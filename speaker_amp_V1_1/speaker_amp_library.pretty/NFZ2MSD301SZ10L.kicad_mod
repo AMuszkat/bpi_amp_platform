@@ -1,0 +1,172 @@
+(footprint "NFZ2MSD301SZ10L"
+	(version 20240108)
+	(generator "pcbnew")
+	(generator_version "8.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at 0.54 -2.008 0)
+		(layer "F.SilkS")
+		(uuid "e6bdfa2b-e426-4cfb-a11a-11b4630e3a19")
+		(effects
+			(font
+				(size 0.8 0.8)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "NFZ2MSD301SZ10L"
+		(at 5.112 2.008 0)
+		(layer "F.Fab")
+		(uuid "f8c35585-fe74-4acb-abc0-e0f0a8cb784d")
+		(effects
+			(font
+				(size 0.8 0.8)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Footprint" "NFZ2MSD301SZ10L"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "7919bdaa-dfba-433e-b7e4-8c56ab87e442")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "6d3e2d42-a528-4f08-b148-41995c5cc054")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "295c9285-29ab-412c-aa3b-65ca2791d8f5")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -1.71 -1.16)
+		(end 1.71 -1.16)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "8ef7509c-931c-4e5e-9258-f2a255f59f39")
+	)
+	(fp_line
+		(start -1.71 1.16)
+		(end -1.71 -1.16)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "e0fe2ac6-ca6e-4d44-851a-04faafa5a7d1")
+	)
+	(fp_line
+		(start -1.71 1.16)
+		(end 1.71 1.16)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "acf5d7b5-d66a-4e3f-a911-63be31a75c6c")
+	)
+	(fp_line
+		(start 1.71 1.16)
+		(end 1.71 -1.16)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "5f554cac-f9e6-4b06-af23-86a3f4a6f7c0")
+	)
+	(fp_line
+		(start -1 0.8)
+		(end -1 -0.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "e6264f09-ff54-4825-9de2-dbb9b74af4d4")
+	)
+	(fp_line
+		(start 1 -0.8)
+		(end -1 -0.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "6a0904c3-0010-4863-a1ff-a3752c19595b")
+	)
+	(fp_line
+		(start 1 0.8)
+		(end -1 0.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "9b33eeeb-36e1-4e93-a1ac-2748a0fa77d4")
+	)
+	(fp_line
+		(start 1 0.8)
+		(end 1 -0.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "796f9b29-e369-453a-a0f0-5fac7bb3e924")
+	)
+	(pad "1" smd roundrect
+		(at -0.86 0)
+		(size 1.2 1.82)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+		(roundrect_rratio 0.25)
+		(solder_mask_margin 0.102)
+		(uuid "7a5dd460-e784-40fa-811f-89b13a68ec76")
+	)
+	(pad "2" smd roundrect
+		(at 0.86 0)
+		(size 1.2 1.82)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+		(roundrect_rratio 0.25)
+		(solder_mask_margin 0.102)
+		(uuid "c42776ba-30a1-45bd-b2ed-b69bf5482714")
+	)
+	(model "${KIPRJMOD}/speaker_amp_library.pretty/NFZ2MSD301SZ10L.step"
+		(offset
+			(xyz 0 -0.5 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)
