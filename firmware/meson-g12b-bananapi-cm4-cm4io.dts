@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2023 Neil Armstrong <neil.armstrong@linaro.org>
+ */
+
+/dts-v1/;
+
+#include "meson-g12b-bananapi-cm4.dtsi"
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/sound/meson-g12a-tohdmitx.h>
+
+/ {
+	compatible = "bananapi,bpi-cm4io", "bananapi,bpi-cm4", "amlogic,a311d", "amlogic,g12b";
+	model = "BananaPi BPI-CM4IO Baseboard with BPI-CM4 Module";
+
+	aliases {
+		ethernet0 = &ethmac;
+		i2c0 = &i2c1;
+		i2c1 = &i2c3;
+	};
+
+	adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&saradc 2>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1710000>;
+
+		button-function {
+			label = "Function";
+			linux,code = <KEY_FN>;
+			press-threshold-microvolt = <10000>;
+		};
+	};
+
+	hdmi_connector: hdmi-connector {
+		compatible = "hdmi-connector";
+		type = "a";
+
+		port {
+			hdmi_connector_in: endpoint {
+				remote-endpoint = <&hdmi_tx_tmds_out>;
+			};
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led-blue {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&gpio_ao GPIOAO_7 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+		};
+
+		led-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&gpio_ao GPIOAO_2 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	sound {
+		compatible = "amlogic,axg-sound-card";
+		model = "BPI-CM4IO";
+		audio-aux-devs = <&tdmout_a>, <&tdmin_a>;
+		audio-routing = "TDMOUT_A IN 0", "FRDDR_A OUT 0",
+				"TDM_A Playback", "TDMOUT_A OUT",
+				"TDMIN_A IN 0", "TDM_A Capture",
+				"TODDR_A IN 0", "TDMIN_A OUT";
+
+		clocks = <&clkc CLKID_HIFI_PLL>,
+			 <&clkc CLKID_MPLL0>,
+			 <&clkc CLKID_MPLL1>;
+
+		assigned-clocks = <&clkc CLKID_HIFI_PLL>,
+				  <&clkc CLKID_MPLL0>,
+				  <&clkc CLKID_MPLL1>;
+		assigned-clock-parents = <0>, <0>, <0>;
+		assigned-clock-rates = <589824000>,
+				       <270950400>,
+				       <393216000>;
+
+		dai-link-0 {
+			sound-dai = <&frddr_a>;
+		};
+
+		/* Capture: the amps' DOUT telemetry (voltage/current sense,
+		 * supply rail and die temperature) comes back over TDM_A. */
+		dai-link-1 {
+			sound-dai = <&toddr_a>;
+		};
+
+		dai-link-2 {
+    		sound-dai = <&tdmif_a>;
+    		dai-format = "dsp_a";
+			dai-slot-num = <8>;
+			dai-tdm-slot-tx-mask-0 = <1 1 1 1 1 1 1 1>;
+			/*
+			 * Capture only needs the four 32-bit slots the two amps
+			 * are told to transmit on below: slot 0 = amp1 V|I,
+			 * 1 = amp2 V|I, 2 = amp1 PVDD|TEMP, 3 = amp2 PVDD|TEMP.
+			 *
+			 * The mask suffix is the TDM LANE, and the amps' DOUT
+			 * lands on lane 1 (tdm_a_din1 = GPIOX_8), so this is
+			 * -1 while playback stays on lane 0 (dout0 = GPIOX_9).
+			 */
+			dai-tdm-slot-rx-mask-1 = <1 1 1 1 0 0 0 0>;
+			dai-tdm-slot-width = <32>;	
+			codec-0 {
+				sound-dai = <&max98397_1>;
+			};
+			codec-1 {
+				sound-dai = <&max98397_2>;
+			};
+		};
+};
+
+/* dummy_codec1: dummy_codec_am {
+	#sound-dai-cells = <0>;
+	compatible = "custom,dummy-codec-am";
+	status = "okay";
+	}; */
+
+};
+
+&cecb_AO {
+	status = "okay";
+};
+
+&ethmac {
+	status = "okay";
+};
+
+&hdmi_tx {
+	status = "okay";
+};
+
+&hdmi_tx_tmds_port {
+	hdmi_tx_tmds_out: endpoint {
+		remote-endpoint = <&hdmi_connector_in>;
+	};
+};
+
+/* CSI port */
+/* &i2c1 {
+	status = "okay";
+}; */
+
+/* DSI port for touchscreen */
+/* &i2c3 {
+	status = "okay";
+}; */
+
+&i2c2 {
+	pinctrl-0 = <&i2c2_sda_x_pins>, <&i2c2_sck_x_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+    /*
+     * Telemetry slot plan.  The amps number their transmit slots in 8-bit
+     * units (0..63 on a '97), while the TDM frame here is 8 x 32 bits -- so
+     * TDM slot n covers amp slots 4n..4n+3, and a 16-bit datum at amp slot
+     * 4n lands in the top half of TDM slot n.  Each amp gets one TDM slot
+     * for V|I and one for PVDD|TEMP; they share DOUT and arbitrate by Hi-Z,
+     * so the two amps must never name the same slot.
+     *
+     *   amp slot  0 /  2  -> TDM slot 0: amp1 VMON | amp1 IMON
+     *   amp slot  4 /  6  -> TDM slot 1: amp2 VMON | amp2 IMON
+     *   amp slot  8 / 10  -> TDM slot 2: amp1 PVDD | amp1 TEMP
+     *   amp slot 12 / 14  -> TDM slot 3: amp2 PVDD | amp2 TEMP
+     *
+     * adi,telemetry-enable is what actually lets the amp drive those slots;
+     * without it the driver leaves DOUT entirely Hi-Z.
+     */
+    max98397_1: amplifier@39 {
+		#sound-dai-cells = <0>;
+		compatible = "adi,max98397";
+        reg = <0x39>;
+        reset-gpios = <&gpio GPIOA_1 GPIO_ACTIVE_LOW>;
+		sound-name-prefix = "amp1";
+		adi,bypass-slot-no = <0>;
+		adi,telemetry-enable;
+		adi,vmon-slot-no = <0>;
+		adi,imon-slot-no = <2>;
+		adi,supply1-slot-no = <8>;
+		adi,therm-slot-no = <10>;
+		adi,supply-select = <0>;	/* PVDD */
+		};
+	max98397_2: amplifier@38 {
+		#sound-dai-cells = <0>;
+		compatible = "adi,max98397";
+        reg = <0x38>;
+		sound-name-prefix = "amp2";
+		adi,bypass-slot-no = <1>;
+		adi,telemetry-enable;
+		adi,vmon-slot-no = <4>;
+		adi,imon-slot-no = <6>;
+		adi,supply1-slot-no = <12>;
+		adi,therm-slot-no = <14>;
+		adi,supply-select = <0>;	/* PVDD */
+		};
+    };
+
+/* miniPCIe port with USB + SIM slot */
+&pcie {
+	status = "okay";
+};
+
+&sd_emmc_b {
+	status = "okay";
+};
+
+&tohdmitx {
+	status = "okay";
+};
+
+/* Peripheral Only USB-C port */
+&usb {
+	dr_mode = "peripheral";
+
+	status = "okay";
+};

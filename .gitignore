@@ -1,0 +1,8 @@
+# macOS
+.DS_Store
+
+# KiCad local history, backups and lock files
+.history/
+*-backups/
+*.lck
+_autosave-*

@@ -1,0 +1,10 @@
+obj-$(CONFIG_SND_SOC_MAX98396)	+= snd-soc-max98396.o
+
+KDIR := /lib/modules/$(shell uname -r)/build
+PWD  := $(shell pwd)
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean

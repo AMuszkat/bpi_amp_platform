@@ -1,0 +1,14 @@
+# Per-developer settings. Copy to local.mk (gitignored) and adjust:
+#   cp local.mk.example local.mk
+# Read by Makefile and localBuild/Makefile. Any of these can instead come from
+# the environment (export BOARD_HOST=...). The *-setup.sh scripts read
+# BOARD_HOST / BOARD_USER from the environment only (or take --target-host).
+
+# Network name or address of the board
+BOARD_HOST := bpi-amp.local
+
+# Unprivileged user on the board (localBuild/ builds modules natively as this user)
+BOARD_USER := user
+
+# Kernel source tree (default: ./linuxMainLine)
+# LINUX := /path/to/linux

@@ -1,0 +1,19 @@
+# Private per-developer settings (board hostname, ssh user, local paths)
+local.mk
+
+# Kernel source tree (fetched separately) and module install staging
+/linux*/
+/lib/
+/6.*
+initrd.*
+uInitrd*
+
+# Build artifacts
+*.ko
+*.o
+*.mod
+*.mod.c
+.*.cmd
+Module.symvers
+modules.order
+__pycache__/
