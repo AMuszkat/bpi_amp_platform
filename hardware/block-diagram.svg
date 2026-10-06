@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 560" width="1080" height="560" role="img" aria-labelledby="t d">
+  <title id="t">BPI AMP Platform hardware block diagram</title>
+  <desc id="d">Network audio reaches the BPI-CM4 module on the base board over Wi-Fi. The module sends TDM audio and I2C control through a 46-pin connector to two MAX98397 class-D amplifiers on the speaker amp board, which drive two speakers. A battery or DC input is boosted by an LTC3786 boost converter to PVDD, which can also come from an external supply. PVDD powers the amplifiers and an MP9943 buck converter that returns 5 V to the base board.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --ink: #1c2420; --muted: #5d6862;
+      --block: #ffffff; --block-line: #9fb0a6;
+      --base: #e8f2eb; --base-line: #a9cdb6;
+      --amp: #eef0ef; --amp-line: #c3c9c5;
+      --pin: #b08d3a; --conn: #2f3a34;
+      --power: #c2470f; --signal: #2563a8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --ink: #e6edf3; --muted: #9aa69f;
+        --block: #161b22; --block-line: #3f4d45;
+        --base: #10231a; --base-line: #2c5a3e;
+        --amp: #191c1b; --amp-line: #3a413d;
+        --pin: #c9a24a; --conn: #2b3430;
+        --power: #f0883e; --signal: #58a6ff;
+      }
+    }
+    .bg { fill: var(--bg); }
+    .base { fill: var(--base); stroke: var(--base-line); stroke-width: 1.5; }
+    .amp { fill: var(--amp); stroke: var(--amp-line); stroke-width: 1.5; }
+    .block { fill: var(--block); stroke: var(--block-line); stroke-width: 1.5; }
+    .group { fill: none; stroke: var(--block-line); stroke-width: 1.2; stroke-dasharray: 5 5; }
+    .pill { fill: var(--block); stroke: var(--block-line); stroke-width: 1.2; }
+    .tick { stroke: var(--block-line); stroke-width: 1.5; }
+    .conn { fill: var(--conn); }
+    .pin { fill: var(--pin); }
+    .panel-label { fill: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 1.6px; }
+    .title { fill: var(--ink); font-size: 16px; font-weight: 600; }
+    .sub { fill: var(--muted); font-size: 12.5px; }
+    .small { fill: var(--muted); font-size: 11.5px; }
+    .label-signal { fill: var(--signal); font-size: 12px; font-weight: 600; }
+    .label-power { fill: var(--power); font-size: 12px; font-weight: 700; }
+    .power { fill: none; stroke: var(--power); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+    .power-opt { fill: none; stroke: var(--power); stroke-width: 4; stroke-dasharray: 9 7; }
+    .signal { fill: none; stroke: var(--signal); stroke-width: 2; stroke-linejoin: round; }
+    .wifi { fill: none; stroke: var(--signal); stroke-width: 2.4; stroke-linecap: round; }
+    .dot-signal { fill: var(--signal); }
+    .m-power { fill: var(--power); }
+    .m-signal { fill: var(--signal); }
+    .speaker { fill: var(--block); stroke: var(--ink); stroke-width: 1.6; stroke-linejoin: round; }
+    .wave { fill: none; stroke: var(--ink); stroke-width: 1.6; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="arrow-power" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="13" markerHeight="13" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path class="m-power" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+    <marker id="arrow-signal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path class="m-signal" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1080" height="560" rx="16"/>
+
+  <!-- Boards -->
+  <rect class="base" x="168" y="40" width="300" height="450" rx="14"/>
+  <text class="panel-label" x="188" y="68">BASE BOARD</text>
+  <rect class="amp" x="530" y="40" width="400" height="450" rx="14"/>
+  <text class="panel-label" x="550" y="68">SPEAKER AMP BOARD</text>
+
+  <!-- Network audio in -->
+  <path class="wifi" d="M74 146 A14 14 0 0 1 94 146"/>
+  <path class="wifi" d="M66 137 A26 26 0 0 1 102 137"/>
+  <path class="wifi" d="M58 128 A38 38 0 0 1 110 128"/>
+  <circle class="dot-signal" cx="84" cy="155" r="3.5"/>
+  <text class="title" x="84" y="190" text-anchor="middle" style="font-size:14px">Network audio</text>
+  <text class="sub" x="84" y="208" text-anchor="middle">AirPlay · Snapcast</text>
+  <text class="sub" x="84" y="225" text-anchor="middle">over Wi-Fi</text>
+  <path class="signal" d="M144 185 H192" marker-end="url(#arrow-signal)"/>
+
+  <!-- Compute module -->
+  <rect class="block" x="196" y="110" width="244" height="150" rx="10"/>
+  <text class="title" x="318" y="170" text-anchor="middle">BPI-CM4 module</text>
+  <text class="sub" x="318" y="194" text-anchor="middle">Amlogic A311D</text>
+  <text class="sub" x="318" y="214" text-anchor="middle">Linux · PipeWire</text>
+  <line class="tick" x1="244" y1="260" x2="244" y2="272"/>
+  <line class="tick" x1="354" y1="260" x2="354" y2="272"/>
+  <rect class="pill" x="196" y="272" width="96" height="28" rx="14"/>
+  <text class="small" x="244" y="290" text-anchor="middle">USB-C</text>
+  <rect class="pill" x="302" y="272" width="104" height="28" rx="14"/>
+  <text class="small" x="354" y="290" text-anchor="middle">Debug UART</text>
+
+  <!-- Audio + control: module -> both amplifiers -->
+  <path class="signal" d="M440 185 H600"/>
+  <path class="signal" d="M600 146 V234"/>
+  <path class="signal" d="M600 146 H642" marker-end="url(#arrow-signal)"/>
+  <path class="signal" d="M600 234 H642" marker-end="url(#arrow-signal)"/>
+  <circle class="dot-signal" cx="600" cy="185" r="4"/>
+  <text class="label-signal" x="556" y="164" text-anchor="middle">TDM audio</text>
+  <text class="label-signal" x="556" y="178" text-anchor="middle">I²C control</text>
+
+  <!-- Amplifiers -->
+  <rect class="group" x="628" y="98" width="244" height="184" rx="12"/>
+  <rect class="block" x="646" y="110" width="208" height="72" rx="10"/>
+  <text class="title" x="750" y="142" text-anchor="middle">Amplifier 1</text>
+  <text class="sub" x="750" y="162" text-anchor="middle">MAX98397 · class D</text>
+  <rect class="block" x="646" y="198" width="208" height="72" rx="10"/>
+  <text class="title" x="750" y="230" text-anchor="middle">Amplifier 2</text>
+  <text class="sub" x="750" y="250" text-anchor="middle">MAX98397 · class D</text>
+
+  <!-- Speaker outputs -->
+  <path class="signal" d="M854 146 H946" marker-end="url(#arrow-signal)"/>
+  <path class="signal" d="M854 234 H946" marker-end="url(#arrow-signal)"/>
+  <rect class="speaker" x="952" y="136" width="10" height="20" rx="1.5"/>
+  <path class="speaker" d="M962 136 L978 124 V168 L962 156 Z"/>
+  <path class="wave" d="M986 136 A14 14 0 0 1 986 156"/>
+  <text class="title" x="1000" y="151" style="font-size:13px">Speaker 1</text>
+  <rect class="speaker" x="952" y="224" width="10" height="20" rx="1.5"/>
+  <path class="speaker" d="M962 224 L978 212 V256 L962 244 Z"/>
+  <path class="wave" d="M986 224 A14 14 0 0 1 986 244"/>
+  <text class="title" x="1000" y="239" style="font-size:13px">Speaker 2</text>
+
+  <!-- Power: PVDD rail -->
+  <path class="power" d="M630 340 H905"/>
+  <text class="label-power" x="690" y="330" text-anchor="middle">PVDD</text>
+  <path class="power" d="M750 340 V288" marker-end="url(#arrow-power)"/>
+  <path class="power-opt" d="M1040 340 H911" marker-end="url(#arrow-power)"/>
+  <text class="sub" x="990" y="326" text-anchor="middle">External PVDD</text>
+  <text class="small" x="990" y="362" text-anchor="middle">(optional)</text>
+
+  <!-- Boost converter -->
+  <rect class="block" x="760" y="392" width="150" height="72" rx="10"/>
+  <text class="title" x="835" y="424" text-anchor="middle">Boost converter</text>
+  <text class="sub" x="835" y="444" text-anchor="middle">LTC3786</text>
+  <path class="power" d="M835 392 V346" marker-end="url(#arrow-power)"/>
+  <text class="small" x="845" y="374">jumpers</text>
+  <path class="power" d="M835 522 V470" marker-end="url(#arrow-power)"/>
+  <text class="sub" x="835" y="545" text-anchor="middle">Battery / DC in</text>
+
+  <!-- 5 V buck -> module -->
+  <rect class="block" x="560" y="392" width="140" height="72" rx="10"/>
+  <text class="title" x="630" y="424" text-anchor="middle">5 V buck</text>
+  <text class="sub" x="630" y="444" text-anchor="middle">MP9943</text>
+  <path class="power" d="M630 340 V386" marker-end="url(#arrow-power)"/>
+  <path class="power" d="M560 428 H424 V266" marker-end="url(#arrow-power)"/>
+  <text class="label-power" x="432" y="352">+5 V</text>
+
+  <!-- 46-pin (2 x 23) board-to-board connector, drawn over the lines that pass through it -->
+  <text class="panel-label" x="499" y="92" text-anchor="middle">46-PIN</text>
+  <rect class="conn" x="486" y="100" width="26" height="338" rx="4"/>
+  <g class="pin">
+    <rect x="490" y="108" width="6" height="6"/><rect x="502" y="108" width="6" height="6"/>
+    <rect x="490" y="122" width="6" height="6"/><rect x="502" y="122" width="6" height="6"/>
+    <rect x="490" y="136" width="6" height="6"/><rect x="502" y="136" width="6" height="6"/>
+    <rect x="490" y="150" width="6" height="6"/><rect x="502" y="150" width="6" height="6"/>
+    <rect x="490" y="164" width="6" height="6"/><rect x="502" y="164" width="6" height="6"/>
+    <rect x="490" y="178" width="6" height="6"/><rect x="502" y="178" width="6" height="6"/>
+    <rect x="490" y="192" width="6" height="6"/><rect x="502" y="192" width="6" height="6"/>
+    <rect x="490" y="206" width="6" height="6"/><rect x="502" y="206" width="6" height="6"/>
+    <rect x="490" y="220" width="6" height="6"/><rect x="502" y="220" width="6" height="6"/>
+    <rect x="490" y="234" width="6" height="6"/><rect x="502" y="234" width="6" height="6"/>
+    <rect x="490" y="248" width="6" height="6"/><rect x="502" y="248" width="6" height="6"/>
+    <rect x="490" y="262" width="6" height="6"/><rect x="502" y="262" width="6" height="6"/>
+    <rect x="490" y="276" width="6" height="6"/><rect x="502" y="276" width="6" height="6"/>
+    <rect x="490" y="290" width="6" height="6"/><rect x="502" y="290" width="6" height="6"/>
+    <rect x="490" y="304" width="6" height="6"/><rect x="502" y="304" width="6" height="6"/>
+    <rect x="490" y="318" width="6" height="6"/><rect x="502" y="318" width="6" height="6"/>
+    <rect x="490" y="332" width="6" height="6"/><rect x="502" y="332" width="6" height="6"/>
+    <rect x="490" y="346" width="6" height="6"/><rect x="502" y="346" width="6" height="6"/>
+    <rect x="490" y="360" width="6" height="6"/><rect x="502" y="360" width="6" height="6"/>
+    <rect x="490" y="374" width="6" height="6"/><rect x="502" y="374" width="6" height="6"/>
+    <rect x="490" y="388" width="6" height="6"/><rect x="502" y="388" width="6" height="6"/>
+    <rect x="490" y="402" width="6" height="6"/><rect x="502" y="402" width="6" height="6"/>
+    <rect x="490" y="416" width="6" height="6"/><rect x="502" y="416" width="6" height="6"/>
+  </g>
+
+  <!-- Legend -->
+  <path class="power" d="M28 520 H64"/>
+  <text class="sub" x="72" y="524">Power</text>
+  <path class="signal" d="M28 544 H64"/>
+  <text class="sub" x="72" y="548">Audio, control</text>
+</svg>
