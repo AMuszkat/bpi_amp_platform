@@ -19,6 +19,7 @@ audio plugins in the PipeWire graph.
 | [`hardware/base_board`](hardware/base_board) | KiCad project: carrier board for the BPI-CM4 module |
 | [`hardware/speaker_amp`](hardware/speaker_amp) | KiCad project: amplifier and power board |
 | [`firmware`](firmware) | Device tree, kernel config, amplifier and sound-card drivers, PipeWire config and board setup scripts |
+| [`docs`](docs) | Design proposals: the [remote plugin host](docs/remote-plugin-host.md) for controlling a stereo pair, and its [autonomous development setup](docs/autonomous-development.md) |
 
 ## Hardware
 
