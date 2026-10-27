@@ -98,8 +98,9 @@ class StartOrder(unittest.TestCase):
         """speakerd started for an amplifier that is not there yet, and the speaker."""
         speaker = self.pair["left"]
         state = state_dir(self.tmp / case, amplifier=LATE_AMPLIFIER, current=DOCUMENT)
-        self.addCleanup(subprocess.run, ["pw-cli", "destroy", LATE_AMPLIFIER], env=speaker.env,
-                        capture_output=True, timeout=10)
+        # Once speakerd has stopped the sink is idle: remove_sink() keeps it running while it
+        # destroys it, or WirePlumber would die 5 s later (harness.Speaker.remove_sink).
+        self.addCleanup(lambda: speaker.has_sink(LATE_AMPLIFIER) and speaker.remove_sink(LATE_AMPLIFIER))
         return speaker, Speakerd(speaker, state, bundles=[self.headless],
                                  wait_for=f"waiting for amplifier '{LATE_AMPLIFIER}' and its ports")
 
@@ -121,7 +122,7 @@ class StartOrder(unittest.TestCase):
         with speakerd as sd:
             self.appears(speaker, sd)
             mark = sd.mark()
-            speaker.remove_node(LATE_AMPLIFIER)
+            speaker.remove_sink(LATE_AMPLIFIER)
             sd.wait_for(f"unlinked from amplifier '{LATE_AMPLIFIER}': linking again", after=mark)
             self.appears(speaker, sd, after=mark)
             self.check_sound(speaker, LATE_AMPLIFIER, "the amplifier went away and came back")
@@ -131,8 +132,8 @@ class StartOrder(unittest.TestCase):
         try:
             speaker = self.pair["right"]   # its environment: where its PipeWire will be
             state = state_dir(self.tmp / "late-pipewire", role="right", current=DOCUMENT)
-            # "cannot connect to PipeWire: <reason>: trying again every second" is the line
-            # speakerd says while it waits; its README's table of log lines does not list it yet.
+            # speakerd says "cannot connect to PipeWire: <reason>: trying again every second"
+            # once, while it waits (its README's table of log lines).
             with Speakerd(speaker, state, bundles=[self.headless],
                           wait_for="cannot connect to PipeWire") as sd:
                 self.assertEqual(sd.lines_starting("pipewire: "), [], sd.log())

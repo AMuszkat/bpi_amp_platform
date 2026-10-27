@@ -77,15 +77,21 @@ amplifier channels with its frequency and level intact, on each speaker, and the
 are independent. On a machine with Podman both speakers run inside the development
 container described below, on bookworm's PipeWire 0.3.65 and WirePlumber 0.4.13, the
 versions the boards run; natively where there is no container runtime. `speakerd`
-(`dsp/juce_apps/speakerd`) runs on the speakers in four scenarios, which compare what it
+(`dsp/juce_apps/speakerd`) runs on the speakers in seven scenarios, which compare what it
 plays with its own offline render of the same document through the complete build:
 `speakerd_same_sound` (the headless build gives the complete build's gain within 0.05 dB from
 40 Hz to 6 kHz, level detector included), `speakerd_state_layers` (a broken layer falls back
 to the next, said in the log and heard), `passthrough_safety` (with no plugin or no layer
-the tweeter is silent and the woofer capped at -20 dBFS, for left, right and mono, also with
-the input above full scale) and `speakerd_start_order` (it plays when the amplifier or
-PipeWire start after it, when the amplifier comes back, and with no network). `ampd`, the
-Snapcast source and `tc netem` come next; the compose file comes with them, for CI.
+the tweeter gets exact zeros and the woofer is capped at -20 dBFS, for left, right and mono,
+also with the input above full scale, which is shown to reach `speakerd` and checked
+sample for sample in the render), `speakerd_start_order` (it plays when the amplifier or
+PipeWire start after it, when the amplifier comes back, and with no network),
+`speakerd_restart` (stopped under a playing stream it leaves the amplifier silent and the
+stream on its sink, and the next one adopts both), `speakerd_second_instance` (a second one
+on the same PipeWire refuses) and `speakerd_quantum_change` (the quantum changes while a
+stream plays and the sound comes back each time). `tools/test.sh vpair` records the tests it
+skipped, and why, with the result. `ampd`, the Snapcast source and `tc netem` come next; the
+compose file comes with them, for CI.
 
 **Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
 complete, control and headless targets and checks that they fit together (same parameters,
@@ -233,6 +239,9 @@ the architecture:
 | `speakerd_state_layers` | a broken current layer plays last known good, and with both broken factory, each said in the log and recognised by its sound |
 | `speakerd_start_order` | `speakerd` started before its amplifier or its PipeWire, or with no network, links and plays the complete build's sound once they are there, and again when the amplifier comes back |
 | `passthrough_safety` | with every plugin removed, the tweeter capture is silent and the woofer capture is capped |
+| `speakerd_restart` | `speakerd` stopped while a stream plays leaves the amplifier silent and the stream on its sink, and a new `speakerd` adopts the sink under the running stream and plays the same sound |
+| `speakerd_second_instance` | a second `speakerd` on the same PipeWire says another one runs and exits, and the first plays on unaffected |
+| `speakerd_quantum_change` | with a stream playing, the quantum changes and comes back, and after each change the gain is the render's again, with nothing non-finite or above full scale reaching the amplifier |
 | `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately |
 | `monitor_freshness` | with 5 % packet loss and 20 ms jitter, every frame drawn is less than 50 ms old at the 99th percentile, and the speaker never holds more than one pending frame per stream |
 | `scope_resolution` | a scope frame from the speaker is identical to the frame the complete build computes from the same Demo capture |

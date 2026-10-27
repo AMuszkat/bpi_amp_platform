@@ -44,8 +44,31 @@ run_vpair() {
         echo "vpair: pipewire and wireplumber are needed: install Podman (tools/container.sh), or see CLAUDE.md"
         record vpair skipped "no pipewire"; return 1
     fi
-    if python3 -m unittest discover -s tests/vpair -v; then record vpair pass; else record vpair fail; return 1; fi
+    # python3 -m unittest discover -s tests/vpair -v, which also writes the note: how many tests
+    # ran, which failed, and which were skipped and why, so that a pass with skips shows.
+    local note result=pass
+    note="$(mktemp)"
+    python3 -c "$VPAIR_RUNNER" "$note" || result=fail
+    [ -s "$note" ] || echo "the test run wrote no note" > "$note"
+    record vpair "$result" "$(cat "$note")"
+    rm -f "$note"
+    [ "$result" = pass ]
 }
+
+VPAIR_RUNNER='
+import sys, unittest
+result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("tests/vpair"))
+one_line = lambda text: " ".join(str(text).split())
+note = [f"{result.testsRun} tests"]
+broken = [test.id() for test, _ in result.failures + result.errors]
+if broken:
+    note.append(f"{len(broken)} failed: " + ", ".join(broken))
+note.append(f"{len(result.skipped)} skipped" + (": " if result.skipped else "")
+            + "; ".join(f"{test.id()} ({one_line(reason)})" for test, reason in result.skipped))
+with open(sys.argv[1], "w") as f:
+    f.write(", ".join(note))
+sys.exit(0 if result.wasSuccessful() else 1)
+'
 
 case "$what" in
     unit)  run_unit || rc=1 ;;
