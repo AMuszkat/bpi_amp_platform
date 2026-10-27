@@ -251,6 +251,11 @@ namespace
                 log ("pipewire: the quantum changed to " + juce::String (serviced.primedBlock)
                      + ": faded out, primed the graph for it and faded back in");
 
+            // That line says it all: a change the audio thread counted after the check above is
+            // not logged again as "runs it as 1 block(s)".
+            if (serviced.rate > 0.0 || serviced.primedBlock > 0)
+                seenQuantumChanges = engine.getQuantumChanges();
+
             if (const auto links = node.getLinkCount(); links != seenLinks)
             {
                 seenLinks = links;
