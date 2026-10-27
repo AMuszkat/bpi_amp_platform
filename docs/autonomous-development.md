@@ -48,10 +48,11 @@ flowchart LR
         sdR["speakerd"]
         amR["ampd"]
     end
-    harness["test harness (pytest)<br/>sends OSC and graph documents like the controller<br/>records each null sink with pw-record<br/>analyses with numpy (python_dsp_tools/nearfield)"]
+    harness["test harness (pytest)<br/>sends OSC and graph documents like the controller<br/>subscribes to monitoring like a plugin window<br/>records each null sink with pw-record<br/>analyses with numpy (python_dsp_tools/nearfield)"]
     srv == "Snapcast stream" ==> pwL
     srv == "Snapcast stream" ==> pwR
     harness -- "control" --> amL
+    amR -. "monitoring" .-> harness
     harness -. "capture" .-> pwL
     harness -. "capture" .-> pwR
 ```
@@ -61,6 +62,11 @@ PipeWire runs in a container with its `support.node.driver` dummy driver and a
 records what the amplifier would have received. The same compose file runs on a developer
 machine, in CI and inside an agent's session. The containers are x86_64 so the whole rung
 runs at full speed; the aarch64 binaries are only exercised on rung 3.
+
+The bridge network between the containers goes through `tc netem`, so a scenario can add
+Wi-Fi-like delay, jitter and packet loss. The `ampScope` Demo source runs inside the
+headless build, so the monitoring path, scope frames and triggered records included, is
+tested without an amplifier.
 
 **Rung 3, the hardware lab.** The boards named in the gitignored `local.env`, reached over ssh
 with the existing `make`/`build-podman.sh -install` paths. The probe is the amplifier itself:
@@ -126,9 +132,9 @@ agent never improvises a `pw-cli` or `ssh` line.
 | Skill | What it does | Used by |
 |---|---|---|
 | `/build <plugin\|app> [target]` | builds complete, control or headless, or `speakerd`/controller, in the builder container; prints the version hash | all dev agents |
-| `/test unit` | `ctest` in the container: DSP cores against exported coefficients, control and headless parameter layouts identical, state-layer loading, graph diff | verifier |
+| `/test unit` | `ctest` in the container: DSP cores against exported coefficients, control and headless parameter and monitor layouts identical, state-layer loading, graph diff, scope view model against recorded captures | verifier |
 | `/vpair up\|down\|scenario <name>` | brings the virtual pair up with a given build and runs one scenario from `tests/scenarios/` | verifier, orchestrator |
-| `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency | verifier |
+| `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | verifier |
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
 | `/board <name> status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3; refuses when the lab lock exists or rung 2 is not green | board-ops |
 | `/juce` | the JUCE knowledge base that already exists in `bpi_amp_dsp_tuning` | dev agents |
@@ -158,7 +164,7 @@ environment variable for that one session, and the override is logged.
 ```mermaid
 flowchart LR
     unit["Rung 1: unit and integration<br/>seconds, on every edit<br/>DSP core impulse responses<br/>parameter layouts identical across targets<br/>graph document round trip<br/>state layer fallback, RT-safety lint"]
-    sys["Rung 2: system scenarios<br/>minutes, on every pull request<br/>knob latency, graph edit atomic on both<br/>hub down, network down<br/>power-cut recovery, two controllers"]
+    sys["Rung 2: system scenarios<br/>minutes, on every pull request<br/>knob latency, graph edit atomic on both<br/>hub down, power-cut recovery, two controllers<br/>monitoring under packet loss"]
     hw["Rung 3: hardware smoke<br/>minutes, nightly<br/>deploy to the lab pair, play the sweep<br/>compare amplifier telemetry with the expected response<br/>check xruns in pw-top"]
     unit --> sys --> hw
 ```
@@ -176,6 +182,12 @@ the architecture:
 | `two_controllers` | changes from two harness clients interleave and both see the same final state |
 | `catalogue` | a version-hash mismatch between a control and a headless build is refused |
 | `passthrough_safety` | with every plugin removed, the tweeter capture is silent and the woofer capture is capped |
+| `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately |
+| `monitor_freshness` | with 5 % packet loss and 20 ms jitter, every frame drawn is less than 50 ms old at the 99th percentile, and the speaker never holds more than one pending frame per stream |
+| `scope_resolution` | a scope frame from the speaker is identical to the frame the complete build computes from the same Demo capture |
+| `triggered_record` | under the same loss, a single-trigger record fetched by the controller is bit-identical to the speaker's ring buffer |
+| `monitor_rt_safety` | opening and closing 100 plugin windows during playback causes no xrun and no change in the null-sink capture |
+| `ampd_restart` | killing `ampd` leaves the audio capture uninterrupted, and open windows resubscribe within 2 s |
 
 Rung 3 adds one smoke test, not a copy of rung 2: deploy, play the sweep, compare the
 telemetry capture with the expected crossover response within a tolerance, and check `pw-top`

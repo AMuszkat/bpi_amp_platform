@@ -17,6 +17,8 @@ The requirements:
 3. The speakers run headless, with no X11 and no plugin host window.
 4. The speakers boot, play and keep their settings without the controller, without a hub and
    without a network.
+5. Plugin GUIs in the controller show live data from the speakers: meters, level bars, plots
+   and scope traces, at the same resolution as the complete build.
 
 A change made in the controller must be heard on both speakers within tens of milliseconds.
 Plugin settings are shared by the pair; a few settings (which channel a speaker plays, its
@@ -80,6 +82,8 @@ flowchart TB
     br <-- "graph: TCP<br/>knobs: OSC/UDP" --> hub
     local --> hub
     hub -- "fan-out" --> agR
+    agL -. "monitoring" .-> br
+    agR -. "monitoring" .-> br
     src == "stereo stream" ==> engL
     src == "stereo stream" ==> engR
 ```
@@ -87,7 +91,8 @@ flowchart TB
 How to read it:
 
 - **Orange is control, blue is audio, green is hardware, grey is files on disk.** Thick
-  arrows carry audio, thin arrows carry settings, dotted arrows are read once at boot.
+  arrows carry audio, thin arrows carry settings. Dotted arrows carry data that is only read:
+  state files at boot, and monitoring.
 - **The controller holds no audio.** It is a plugin host whose plugins are editors only. Every
   edit leaves through the bridge to the hub.
 - **Each speaker runs two daemons.** `speakerd` is the **headless plugin host**: it runs the
@@ -97,6 +102,9 @@ How to read it:
 - **The hub is a role of `ampd` on the left speaker.** It holds the truth and fans each
   change out to the agent on the right speaker. Without the controller, without the hub or
   without the network, each `speakerd` keeps playing from its own state files.
+- **Monitoring goes the other way, and not through the hub.** Meters, level bars and scope
+  traces belong to the speaker that measured them, so each speaker's `ampd` sends them
+  straight to the controller (section 5).
 
 ## 1. Why this fits JUCE well
 
@@ -198,6 +206,7 @@ flowchart LR
             hubrole["hub role<br/>(left speaker only)"]:::ctl
             cat["plugin catalogue<br/>from ~/.lv2"]:::ctl
             persist["persist state<br/>atomic writes"]:::ctl
+            msrv["monitor server<br/>subscriptions, credits"]:::ctl
         end
         files[("graph.json<br/>graph.lkg.json<br/>factory.json<br/>device.json")]:::sto
         subgraph SD["speakerd: headless plugin host"]
@@ -205,9 +214,12 @@ flowchart LR
             cmd["command queue<br/>(lock-free)"]:::aud
             eng["AudioProcessorGraph<br/>headless plugins"]:::aud
             pwf["pw_filter node<br/>inside the PipeWire cycle"]:::aud
+            mon["monitor thread<br/>meters, levels, scope frames"]:::aud
             cmd --> eng --> pwf
+            eng -. "atomics, rings" .-> mon
         end
         rx -- "local socket:<br/>set param, apply rev N" --> cmd
+        msrv <-. "local socket:<br/>subscribe, newest frame" .-> mon
         persist --> files
         files -. "read at boot,<br/>first layer that loads" .-> eng
     end
@@ -215,6 +227,7 @@ flowchart LR
     net <--> disc
     net <--> rx
     net <--> hubrole
+    net <-. "monitoring" .-> msrv
     knob --> hubrole
     snap["Snapcast stream"]:::aud == "audio in" ==> pwf
     pwf == "audio out" ==> amp["Amplifier<br/>woofer + tweeter"]:::hw
@@ -224,9 +237,9 @@ flowchart LR
 |---|---|---|
 | What it is | the headless plugin host | the speaker's network agent |
 | Job | runs the plugin graph | everything that talks to the outside |
-| Owns | the running graph and its parameter values | the state files, the network, the hub role, the catalogue |
+| Owns | the running graph, its parameter values, the monitor producers | the state files, the network, the hub role, the catalogue, monitoring subscriptions |
 | Talks to | PipeWire, and the local socket | the hub, controllers, mDNS, the web page, `speakerd` |
-| Threads | one real-time audio thread, no blocking | ordinary threads, may block on network and disk |
+| Threads | one real-time audio thread that never blocks, plus a normal-priority monitor thread | ordinary threads, may block on network and disk |
 | Needed for sound | yes | no |
 | Starts | right after PipeWire, no network dependency | after `speakerd` |
 | Restart cost | one fade, back on last known good | none audible |
@@ -262,8 +275,10 @@ headless builds of the plugins. It adds only what an unattended host inside a sp
   30 ms, so it never clicks.
 - **The role-aware input.** It resolves the "Mine" input pin to FL or FR from the speaker's
   role.
-- **Self-reporting.** It measures time per node and counts xruns, because nobody is watching
-  a window.
+- **Monitoring.** A normal-priority thread samples the plugins' meters and scope buffers, the
+  output level of each amplifier channel, the amplifier telemetry, the time per node and the
+  xrun count, and hands the newest of each to `ampd` (section 5). Nobody is watching a window,
+  so the speaker reports on itself.
 
 It hosts the plugins through JUCE's own LV2 or VST3 hosting, which understands JUCE's
 parameters, so the DSP stays JUCE from end to end. It never touches the network.
@@ -271,8 +286,8 @@ parameters, so the DSP stays JUCE from end to end. It never touches the network.
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it advertises the speaker over mDNS, receives
 parameter changes and graph revisions, hands them to `speakerd`, persists the state files that
-`speakerd` reads at boot, builds the plugin catalogue and serves the knob, IR receiver and web
-page. It never touches audio.
+`speakerd` reads at boot, builds the plugin catalogue, serves the monitoring subscriptions of open plugin windows, and
+serves the knob, IR receiver and web page. It never touches audio.
 
 **The hub** is a role of `ampd` on the left speaker: the one place that holds the truth. The
 truth has two parts, the **graph document** with a revision number and the **parameter
@@ -358,7 +373,162 @@ structural change on the speaker is a diff, not a rebuild. The engine rebuilds i
 render sequence on the audio thread's next cycle. A 30 ms fade on the output node covers the
 one cycle where the sequence changes.
 
-## 5. One graph, two speakers, two channels
+## 5. Monitoring: data from the speakers to the controller
+
+Parameters and graph edits flow from the controller to the speakers. Monitoring flows the
+other way: the live data a plugin window draws. Today an editor reads it straight from its
+own processor. The `loudness` editor polls the detector level, the active setting and the live
+shelf values at 60 Hz, and the `ampScope` editor reads a ring buffer that a capture thread
+fills from the amplifier. In a control build the processor is a proxy with no DSP and no
+hardware, so this data has to come from the speaker. One mechanism serves every case.
+
+| Kind | Examples | Typical size and rate |
+|---|---|---|
+| **Values** | `loudness` level and active setting, the output level bar of each amplifier channel, CPU time per node | a few floats, 20 to 60 Hz |
+| **Frames** | an `ampScope` trace, any plot drawn from a buffer | one envelope per screen, 20 to 30 Hz |
+| **Records** | the full capture behind a stopped or triggered scope | a few MB, once, on request |
+
+<!-- diagram: monitor -->
+```mermaid
+flowchart LR
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+
+    subgraph SPK["One speaker"]
+        direction LR
+        subgraph SD["speakerd"]
+            direction TB
+            dsp["plugin DSP<br/>audio thread"]:::aud
+            outm["output node<br/>level meter per channel"]:::aud
+            acq["ampScope acquisition<br/>amplifier capture"]:::hw
+            mon["monitor thread<br/>samples values,<br/>builds frames"]:::aud
+            slot["one slot per stream<br/>newest wins"]:::aud
+            dsp -- "atomics,<br/>lock-free rings" --> mon
+            outm --> mon
+            acq --> mon
+            mon --> slot
+        end
+        subgraph AM["ampd"]
+            srv["monitor server<br/>subscriptions,<br/>credits"]:::ctl
+        end
+        slot -- "local socket" --> srv
+    end
+    subgraph C["Controller app"]
+        direction LR
+        br["Bridge"]:::ctl --> px["proxy processor<br/>same getters as the DSP"]:::ctl --> ed["editor<br/>meter, level bar, scope"]:::ctl
+    end
+    srv -- "WebSocket,<br/>one per speaker" --> br
+    br -. "credit: ready for the next frame" .-> srv
+```
+
+**The rules:**
+
+- **Everything is measured on the speaker.** The DSP and the hardware live in `speakerd`, so
+  meters, levels and scope captures are produced there. `ampScope`'s acquisition runs in its
+  headless build inside `speakerd` and opens the amplifier's capture device exactly as it does
+  today.
+- **The audio thread does what it does today.** It writes atomics and lock-free ring buffers.
+  A normal-priority monitor thread in `speakerd` reads them, turns them into values and
+  frames, and never holds up the audio thread.
+- **Monitoring belongs to one speaker.** Parameters are shared by the pair; the left and right
+  levels are not. So monitoring does not pass through the hub. It goes from the speaker that
+  measured it, through that speaker's `ampd`, straight to the controller. Each plugin window
+  has a speaker selector: L, R, or both overlaid.
+- **Nothing is produced unless a window shows it.** Opening a window subscribes to its
+  streams; closing it unsubscribes. With no window open, monitoring costs nothing.
+- **Frames are snapshots, and the newest wins.** A frame is a complete picture of the current
+  view, so the speaker keeps only one pending frame per stream and overwrites it when a newer
+  one is ready. The controller grants a credit after it has drawn a frame, and the speaker
+  sends only against credits. A slow network lowers the frame rate; it never builds a queue,
+  so what the window shows is never stale.
+- **The transport is reliable.** One WebSocket per controller and speaker carries every
+  stream, so nothing sent is lost. The traffic is marked for the Wi-Fi video access class,
+  below the audio stream.
+- **Events are guaranteed separately.** When a single or normal trigger fires, the speaker
+  freezes that record and the controller fetches it in full. A captured transient can never be
+  lost, whatever happens to live frames.
+
+<!-- diagram: monitorseq -->
+```mermaid
+sequenceDiagram
+    box Controller app
+        participant E as ampScope window
+        participant B as Bridge
+    end
+    box Speaker R
+        participant A as ampd R
+        participant S as speakerd R
+    end
+    E->>B: open, speaker R, 1,000 columns wide
+    B->>A: subscribe: node, stream, view
+    A->>S: start producing
+    loop while the window is open
+        S->>A: newest frame (overwrites an unsent one)
+        A->>B: frame, seq, timestamp
+        B->>E: draw
+        B-->>A: credit
+    end
+    Note over S,B: a slow network lowers the frame rate,<br/>old frames are never queued
+    S->>S: single trigger fires, record frozen
+    A->>B: record ready
+    B->>A: fetch record
+    A->>B: every sample of the record
+    E->>B: close
+    B->>A: unsubscribe
+    A->>S: stop producing
+```
+
+**What a plugin declares.** Next to its parameter layout, in the header all three targets
+share, a plugin lists its monitors:
+
+```cpp
+// Params.hpp, compiled into complete, control and headless
+inline MonitorLayout createMonitorLayout()
+{
+    MonitorLayout m;
+    m.value ("levelDb",       "dBFS", -120.0f, 0.0f);   // the detector meter
+    m.value ("activeSetting", "",        0.0f, 3.0f);
+    return m;
+}
+```
+
+The headless build publishes these from the atomics it already writes. The proxy processor
+exposes the same getters, such as `getLevelDb()`, and the bridge fills them from the stream.
+The editor code does not change. Frame streams use a shared view-model class that turns a
+ring buffer into a frame (trigger search, window selection, one min/max pair per pixel
+column, the measurements). The complete build runs it locally; the headless build runs it on
+the speaker and the control build draws what it receives. The monitor layout is part of the
+version hash, so a GUI can never wait for a stream the speaker does not produce.
+
+**Built into `speakerd`, for any graph.** Some monitors need no plugin:
+
+- the output level of each amplifier channel, woofer and tweeter, peak and RMS, measured on
+  the output node, for a level bar in the controller;
+- the amplifier telemetry the driver publishes through its ALSA controls: supply voltage,
+  temperature, fault flags;
+- the time each node takes and the xrun count.
+
+**Same resolution as the complete build.** The native `ampScope` draws each pixel column as
+the min/max envelope of the samples in it. The speaker computes that same envelope from the
+same ring buffer, so a live trace in the controller is identical to the native one. Zooming
+into a stopped capture uses the fetched record, so it shows the real samples.
+
+| Stream | Size | Rate | Bandwidth per speaker |
+|---|---|---|---|
+| Values of every open plugin window | a few hundred bytes | 30 Hz | under 0.1 Mbit/s |
+| Output level bar | 4 channels, peak and RMS | 30 Hz | negligible |
+| `ampScope` frame | 10 to 20 kB (int16 min/max, enabled traces only) | 20 Hz | 1.6 to 3 Mbit/s |
+| `ampScope` record | about 5 MB | once, on stop or trigger | under a second to fetch |
+
+**Latency.** In steady state a frame reaches the window one Wi-Fi round trip after the
+speaker produced it, a few milliseconds. When a packet is lost, TCP retransmits it and that
+one frame arrives late; the next frame is fresh, because nothing queued behind it. Lowering
+the minimum retransmit timeout on the speaker for the controller's subnet (`ip route ...
+rto_min 20ms`) keeps the worst case near 20 ms instead of Linux's default 200 ms. No jitter
+buffer is used: an instrument should show the latest state, not an evenly delayed one.
+
+## 6. One graph, two speakers, two channels
 
 The graph is shared by every speaker in the group, but one speaker plays left and the other
 right. Today that is a wire from the FL or FR pin of the input node. Keep that mental model and
@@ -388,7 +558,7 @@ Trim and delay per speaker are parameters of the input node and are device state
 state. The controller shows the group graph; a small per-speaker panel (role, trim, delay,
 mute) sits beside it.
 
-## 6. Build system
+## 7. Build system
 
 `speaker_add_plugin()` grows one option and produces three CMake targets from the same call:
 
@@ -414,14 +584,14 @@ The proxy processor is generic: it is the same `PluginProcessor` class compiled 
 does. The identity (`CODE`, LV2 URI) is suffixed per target so a host never confuses them.
 Every target embeds a **version hash** of the source tree; the catalogue carries it, and the
 hub only applies a graph when control and headless hashes agree, so a GUI can never show a
-parameter the speaker does not have.
+parameter, or wait for a monitor stream, that the speaker does not have.
 
 Static linking matters for a **phone or tablet**: a JUCE controller app builds for iOS and
 Android, where plugins cannot be loaded dynamically. There the control builds are compiled in
 as internal plugins, the same mechanism AudioPluginHost uses for its own "Audio Input" node.
 The desktop controller can load them dynamically or statically, your choice.
 
-## 7. Working without the controller
+## 8. Working without the controller
 
 **Requirement.** A speaker must boot, play and keep its settings with no controller app
 running, no hub reachable and no network at all. The controller is for changing things, never
@@ -520,13 +690,14 @@ are reachable without the controller app:
 | Right speaker off | The hub keeps working, the app shows the speaker as offline, changes queue and are applied when it returns. |
 | Both speakers rebooted, out of sync | The hub's revision wins when they meet. If the right speaker is newer (it was changed while the left was off), the hub adopts it, because revisions carry a timestamp and an origin. |
 | A graph that crashes `speakerd` | systemd restarts it on last known good within a second. After three crashes in a minute it starts on factory and tells the hub. |
+| `ampd` restarts | Audio keeps playing. Control and monitoring pause for about a second; open plugin windows resubscribe on their own. |
 
 **One dependency to keep in mind.** The requirement covers the control side. On the audio
 side, Snapcast still needs its server. If that server is a computer, the speakers are silent
 when it is off, controller or not. Running `snapserver` on the hub speaker removes that dependency; it is a separate decision
 and not part of this design yet.
 
-## 8. Native or web?
+## 9. Native or web?
 
 Native, and specifically JUCE. The whole point of the fake GUIs is to reuse the editors you
 already have (`MorphPad`, the plot components, `ampScope`'s views). A web controller would
@@ -537,7 +708,7 @@ A web page keeps one job: a small status and preset page served by the hub, for 
 has nothing installed. It shows the chain, master volume, mute and presets. It does not try to
 be the plugin host.
 
-## 9. Where the code lives
+## 10. Where the code lives
 
 | Piece | Repository | Path |
 |---|---|---|
@@ -549,14 +720,14 @@ be the plugin host.
 Board addresses, user names and deploy targets stay in the gitignored `local.env` and
 `local.mk` files, as the two repositories already require.
 
-## 10. Roadmap
+## 11. Roadmap
 
 <!-- diagram: roadmap -->
 ```mermaid
 flowchart LR
     s1["Step 1<br/>Add SPEAKER_CONTROL to one plugin.<br/>Load it in the stock AudioPluginHost:<br/>the editor works, no sound. Proves the proxy."] --> s2["Step 2<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
-    s2 --> s3["Step 3<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin."]
-    s3 --> s4["Step 4<br/>Catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
+    s2 --> s3["Step 3<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin, value monitors<br/>and the output level bar."]
+    s3 --> s4["Step 4<br/>Scope frames and records,<br/>catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
 ```
 
 Step 1 is an afternoon and tells you immediately whether the editors survive being detached
