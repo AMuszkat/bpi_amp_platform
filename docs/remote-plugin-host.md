@@ -22,6 +22,81 @@ A change made in the controller must be heard on both speakers within tens of mi
 Plugin settings are shared by the pair; a few settings (which channel a speaker plays, its
 trim and delay) belong to one speaker.
 
+## Architecture at a glance
+
+<!-- diagram: glance -->
+```mermaid
+flowchart TB
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+
+    subgraph CTRL["Controller app"]
+        direction LR
+        gui["Plugin host GUI<br/>canvas, pins, connections,<br/>plugin windows"]:::ctl
+        cb["Control builds<br/>the real plugin editors,<br/>no DSP inside"]:::ctl
+        br["Bridge<br/>sends every edit,<br/>applies remote changes"]:::ctl
+        gui --- cb --- br
+    end
+
+    local["Knob, IR remote,<br/>phone web page"]:::ctl
+    src["Audio source<br/>Snapcast server"]:::aud
+
+    subgraph SR["Speaker R"]
+        direction TB
+        subgraph AR["ampd: control plane"]
+            agR["agent<br/>persists, applies, mDNS"]:::ctl
+        end
+        stR[("state files<br/>graph, device role")]:::sto
+        subgraph SDR["speakerd: audio engine"]
+            engR["graph engine<br/>headless plugins<br/>real-time thread"]:::aud
+        end
+        ampR["PipeWire sink<br/>2 x MAX98397<br/>woofer + tweeter"]:::hw
+        agR -- "local socket" --> engR
+        agR --> stR
+        stR -. "read at boot" .-> engR
+        engR ==> ampR
+    end
+
+    subgraph SL["Speaker L, the hub"]
+        direction TB
+        subgraph AL["ampd: control plane"]
+            hub["hub role<br/>graph document, parameters,<br/>catalogue, fan-out"]:::ctl
+            agL["agent<br/>persists, applies, mDNS"]:::ctl
+        end
+        stL[("state files<br/>graph, device role")]:::sto
+        subgraph SDL["speakerd: audio engine"]
+            engL["graph engine<br/>headless plugins<br/>real-time thread"]:::aud
+        end
+        ampL["PipeWire sink<br/>2 x MAX98397<br/>woofer + tweeter"]:::hw
+        hub --> agL
+        agL -- "local socket" --> engL
+        agL --> stL
+        stL -. "read at boot" .-> engL
+        engL ==> ampL
+    end
+
+    br <-- "graph: TCP<br/>knobs: OSC/UDP" --> hub
+    local --> hub
+    hub -- "fan-out" --> agR
+    src == "stereo stream" ==> engL
+    src == "stereo stream" ==> engR
+```
+
+How to read it:
+
+- **Orange is control, blue is audio, green is hardware, grey is files on disk.** Thick
+  arrows carry audio, thin arrows carry settings, dotted arrows are read once at boot.
+- **The controller holds no audio.** It is a plugin host whose plugins are editors only. Every
+  edit leaves through the bridge to the hub.
+- **Each speaker runs two daemons.** `ampd` is the control plane: network, state files, the
+  hub role. `speakerd` is the audio engine: the plugin graph inside PipeWire. Audio never
+  passes through `ampd`, and `speakerd` never talks to the network.
+- **The hub is a role of `ampd` on the left speaker.** It holds the truth and fans each
+  change out to the agent on the right speaker. Without the controller, without the hub or
+  without the network, each `speakerd` keeps playing from its own state files.
+
 ## 1. Why this fits JUCE well
 
 JUCE already draws the line this design needs. An `AudioProcessor` owns the parameters
@@ -56,26 +131,66 @@ flowchart LR
 
 ## 2. The pieces
 
-<!-- diagram: overview -->
+The controller side is one application. The speaker side is two daemons with a hard line
+between them: everything that can wait is in `ampd`, everything that cannot is in
+`speakerd`.
+
+<!-- diagram: inside -->
 ```mermaid
 flowchart LR
-    subgraph ctrl["Controller app (JUCE)"]
-        direction TB
-        gui["AudioPluginHost GUI<br/>graph editor, pins, connections, plugin windows"]
-        mirror["Graph mirror<br/>AudioProcessorGraph of control builds<br/>no audio device, no processing"]
-        bridge["Bridge<br/>listens to every parameter and graph edit,<br/>applies remote changes back"]
-        gui --> mirror --> bridge
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+
+    net["Network<br/>hub, controllers,<br/>other speaker"]:::ctl
+    knob["Knob, IR,<br/>web page"]:::ctl
+
+    subgraph SPK["One speaker"]
+        direction LR
+        subgraph AMPD["ampd (control plane)"]
+            direction TB
+            disc["mDNS<br/>advertise, find the hub"]:::ctl
+            rx["receive parameters (OSC)<br/>and graph revisions (TCP)"]:::ctl
+            hubrole["hub role<br/>(left speaker only)"]:::ctl
+            cat["plugin catalogue<br/>from ~/.lv2"]:::ctl
+            persist["persist state<br/>atomic writes"]:::ctl
+        end
+        files[("graph.json<br/>graph.lkg.json<br/>factory.json<br/>device.json")]:::sto
+        subgraph SD["speakerd (audio engine)"]
+            direction TB
+            cmd["command queue<br/>(lock-free)"]:::aud
+            eng["AudioProcessorGraph<br/>headless plugins"]:::aud
+            pwf["pw_filter node<br/>inside the PipeWire cycle"]:::aud
+            cmd --> eng --> pwf
+        end
+        rx -- "local socket:<br/>set param, apply rev N" --> cmd
+        persist --> files
+        files -. "read at boot,<br/>first layer that loads" .-> eng
     end
-    hub["Hub (one speaker)<br/>graph document, rev N<br/>parameter values<br/>catalogue of installed plugins<br/>fan-out to speakers and controllers"]
-    subgraph spk["Speaker L and Speaker R"]
-        direction TB
-        sd["speakerd<br/>AudioProcessorGraph of headless builds<br/>PipeWire client (pw_filter)"]
-        pw["PipeWire<br/>stream in, amplifier out"]
-        sd --- pw
-    end
-    bridge <== "graph document: TCP<br/>parameters: OSC/UDP" ==> hub
-    hub <== "same" ==> sd
+
+    net <--> disc
+    net <--> rx
+    net <--> hubrole
+    knob --> hubrole
+    snap["Snapcast stream"]:::aud == "audio in" ==> pwf
+    pwf == "audio out" ==> amp["Amplifier<br/>woofer + tweeter"]:::hw
 ```
+
+| | `speakerd` | `ampd` |
+|---|---|---|
+| Job | runs the plugin graph | everything that talks to the outside |
+| Owns | the running graph and its parameter values | the state files, the network, the hub role, the catalogue |
+| Talks to | PipeWire, and the local socket | the hub, controllers, mDNS, the web page, `speakerd` |
+| Threads | one real-time audio thread, no blocking | ordinary threads, may block on network and disk |
+| Needed for sound | yes | no |
+| Starts | right after PipeWire, no network dependency | after `speakerd` |
+| Restart cost | one fade, back on last known good | none audible |
+| Language, repository | JUCE C++, `bpi_amp_dsp_tuning` | Python first, `bpi_amp_platform` |
+
+The local socket carries the same messages as the network, so `speakerd` cannot tell a
+change from its own agent from a change relayed by the hub. That keeps `speakerd` small and
+lets `ampd` be restarted or upgraded while music plays.
 
 **Controller app.** A copy of `extras/AudioPluginHost` with three changes: the audio device
 and the processing thread are removed (the graph is never prepared or run), the plugin list
@@ -87,9 +202,9 @@ proxy processor keeps the APVTS, so the editors work untouched. The bridge does 
 the plugin: the host already sees every parameter of every node, so one bridge in the host
 forwards them all. A control build knows nothing about the network.
 
-**Agent and hub.** A small daemon, `ampd`, runs on every speaker next to `speakerd`. It
-persists the state, applies updates, advertises the speaker over mDNS and, on exactly one
-speaker, acts as the **hub**: the one place that holds the truth. The truth has two parts, the
+**ampd and the hub.** `ampd` runs on every speaker next to `speakerd`. It persists the state,
+hands updates to `speakerd`, advertises the speaker over mDNS and, on exactly one speaker,
+acts as the **hub**: the one place that holds the truth. The truth has two parts, the
 **graph document** with a revision number and the **parameter values** keyed by node uid and
 parameter ID. The hub also keeps the **catalogue** (which plugin builds, at which version
 hash, each speaker has installed) and refuses a graph that references a plugin a speaker lacks.
@@ -108,22 +223,28 @@ stays JUCE from end to end.
 <!-- diagram: knob -->
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant E as loudness editor (control build)
-    participant P as proxy processor (APVTS)
-    participant B as Bridge in the controller
-    participant H as Hub
-    participant S as speakerd (both speakers)
-    participant C2 as other controllers
-    U->>E: drags shelf 1 gain
-    E->>P: setValueNotifyingHost(s1_b1_gain, 4.5)
-    P-->>B: parameterValueChanged (listener)
-    B->>H: OSC /p/<node-uid>/s1_b1_gain 4.5 (throttled to 50 Hz, origin = this app)
-    H->>S: fan-out, seq
-    S->>S: headless loudness: setValueNotifyingHost → heard at the next cycle
-    H->>C2: same message
-    C2->>C2: bridge applies it to its proxy, and that editor moves too
-    Note over B,H: an echo with origin == self is ignored
+    box Controller app
+        participant E as Editor (control build)
+        participant B as Bridge
+    end
+    box Speaker L
+        participant H as ampd (hub)
+        participant SL as speakerd L
+    end
+    box Speaker R
+        participant AR as ampd R
+        participant SR as speakerd R
+    end
+    E->>B: s1_b1_gain = 4.5 (parameter listener)
+    B->>H: OSC, throttled to 50 Hz, origin = this app
+    H->>H: update state, seq + 1, persist (debounced)
+    par fan-out
+        H->>SL: local socket: set param
+        H->>AR: OSC, seq
+        AR->>SR: local socket: set param
+    end
+    Note over SL,SR: heard at the next PipeWire cycle on both speakers
+    H-->>B: echo with seq (other controllers get it too, their editors move)
 ```
 
 The gesture calls (`beginChangeGesture` / `endChangeGesture`) travel as well, so the hub can
@@ -137,20 +258,32 @@ Graph edits are rarer and must be atomic, so they go over TCP as a new document 
 <!-- diagram: graph -->
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant G as Graph editor (controller)
-    participant B as Bridge
-    participant H as Hub
-    participant S as speakerd (each speaker)
-    U->>G: drag firConv onto the canvas, connect xo:low → fc:in
-    G->>G: AudioProcessorGraph: addNode, addConnection (control build)
-    G-->>B: graph changed
-    B->>H: document rev N+1 (filtergraph XML: nodes, uids, connections, open editors)
-    H->>H: every node's plugin + version in all catalogues?
+    box Controller app
+        participant G as Graph editor
+        participant B as Bridge
+    end
+    box Speaker L
+        participant H as ampd (hub)
+        participant SL as speakerd L
+    end
+    box Speaker R
+        participant AR as ampd R
+        participant SR as speakerd R
+    end
+    G->>B: add firConv, connect xo:low to fc:in
+    B->>H: TCP: graph document rev N+1
+    H->>H: is every plugin, at this version, on every speaker?
     alt yes
-        H->>S: rev N+1
-        S->>S: diff against rev N: addNode(headless firConv), addConnection, under a short fade
-        S-->>H: ack rev N+1
+        H->>AR: rev N+1
+        par apply on both
+            H->>SL: apply rev N+1
+            AR->>SR: apply rev N+1
+        end
+        Note over SL,SR: diff against rev N, under a 30 ms fade
+        SL-->>H: ack
+        SR-->>AR: ack
+        AR-->>H: ack
+        H->>H: persist rev N+1 as current
         H-->>B: applied
     else a speaker lacks the plugin
         H-->>B: rejected: Speaker R has no firConv 1.3.0
@@ -241,12 +374,25 @@ each speaker, and `speakerd` loads the first one that works:
 <!-- diagram: state -->
 ```mermaid
 flowchart LR
-    cur["current<br/>~/.config/bpi-amp/graph.json<br/>the last revision applied"] -- "fails to load" --> lkg["last known good<br/>graph.lkg.json<br/>the last revision that played for 60 s"]
-    lkg -- "fails to load" --> fac["factory<br/>/usr/share/bpi-amp/factory.json<br/>installed with the plugins, read-only"]
-    fac -- "fails to load" --> pass["passthrough<br/>Mine pin to the woofer only<br/>tweeter muted, safe level"]
-    role["/etc/bpi-amp/device.json<br/>role, trim, delay<br/>set once at installation"] -.-> cur
-    role -.-> lkg
-    role -.-> fac
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+
+    ampd["ampd<br/>writes"]:::ctl
+    subgraph layers["state layers on the speaker, tried in order"]
+        direction LR
+        cur[("Layer 1: current<br/>graph.json<br/>last revision applied")]:::sto
+        lkg[("Layer 2: last known good<br/>graph.lkg.json<br/>played cleanly for 60 s")]:::sto
+        fac[("Layer 3: factory<br/>factory.json<br/>read-only, ships with the plugins")]:::sto
+        pass["Layer 4: passthrough<br/>woofer only, tweeter muted,<br/>level capped"]:::sto
+        cur -- "fails to load" --> lkg -- "fails to load" --> fac -- "fails to load" --> pass
+    end
+    dev[("device.json<br/>role, trim, delay<br/>set once, never from the hub")]:::sto
+    sd["speakerd<br/>reads at boot"]:::aud
+    ampd --> cur
+    ampd -- "promotes" --> lkg
+    layers -. "first layer that loads" .-> sd
+    dev -. "always" .-> sd
 ```
 
 - **Current** is written on every accepted change, atomically (write a temporary file,
@@ -329,33 +475,7 @@ A web page keeps one job: a small status and preset page served by the hub, for 
 has nothing installed. It shows the chain, master volume, mute and presets. It does not try to
 be the plugin host.
 
-## 9. Alternative considered: hosting in PipeWire's filter-chain
-
-PipeWire's `module-filter-chain` can host LV2 plugins itself, one chain per stage, with
-controls changed at runtime through `pw-cli set-param`. It was the first candidate for the
-speaker side and is worth recording why it lost.
-
-| | PipeWire filter-chain | This proposal |
-|---|---|---|
-| Host on the speaker | `module-filter-chain`, one process per stage | `speakerd`, JUCE graph engine as a PipeWire client |
-| Headless plugin | hand-written LV2 with control ports | JUCE build without editor, unchanged parameter mechanism |
-| Graph model | linear list of stages with links | free-form `AudioProcessorGraph`, per-channel pins, same as AudioPluginHost |
-| Controller | web page with generated forms | the AudioPluginHost GUI with the real editors as remotes |
-| Crash isolation | per stage process | one process; a plugin crash restarts `speakerd` on last known good (sub-second, under mute) |
-| Without the controller | plays the persisted pipeline | plays current, then last known good, then factory, then passthrough |
-| Parameter path | LV2 control ports only (needs the rewrite) | JUCE parameters, unchanged |
-| Per-stage load in `pw-top` | yes | no; `speakerd` reports per-node timing itself |
-
-The filter-chain route needs every plugin rewritten as a thin LV2 with control ports around
-a shared DSP core, plus a stage manager that regenerates configs and restarts processes on
-every graph change, and it cannot express a free-form graph with per-channel pins. This
-proposal instead owns a headless host. Most of that host is `extras/AudioPluginHost` minus
-the GUI plus one `pw_filter` audio device, which is a bounded piece of work, and it is the
-same engine the controller runs, so graph behaviour cannot drift between the two. The
-filter-chain route keeps two real advantages, per-stage crash isolation and per-stage load in
-`pw-top`, which `speakerd` has to provide itself.
-
-## 10. Where the code lives
+## 9. Where the code lives
 
 | Piece | Repository | Path |
 |---|---|---|
@@ -367,7 +487,7 @@ filter-chain route keeps two real advantages, per-stage crash isolation and per-
 Board addresses, user names and deploy targets stay in the gitignored `local.env` and
 `local.mk` files, as the two repositories already require.
 
-## 11. Roadmap
+## 10. Roadmap
 
 <!-- diagram: roadmap -->
 ```mermaid
