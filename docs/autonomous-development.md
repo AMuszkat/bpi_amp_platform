@@ -133,6 +133,9 @@ flowchart TB
 | `reviewer` | all | Read, Grep, Glob | edits source, runs anything |
 | `board-ops` | `firmware/` | the board skill only | edits source, runs on a locked lab |
 
+All eight definitions are in `.claude/agents/`, with these tool grants and rules;
+`board-ops` says so and stops until the `/board` skill exists.
+
 The split between `plugin-dev`, `host-dev` and `controller-dev` follows the three build
 targets. They work in separate git worktrees so that the orchestrator can run them in
 parallel on one feature and merge the results.
@@ -165,6 +168,18 @@ flowchart LR
     stop["Stop<br/>run /test unit when source changed<br/>refuse to end with a red build"]
     ss --> pre --> post --> stop
 ```
+
+**What exists today.** The hooks are in place: `.claude/hooks/pre-edit.py` and the commit
+check in `pre-bash.py` refuse private data (the rule is `private-data-check.py`, with the
+documentation address ranges and the placeholders as exceptions); `pre-bash.py` refuses
+pushes to `main` and force pushes, and gates every command that could reach a board (`ssh`,
+`scp`, `rsync`, the `-install` and `--target-host` paths of the build scripts) on the lab
+lock and on a green test status for the exact commit with a clean tree; `post-edit.py`
+checks the Mermaid diagrams of an edited document when `tools/mermaid-check` is installed;
+`stop.py` runs the virtual pair tests when their files, `firmware/ampd/` or
+`dsp/juce_apps/` changed. The skills `/build`, `/test`, `/vpair` and `/pw-inspect` exist
+with their scripts in `tools/`; `/test` writes the status file the gate reads. `/measure`,
+`/board` and `/release` wait for `speakerd`, `ampd` and the version hash.
 
 The deploy gate is the one that matters most. It reads `tests/.status/<commit>.json`, which
 the verifier writes after a rung 2 run, and refuses the deploy if the file is missing, red or
@@ -248,10 +263,11 @@ sequenceDiagram
 
 Two pieces of infrastructure make this run unattended:
 
-- **CI in GitHub Actions** builds every target in the builder image and runs rung 2 on each
-  pull request. Rung 2 only needs containers, so it runs on ordinary runners. The workflow
-  caches the JUCE build and uploads the plugin bundles and `speakerd` as artifacts with their
-  version hashes.
+- **CI in GitHub Actions** builds every target and runs rungs 1 and 2 on each pull request
+  and push to `develop` (`.github/workflows/ci.yml`: it installs the packages, caches the
+  JUCE install by submodule commit, runs `tools/test.sh unit` and `tools/test.sh vpair`,
+  and keeps the reports and screenshots as artifacts). Rung 2 needs no containers, so it
+  runs on ordinary runners.
 - **Scheduled tasks** run the nightly rung 3 smoke, a weekly dependency check (JUCE submodule,
   PipeWire version on the boards, Snapcast release) that opens an issue with the diff, and a
   weekly "replay the scenarios against `main`" run that catches drift between `dsp/` and
@@ -266,9 +282,13 @@ In order, because each unlocks the next:
    agent can test anything, so it comes first, even before `speakerd` exists. Its first
    version is in place: two virtual speakers, the harness and three audio-path tests.
 2. **The hooks**, because agents will start touching boards the moment a deploy script exists.
-3. **The skills**, replacing ad-hoc shell: `/build`, `/vpair`, `/measure`, `/board`.
-4. **The agent definitions** and the `CLAUDE.md` map of the repository with the rules.
-5. **CI** running rungs 1 and 2 on pull requests.
+   In place (`.claude/hooks/`, wired in `.claude/settings.json`).
+3. **The skills**, replacing ad-hoc shell. `/build`, `/test`, `/vpair` and `/pw-inspect` are in
+   place; `/measure` and `/board` follow `speakerd` and `ampd`, `/release` the version hash.
+4. **The agent definitions** and the `CLAUDE.md` map of the repository with the rules. In
+   place (`.claude/agents/`, the root `CLAUDE.md`).
+5. **CI** running rungs 1 and 2 on pull requests. In place (`.github/workflows/ci.yml`), not
+   yet seen running: it needs Actions enabled on the repository.
 6. **Scheduled tasks** for rung 3, last, once the lab pair has run a week of manual deploys
    through the same skill without surprises.
 

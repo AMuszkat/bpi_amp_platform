@@ -35,6 +35,27 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
 - **Real-time code never blocks:** no allocation, lock or syscall on the audio thread, in
   plugins and in `speakerd` alike.
 
+## Hooks, skills and agents
+
+`docs/autonomous-development.md` is the plan; this is what of it exists.
+
+- **Hooks** (`.claude/settings.json`, scripts in `.claude/hooks/`) enforce the rules above:
+  no private data in an edit or a commit, no push to `main`, no force push, and the
+  **deploy gate**: nothing reaches a board (`ssh`, `scp`, `rsync`, `-install`,
+  `--target-host`) while `.claude/lab.lock` exists, or without `tests/.status/<commit>.json`
+  saying `unit: pass` and `vpair: pass` for the exact commit with a clean tree. A person
+  may bypass the status (never the lock) once with `BPI_DEPLOY_OVERRIDE=1 <command>`; it is
+  logged in `tests/.status/overrides.log`. Create `.claude/lab.lock` whenever the boards are
+  on a bench.
+- **Skills**: `/build` (a plugin or app, native or aarch64), `/test` (`unit` = plugin-check,
+  `vpair` = the virtual pair, `all`; writes the status file), `/vpair` (operate the virtual
+  pair), `/pw-inspect` (a PipeWire graph, summarised), `/juce` (JUCE knowledge). Their
+  scripts are in `tools/` and work without Claude.
+- **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
+  `controller-dev`, `board-dev`, `verifier`, `reviewer`, `board-ops`, each limited to its
+  area and tools as the document's table says.
+- **CI** (`.github/workflows/ci.yml`) runs rungs 1 and 2 on pull requests and on `develop`.
+
 ## Developing the remote plugin host
 
 Everything below runs on a Linux x86_64 machine with no boards attached.

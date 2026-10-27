@@ -12,3 +12,12 @@ __pycache__/
 
 # Local builds (JUCE install, plugin-check, ...)
 build/
+
+# Test results per commit, read by the deploy gate (.claude/hooks/pre-bash.py)
+tests/.status/
+
+# The lab lock: present while a person has the boards
+.claude/lab.lock
+
+# mermaid-check dependencies
+tools/mermaid-check/node_modules/

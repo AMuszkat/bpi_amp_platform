@@ -1,0 +1,60 @@
+# Rungs 1 and 2 of docs/autonomous-development.md on every pull request and push to develop:
+# plugin-check on every plugin with control and headless targets, then the virtual pair.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [develop]
+
+jobs:
+  rungs-1-and-2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libasound2-dev libpipewire-0.3-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl-dev \
+            libcurl4-openssl-dev ladspa-sdk lv2-dev lilv-utils \
+            pipewire pipewire-bin wireplumber dbus python3-numpy \
+            xvfb openbox imagemagick
+
+      - name: Cache the JUCE install
+        id: juce
+        uses: actions/cache@v4
+        with:
+          path: build/juce-install
+          key: juce-${{ hashFiles('.gitmodules') }}-${{ hashFiles('dsp/juce_plugins/JUCE/CMakeLists.txt') }}-${{ runner.os }}
+
+      - name: Build JUCE
+        if: steps.juce.outputs.cache-hit != 'true'
+        run: |
+          cmake -S dsp/juce_plugins/JUCE -B build/juce -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="$PWD/build/juce-install" -DJUCE_BUILD_EXTRAS=OFF -DJUCE_BUILD_EXAMPLES=OFF
+          cmake --build build/juce
+          cmake --install build/juce
+
+      - name: Rung 1, plugin-check
+        run: JUCE_INSTALL_DIR="$PWD/build/juce-install" tools/test.sh unit
+
+      - name: Rung 2, the virtual pair
+        run: tools/test.sh vpair
+
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            dsp/juce_apps/plugin-check/build-check/*-report.txt
+            dsp/juce_apps/plugin-check/build-check/*.png
+            tests/.status/
+          if-no-files-found: ignore

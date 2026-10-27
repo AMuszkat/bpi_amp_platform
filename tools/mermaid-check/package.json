@@ -1,0 +1,9 @@
+{
+  "name": "mermaid-check",
+  "private": true,
+  "description": "Checks that the Mermaid diagrams in a Markdown file parse (see check.js).",
+  "dependencies": {
+    "mermaid": "11.4.1",
+    "playwright": "1.47.2"
+  }
+}
