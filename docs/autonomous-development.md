@@ -76,8 +76,9 @@ records from each speaker, and three tests prove the audio path: a tone arrives 
 amplifier channels with its frequency and level intact, on each speaker, and the speakers
 are independent. On a machine with Podman both speakers run inside the development
 container described below, on bookworm's PipeWire 0.3.65 and WirePlumber 0.4.13, the
-versions the boards run; natively where there is no container runtime. `speakerd`, `ampd`,
-the Snapcast source and `tc netem` come next; the compose file comes with them, for CI.
+versions the boards run; natively where there is no container runtime. `speakerd`
+(`dsp/juce_apps/speakerd`) runs on a virtual speaker by hand. Its scenario, `ampd`, the
+Snapcast source and `tc netem` come next; the compose file comes with them, for CI.
 
 **Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
 complete, control and headless targets and checks that they fit together (same parameters,

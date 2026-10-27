@@ -1,0 +1,319 @@
+#include "GraphBuilder.h"
+
+#include "LV2State.h"
+
+#include <cmath>
+#include <map>
+
+namespace speakerd
+{
+    namespace
+    {
+        using Graph  = juce::AudioProcessorGraph;
+        using NodeID = Graph::NodeID;
+        using IO     = Graph::AudioGraphIOProcessor;
+        constexpr auto deferred = Graph::UpdateKind::none;   // one rebuild, in prepareToPlay
+
+        /** Node uid of the passthrough processor, from the reserved range. */
+        constexpr juce::uint32 passthroughNode = 3;
+
+        /** The parameter ID a plugin declared. JUCE's LV2 hosting reports it as a URI under the
+            plugin's own URI, which differs between builds; the ID is the part after the last
+            '#', '/' or ':' (the same rule as plugin-check). */
+        juce::String bareId (const juce::String& id)
+        {
+            const auto cut = juce::jmax (id.lastIndexOfChar ('#'), id.lastIndexOfChar ('/'), id.lastIndexOfChar (':'));
+            return cut >= 0 ? id.substring (cut + 1) : id;
+        }
+
+        /** A document value, in the plugin's own units, as the hosted parameter's normalised
+            value. Numbers are what the plugin's parameter reports (dB, Hz, ms, the index of a
+            choice); a string can name a choice; a bool sets a switch. */
+        juce::Result toNormalised (juce::AudioProcessorParameter& p, const juce::var& value,
+                                   float& normalised, juce::StringArray& warnings, const juce::String& where)
+        {
+            // JUCE's LV2 hosting gives an enumeration (a choice or a switch) its labels; for any
+            // other parameter this is empty.
+            const auto choices = p.isDiscrete() ? p.getAllValueStrings() : juce::StringArray();
+            const auto choiceValue = [&] (int index)
+            {
+                return choices.size() > 1 ? (float) index / (float) (choices.size() - 1) : 0.0f;
+            };
+            const auto choiceList = [&] { return "\"" + choices.joinIntoString ("\", \"") + "\""; };
+
+            if (value.isBool())
+            {
+                if (! p.isBoolean())
+                    return juce::Result::fail (where + ": true/false is only for a switch; give a number");
+
+                normalised = (bool) value ? 1.0f : 0.0f;
+                return juce::Result::ok();
+            }
+
+            double number = 0.0;
+
+            if (value.isString())
+            {
+                const auto text = value.toString().trim();
+
+                if (const auto index = choices.indexOf (text); index >= 0)
+                {
+                    normalised = choiceValue (index);
+                    return juce::Result::ok();
+                }
+
+                if (! text.containsOnly ("0123456789+-.eE") || ! text.containsAnyOf ("0123456789"))
+                    return juce::Result::fail (where + ": \"" + text + "\" is not "
+                                               + (choices.isEmpty() ? juce::String ("a number")
+                                                                    : "one of " + choiceList()));
+
+                number = text.getDoubleValue();
+            }
+            else
+            {
+                number = (double) value;
+            }
+
+            if (! std::isfinite (number))
+                return juce::Result::fail (where + ": not a finite number");
+
+            if (! choices.isEmpty())
+            {
+                const auto index = juce::roundToInt (number);
+
+                if (std::abs (number - index) > 1.0e-6 || ! juce::isPositiveAndBelow (index, choices.size()))
+                    return juce::Result::fail (where + ": a choice takes an index from 0 to "
+                                               + juce::String (choices.size() - 1) + ", or one of " + choiceList());
+
+                normalised = choiceValue (index);
+                return juce::Result::ok();
+            }
+
+            // A continuous parameter: the hosted parameter maps the plugin's own range linearly,
+            // so its text conversion turns the plain value into its normalised value (clamped).
+            normalised = p.getValueForText (juce::String (number, 9));
+
+            const auto lowest  = p.getText (0.0f, 64).getDoubleValue();
+            const auto highest = p.getText (1.0f, 64).getDoubleValue();
+
+            if (lowest < highest && (number < lowest - 1.0e-6 * (highest - lowest) || number > highest + 1.0e-6 * (highest - lowest)))
+                warnings.add (where + ": " + juce::String (number) + " is outside " + juce::String (lowest)
+                              + " .. " + juce::String (highest) + ", clamped");
+
+            return juce::Result::ok();
+        }
+
+        std::unique_ptr<Graph> makeGraph (double sampleRate, int maxBlock)
+        {
+            auto graph = std::make_unique<Graph>();
+
+            // The stream in (FL, FR) and the amplifier out (woofer, tweeter). The I/O nodes take
+            // their channel counts from the graph, so this comes first.
+            graph->setPlayConfigDetails (GraphDocument::inputChannels, GraphDocument::outputChannels, sampleRate, maxBlock);
+            graph->addNode (std::make_unique<IO> (IO::audioInputNode),  NodeID { GraphDocument::inputNode },  deferred);
+            graph->addNode (std::make_unique<IO> (IO::audioOutputNode), NodeID { GraphDocument::outputNode }, deferred);
+            return graph;
+        }
+
+        juce::String channelsOf (Graph& graph, juce::uint32 uid)
+        {
+            if (auto* node = graph.getNodeForId (NodeID { uid }))
+                return "node " + juce::String (uid) + " has " + juce::String (node->getProcessor()->getTotalNumInputChannels())
+                     + " input(s) and " + juce::String (node->getProcessor()->getTotalNumOutputChannels()) + " output(s)";
+
+            return "no node " + juce::String (uid);
+        }
+
+        //==============================================================================
+        /** Passthrough: the speaker's own channel to the woofer, at a fixed, low level. */
+        class PassthroughProcessor final : public juce::AudioProcessor
+        {
+        public:
+            PassthroughProcessor (Role r, float gainIn)
+                : AudioProcessor (BusesProperties().withInput  ("Stream", juce::AudioChannelSet::stereo(), true)
+                                                   .withOutput ("Woofer", juce::AudioChannelSet::mono(), true)),
+                  role (r), gain (gainIn)
+            {}
+
+            const juce::String getName() const override        { return "passthrough"; }
+            void prepareToPlay (double, int) override          {}
+            void releaseResources() override                   {}
+
+            using AudioProcessor::processBlock;   // the double-precision one stays the default
+
+            void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
+            {
+                const auto n = buffer.getNumSamples();
+                auto* woofer = buffer.getWritePointer (0);
+                const auto* fl = buffer.getReadPointer (0);
+                const auto* fr = buffer.getReadPointer (1);
+
+                switch (role)
+                {
+                    case Role::left:
+                        juce::FloatVectorOperations::multiply (woofer, gain, n);
+                        break;
+
+                    case Role::right:
+                        juce::FloatVectorOperations::copyWithMultiply (woofer, fr, gain, n);
+                        break;
+
+                    case Role::mono:
+                        for (int i = 0; i < n; ++i)
+                            woofer[i] = 0.5f * gain * (fl[i] + fr[i]);
+                        break;
+                }
+            }
+
+            double getTailLengthSeconds() const override                 { return 0.0; }
+            bool acceptsMidi() const override                            { return false; }
+            bool producesMidi() const override                           { return false; }
+            juce::AudioProcessorEditor* createEditor() override          { return nullptr; }
+            bool hasEditor() const override                              { return false; }
+            int getNumPrograms() override                                { return 1; }
+            int getCurrentProgram() override                             { return 0; }
+            void setCurrentProgram (int) override                        {}
+            const juce::String getProgramName (int) override             { return {}; }
+            void changeProgramName (int, const juce::String&) override   {}
+            void getStateInformation (juce::MemoryBlock&) override       {}
+            void setStateInformation (const void*, int) override         {}
+
+        private:
+            const Role role;
+            const float gain;
+        };
+    }
+
+    //==============================================================================
+    juce::Result GraphBuilder::build (const GraphDocument& doc, double sampleRate, int maxBlock, BuiltGraph& out)
+    {
+        out = {};
+        auto graph = makeGraph (sampleRate, maxBlock);
+
+        // 1. Every plugin, found by its identifier (for LV2, the URI) and instantiated.
+        std::vector<std::pair<const GraphDocument::Node*, juce::String>> loaded;   // node, plugin name
+
+        for (const auto& node : doc.nodes)
+        {
+            const auto where = node.describe();
+
+            juce::AudioPluginFormat* format = nullptr;
+            for (auto* f : formats.getFormats())
+                if (f->getName() == node.format)
+                    format = f;
+
+            if (format == nullptr)
+                return juce::Result::fail (where + ": plugin format \"" + node.format + "\" is not hosted (speakerd hosts LV2)");
+
+            juce::OwnedArray<juce::PluginDescription> found;
+            format->findAllTypesForFile (found, node.identifier);
+
+            if (found.isEmpty())
+                return juce::Result::fail (where + ": no " + node.format + " plugin " + node.identifier
+                                           + " (looked in " + format->getDefaultLocationsToSearch().toStringWithSeparator (", ")
+                                           + " and the --lv2-bundle paths)");
+
+            juce::String error;
+            auto instance = formats.createPluginInstance (*found.getFirst(), sampleRate, maxBlock, error);
+
+            if (instance == nullptr)
+                return juce::Result::fail (where + ": " + node.identifier + " did not instantiate: " + error);
+
+            instance->enableAllBuses();
+
+            if (graph->addNode (std::move (instance), NodeID { node.uid }, deferred) == nullptr)
+                return juce::Result::fail (where + ": uid " + juce::String (node.uid) + " is taken");
+
+            loaded.emplace_back (&node, found.getFirst()->name);
+            ++out.pluginNodes;
+        }
+
+        // 2. The connections, per channel.
+        bool reachesAmplifier = false;
+
+        for (const auto& c : doc.connections)
+        {
+            const Graph::Connection connection { { NodeID { c.srcNode }, c.srcChannel }, { NodeID { c.dstNode }, c.dstChannel } };
+
+            if (! graph->addConnection (connection, deferred))
+                return juce::Result::fail ("connection " + c.describe() + " is not possible: "
+                                           + channelsOf (*graph, c.srcNode) + ", " + channelsOf (*graph, c.dstNode));
+
+            reachesAmplifier = reachesAmplifier || c.dstNode == GraphDocument::outputNode;
+        }
+
+        if (! reachesAmplifier)
+            out.warnings.add ("no connection reaches the output node: the amplifier gets silence");
+
+        // 3. Prepare. JUCE's LV2 hosting re-instantiates a plugin in prepareToPlay, carrying its
+        //    LV2 state across but not a control-port value that was set and not yet processed (a
+        //    bypass, or any parameter of a plugin that uses control ports). So the state and the
+        //    values are applied after this, to the instances that will run.
+        graph->prepareToPlay (sampleRate, maxBlock);
+
+        // 4. Each node's own state first, then its parameter values on top of it: the truth is the
+        //    document plus the parameter values.
+        for (const auto& [node, pluginName] : loaded)
+        {
+            const auto where = node->describe();
+            auto* graphNode = graph->getNodeForId (NodeID { node->uid });
+            auto& instance = *graphNode->getProcessor();
+
+            if (node->state.has_value())
+            {
+                auto* plugin = dynamic_cast<juce::AudioPluginInstance*> (&instance);
+
+                if (plugin == nullptr)
+                    return juce::Result::fail (where + ": state: not a hosted plugin");
+
+                if (auto r = lv2state::restore (*plugin, *node->state); r.failed())
+                    return juce::Result::fail (where + ": state: " + r.getErrorMessage());
+            }
+
+            std::map<juce::String, juce::AudioProcessorParameter*> byId;
+            for (auto* p : instance.getParameters())
+                if (auto* hosted = dynamic_cast<juce::HostedAudioProcessorParameter*> (p))
+                    byId[bareId (hosted->getParameterID())] = p;
+
+            for (const auto& [id, value] : node->params)
+            {
+                const auto it = byId.find (id);
+
+                if (it == byId.end())
+                    return juce::Result::fail (where + ": " + pluginName + " has no parameter \"" + id + "\"");
+
+                float normalised = 0.0f;
+                if (auto r = toNormalised (*it->second, value, normalised, out.warnings, where + ": " + id); r.failed())
+                    return r;
+
+                // A hosted LV2 plugin receives this on its atom port in its next processBlock;
+                // Engine::settle runs those blocks before anything is heard.
+                it->second->setValueNotifyingHost (normalised);
+            }
+
+            if (node->bypassed)
+                graphNode->setBypassed (true);
+        }
+
+        out.graph = std::move (graph);
+        return juce::Result::ok();
+    }
+
+    BuiltGraph GraphBuilder::buildPassthrough (Role role, double sampleRate, int maxBlock)
+    {
+        BuiltGraph out;
+        auto graph = makeGraph (sampleRate, maxBlock);
+
+        const auto gain = juce::Decibels::decibelsToGain (passthroughGainDb);
+        graph->addNode (std::make_unique<PassthroughProcessor> (role, gain), NodeID { passthroughNode }, deferred);
+
+        const NodeID in { GraphDocument::inputNode }, pass { passthroughNode }, amp { GraphDocument::outputNode };
+        graph->addConnection ({ { in, 0 }, { pass, 0 } }, deferred);
+        graph->addConnection ({ { in, 1 }, { pass, 1 } }, deferred);
+        graph->addConnection ({ { pass, 0 }, { amp, 0 } }, deferred);   // the woofer; the tweeter stays silent
+
+        graph->prepareToPlay (sampleRate, maxBlock);
+        out.graph = std::move (graph);
+        return out;
+    }
+}

@@ -1,8 +1,11 @@
 # Remote plugin host: controlling the speakers like a plugin host
 
-*Design proposal. Step 1 of the roadmap is implemented: `loudness` builds as complete, control
-and headless targets, checked by `dsp/juce_apps/plugin-check`. The virtual pair used for
-testing is in `tests/vpair/`. Everything else is still a proposal.*
+*Design proposal. Steps 1 and 2 of the roadmap are implemented. Step 1: `loudness` builds as
+complete, control and headless targets, checked by `dsp/juce_apps/plugin-check`. Step 2:
+`speakerd` (`dsp/juce_apps/speakerd`) runs the headless builds inside PipeWire, from the first
+state layer that loads, with no controller. On the virtual pair it sounds like the complete
+build; this was checked by hand, and the scenario that checks it automatically comes next. The
+virtual pair used for testing is in `tests/vpair/`. Everything else is still a proposal.*
 
 A stereo set made of this platform is two complete boards, each running the same JUCE
 plugins on its own copy of the audio graph. This document proposes how to tune and rewire
@@ -211,11 +214,12 @@ flowchart LR
             msrv["monitor server<br/>subscriptions, credits"]:::ctl
         end
         files[("graph.json<br/>graph.lkg.json<br/>factory.json<br/>device.json")]:::sto
+        sink["input sink 'speakerd'<br/>players play here"]:::aud
         subgraph SD["speakerd: headless plugin host"]
             direction TB
             cmd["command queue<br/>(lock-free)"]:::aud
             eng["AudioProcessorGraph<br/>headless plugins"]:::aud
-            pwf["pw_filter node<br/>inside the PipeWire cycle"]:::aud
+            pwf["pw_filter node<br/>'speakerd-dsp', inside<br/>the PipeWire cycle"]:::aud
             mon["monitor thread<br/>meters, levels, scope frames"]:::aud
             cmd --> eng --> pwf
             eng -. "atomics, rings" .-> mon
@@ -231,7 +235,7 @@ flowchart LR
     net <--> hubrole
     net <-. "monitoring" .-> msrv
     knob --> hubrole
-    snap["Snapcast stream"]:::aud == "audio in" ==> pwf
+    snap["Snapcast stream"]:::aud == "audio in" ==> sink == "monitor ports" ==> pwf
     pwf == "audio out" ==> amp["Amplifier<br/>woofer + tweeter"]:::hw
 ```
 
@@ -266,9 +270,9 @@ host forwards them all. A control build knows nothing about the network.
 removed: the same graph engine (`AudioProcessorGraph`), the same session format, loading the
 headless builds of the plugins. It adds only what an unattended host inside a speaker needs:
 
-- **Native PipeWire audio.** It is a node inside the PipeWire cycle through `pw_filter`.
+- **Native PipeWire audio.** The graph runs in a `pw_filter` node inside the PipeWire cycle.
   AudioPluginHost goes through the ALSA compatibility layer, which adds one or two periods of
-  latency before the plugins even run.
+  latency before the plugins even run. Players play into a sink in front of it (see below).
 - **Starts on its own.** At boot it loads the first state layer that works (current, last
   known good, factory, passthrough) and reads the speaker's role from `device.json`. Nobody
   has to open a session.
@@ -285,6 +289,35 @@ headless builds of the plugins. It adds only what an unattended host inside a sp
 
 It hosts the plugins through JUCE's own LV2 or VST3 hosting, which understands JUCE's
 parameters, so the DSP stays JUCE from end to end. It never touches the network.
+
+**What step 2 decided.** `dsp/juce_apps/speakerd/README.md` has the details.
+
+- **Two PipeWire nodes, not one.** The graph runs in one `pw_filter`, `speakerd-dsp`. Players
+  play into a sink called `speakerd`, and its monitor ports feed the filter in the same cycle.
+  WirePlumber 0.4.13, the boards' version, only links a player into an adapter node, one whose
+  node format it can read. A `pw_filter` in PipeWire 0.3.65 cannot publish a node format, so a
+  player sent to it lands on the default sink instead: the amplifier. `speakerd` links the
+  sink to the filter, and the filter to the amplifier named in `device.json`, itself, from the
+  registry, whenever the ports exist. A speaker should define the `speakerd` sink in its
+  PipeWire configuration, so that a stream never falls back to the amplifier while `speakerd`
+  restarts. `speakerd` creates the sink only when there is none.
+- **The graph document, version 1, is `.filtergraph` as JSON.** It has a revision number,
+  nodes with uids, the plugin by format and identifier (for LV2, the URI), the plugin's own
+  state as base64, and connections per channel between uids. Each node also carries its
+  parameter values by parameter ID, in the plugin's own units. The input node has the
+  reserved uid 1 (channels FL, FR) and the output node uid 2 (woofer, tweeter). Plugin nodes
+  start at 16. A document with parameter values and no state works.
+- **State crosses the URI boundary in the plugin's own format** (finding 1 of section 7).
+  `speakerd` puts it under `<URI>:StateString` of whichever build it hosts, so the same
+  document runs the headless build on a speaker and the complete build in the render mode.
+- **Every new graph runs on 1 s of silence before it is heard.** A hosted LV2 plugin takes
+  parameter values only while it processes (finding 2). JUCE's LV2 wrapper also prepares a
+  plugin's DSP, its smoothing included, with the default values when it is instantiated. And
+  JUCE's LV2 hosting re-instantiates the plugin in `prepareToPlay`. So the values are set after
+  the graph is prepared, and the plugins run until their smoothing is over. After that the
+  document is in force from the first audible sample.
+- **An offline render mode**, `speakerd --render IN.wav OUT.wav`, runs the same graph from the
+  same layers in blocks of the live quantum: the reference a live capture is compared with.
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it advertises the speaker over mDNS, receives
@@ -649,7 +682,7 @@ flowchart LR
         cur[("Layer 1: current<br/>graph.json<br/>last revision applied")]:::sto
         lkg[("Layer 2: last known good<br/>graph.lkg.json<br/>played cleanly for 60 s")]:::sto
         fac[("Layer 3: factory<br/>factory.json<br/>read-only, ships with the plugins")]:::sto
-        pass["Layer 4: passthrough<br/>woofer only, tweeter muted,<br/>level capped"]:::sto
+        pass["Layer 4: passthrough<br/>woofer only, tweeter muted,<br/>level capped at -20 dB"]:::sto
         cur -- "fails to load" --> lkg -- "fails to load" --> fac -- "fails to load" --> pass
     end
     dev[("device.json<br/>role, trim, delay<br/>set once, never from the hub")]:::sto
@@ -669,8 +702,14 @@ flowchart LR
   tuning out of the box.
 - **Passthrough** is the last resort when no plugin loads at all. With no crossover running,
   a full-range signal would reach the tweeter, so this mode sends the Mine pin to the woofer
-  output only, mutes the tweeter and caps the level. It should also be loud in the logs and
-  show on the identify LED or chime.
+  output only, mutes the tweeter and caps the level. Mine is FL on a left speaker, FR on a
+  right one, and (FL + FR) / 2 on a mono one. It reaches the woofer 20 dB down, so nothing in
+  passthrough is louder than -20 dBFS. It is loud in the logs, and should also show on the
+  identify LED or chime.
+
+A layer **loads** when it parses, every plugin in it is found and instantiated and takes its
+state and parameter values, and every connection is possible. `speakerd` says on stderr why
+each layer before the one it uses failed.
 
 The device file is local and never comes from the hub. A speaker always knows whether it is
 left or right, even alone on a shelf.
@@ -688,7 +727,7 @@ sequenceDiagram
     SD->>PW: start
     SD->>S: start (After=pipewire, no network dependency)
     S->>S: load device.json + the first working graph layer
-    S->>PW: register the pw_filter node, audio flows
+    S->>PW: register the pw_filter node, link it to the input sink and the amplifier, audio flows
     Note over S,PW: the speaker plays from here on,<br/>whatever happens below
     SD->>A: start (After=speakerd)
     A->>A: look for the hub (left speaker) over mDNS
@@ -722,7 +761,7 @@ are reachable without the controller app:
 | Hub (left speaker off) | The right speaker keeps its revision. With `partner-lost = sum` in its device file it switches to an L+R mix, so a single speaker still plays the whole song. |
 | Right speaker off | The hub keeps working, the app shows the speaker as offline, changes queue and are applied when it returns. |
 | Both speakers rebooted, out of sync | The hub's revision wins when they meet. If the right speaker is newer (it was changed while the left was off), the hub adopts it, because revisions carry a timestamp and an origin. |
-| A graph that crashes `speakerd` | systemd restarts it on last known good within a second. After three crashes in a minute it starts on factory and tells the hub. |
+| A graph that crashes `speakerd` | systemd restarts it on last known good within a second. After three crashes in a minute it starts on factory and tells the hub. `speakerd` writes no file, so it keeps no count of its own crashes: whoever restarts it starts it with `--from last-known-good` or `--from factory`. |
 | `ampd` restarts | Audio keeps playing. Control and monitoring pause for about a second; open plugin windows resubscribe on their own. |
 
 **One dependency to keep in mind.** The requirement covers the control side. On the audio
@@ -746,7 +785,7 @@ be the plugin host.
 | Piece | Path |
 |---|---|
 | DSP cores, the three plugin targets, `speaker_add_plugin()` | `dsp/juce_plugins/` |
-| `plugin-check`, and later `speakerd` and the controller app (JUCE applications, same build system) | `dsp/juce_apps/` |
+| `plugin-check`, `speakerd`, and later the controller app (JUCE applications, same build system) | `dsp/juce_apps/` |
 | `ampd`, its systemd units, `device.json`, the factory graph, the web page | `firmware/ampd/` |
 | PipeWire configuration and board setup | `firmware/pipewire/`, `firmware/*.sh` |
 | The virtual pair and its tests | `tests/vpair/` |
@@ -759,7 +798,7 @@ and `firmware/local.mk` files, as before.
 <!-- diagram: roadmap -->
 ```mermaid
 flowchart LR
-    s1["Step 1, done<br/>loudness builds as complete,<br/>control and headless.<br/>plugin-check proves they fit:<br/>same parameters, state, sound."] --> s2["Step 2<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
+    s1["Step 1, done<br/>loudness builds as complete,<br/>control and headless.<br/>plugin-check proves they fit:<br/>same parameters, state, sound."] --> s2["Step 2, built, scenario next<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
     s2 --> s3["Step 3<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin, value monitors<br/>and the output level bar."]
     s3 --> s4["Step 4<br/>Scope frames and records,<br/>catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
 ```
@@ -768,3 +807,9 @@ Step 1 is done: the editor survives being detached from its DSP, and the headles
 sounds exactly like the complete one. Step 2 is the first point where a speaker runs with no
 X11, and it is built to run with no controller from day one: the controller only appears in
 step 3. The virtual pair in `tests/vpair/` is where step 2 is tested first.
+
+Step 2 is built. On a virtual speaker, by hand, `speakerd` with `loudness_headless` gives the
+complete build's gain on both amplifier channels (+7.816 dB at 100 Hz for the test setting,
+0.000 dB apart). With no loadable layer, the woofer is at exactly -20 dB and the tweeter is
+silent. What is left of step 2 is the `tests/vpair/test_speakerd_*` scenario that checks this
+on every run.
