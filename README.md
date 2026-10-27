@@ -7,10 +7,11 @@ tuning**. A BananaPi BPI-CM4 module receives audio over the network (AirPlay thr
 shairport-sync, or synchronized multi-room streams through Snapcast), processes it in PipeWire
 and drives two MAX98397 class-D smart amplifiers.
 
-The loudspeaker DSP lives in the companion repository
-**[bpi_amp_dsp_tuning](https://github.com/AMuszkat/bpi_amp_dsp_tuning)**. It measures a
-speaker, designs crossover and correction filters for it, and runs them on the board as JUCE
-audio plugins in the PipeWire graph.
+The loudspeaker DSP lives in [`dsp`](dsp): it measures a speaker, designs crossover and
+correction filters for it, and runs them on the board as JUCE audio plugins in the PipeWire
+graph. [`docs`](docs) holds the design of the next step, a remote plugin host that tunes a
+stereo pair of boards from one controller, and [`tests/vpair`](tests/vpair) a virtual pair of
+speakers to develop it against without hardware.
 
 ## Repository layout
 
@@ -19,7 +20,21 @@ audio plugins in the PipeWire graph.
 | [`hardware/base_board`](hardware/base_board) | KiCad project: carrier board for the BPI-CM4 module |
 | [`hardware/speaker_amp`](hardware/speaker_amp) | KiCad project: amplifier and power board |
 | [`firmware`](firmware) | Device tree, kernel config, amplifier and sound-card drivers, PipeWire config and board setup scripts |
+| [`dsp`](dsp) | Measurement and tuning tools, the JUCE plugins, and the applications of the remote plugin host (formerly the `bpi_amp_dsp_tuning` repository) |
 | [`docs`](docs) | Design proposals: the [remote plugin host](docs/remote-plugin-host.md) for controlling a stereo pair, and its [autonomous development setup](docs/autonomous-development.md) |
+| [`tests/vpair`](tests/vpair) | Two virtual speakers on one machine, for developing and testing the remote plugin host without boards |
+
+## Developing
+
+Clone with the JUCE submodule, then follow the quick start in [`CLAUDE.md`](CLAUDE.md): it
+lists the packages, builds JUCE once, runs `plugin-check` on a plugin's three builds and runs
+the virtual pair's tests, all on a Linux machine with no board attached. The board builds are
+`dsp/juce_plugins/tools/build-podman.sh` for the plugins and `firmware/Makefile` for the
+kernel side; both read their board address from a gitignored local file.
+
+```sh
+git clone --recurse-submodules https://github.com/AMuszkat/bpi_amp_platform
+```
 
 ## Hardware
 

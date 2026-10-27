@@ -21,7 +21,7 @@
 # the LV2 URI, and tools/build-podman.sh relies on that: it builds `<name>_LV2` and expects
 # `<name>.lv2`.
 #
-# Build targets (docs/remote-plugin-host.md in bpi_amp_platform). A plugin can also be built
+# Build targets (docs/remote-plugin-host.md at the repository root). A plugin can also be built
 # as a remote control and as a headless DSP engine, from the same sources:
 #
 #     speaker_add_plugin(myPlugin
@@ -51,7 +51,9 @@ include_guard(GLOBAL)
 # plugin database on it, so two plugins sharing one collide and only one survives a scan,
 # and changing it orphans every saved session that references the old one. Hence one base
 # for the whole repo, with the plugin name appended -- unique by construction. Change it
-# deliberately, once (e.g. to the public repository URL), not per machine.
+# deliberately, once (e.g. to the public repository URL), not per machine. It still names the
+# bpi_amp_dsp_tuning repository the plugins came from: it is an identity, not a link, and
+# changing it would orphan every saved session.
 # tools/build-podman.sh reads this default back to write its debug sessions, so keep it on
 # one line in this exact form.
 # (A plain variable, not a cache entry: a cached value would silently survive an edit here in

@@ -1,6 +1,9 @@
-# bpi_amp_dsp_tuning
+# dsp: measurement, tuning and the JUCE plugins
 
-A set of simple audio DSP tools, consisting of loudspeaker measurement/tuning gui tools and audio plugins to complement the [BPI AMP PLATFORM](https://github.com/AMuszkat/bpi_amp_platform)
+The DSP side of the BPI AMP Platform: loudspeaker measurement and tuning GUI tools, the audio
+plugins that run on the board, and the applications of the remote plugin host. Until it was
+merged into this repository it was the separate `bpi_amp_dsp_tuning` repository; paths in this
+folder's documentation are relative to `dsp/`.
 
 ```
  python_dsp_tools/                                            juce_plugins/
@@ -61,7 +64,8 @@ A set of simple audio DSP tools, consisting of loudspeaker measurement/tuning gu
 ## Quick start
 
 ```bash
-git clone --recurse-submodules <this repo>        # or later: git submodule update --init
+git submodule update --init dsp/juce_plugins/JUCE   # from the repository root, once
+cd dsp
 cp config/local.env.example config/local.env      # then fill in your devices / deploy host
 
 # Python tools (conda/miniforge)

@@ -1,9 +1,8 @@
 # Remote plugin host: controlling the speakers like a plugin host
 
 *Design proposal. Step 1 of the roadmap is implemented: `loudness` builds as complete, control
-and headless targets, checked by `juce_apps/plugin-check` (branch
-`claude/remote-plugin-host-dev` of bpi_amp_dsp_tuning). The virtual pair used for testing is in
-`tests/vpair/`. Everything else is still a proposal.*
+and headless targets, checked by `dsp/juce_apps/plugin-check`. The virtual pair used for
+testing is in `tests/vpair/`. Everything else is still a proposal.*
 
 A stereo set made of this platform is two complete boards, each running the same JUCE
 plugins on its own copy of the audio graph. This document proposes how to tune and rewire
@@ -246,7 +245,7 @@ flowchart LR
 | Needed for sound | yes | no |
 | Starts | right after PipeWire, no network dependency | after `speakerd` |
 | Restart cost | one fade, back on last known good | none audible |
-| Language, repository | JUCE C++, `bpi_amp_dsp_tuning` | Python first, `bpi_amp_platform` |
+| Language, where | JUCE C++, `dsp/juce_apps/speakerd/` | Python first, `firmware/ampd/` |
 
 The local socket carries the same messages as the network, so `speakerd` cannot tell a
 change from its own agent from a change relayed by the hub. That keeps `speakerd` small and
@@ -594,7 +593,7 @@ Every target will embed a **version hash** of the source tree (not built yet); t
 carries it, and the hub only applies a graph when control and headless hashes agree, so a GUI
 can never show a parameter, or wait for a monitor stream, that the speaker does not have.
 
-**What `plugin-check` verifies.** `juce_apps/plugin-check/run.sh loudness` builds the three
+**What `plugin-check` verifies.** `dsp/juce_apps/plugin-check/run.sh loudness` builds the three
 targets and loads them through JUCE's LV2 hosting. It checks that they expose the same 36
 parameters, that only the headless build lacks an editor, that saved state moves between the
 control and headless builds in both directions, that the headless build set up only from the
@@ -744,15 +743,16 @@ be the plugin host.
 
 ## 10. Where the code lives
 
-| Piece | Repository | Path |
-|---|---|---|
-| DSP cores, the three plugin targets, `speaker_add_plugin()` | `bpi_amp_dsp_tuning` | `juce_plugins/` |
-| `speakerd` and the controller app (both JUCE applications, same build system) | `bpi_amp_dsp_tuning` | `juce_apps/speakerd/`, `juce_apps/controller/` |
-| `ampd`, its systemd units, `device.json`, the factory graph, the web page | `bpi_amp_platform` | `firmware/ampd/` |
-| PipeWire configuration and board setup | `bpi_amp_platform` | `firmware/pipewire/`, `firmware/*.sh` |
+| Piece | Path |
+|---|---|
+| DSP cores, the three plugin targets, `speaker_add_plugin()` | `dsp/juce_plugins/` |
+| `plugin-check`, and later `speakerd` and the controller app (JUCE applications, same build system) | `dsp/juce_apps/` |
+| `ampd`, its systemd units, `device.json`, the factory graph, the web page | `firmware/ampd/` |
+| PipeWire configuration and board setup | `firmware/pipewire/`, `firmware/*.sh` |
+| The virtual pair and its tests | `tests/vpair/` |
 
-Board addresses, user names and deploy targets stay in the gitignored `local.env` and
-`local.mk` files, as the two repositories already require.
+Board addresses, user names and deploy targets stay in the gitignored `dsp/config/local.env`
+and `firmware/local.mk` files, as before.
 
 ## 11. Roadmap
 

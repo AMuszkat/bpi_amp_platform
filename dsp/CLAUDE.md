@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-Guidance for Claude Code (claude.ai/code) in this repository. User-facing documentation
+Guidance for Claude Code (claude.ai/code) in `dsp/`, the DSP side of the BPI AMP Platform
+repository (the board side is `firmware/`, the design documents are `docs/`, the virtual pair
+is `tests/vpair/`; see the root `CLAUDE.md`). Paths below are relative to `dsp/`. User-facing documentation
 lives in the READMEs; this file is the map plus the rules and traps that aren't obvious from
 the code. **Read the README of the area you're changing first**, since most design
 rationale is there.
@@ -101,7 +103,7 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
 ### Researching JUCE itself
 
 `juce_plugins/JUCE/` is a submodule pinned to the commit the plugins compile against
-(`git submodule update --init juce_plugins/JUCE`). For what JUCE *actually* does, read and
+(`git submodule update --init dsp/juce_plugins/JUCE` from the repository root). For what JUCE *actually* does, read and
 grep it first: `modules/…` (header doc comments are the API reference; the `.cpp` is the
 only answer for undocumented behaviour), `docs/CMake API.md`, `examples/`, `extras/`. It
 outranks memory and the web, which is full of answers for other versions. Only if the tree
@@ -109,5 +111,5 @@ can't answer it, go online (docs.juce.com, github.com/juce-framework/JUCE, forum
 note which version an answer applies to, and verify it against the pinned source. Write
 findings that cost real effort into `docs/juce-knowledge/`.
 
-The `/juce` skill (`.claude/skills/juce/SKILL.md`) loads that knowledge base and the JUCE docs
-before answering JUCE questions.
+The `/juce` skill (`.claude/skills/juce/SKILL.md` at the repository root) loads that knowledge
+base and the JUCE docs before answering JUCE questions.

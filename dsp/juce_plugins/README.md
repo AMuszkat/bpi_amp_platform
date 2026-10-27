@@ -41,7 +41,7 @@ scripts find plugins by that call, and read the channel counts and the LV2 URI f
 ## Building
 
 Prerequisites: [Podman](https://podman.io) and the JUCE submodule
-(`git submodule update --init juce_plugins/JUCE`).
+(`git submodule update --init dsp/juce_plugins/JUCE` from the repository root).
 
 ```bash
 tools/build-podman.sh -install-podman      # one-time, if Podman is missing
@@ -138,7 +138,7 @@ database on that URI, so two plugins sharing one collide and only one survives a
 ## Control and headless builds
 
 For the remote plugin host (controller app plus headless speakers, see
-`docs/remote-plugin-host.md` in bpi_amp_platform) a plugin can also be built without its DSP
+[`../../docs/remote-plugin-host.md`](../../docs/remote-plugin-host.md)) a plugin can also be built without its DSP
 and without its editor. List the sources by role and name the targets:
 
 ```cmake

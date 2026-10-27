@@ -1,0 +1,3 @@
+[submodule "dsp/juce_plugins/JUCE"]
+	path = dsp/juce_plugins/JUCE
+	url = https://github.com/juce-framework/JUCE.git

@@ -1,13 +1,12 @@
 # plugin-check
 
 Checks that the three builds of a plugin fit together the way the remote plugin host needs
-them to. The design is in `docs/remote-plugin-host.md` of
-[bpi_amp_platform](https://github.com/AMuszkat/bpi_amp_platform); in short, the controller app
+them to. The design is in [`docs/remote-plugin-host.md`](../../../docs/remote-plugin-host.md); in short, the controller app
 runs a plugin's **control** build (its editor, no DSP) and each speaker runs its **headless**
 build (its DSP, no editor), and the two exchange parameter values and saved state.
 
 ```bash
-JUCE_INSTALL_DIR=/path/to/juce-install juce_apps/plugin-check/run.sh loudness
+JUCE_INSTALL_DIR=/path/to/juce-install dsp/juce_apps/plugin-check/run.sh loudness
 ```
 
 `run.sh` builds `<plugin>`, `<plugin>_control` and `<plugin>_headless` natively, builds this

@@ -9,3 +9,6 @@ _autosave-*
 
 # Python
 __pycache__/
+
+# Local builds (JUCE install, plugin-check, ...)
+build/

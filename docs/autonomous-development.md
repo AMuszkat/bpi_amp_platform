@@ -4,8 +4,8 @@
 coding agent build, deploy and verify the architecture in [remote-plugin-host.md](remote-plugin-host.md)
 with no human in the loop for the routine work, and with hard limits on what it may touch.*
 
-The architecture spans two repositories (`bpi_amp_dsp_tuning` for the plugins, `speakerd` and
-the controller; `bpi_amp_platform` for `ampd`, PipeWire and the boards), one cross-compiler
+The architecture spans two sides of this repository (`dsp/` for the plugins, `speakerd` and
+the controller; `firmware/` for `ampd`, PipeWire and the boards), one cross-compiler
 container, and real hardware with amplifiers attached to real drivers. Autonomy therefore has
 three problems to solve, in this order: **where** an agent can run and test anything without
 hardware, **what** it is allowed to do, and only then **who** (which agent, skill or hook) does
@@ -77,7 +77,7 @@ amplifier channels with its frequency and level intact, on each speaker, and the
 are independent. `speakerd`, `ampd`, the Snapcast source and `tc netem` come next; the
 compose file comes with them, for CI.
 
-**Rung 1 today** is `juce_apps/plugin-check` in bpi_amp_dsp_tuning: it builds a plugin's
+**Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
 complete, control and headless targets and checks that they fit together (same parameters,
 state that moves between them, identical sound).
 
@@ -95,7 +95,7 @@ forgotten and hooks cannot.
 
 | Rule | Why | Enforced by |
 |---|---|---|
-| No hostname, IP, user name or home path in any tracked file | both repositories are public | `PreToolUse` on Edit/Write and a pre-commit check |
+| No hostname, IP, user name or home path in any tracked file | the repository is public | `PreToolUse` on Edit/Write and a pre-commit check |
 | Nothing is deployed to rung 3 unless rung 2 is green for the same commit | an agent cannot hear a broken crossover | `PreToolUse` gate on the deploy skill |
 | Every deploy caps the master gain and mutes the tweeter path until the first smoke test passes | a wrong graph must not reach a tweeter at full level | the deploy skill itself, checked by the gate |
 | A lab lock file stops every hardware action | a human may be measuring, or the boards may be on a bench | `PreToolUse` on any ssh to a board |
@@ -122,16 +122,16 @@ flowchart TB
     rev -.-> orch
 ```
 
-| Agent | Repository | Tools | Never does |
+| Agent | Area | Tools | Never does |
 |---|---|---|---|
-| `orchestrator` | both | Agent, Read, Grep, Glob, git on branches | writes code itself |
-| `plugin-dev` | `bpi_amp_dsp_tuning` | Read, Edit, Write, Bash in the builder container | touches `speakerd` or the controller |
-| `host-dev` | `bpi_amp_dsp_tuning` | same | changes the plugin parameter layouts |
-| `controller-dev` | `bpi_amp_dsp_tuning` | same, plus a headless X server for GUI screenshots | changes the wire protocol without `host-dev` |
-| `board-dev` | `bpi_amp_platform` | Read, Edit, Write, Bash for the virtual pair | ssh to real boards |
-| `verifier` | both | Bash for rungs 1 and 2, Read | edits source |
-| `reviewer` | both | Read, Grep, Glob | edits source, runs anything |
-| `board-ops` | `bpi_amp_platform` | the board skill only | edits source, runs on a locked lab |
+| `orchestrator` | all | Agent, Read, Grep, Glob, git on branches | writes code itself |
+| `plugin-dev` | `dsp/juce_plugins/` | Read, Edit, Write, Bash in the builder container | touches `speakerd` or the controller |
+| `host-dev` | `dsp/juce_apps/speakerd/` | same | changes the plugin parameter layouts |
+| `controller-dev` | `dsp/juce_apps/controller/` | same, plus a headless X server for GUI screenshots | changes the wire protocol without `host-dev` |
+| `board-dev` | `firmware/`, `tests/vpair/` | Read, Edit, Write, Bash for the virtual pair | ssh to real boards |
+| `verifier` | all | Bash for rungs 1 and 2, Read | edits source |
+| `reviewer` | all | Read, Grep, Glob | edits source, runs anything |
+| `board-ops` | `firmware/` | the board skill only | edits source, runs on a locked lab |
 
 The split between `plugin-dev`, `host-dev` and `controller-dev` follows the three build
 targets. They work in separate git worktrees so that the orchestrator can run them in
@@ -150,7 +150,7 @@ agent never improvises a `pw-cli` or `ssh` line.
 | `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | verifier |
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
 | `/board <name> status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3; refuses when the lab lock exists or rung 2 is not green | board-ops |
-| `/juce` | the JUCE knowledge base that already exists in `bpi_amp_dsp_tuning` | dev agents |
+| `/juce` | the JUCE knowledge base in `dsp/docs/juce-knowledge/` | dev agents |
 | `/release` | builds every target, writes the catalogue with version hashes, tags | orchestrator |
 
 Hooks are the gates. They live in `.claude/settings.json` of each repository and run
@@ -254,7 +254,8 @@ Two pieces of infrastructure make this run unattended:
   version hashes.
 - **Scheduled tasks** run the nightly rung 3 smoke, a weekly dependency check (JUCE submodule,
   PipeWire version on the boards, Snapcast release) that opens an issue with the diff, and a
-  weekly "replay the scenarios against `main`" run that catches drift between the two repos.
+  weekly "replay the scenarios against `main`" run that catches drift between `dsp/` and
+  `firmware/`.
   Each fires into a fresh session with the orchestrator's instructions.
 
 ## 7. What has to exist before any of this works
@@ -266,7 +267,7 @@ In order, because each unlocks the next:
    version is in place: two virtual speakers, the harness and three audio-path tests.
 2. **The hooks**, because agents will start touching boards the moment a deploy script exists.
 3. **The skills**, replacing ad-hoc shell: `/build`, `/vpair`, `/measure`, `/board`.
-4. **The agent definitions** and the `CLAUDE.md` map of both repositories with the rules.
+4. **The agent definitions** and the `CLAUDE.md` map of the repository with the rules.
 5. **CI** running rungs 1 and 2 on pull requests.
 6. **Scheduled tasks** for rung 3, last, once the lab pair has run a week of manual deploys
    through the same skill without surprises.
