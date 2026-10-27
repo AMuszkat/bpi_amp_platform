@@ -173,7 +173,9 @@ namespace
 
             if (found.isEmpty())
             {
-                log ("--lv2-bundle " + bundle + ": no LV2 plugin in it");
+                // lilv keeps the first plugin of a URI it sees, and the default paths come first.
+                log ("--lv2-bundle " + bundle + ": no LV2 plugin loaded from it: either it holds none, or a plugin "
+                     "with the same URI in ~/.lv2, /usr/lib/lv2 or /usr/local/lib/lv2 shadows it");
                 return false;
             }
 

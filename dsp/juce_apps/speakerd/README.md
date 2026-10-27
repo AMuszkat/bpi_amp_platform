@@ -32,12 +32,18 @@ speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--l
 |---|---|
 | 0 | stopped by SIGINT, SIGTERM or SIGHUP (after fading out), or the render was written |
 | 1 | not used yet: kept for other failures |
-| 2 | bad command line, or a `--lv2-bundle` that holds no LV2 plugin |
+| 2 | bad command line, or a `--lv2-bundle` from which no plugin loaded |
 | 3 | the PipeWire node could not be created, or the connection to PipeWire was lost |
 | 4 | the render could not read `IN.wav` or write `OUT.wav` |
 
 No loadable layer is not an error: speakerd plays passthrough and keeps running. If PipeWire
 is not there yet, speakerd waits for it, trying every second.
+
+**Which build runs.** lilv keeps the first plugin of a URI it sees, and it sees the default
+paths first. A `--lv2-bundle` whose URI is also in `~/.lv2` is therefore ignored, and speakerd
+stops with status 2 rather than run a build it was not asked for. To run exactly the bundles
+named, give speakerd an empty `HOME`, as plugin-check does. lilv's `attempt to map invalid URI`
+line on loading a bundle is harmless.
 
 ## Building and running
 
@@ -82,8 +88,8 @@ the same cycle, so the sink adds no latency.
 
 **Whose sink.** If a node called `speakerd` exists when speakerd starts, speakerd uses it.
 Otherwise speakerd creates a null-audio-sink of that name, and the sink goes when speakerd
-goes. Then WirePlumber moves whatever played into it to the default sink, which on a speaker
-is the amplifier: full range, at full level, tweeter included. A speaker should therefore
+goes. When it goes, WirePlumber moves whatever was playing into it to the default sink, which
+on a speaker is the amplifier: full range, at full level, tweeter included. A speaker should therefore
 create the sink in its PipeWire configuration (`context.objects`, an `adapter` with
 `factory.name = support.null-audio-sink`, `node.name = "speakerd"`,
 `media.class = "Audio/Sink"`, `audio.position = [ FL FR ]`, `monitor.channel-volumes = false`),
@@ -209,7 +215,7 @@ The last layer, used when no other loads. The speaker's own channel goes to the 
 **-20 dB**, and the tweeter gets digital silence. Left plays FL, right plays FR, and mono plays
 (FL + FR) / 2, so the woofer never sees more than -20 dBFS. No plugin is involved, so it works
 even with no LV2 plugin installed at all. With no crossover running, a full-range signal must
-never reach the tweeter. speakerd says so loudly:
+never reach the tweeter. speakerd announces passthrough loudly:
 
 ```
 speakerd: *** PASSTHROUGH: no state layer loaded ***
