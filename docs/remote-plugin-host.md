@@ -1,6 +1,9 @@
 # Remote plugin host: controlling the speakers like a plugin host
 
-*Design proposal. Nothing in this document is implemented yet.*
+*Design proposal. Step 1 of the roadmap is implemented: `loudness` builds as complete, control
+and headless targets, checked by `juce_apps/plugin-check` (branch
+`claude/remote-plugin-host-dev` of bpi_amp_dsp_tuning). The virtual pair used for testing is in
+`tests/vpair/`. Everything else is still a proposal.*
 
 A stereo set made of this platform is two complete boards, each running the same JUCE
 plugins on its own copy of the audio graph. This document proposes how to tune and rewire
@@ -254,10 +257,11 @@ and the processing thread are removed (the graph is never prepared or run), the 
 is filtered to control builds, and a bridge object is attached. Everything the user sees is
 the existing host: the same canvas, pins, connection dragging, the same plugin windows.
 
-**Control builds.** Ordinary plugins (LV2 or VST3) the controller loads like any host. The
-proxy processor keeps the APVTS, so the editors work untouched. The bridge does not live in
-the plugin: the host already sees every parameter of every node, so one bridge in the host
-forwards them all. A control build knows nothing about the network.
+**Control builds.** Compiled into the controller as internal plugins, the way AudioPluginHost
+compiles in its own "Audio Input" node, rather than loaded as LV2 or VST3 (section 7 explains
+why). The proxy processor keeps the APVTS, so the editors work untouched. The bridge does not
+live in the plugin: the host already sees every parameter of every node, so one bridge in the
+host forwards them all. A control build knows nothing about the network.
 
 **speakerd: the headless plugin host.** `speakerd` is AudioPluginHost with the window
 removed: the same graph engine (`AudioProcessorGraph`), the same session format, loading the
@@ -560,36 +564,66 @@ mute) sits beside it.
 
 ## 7. Build system
 
-`speaker_add_plugin()` grows one option and produces three CMake targets from the same call:
+`speaker_add_plugin()` takes the sources by role and produces one CMake target per build.
+This is implemented; `loudness` uses it:
 
 ```cmake
 speaker_add_plugin(loudness
-    CODE     Loud
-    INPUTS   1
-    OUTPUTS  1
-    CORE     Core.hpp Params.hpp            # shared by all targets
-    DSP      PluginProcessor.cpp            # excluded from control
-    EDITOR   PluginEditor.cpp MorphPad.cpp  # excluded from headless
-    TARGETS  complete control headless)
+    CODE    Loud
+    INPUTS  1
+    OUTPUTS 1
+    SOURCES PluginProcessor.cpp                        # parameters, state: every target
+    DSP     LoudnessDsp.cpp                            # left out of the control build
+    EDITOR  PluginEditor.cpp MorphPad.cpp HostWindowTracker.cpp   # left out of the headless build
+    MODULES juce_dsp
+    TARGETS complete control headless)
 ```
 
-| Target | Defines | Sources | Modules | Format | Deployed to |
-|---|---|---|---|---|---|
-| `loudness` | `SPEAKER_COMPLETE` | all | as today | LV2, VST3 | desktop plugin host |
-| `loudness_control` | `SPEAKER_CONTROL` | core, editor, a generated proxy processor | gui + audio_processors | LV2, VST3, or **statically linked** into the controller | the controller app |
-| `loudness_headless` | `SPEAKER_HEADLESS` | core, dsp | audio_processors only | LV2 (JUCE wrapper) | `~/.lv2` on the speakers |
+| Target | Defines | Sources | Runs in |
+|---|---|---|---|
+| `loudness` | `SPEAKER_COMPLETE` | all | the desktop plugin host, tuning |
+| `loudness_control` | `SPEAKER_CONTROL` | `SOURCES` + `EDITOR`; `prepareToPlay`, `reset` and `processBlock` are empty stubs | compiled into the controller app |
+| `loudness_headless` | `SPEAKER_HEADLESS` | `SOURCES` + `DSP`; `hasEditor()` is false | `~/.lv2` on the speakers, hosted by `speakerd` |
 
-The proxy processor is generic: it is the same `PluginProcessor` class compiled with
-`processBlock()` stubbed and the core header not included, which is what `SPEAKER_CONTROL`
-does. The identity (`CODE`, LV2 URI) is suffixed per target so a host never confuses them.
-Every target embeds a **version hash** of the source tree; the catalogue carries it, and the
-hub only applies a graph when control and headless hashes agree, so a GUI can never show a
-parameter, or wait for a monitor stream, that the speaker does not have.
+The control and headless targets get their own plugin code (the last character of `CODE`
+replaced by 1 or 2) and their own LV2 URI (`.../loudness_control`, `.../loudness_headless`), so
+a host never confuses them with the complete plugin. Plugins that do not list `TARGETS` build
+exactly as before, and `tools/build-podman.sh` keeps building the complete target only.
 
-Static linking matters for a **phone or tablet**: a JUCE controller app builds for iOS and
-Android, where plugins cannot be loaded dynamically. There the control builds are compiled in
-as internal plugins, the same mechanism AudioPluginHost uses for its own "Audio Input" node.
-The desktop controller can load them dynamically or statically, your choice.
+Every target will embed a **version hash** of the source tree (not built yet); the catalogue
+carries it, and the hub only applies a graph when control and headless hashes agree, so a GUI
+can never show a parameter, or wait for a monitor stream, that the speaker does not have.
+
+**What `plugin-check` verifies.** `juce_apps/plugin-check/run.sh loudness` builds the three
+targets and loads them through JUCE's LV2 hosting. It checks that they expose the same 36
+parameters, that only the headless build lacks an editor, that saved state moves between the
+control and headless builds in both directions, that the headless build set up only from the
+control build's saved state outputs exactly what the complete build outputs (bit for bit),
+that the control build leaves audio untouched, and that the control editor opens on its own:
+
+![The loudness control build's editor, running with no DSP](images/loudness-control-editor.png)
+
+The level meter reads -120 dBFS because nothing measures anything in a control build; the
+monitoring channel (section 5) is what will fill it.
+
+**Two findings from step 1 that shape the rest:**
+
+- **LV2 state carries the plugin's URI.** JUCE saves an LV2 plugin's state as a preset whose
+  subject and state key are built from the plugin URI, and the control and headless builds
+  have different URIs: restored unchanged into the other build, state is silently ignored.
+  So the graph document stores each node's state in the plugin's own format (what its
+  `getStateInformation()` returns), and `speakerd` wraps it into the LV2 state of the headless
+  build it hosts, and unwraps it when reporting back. `plugin-check` proves the translation
+  works by rewriting the URI.
+- **A hosted LV2 plugin only receives parameter changes while it processes audio.** Changes set
+  through the host travel on the plugin's atom port during `processBlock`. That is no problem
+  for `speakerd`, which always processes. It is for the controller, which never processes, and
+  LV2 hosting also gives no access to a plugin's own getters, which the monitoring channel
+  needs to fill (`getLevelDb()` and friends). Hence the controller **compiles its control
+  builds in** as internal plugins: it can then reach each processor directly, set parameters
+  through its APVTS and fill its monitor getters. The same build is what a phone or tablet
+  needs anyway, since iOS and Android cannot load plugins dynamically. The LV2 and VST3
+  bundles of the control build are still produced, for `plugin-check` and the desktop host.
 
 ## 8. Working without the controller
 
@@ -725,11 +759,12 @@ Board addresses, user names and deploy targets stay in the gitignored `local.env
 <!-- diagram: roadmap -->
 ```mermaid
 flowchart LR
-    s1["Step 1<br/>Add SPEAKER_CONTROL to one plugin.<br/>Load it in the stock AudioPluginHost:<br/>the editor works, no sound. Proves the proxy."] --> s2["Step 2<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
+    s1["Step 1, done<br/>loudness builds as complete,<br/>control and headless.<br/>plugin-check proves they fit:<br/>same parameters, state, sound."] --> s2["Step 2<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
     s2 --> s3["Step 3<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin, value monitors<br/>and the output level bar."]
     s3 --> s4["Step 4<br/>Scope frames and records,<br/>catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
 ```
 
-Step 1 is an afternoon and tells you immediately whether the editors survive being detached
-from their DSP. Step 2 is the first point where a speaker runs with no X11, and it is built
-to run with no controller from day one: the controller only appears in step 3.
+Step 1 is done: the editor survives being detached from its DSP, and the headless build
+sounds exactly like the complete one. Step 2 is the first point where a speaker runs with no
+X11, and it is built to run with no controller from day one: the controller only appears in
+step 3. The virtual pair in `tests/vpair/` is where step 2 is tested first.

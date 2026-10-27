@@ -68,6 +68,19 @@ Wi-Fi-like delay, jitter and packet loss. The `ampScope` Demo source runs inside
 headless build, so the monitoring path, scope frames and triggered records included, is
 tested without an amplifier.
 
+**What exists today** ([`tests/vpair/`](../tests/vpair/README.md)): the two virtual speakers
+run as processes rather than containers, each with its own PipeWire, WirePlumber and D-Bus
+session and a null-sink amplifier, so the rung already runs where containers cannot (the
+cloud sessions agents work in have no container runtime). A Python harness plays into and
+records from each speaker, and three tests prove the audio path: a tone arrives at both
+amplifier channels with its frequency and level intact, on each speaker, and the speakers
+are independent. `speakerd`, `ampd`, the Snapcast source and `tc netem` come next; the
+compose file comes with them, for CI.
+
+**Rung 1 today** is `juce_apps/plugin-check` in bpi_amp_dsp_tuning: it builds a plugin's
+complete, control and headless targets and checks that they fit together (same parameters,
+state that moves between them, identical sound).
+
 **Rung 3, the hardware lab.** The boards named in the gitignored `local.env`, reached over ssh
 with the existing `make`/`build-podman.sh -install` paths. The probe is the amplifier itself:
 the MAX98397 voltage sense capture that `ampScope` reads gives the output waveform without a
@@ -248,9 +261,9 @@ Two pieces of infrastructure make this run unattended:
 
 In order, because each unlocks the next:
 
-1. **The virtual pair** (`tests/vpair/compose.yaml`, the harness, two scenarios). Without it
-   no agent can test anything, so it comes first, even before `speakerd` exists: the first
-   version runs today's AudioPluginHost headless check and a null graph.
+1. **The virtual pair** (`tests/vpair/`, the harness, the first scenarios). Without it no
+   agent can test anything, so it comes first, even before `speakerd` exists. Its first
+   version is in place: two virtual speakers, the harness and three audio-path tests.
 2. **The hooks**, because agents will start touching boards the moment a deploy script exists.
 3. **The skills**, replacing ad-hoc shell: `/build`, `/vpair`, `/measure`, `/board`.
 4. **The agent definitions** and the `CLAUDE.md` map of both repositories with the rules.
