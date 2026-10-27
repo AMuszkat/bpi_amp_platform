@@ -22,7 +22,9 @@ Runs from the repository root, in the development container when Podman is insta
 
 The container has all of them.
 
-Read the report, not just the exit status: `unit` writes
+Read the report, not just the exit status. `vpair` writes a `vpair_note` into the status
+file: how many tests ran, which failed and which were skipped and why, so a pass with skipped
+scenarios is visible. `unit` writes
 `dsp/juce_apps/plugin-check/build-check/<plugin>-report.txt` with one line per check, and a
 screenshot of the control editor next to it. When a check fails, quote the failing line in
 your answer and fix the cause; never mark a rung as passed by hand with `tools/status.py`.
