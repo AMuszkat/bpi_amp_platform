@@ -11,7 +11,7 @@ _autosave-*
 __pycache__/
 
 # Local builds (JUCE install, plugin-check, ...)
-build/
+/build/
 
 # Test results per commit, read by the deploy gate (.claude/hooks/pre-bash.py)
 tests/.status/
