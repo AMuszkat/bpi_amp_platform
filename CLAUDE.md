@@ -35,6 +35,27 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
 - **Real-time code never blocks:** no allocation, lock or syscall on the audio thread, in
   plugins and in `speakerd` alike.
 
+## Who does what
+
+Start every session on the remote plugin host with `/roadmap`: it says which step of
+`docs/remote-plugin-host.md` is next and which agent owns it. Then route by the files a
+task would change:
+
+| Files | Agent |
+|---|---|
+| `dsp/juce_plugins/` | `plugin-dev` |
+| `dsp/juce_apps/speakerd/` | `host-dev` |
+| `dsp/juce_apps/controller/` | `controller-dev` |
+| `firmware/`, `tests/vpair/` | `board-dev` |
+| more than one of the above, or a protocol they share | `orchestrator`, which runs the area agents in parallel worktrees and merges |
+| running the tests, "is it green?" | `verifier` |
+| before a pull request is merged | `reviewer` |
+| a real board | `board-ops`, only after the verifier reports both rungs green |
+
+A single-area task goes straight to its agent; the orchestrator is for work that has to be
+split and merged, not a required entry point. Agents do not cross areas: an agent that
+needs a change outside its files says so and stops.
+
 ## Hooks, skills and agents
 
 `docs/autonomous-development.md` is the plan; this is what of it exists.
