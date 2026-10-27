@@ -39,7 +39,7 @@ namespace speakerd
         speakerd carries on.
 
         Everything except the process callback runs on PipeWire's own (non-real-time) loop
-        thread. This class never opens a socket other than PipeWire's. */
+        thread. This class opens no network socket: only PipeWire's local one. */
     class PipeWireNode
     {
     public:
@@ -59,7 +59,7 @@ namespace speakerd
         juce::Result connect (Clock&);
 
         /** Creates the input sink if there is none, registers the filter node, and starts
-            linking. */
+            linking. Fails if the filter node of another speakerd (`<name>-dsp`) is there. */
         juce::Result start();
 
         /** From now on, makes no link and logs nothing about links; the links that exist stay,
@@ -69,7 +69,8 @@ namespace speakerd
         /** Unlinks, destroys the filter, and disconnects. A sink speakerd created stays. */
         void stop();
 
-        /** True once the connection to PipeWire is lost, or the filter or the input sink failed. */
+        /** True once the connection to PipeWire is lost, or the filter or the input sink failed,
+            or the filter node went away (destroyed by the server or by pw-cli). */
         bool hasFailed() const noexcept;
 
         /** True while the filter is linked on both sides: the input sink to its inputs, its

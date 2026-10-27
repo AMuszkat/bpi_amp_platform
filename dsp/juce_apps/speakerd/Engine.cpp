@@ -78,12 +78,14 @@ namespace speakerd
         preparedRate = rate;
         preparedRateForReaders.store (rate);
         fadeLength = juce::jmax (1, juce::roundToInt (fadeSeconds * rate));
+        upwardPrimeAfter = (juce::int64) std::ceil (upwardPrimeSeconds * rate);
     }
 
     void Engine::setPrimedBlock (int blockSize)
     {
         primedBlock = blockSize;
         primedBlockForReaders.store (blockSize);
+        stableSamples = 0;
     }
 
     void Engine::settle (juce::AudioProcessorGraph& g, double sampleRate, int blockSize,
@@ -154,6 +156,11 @@ namespace speakerd
                 setRate (rate);
                 settle (*graph, rate, settleBlock, io, midi);
                 setPrimedBlock (settleBlock);
+
+                // The cycles at the new rate come at this size: not a change of quantum of its
+                // own (the rate line says what happened).
+                lastCycleBlock = settleBlock;
+                lastBlockForReaders.store (settleBlock);
             }
 
             requestedPrime.store (0);
@@ -162,14 +169,17 @@ namespace speakerd
             return done;
         }
 
-        // A cycle that did not fit the primed size; unless the quantum has moved on since, or
-        // back to a size that fits.
+        // A cycle that did not fit the primed size, or a lasting quantum of many primed blocks;
+        // unless the quantum has moved on since, or back to a size that fits as it is.
         const auto wanted = requestedPrime.exchange (0, std::memory_order_acquire);
+        const auto fitsAsItIs = wanted % primedBlock == 0 && wanted / primedBlock < upwardPrimeRatio;
 
-        if (wanted <= 0 || wanted > maxBlock || wanted % primedBlock == 0 || wanted != lastBlockForReaders.load())
+        if (wanted <= 0 || wanted > maxBlock || fitsAsItIs || wanted != lastBlockForReaders.load())
             return done;
 
-        park();    // the audio thread has faded out already, and is silent
+        // A size that does not fit: the audio thread has faded out already, and is silent. A
+        // larger one that fits: cycles still play, and this is a normal 30 ms fade-out.
+        park();
 
         if (graph != nullptr)
         {
@@ -225,6 +235,14 @@ namespace speakerd
         const auto serial = parkSerial.load (std::memory_order_acquire);
         const bool fadingIn = fadeInRequested.load (std::memory_order_acquire);
 
+        // The output gate (see Engine.h): closed while the links are not all active.
+        const bool gateOpen = outputGateOpen.load (std::memory_order_acquire);
+        const bool gateOpened = gateOpen && ! gateWasOpen;
+        gateWasOpen = gateOpen;
+
+        if (gateOpened)
+            gateOpenings.fetch_add (1, std::memory_order_relaxed);
+
         const auto silence = [&]
         {
             if (out != nullptr)
@@ -279,6 +297,7 @@ namespace speakerd
 
             lastCycleBlock = numSamples;
             lastBlockForReaders.store (numSamples, std::memory_order_relaxed);
+            stableSamples = 0;
         }
 
         // The graph only ever runs blocks of the size it is primed for (see Engine.h).
@@ -291,6 +310,14 @@ namespace speakerd
 
             if (fadePosition == 0)
                 return silentAtZero();   // until service() primes the new size
+        }
+        else if (numSamples / block >= upwardPrimeRatio)
+        {
+            // Many small blocks per cycle, for upwardPrimeSeconds: ask for a prime at this size.
+            stableSamples += numSamples;
+
+            if (stableSamples >= upwardPrimeAfter)
+                requestedPrime.store (numSamples, std::memory_order_release);
         }
 
         juce::ScopedNoDenormals noDenormals;
@@ -322,7 +349,15 @@ namespace speakerd
         auto* woofer  = io.getWritePointer (0);
         auto* tweeter = io.getWritePointer (1);
 
-        if (! fits)
+        if (! gateOpen)
+        {
+            // Nobody hears this cycle (or not all of it): silent, and the fade-in, when it comes,
+            // starts from 0.
+            juce::FloatVectorOperations::clear (woofer, numSamples);
+            juce::FloatVectorOperations::clear (tweeter, numSamples);
+            fadePosition = 0;
+        }
+        else if (! fits)
         {
             // The real samples of a padded cycle fade out within it; then silence until the
             // graph is primed at the new size.

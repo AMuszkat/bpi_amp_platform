@@ -49,7 +49,19 @@ namespace speakerd
         size. A cycle that is a whole multiple of it runs as several blocks. Any other cycle (a
         smaller quantum, or one that is not a multiple) is padded with zeros to whole blocks, its
         real samples fade out, and the output stays silent until service() primes the graph at
-        the new size with one silent block and fades back in. */
+        the new size with one silent block and fades back in. A quantum of upwardPrimeRatio or
+        more primed blocks that lasts upwardPrimeSeconds is primed anew too, through a normal
+        fade-out, so that the graph does not stay at a small block (and its per-call cost) for
+        good after a quantum came down and went back up.
+
+        The output gate. The input sink drives the filter on its own, so the graph keeps running
+        while the amplifier is away, and PipeWire 0.3.65 keeps handing the filter output buffers
+        that nobody reads. Without a gate, the fade would be long over when the amplifier came
+        back, and it would hear the stream start at full level. So the PipeWire side closes the
+        gate (setOutputGate) whenever the filter is not linked on both sides with every link
+        active, and opens it once they all are. While it is closed the plugins keep running and
+        the output stays at gain 0; when it opens, the fade-in starts from 0 in the next cycle.
+        Lock-free: one atomic, read once per cycle. */
     class Engine
     {
     public:
@@ -66,6 +78,11 @@ namespace speakerd
 
         /** The largest sample speakerd sends to an amplifier. */
         static constexpr float outputLimit = 1.0f;
+
+        /** A quantum this many times the primed block size, or more, that lasts this long, is
+            primed anew (see above). */
+        static constexpr int upwardPrimeRatio = 4;
+        static constexpr double upwardPrimeSeconds = 2.0;
 
         Engine() = default;
         ~Engine();
@@ -91,14 +108,19 @@ namespace speakerd
 
         /** Handles what the audio thread asked for. A cycle at a sample rate the graph is not
             prepared for: re-prepares the graph at the new rate (hosted LV2 plugins are
-            re-instantiated, keeping their state), settles it and fades back in. A cycle that
-            does not fit the primed block size: primes the graph at the new size with one silent
-            block and fades back in. Call it often, from a timer. */
+            re-instantiated, keeping their state), settles it at the cycles' block size and fades
+            back in. A cycle that does not fit the primed block size, or a lasting quantum of
+            upwardPrimeRatio primed blocks or more: fades out if need be, primes the graph at the
+            new size with one silent block and fades back in. Call it often, from a timer. */
         Serviced service();
 
         /** Fades the output out and keeps it silent, for a clean stop. Returns after two
             silent cycles more, so that the end of the fade has reached the amplifier before
             the node goes. */
+
+        /** Closes or opens the output gate (see above). Any thread; lock-free. Open by default,
+            for the render; the live node closes it until its links are active. */
+        void setOutputGate (bool open) noexcept    { outputGateOpen.store (open, std::memory_order_release); }
         void fadeOut();
 
         double getSampleRate() const noexcept      { return preparedRateForReaders.load(); }
@@ -110,6 +132,7 @@ namespace speakerd
         int getLastBlockSize() const noexcept      { return lastBlockForReaders.load (std::memory_order_relaxed); }   // the last cycle's
         int getPrimedBlockSize() const noexcept    { return primedBlockForReaders.load (std::memory_order_relaxed); } // the graph's
         int getQuantumChanges() const noexcept     { return quantumChanges.load (std::memory_order_relaxed); }
+        int getGateOpenings() const noexcept       { return gateOpenings.load (std::memory_order_relaxed); }
         bool isAudible() const noexcept            { return audible.load (std::memory_order_relaxed); }
 
         //==============================================================================
@@ -144,14 +167,18 @@ namespace speakerd
         double preparedRate = 0.0;
         int maxBlock = 0, primedBlock = 1, lastCycleBlock = 0;
         int fadeLength = 1, fadePosition = 0;    // gain = fadePosition / fadeLength
+        juce::int64 stableSamples = 0, upwardPrimeAfter = 0;   // samples at a quantum of upwardPrimeRatio blocks or more
+
+        // The audio thread's alone, whoever holds the graph: was the gate open in the last cycle?
+        bool gateWasOpen = true;
 
         // Between the threads.
-        std::atomic<bool> fadeInRequested { true }, audible { false };
+        std::atomic<bool> fadeInRequested { true }, audible { false }, outputGateOpen { true };
         std::atomic<juce::uint32> parkSerial { 0 }, fadedSerial { 0 };
         std::atomic<int> requestedRate { 0 }, requestedBlock { 0 }, requestedPrime { 0 };
 
         std::atomic<juce::uint64> cycles { 0 };
-        std::atomic<int> lastBlockForReaders { 0 }, primedBlockForReaders { 0 }, quantumChanges { 0 };
+        std::atomic<int> lastBlockForReaders { 0 }, primedBlockForReaders { 0 }, quantumChanges { 0 }, gateOpenings { 0 };
         std::atomic<double> preparedRateForReaders { 0.0 };
 
         JUCE_DECLARE_NON_COPYABLE (Engine)

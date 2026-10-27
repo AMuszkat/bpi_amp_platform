@@ -4,6 +4,7 @@
 #include "Log.h"
 
 #include <pipewire/filter.h>
+#include <pipewire/link.h>
 #include <pipewire/pipewire.h>
 
 #include <algorithm>
@@ -95,10 +96,11 @@ namespace speakerd
         {
             Impl* owner = nullptr;
             pw_proxy* proxy = nullptr;
-            spa_hook listener {};
+            spa_hook listener {}, infoListener {};
+            pw_link_state state = PW_LINK_STATE_INIT;   // from the link's info events
             juce::uint32 outputPort = SPA_ID_INVALID, inputPort = SPA_ID_INVALID;
             juce::String description;     // "speakerd-dsp:output_woofer -> amplifier:playback_FL"
-            bool failed = false;
+            bool failed = false;  // an error, or the server removed it: it is dropped and made again
             bool seen = false;    // its link has been in the registry
         };
         std::vector<std::unique_ptr<OwnLink>> ownLinks;
@@ -227,6 +229,10 @@ namespace speakerd
         static void onGlobalRemove (void* data, uint32_t id)
         {
             auto& self = *static_cast<Impl*> (data);
+
+            if (id == self.ownNode && self.filter != nullptr)
+                self.filterGone ({});
+
             self.nodes.erase (id);
             self.ports.erase (id);
             self.links.erase (id);
@@ -257,9 +263,27 @@ namespace speakerd
                     break;
 
                 case PW_FILTER_STATE_UNCONNECTED:
+                    // After it was registered, the node only goes back to unconnected when it is
+                    // gone (destroyed by the server or by pw-cli, or the connection broke).
+                    if (self.ownNode != SPA_ID_INVALID)
+                        self.filterGone (error != nullptr ? juce::String::fromUTF8 (error) : juce::String());
+                    break;
+
                 case PW_FILTER_STATE_CONNECTING:
                     break;
             }
+        }
+
+        /** The filter node is gone while speakerd runs: nothing would play again, so this is a
+            failure (exit status 3) for whatever restarts speakerd. Said once, and not at all
+            when the connection is lost, which says so itself. */
+        void filterGone (const juce::String& why)
+        {
+            if (failed.load())
+                return;
+
+            log ("pipewire: node '" + filterName + "' went away" + (why.isNotEmpty() ? " (" + why + ")" : juce::String()));
+            failed = true;
         }
 
         /** The real-time part: PipeWire's data thread, once per cycle. */
@@ -291,6 +315,7 @@ namespace speakerd
         {
             auto& link = *static_cast<OwnLink*> (data);
             link.failed = true;
+            link.owner->requestLinkUpdate();
 
             const auto now = juce::Time::getMillisecondCounter();
             const auto key = std::make_pair (link.outputPort, link.inputPort);
@@ -303,6 +328,27 @@ namespace speakerd
             self.linkFailureLogged[key] = now;
             log ("pipewire: a link failed: " + juce::String::fromUTF8 (message != nullptr ? message : "")
                  + " (" + errorText (res) + "): " + link.description);
+        }
+
+        static void onLinkInfo (void* data, const pw_link_info* info)
+        {
+            auto& link = *static_cast<OwnLink*> (data);
+
+            if (info == nullptr || (info->change_mask & PW_LINK_CHANGE_MASK_STATE) == 0)
+                return;
+
+            link.state = info->state;
+            link.owner->requestLinkUpdate();
+        }
+
+        /** The server removed one of speakerd's links: its peer went, or someone destroyed it.
+            Without this, a link whose global came and went within one round trip would never be
+            seen, never fail, and stay pending: nothing would make it again. */
+        static void onLinkRemoved (void* data)
+        {
+            auto& link = *static_cast<OwnLink*> (data);
+            link.failed = true;
+            link.owner->requestLinkUpdate();
         }
 
         static void onSinkError (void* data, int, int res, const char* message)
@@ -387,6 +433,29 @@ namespace speakerd
             return false;
         }
 
+        /** A link that carries data: one of speakerd's in the active state, or one somebody else
+            made (speakerd sees no state for it), once it is in the registry. */
+        bool isActive (juce::uint32 outputPort, juce::uint32 inputPort) const
+        {
+            for (const auto& link : ownLinks)
+                if (link->outputPort == outputPort && link->inputPort == inputPort)
+                    return link->state == PW_LINK_STATE_ACTIVE && linkExists (outputPort, inputPort);
+
+            return linkExists (outputPort, inputPort);
+        }
+
+        bool sideActive (const juce::uint32 (&from)[2], const juce::uint32 (&to)[2]) const
+        {
+            return isActive (from[0], to[0]) && isActive (from[1], to[1]);
+        }
+
+        void dropLink (OwnLink& link)
+        {
+            spa_hook_remove (&link.infoListener);
+            spa_hook_remove (&link.listener);
+            pw_proxy_destroy (link.proxy);
+        }
+
         /** Runs on every registry change: drops links that failed, whose ports went away or that
             someone removed, and makes the missing ones. */
         void updateLinks()
@@ -403,8 +472,7 @@ namespace speakerd
                 if (link.failed || (link.seen && ! exists)
                     || ports.count (link.outputPort) == 0 || ports.count (link.inputPort) == 0)
                 {
-                    spa_hook_remove (&(*it)->listener);
-                    pw_proxy_destroy (link.proxy);
+                    dropLink (link);
                     it = ownLinks.erase (it);
                 }
                 else
@@ -418,7 +486,10 @@ namespace speakerd
 
             if (std::find (std::begin (ins), std::end (ins), SPA_ID_INVALID) != std::end (ins)
                 || std::find (std::begin (outs), std::end (outs), SPA_ID_INVALID) != std::end (outs))
+            {
+                engine.setOutputGate (false);
                 return;   // the filter's own ports are not all registered yet
+            }
 
             const auto sink = findNode (sinkName);
             const juce::uint32 monitors[] { findPort (sink, true, sinkMonitors[0]), findPort (sink, true, sinkMonitors[1]) };
@@ -439,6 +510,11 @@ namespace speakerd
                 linkCount.fetch_add (1);
 
             linked = both;
+
+            // The output is heard only once every link of both sides is active: the stream has
+            // arrived and the amplifier listens. Until then the gate keeps it at 0, so the
+            // fade-in that follows is heard whole (Engine.h).
+            engine.setOutputGate (both && sideActive (monitors, ins) && sideActive (outs, amp));
         }
 
         juce::String describePort (juce::uint32 port) const
@@ -478,6 +554,7 @@ namespace speakerd
             link->inputPort = inputPort;
             link->description = describePort (outputPort) + " -> " + describePort (inputPort);
             pw_proxy_add_listener (proxy, &link->listener, &linkEvents, link.get());
+            pw_link_add_listener (reinterpret_cast<pw_link*> (proxy), &link->infoListener, &linkInfoEvents, link.get());
             ownLinks.push_back (std::move (link));
         }
 
@@ -510,19 +587,30 @@ namespace speakerd
             return e;
         }
 
-        static pw_proxy_events makeProxyEvents (void (*onError) (void*, int, int, const char*))
+        static pw_proxy_events makeProxyEvents (void (*onError) (void*, int, int, const char*),
+                                                void (*onRemoved) (void*))
         {
             pw_proxy_events e {};
             e.version = PW_VERSION_PROXY_EVENTS;
             e.error = onError;
+            e.removed = onRemoved;
+            return e;
+        }
+
+        static pw_link_events makeLinkEvents()
+        {
+            pw_link_events e {};
+            e.version = PW_VERSION_LINK_EVENTS;
+            e.info = onLinkInfo;
             return e;
         }
 
         static inline const pw_core_events coreEvents         = makeCoreEvents();
         static inline const pw_registry_events registryEvents = makeRegistryEvents();
         static inline const pw_filter_events filterEvents     = makeFilterEvents();
-        static inline const pw_proxy_events linkEvents        = makeProxyEvents (onLinkError);
-        static inline const pw_proxy_events sinkEvents        = makeProxyEvents (onSinkError);
+        static inline const pw_proxy_events linkEvents        = makeProxyEvents (onLinkError, onLinkRemoved);
+        static inline const pw_proxy_events sinkEvents        = makeProxyEvents (onSinkError, nullptr);
+        static inline const pw_link_events linkInfoEvents     = makeLinkEvents();
         spa_hook sinkListener {};
     };
 
@@ -607,6 +695,17 @@ namespace speakerd
         auto& d = *impl;
         pw_thread_loop_lock (d.loop);
 
+        // One speakerd per PipeWire: a second one would adopt the same sink and link to the same
+        // amplifier, and the two outputs would add up (+6 dB, tweeter included). The registry is
+        // complete here (connect() waited for it), and a speakerd that crashed took its filter
+        // node with it, so a node of this name is a speakerd that runs.
+        if (d.findNode (d.filterName) != SPA_ID_INVALID)
+        {
+            pw_thread_loop_unlock (d.loop);
+            return juce::Result::fail ("pipewire: another speakerd already runs on this PipeWire (node '"
+                                       + d.filterName + "' exists)");
+        }
+
         // The input sink players play into: one that is already there (made by the speaker's
         // PipeWire configuration, or left by an earlier speakerd), or a new one. A new one
         // lingers: it stays in PipeWire when speakerd stops, so that a stream playing into it
@@ -640,6 +739,9 @@ namespace speakerd
             pw_proxy_add_listener (d.ownSink, &d.sinkListener, &Impl::sinkEvents, &d);
             log ("pipewire: created the input sink '" + d.sinkName + "'");
         }
+
+        // Silent until its links are active (Engine::setOutputGate).
+        d.engine.setOutputGate (false);
 
         // The filter has no media class: the session manager leaves it alone, speakerd links it.
         // It asks for the speaker's quantum, so that a player asking for more latency does not
@@ -709,10 +811,7 @@ namespace speakerd
         pw_thread_loop_lock (d.loop);
 
         for (auto& link : d.ownLinks)
-        {
-            spa_hook_remove (&link->listener);
-            pw_proxy_destroy (link->proxy);
-        }
+            d.dropLink (*link);
 
         d.ownLinks.clear();
 

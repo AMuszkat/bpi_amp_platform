@@ -302,7 +302,10 @@ parameters, so the DSP stays JUCE from end to end. It never touches the network.
   creates it lingering: it stays when `speakerd` stops, so a stream stays on it, the amplifier
   gets silence, and the next `speakerd` adopts it. A lingering sink only exists once `speakerd`
   has run, so before any deploy a speaker must define the `speakerd` sink in its PipeWire
-  configuration: a stream must never fall back to the amplifier.
+  configuration: a stream must never fall back to the amplifier. One `speakerd` per PipeWire:
+  a second one finds `speakerd-dsp` and stops, since two would add up on the amplifier. The
+  output is held at 0 until every link of both sides is active, so an amplifier that comes back
+  under a playing stream hears the fade-in, not the stream at full level.
 - **The graph document, version 1, is `.filtergraph` as JSON.** It has a revision number,
   nodes with uids, the plugin by format and identifier (for LV2, the URI), the plugin's own
   state as base64, and connections per channel between uids. Each node also carries its
@@ -827,11 +830,12 @@ X11, and it is built to run with no controller from day one: the controller only
 step 3. The virtual pair in `tests/vpair/` is where step 2 is tested first.
 
 Step 2 is done. On a virtual speaker `speakerd` with `loudness_headless` gives the complete
-build's gain on both amplifier channels, within 0.0001 dB from 40 Hz to 6 kHz and at two
-levels (`test_speakerd_same_sound`); a broken layer falls back to the next one
-(`test_speakerd_state_layers`); with no loadable layer the tweeter is silent and the woofer
-never exceeds -20 dBFS, even for an input above full scale (`test_passthrough_safety`); and it
-plays whatever starts first and survives the amplifier going away (`test_speakerd_start_order`).
+build's gain on both amplifier channels, measured within 0.0001 dB (required within 0.05 dB)
+from 40 Hz to 6 kHz and at two levels (`test_speakerd_same_sound`); a broken layer falls back
+to the next one (`test_speakerd_state_layers`); with no loadable layer the tweeter is silent
+and the woofer never exceeds -20 dBFS, even for an input above full scale
+(`test_passthrough_safety`); and it plays whatever starts first and survives the amplifier
+going away (`test_speakerd_start_order`).
 Before `speakerd` runs on a board it still needs a persistent `speakerd` sink in the board's
 PipeWire configuration, a systemd unit that restarts it on an older layer after a crash, and an
 aarch64 build.
