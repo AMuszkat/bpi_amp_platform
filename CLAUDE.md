@@ -14,7 +14,7 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
 |---|---|---|
 | `hardware/` | KiCad projects: the carrier board and the amplifier board | `README.md` |
 | `firmware/` | Device tree, kernel config, amplifier drivers, PipeWire config, board setup scripts; later `ampd` | `firmware/CLAUDE.md` |
-| `dsp/` | Measurement and tuning tools, the JUCE plugins, `plugin-check`; later `speakerd` and the controller app (formerly the `bpi_amp_dsp_tuning` repository) | `dsp/CLAUDE.md` |
+| `dsp/` | Measurement and tuning tools, the JUCE plugins, `plugin-check`, `speakerd` (the headless plugin host); later the controller app (formerly the `bpi_amp_dsp_tuning` repository) | `dsp/CLAUDE.md` |
 | `docs/` | The remote plugin host design (`remote-plugin-host.md`) and how to develop it autonomously (`autonomous-development.md`) | |
 | `tests/vpair/` | Two virtual speakers on one machine, for developing the remote plugin host without boards | `tests/vpair/README.md` |
 | `.claude/skills/juce/` | The `/juce` skill: JUCE knowledge for the plugins under `dsp/` | |

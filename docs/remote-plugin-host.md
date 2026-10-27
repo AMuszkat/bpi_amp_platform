@@ -3,9 +3,9 @@
 *Design proposal. Steps 1 and 2 of the roadmap are implemented. Step 1: `loudness` builds as
 complete, control and headless targets, checked by `dsp/juce_apps/plugin-check`. Step 2:
 `speakerd` (`dsp/juce_apps/speakerd`) runs the headless builds inside PipeWire, from the first
-state layer that loads, with no controller. On the virtual pair it sounds like the complete
-build; this was checked by hand, and the scenario that checks it automatically comes next. The
-virtual pair used for testing is in `tests/vpair/`. Everything else is still a proposal.*
+state layer that loads, with no controller, and sounds like the complete build; the
+`tests/vpair/test_speakerd_*` and `test_passthrough_safety` scenarios check it on every run.
+The virtual pair used for testing is in `tests/vpair/`. Everything else is still a proposal.*
 
 A stereo set made of this platform is two complete boards, each running the same JUCE
 plugins on its own copy of the audio graph. This document proposes how to tune and rewire
@@ -816,7 +816,7 @@ and `firmware/local.mk` files, as before.
 <!-- diagram: roadmap -->
 ```mermaid
 flowchart LR
-    s1["Step 1, done<br/>loudness builds as complete,<br/>control and headless.<br/>plugin-check proves they fit:<br/>same parameters, state, sound."] --> s2["Step 2, built, scenario next<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
+    s1["Step 1, done<br/>loudness builds as complete,<br/>control and headless.<br/>plugin-check proves they fit:<br/>same parameters, state, sound."] --> s2["Step 2, done<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
     s2 --> s3["Step 3<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin, value monitors<br/>and the output level bar."]
     s3 --> s4["Step 4<br/>Scope frames and records,<br/>catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
 ```
@@ -826,8 +826,12 @@ sounds exactly like the complete one. Step 2 is the first point where a speaker 
 X11, and it is built to run with no controller from day one: the controller only appears in
 step 3. The virtual pair in `tests/vpair/` is where step 2 is tested first.
 
-Step 2 is built. On a virtual speaker, by hand, `speakerd` with `loudness_headless` gives the
-complete build's gain on both amplifier channels (+7.816 dB at 100 Hz for the test setting,
-0.000 dB apart). With no loadable layer, the woofer is at exactly -20 dB and the tweeter is
-silent. What is left of step 2 is the `tests/vpair/test_speakerd_*` scenario that checks this
-on every run.
+Step 2 is done. On a virtual speaker `speakerd` with `loudness_headless` gives the complete
+build's gain on both amplifier channels, within 0.0001 dB from 40 Hz to 6 kHz and at two
+levels (`test_speakerd_same_sound`); a broken layer falls back to the next one
+(`test_speakerd_state_layers`); with no loadable layer the tweeter is silent and the woofer
+never exceeds -20 dBFS, even for an input above full scale (`test_passthrough_safety`); and it
+plays whatever starts first and survives the amplifier going away (`test_speakerd_start_order`).
+Before `speakerd` runs on a board it still needs a persistent `speakerd` sink in the board's
+PipeWire configuration, a systemd unit that restarts it on an older layer after a crash, and an
+aarch64 build.

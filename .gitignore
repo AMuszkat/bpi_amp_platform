@@ -19,5 +19,8 @@ tests/.status/
 # The lab lock: present while a person has the boards
 .claude/lab.lock
 
+# Git worktrees of the agents (isolation: worktree), each on its own branch
+.claude/worktrees/
+
 # mermaid-check dependencies
 tools/mermaid-check/node_modules/

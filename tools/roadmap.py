@@ -56,10 +56,10 @@ STEPS = [
      "split a plugin into DSP and EDITOR sources with TARGETS, then /test unit"),
     ("Step 2: speakerd, the headless host, runs the headless build on one virtual speaker with no controller",
      lambda: exists("dsp", "juce_apps", "speakerd", "CMakeLists.txt") and has_scenario("speakerd"),
-     "host-dev",
-     "dsp/juce_apps/speakerd: AudioProcessorGraph + pw_filter, the state layers and boot "
-     "order, a tests/vpair/test_speakerd_*.py scenario that compares its output with the "
-     "complete build's; /build speakerd, /test all"),
+     "host-dev, then board-dev",
+     "host-dev: dsp/juce_apps/speakerd, AudioProcessorGraph + pw_filter, the state layers and "
+     "boot order; board-dev: the tests/vpair/test_speakerd_*.py scenarios that compare its "
+     "output with the complete build's; /build speakerd, /test all"),
     ("Step 3: bridge + hub: parameters over OSC, the graph document over TCP, two speakers, the Mine pin, value monitors, the level bar",
      lambda: exists("firmware", "ampd") and exists("dsp", "juce_apps", "controller", "CMakeLists.txt") and has_scenario("knob_latency"),
      "orchestrator",

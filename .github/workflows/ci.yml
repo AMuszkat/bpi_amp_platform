@@ -15,6 +15,8 @@ jobs:
     # otherwise move into the development container (tools/container.sh).
     env:
       BPI_CONTAINER: "0"
+      # For every step: the vpair scenarios build speakerd and the plugins too.
+      JUCE_INSTALL_DIR: ${{ github.workspace }}/build/juce-install
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,7 +49,7 @@ jobs:
           cmake --install build/juce
 
       - name: Rung 1, plugin-check
-        run: JUCE_INSTALL_DIR="$PWD/build/juce-install" tools/test.sh unit
+        run: tools/test.sh unit
 
       - name: Rung 2, the virtual pair
         run: tools/test.sh vpair
