@@ -78,13 +78,20 @@ namespace speakerd
 
         struct OwnLink
         {
+            Impl* owner = nullptr;
             pw_proxy* proxy = nullptr;
             spa_hook listener {};
             juce::uint32 outputPort = SPA_ID_INVALID, inputPort = SPA_ID_INVALID;
+            juce::String description;     // "speakerd-dsp:output_woofer -> amplifier:playback_FL"
             bool failed = false;
             bool seen = false;    // its link has been in the registry
         };
         std::vector<std::unique_ptr<OwnLink>> ownLinks;
+
+        /** A link that keeps failing is made again on every registry change; its failure is
+            logged at most once per this many milliseconds, per pair of ports. */
+        static constexpr juce::uint32 linkFailureLogInterval = 10000;
+        std::map<std::pair<juce::uint32, juce::uint32>, juce::uint32> linkFailureLogged;   // ports -> when
 
         juce::uint32 ownNode = SPA_ID_INVALID;
 
@@ -227,8 +234,18 @@ namespace speakerd
         {
             auto& link = *static_cast<OwnLink*> (data);
             link.failed = true;
+
+            const auto now = juce::Time::getMillisecondCounter();
+            const auto key = std::make_pair (link.outputPort, link.inputPort);
+            auto& self = *link.owner;
+
+            if (const auto it = self.linkFailureLogged.find (key);
+                it != self.linkFailureLogged.end() && now - it->second < linkFailureLogInterval)
+                return;
+
+            self.linkFailureLogged[key] = now;
             log ("pipewire: a link failed: " + juce::String::fromUTF8 (message != nullptr ? message : "")
-                 + " (" + errorText (res) + ")");
+                 + " (" + errorText (res) + "): " + link.description);
         }
 
         static void onSinkError (void* data, int, int res, const char* message)
@@ -367,6 +384,17 @@ namespace speakerd
             linked = both;
         }
 
+        juce::String describePort (juce::uint32 port) const
+        {
+            const auto p = ports.find (port);
+
+            if (p == ports.end())
+                return "port " + juce::String (port);
+
+            const auto n = nodes.find (p->second.node);
+            return (n != nodes.end() ? n->second : juce::String ("node ") + juce::String (p->second.node)) + ":" + p->second.name;
+        }
+
         void createLink (juce::uint32 outputNode, juce::uint32 outputPort, juce::uint32 inputNode, juce::uint32 inputPort)
         {
             auto* props = pw_properties_new (nullptr, nullptr);
@@ -387,9 +415,11 @@ namespace speakerd
             }
 
             auto link = std::make_unique<OwnLink>();
+            link->owner = this;
             link->proxy = proxy;
             link->outputPort = outputPort;
             link->inputPort = inputPort;
+            link->description = describePort (outputPort) + " -> " + describePort (inputPort);
             pw_proxy_add_listener (proxy, &link->listener, &linkEvents, link.get());
             ownLinks.push_back (std::move (link));
         }
@@ -462,7 +492,18 @@ namespace speakerd
             d.context = d.loop != nullptr ? pw_context_new (pw_thread_loop_get_loop (d.loop), nullptr, 0) : nullptr;
 
             if (d.context == nullptr || pw_thread_loop_start (d.loop) < 0)
+            {
+                // Both go, so that the next try starts clean. The loop is not running here.
+                if (d.context != nullptr)
+                    pw_context_destroy (d.context);
+
+                if (d.loop != nullptr)
+                    pw_thread_loop_destroy (d.loop);
+
+                d.context = nullptr;
+                d.loop = nullptr;
                 return juce::Result::fail ("cannot start the PipeWire client loop");
+            }
         }
 
         pw_thread_loop_lock (d.loop);
@@ -508,7 +549,9 @@ namespace speakerd
         pw_thread_loop_lock (d.loop);
 
         // The input sink players play into: one that is already there (made by the speaker's
-        // PipeWire configuration), or one of speakerd's own.
+        // PipeWire configuration, or left by an earlier speakerd), or a new one. A new one
+        // lingers: it stays in PipeWire when speakerd stops, so that a stream playing into it
+        // stays there, and the amplifier gets silence, until the next speakerd adopts it.
         if (d.findNode (d.sinkName) != SPA_ID_INVALID)
         {
             log ("pipewire: input sink '" + d.sinkName + "' exists: using it");
@@ -522,7 +565,7 @@ namespace speakerd
                                              "audio.position",          "[ FL FR ]",
                                              // What the monitor carries is exactly what was played.
                                              "monitor.channel-volumes", "false",
-                                             PW_KEY_OBJECT_LINGER,      "false",
+                                             PW_KEY_OBJECT_LINGER,      "true",
                                              nullptr);
 
             d.ownSink = static_cast<pw_proxy*> (pw_core_create_object (d.core, "adapter", PW_TYPE_INTERFACE_Node,
@@ -611,6 +654,7 @@ namespace speakerd
 
         if (d.ownSink != nullptr)
         {
+            // Only the local proxy: the sink itself lingers in PipeWire.
             spa_hook_remove (&d.sinkListener);
             pw_proxy_destroy (d.ownSink);
             d.ownSink = nullptr;

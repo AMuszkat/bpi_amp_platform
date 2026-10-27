@@ -298,9 +298,11 @@ parameters, so the DSP stays JUCE from end to end. It never touches the network.
   node format it can read. A `pw_filter` in PipeWire 0.3.65 cannot publish a node format, so a
   player sent to it lands on the default sink instead: the amplifier. `speakerd` links the
   sink to the filter, and the filter to the amplifier named in `device.json`, itself, from the
-  registry, whenever the ports exist. A speaker should define the `speakerd` sink in its
-  PipeWire configuration, so that a stream never falls back to the amplifier while `speakerd`
-  restarts. `speakerd` creates the sink only when there is none.
+  registry, whenever the ports exist. `speakerd` creates the sink only when there is none, and
+  creates it lingering: it stays when `speakerd` stops, so a stream stays on it, the amplifier
+  gets silence, and the next `speakerd` adopts it. A lingering sink only exists once `speakerd`
+  has run, so before any deploy a speaker must define the `speakerd` sink in its PipeWire
+  configuration: a stream must never fall back to the amplifier.
 - **The graph document, version 1, is `.filtergraph` as JSON.** It has a revision number,
   nodes with uids, the plugin by format and identifier (for LV2, the URI), the plugin's own
   state as base64, and connections per channel between uids. Each node also carries its
@@ -316,6 +318,18 @@ parameters, so the DSP stays JUCE from end to end. It never touches the network.
   JUCE's LV2 hosting re-instantiates the plugin in `prepareToPlay`. So the values are set after
   the graph is prepared, and the plugins run until their smoothing is over. After that the
   document is in force from the first audible sample.
+- **A new revision is a whole new graph, for now.** It is built beside the running one,
+  settled off the audio path on its own buffers, and swapped under the fade: a 30 ms fade-out, a
+  pointer swap, a 30 ms fade-in. The plugins of the new graph start again from silence. Carrying
+  the unchanged nodes, and their state, across (a diff) is a later refinement (section 4).
+- **Parameter changes are applied on the audio thread.** JUCE's LV2 hosting takes a parameter's
+  listener lock on the audio thread when a plugin echoes a change (`patch:Set`). The message
+  thread takes the same lock when it sets a value, so in step 3 a change goes from the command
+  queue to the audio thread and is applied there, never on the message thread while the graph
+  runs.
+- **Absolute caps.** NaN and infinity in the stream become 0 before any plugin sees them. What
+  leaves `speakerd` has NaN and infinity as 0 and is clamped to +-1.0, whatever the graph does;
+  passthrough is clamped to -20 dBFS.
 - **An offline render mode**, `speakerd --render IN.wav OUT.wav`, runs the same graph from the
   same layers in blocks of the live quantum: the reference a live capture is compared with.
 
@@ -392,7 +406,7 @@ sequenceDiagram
             H->>SL: apply rev N+1
             AR->>SR: apply rev N+1
         end
-        Note over SL,SR: diff against rev N, under a 30 ms fade
+        Note over SL,SR: rev N+1 built beside rev N, swapped under a 30 ms fade
         SL-->>H: ack
         SR-->>AR: ack
         AR-->>H: ack
@@ -404,10 +418,13 @@ sequenceDiagram
     end
 ```
 
-`AudioProcessorGraph` can add and remove nodes and connections while running, so a
-structural change on the speaker is a diff, not a rebuild. The engine rebuilds its internal
-render sequence on the audio thread's next cycle. A 30 ms fade on the output node covers the
-one cycle where the sequence changes.
+In step 2, `speakerd` applies a revision as a whole new graph: it builds rev N+1 beside the
+running rev N, prepares it and runs it on a second of silence off the audio path (section 2),
+then swaps it in between a 30 ms fade-out and a 30 ms fade-in. The swap costs only the fades,
+but every plugin of the new graph starts again from silence, so a delay line or a level
+detector starts empty. `AudioProcessorGraph` can also add and remove nodes and connections
+while it runs; carrying the unchanged nodes across (a diff against rev N, under the same fade)
+is the later refinement that keeps their state.
 
 ## 5. Monitoring: data from the speakers to the controller
 
@@ -703,12 +720,13 @@ flowchart LR
 - **Passthrough** is the last resort when no plugin loads at all. With no crossover running,
   a full-range signal would reach the tweeter, so this mode sends the Mine pin to the woofer
   output only, mutes the tweeter and caps the level. Mine is FL on a left speaker, FR on a
-  right one, and (FL + FR) / 2 on a mono one. It reaches the woofer 20 dB down, so nothing in
-  passthrough is louder than -20 dBFS. It is loud in the logs, and should also show on the
+  right one, and (FL + FR) / 2 on a mono one. It reaches the woofer 20 dB down and is clamped
+  there, so nothing in passthrough is louder than -20 dBFS, even a stream above full scale. It is loud in the logs, and should also show on the
   identify LED or chime.
 
 A layer **loads** when it parses, every plugin in it is found and instantiated and takes its
-state and parameter values, and every connection is possible. `speakerd` says on stderr why
+state (its state changes, when the document's state differs from it) and parameter values,
+every connection is possible, and the graph has no loop. `speakerd` says on stderr why
 each layer before the one it uses failed.
 
 The device file is local and never comes from the hub. A speaker always knows whether it is

@@ -9,8 +9,10 @@ X11. It opens no socket other than PipeWire's.
 
 Not here yet (step 3): the local socket to `ampd`, parameter changes and graph revisions
 while running, the role-aware **Mine** input pin, and monitoring (meters, level bars, scope
-frames). The code that fades the output out, swaps a graph and fades back in is already the
-path every graph takes at boot and on a rate change.
+frames). The path a revision will take exists (`Engine::install`): the new graph is built and
+settled beside the running one, then swapped in between a 30 ms fade-out and a 30 ms fade-in.
+In step 2 it runs once, at boot, before anything plays. A rate change does not swap the graph:
+it re-prepares the running one in place, behind silence.
 
 ## Command line
 
@@ -26,18 +28,19 @@ speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--l
 | `--from LAYER` | start trying at this layer: `current` (the default), `last-known-good`, `factory` or `passthrough`. speakerd keeps no count of its own crashes, since it writes no file. Whatever restarts it after a crash (systemd, `ampd`) says where to start |
 | `--lv2-bundle PATH` | also load this LV2 bundle (repeatable). Plugins are otherwise found by URI in `~/.lv2`, `/usr/lib/lv2` and `/usr/local/lib/lv2`; JUCE ignores `$LV2_PATH` |
 | `--render IN.wav OUT.wav` | the offline render: no PipeWire (see below) |
-| `--block N` | the render's block size, default 1024 (the speaker's quantum) |
+| `--block N` | the render's block size, default 1024 (the speaker's quantum). Render only: the live node runs at PipeWire's quantum, and `--block` without `--render` is a bad command line |
 
 | Exit status | |
 |---|---|
-| 0 | stopped by SIGINT, SIGTERM or SIGHUP (after fading out), or the render was written |
+| 0 | stopped by SIGINT, SIGTERM or SIGHUP, at any point, also while it waits for PipeWire (after fading out, if it played), or the render was written |
 | 1 | not used yet: kept for other failures |
 | 2 | bad command line, or a `--lv2-bundle` from which no plugin loaded |
-| 3 | the PipeWire node could not be created, or the connection to PipeWire was lost |
+| 3 | the input sink or the filter node could not be started, or the connection to PipeWire was lost |
 | 4 | the render could not read `IN.wav` or write `OUT.wav` |
 
 No loadable layer is not an error: speakerd plays passthrough and keeps running. If PipeWire
-is not there yet, speakerd waits for it, trying every second.
+is not there yet, speakerd waits for it, trying every second. Every way out of the live mode
+logs `stopping` once, as its last line before it exits.
 
 **Which build runs.** lilv keeps the first plugin of a URI it sees, and it sees the default
 paths first. A `--lv2-bundle` whose URI is also in `~/.lv2` is therefore ignored, and speakerd
@@ -87,22 +90,37 @@ a sink. Its monitor ports carry exactly what was played (`monitor.channel-volume
 the same cycle, so the sink adds no latency.
 
 **Whose sink.** If a node called `speakerd` exists when speakerd starts, speakerd uses it.
-Otherwise speakerd creates a null-audio-sink of that name, and the sink goes when speakerd
-goes. When it goes, WirePlumber moves whatever was playing into it to the default sink, which
-on a speaker is the amplifier: full range, at full level, tweeter included. A speaker should therefore
-create the sink in its PipeWire configuration (`context.objects`, an `adapter` with
-`factory.name = support.null-audio-sink`, `node.name = "speakerd"`,
+Otherwise speakerd creates a null-audio-sink of that name with `object.linger = true`, and the
+sink stays in PipeWire when speakerd stops: a stream playing into it stays there, unlinked, so
+the amplifier gets silence, and the next speakerd adopts the sink and fades in under the running
+stream. Were the sink to go, WirePlumber would move the stream to the default sink, which on a
+speaker is the amplifier: full range, at full level, tweeter included.
+
+A lingering sink only exists once speakerd has run since PipeWire started. So **before any
+deploy, a speaker must create the sink in its PipeWire configuration** (`context.objects`, an
+`adapter` with `factory.name = support.null-audio-sink`, `node.name = "speakerd"`,
 `media.class = "Audio/Sink"`, `audio.position = [ FL FR ]`, `monitor.channel-volumes = false`),
-so that it outlives speakerd and the stream goes nowhere while speakerd restarts. This is the
-same rule `firmware/` already follows for snapclient's target.
+so that a stream has somewhere safe to go from the moment PipeWire starts, before speakerd and
+between its restarts. This is the same rule `firmware/` already follows for snapclient's
+target.
 
 **Rate and block size.** At start speakerd reads `default.clock.rate`, `default.clock.quantum`
 and `default.clock.quantum-limit` from the PipeWire core. It prepares the graph for blocks up
-to the quantum limit, and runs it at whatever block each cycle brings. The filter asks for
-`node.latency = <quantum>/<rate>`, so a player asking for more latency (pw-play asks for
-100 ms) does not raise the quantum. If a cycle comes at a rate the graph is not prepared for,
-the output is silent until speakerd re-prepares the graph at the new rate, which takes a fraction
-of a second. It logs that, and fades back in.
+to the quantum limit, and primes it at the quantum: from then on the graph is only ever called
+with that block size, so it never reallocates on the audio thread (see Real time). The filter
+asks for `node.latency = <quantum>/<rate>`, so a player asking for more latency (pw-play asks
+for 100 ms) does not raise the quantum. If the quantum changes while speakerd runs:
+
+- to a whole multiple of the primed size, each cycle runs as that many blocks: no dropout, the
+  same output;
+- to anything else (a smaller quantum, or one that is not a multiple), the cycle is padded with
+  zeros to whole blocks, its real samples fade out within the cycle, and the output is silent
+  until speakerd primes the graph at the new size with one silent block, on the message thread,
+  and fades back in: a gap of a few tens of milliseconds.
+
+If a cycle comes at a rate the graph is not prepared for, the output is silent until speakerd
+re-prepares the graph at the new rate, which takes a fraction of a second. It logs that, and
+fades back in.
 
 ## The state directory
 
@@ -116,7 +134,7 @@ of a second. It logs that, and fades back in.
 speakerd only reads these files. At start it tries `graph.json`, `graph.lkg.json` and
 `factory.json` in that order, from the one `--from` names, and uses the first that **loads
 completely**: it parses, every plugin in it is found, instantiated and takes its state and
-every parameter value, and every connection is possible. It says on stderr why each layer
+every parameter value, every connection is possible, and there is no loop. It says on stderr why each layer
 before it failed. If none loads, it plays **passthrough**.
 
 ## device.json
@@ -163,11 +181,15 @@ what the hub will send in step 3.
   ],
   "connections": [
     { "src": { "node": 1,  "channel": 0 }, "dst": { "node": 16, "channel": 0 } },
-    { "src": { "node": 16, "channel": 0 }, "dst": { "node": 2,  "channel": 0 } },
-    { "src": { "node": 16, "channel": 0 }, "dst": { "node": 2,  "channel": 1 } }
+    { "src": { "node": 16, "channel": 0 }, "dst": { "node": 2,  "channel": 0 } }
   ]
 }
 ```
+
+This plays FL through loudness to the woofer, and leaves the tweeter silent. **Only a crossover
+may feed the tweeter** (output channel 1): a full-range signal can destroy it. A test on the
+virtual pair may route a plugin to both channels, to measure both; a document for a board never
+does.
 
 | Key | |
 |---|---|
@@ -204,8 +226,18 @@ same document works whichever build its URI names (`LV2State.h`).
 
 **Connections.** `src` is a node's output channel, `dst` a node's input channel. They are checked
 against each plugin's real channel counts when it loads. A connection listed twice, or one the
-graph refuses, fails the layer. So does an unknown plugin, an unknown parameter ID, or a choice
-text the plugin does not have.
+graph refuses, fails the layer. So does a loop (a node that feeds itself, through any path:
+`node <uid> (<name>) feeds itself: the graph has a loop`), which JUCE's graph would otherwise
+run, giving the connection that closes it silence. So does an unknown plugin, an unknown
+parameter ID, or a choice text the plugin does not have.
+
+**What "takes its state" means.** JUCE's LV2 wrapper reports success for any state, and a JUCE
+plugin ignores a state it cannot read. So speakerd reads the plugin's own state out before (S0)
+and after (S1) restoring the document's state (G). If G differs from S0 but S1 still equals S0,
+the layer fails: `the plugin did not take the state: its state did not change`. This proves the
+state changed, not that every value in it arrived. Its limit: a G that restates the current
+values in other bytes (another attribute order, say) is reported as not taken, which fails the
+layer: the safe side.
 
 Not in version 1: bus layouts (each plugin keeps its default), and the Mine pin.
 
@@ -213,8 +245,10 @@ Not in version 1: bus layouts (each plugin keeps its default), and the Mine pin.
 
 The last layer, used when no other loads. The speaker's own channel goes to the woofer only, at
 **-20 dB**, and the tweeter gets digital silence. Left plays FL, right plays FR, and mono plays
-(FL + FR) / 2, so the woofer never sees more than -20 dBFS. No plugin is involved, so it works
-even with no LV2 plugin installed at all. With no crossover running, a full-range signal must
+(FL + FR) / 2. The woofer is then clamped to +-0.1, and NaN or infinity becomes 0, so the woofer
+never sees more than -20 dBFS, even from a stream above full scale (a player's volume above 1,
+or a float WAV over 0 dBFS). No plugin is involved, so it works even with no LV2 plugin
+installed at all. With no crossover running, a full-range signal must
 never reach the tweeter. speakerd announces passthrough loudly:
 
 ```
@@ -226,7 +260,9 @@ speakerd: using layer passthrough: woofer = FL at -20 dB, tweeter muted
 
 `--render IN.wav OUT.wav` runs the same graph, from the same layers, with no PipeWire. It
 uses the same `Engine`, the same settling (below) and the same block size as the live node,
-1024 unless `--block` says otherwise. `IN.wav` may be mono or stereo. A mono input feeds both
+1024 unless `--block` says otherwise. Every block is a full one, as every cycle of the live node
+is: the last is padded with zeros and only its real samples are written, so `OUT.wav` is as long
+as `IN.wav`. `IN.wav` may be mono or stereo. A mono input feeds both
 FL and FR, which is what a mono player gets through PipeWire. `OUT.wav` has two channels, the
 woofer and the tweeter, at the input's rate, as 32-bit integer PCM. The render starts at full
 level (the live node fades in once, at start, before anything plays). Pointing the same
@@ -236,24 +272,46 @@ build outputs: the reference a live capture is compared with.
 ## Real time
 
 - **The audio thread never blocks, allocates or makes a syscall of its own.** Per cycle it
-  copies the stream in, calls `AudioProcessorGraph::processBlock`, ramps the fade and copies
-  the two amplifier channels out. JUCE's graph takes each processor's callback lock around its
-  `processBlock`. speakerd never takes those locks from another thread while the graph runs, so
-  they are never contended.
-- **The graph is handed over through one atomic.** The message thread takes the graph only
-  after fading the output out. While it holds it, cycles output silence instead of waiting. It
-  builds, prepares and settles the graph, then gives it back and the output fades in.
-- **Fades.** The output fades in over 30 ms at every start, after a rate change and after
-  every graph swap. It fades out over 30 ms before them and at a stop.
+  copies the stream in, calls `AudioProcessorGraph::processBlock`, ramps the fade, caps the
+  output and copies the two amplifier channels out.
+- **Three locks JUCE takes on the audio thread, and why none of them waits.** (1) JUCE's graph
+  takes each processor's callback lock around its `processBlock`; speakerd never takes those
+  locks from another thread while the graph runs. (2) The graph hands its render sequence over
+  under a `SpinLock` that the audio thread only try-locks. (3) JUCE's LV2 hosting, when a plugin
+  echoes a parameter on its atom output (`patch:Set`), sets the hosted parameter on the audio
+  thread (`processAtomPort` -> `PatchSetCallback` -> `setDenormalisedValueWithoutTriggeringUpdate`),
+  which takes that parameter's `listenerLock` (`juce_AudioProcessorParameter.cpp`,
+  `sendValueChangedMessageToListeners`); a `StateChanged` atom calls `updateHostDisplay`, which
+  takes the processor's `listenerLock`. The message thread takes the same parameter lock when
+  it sets a value. So nobody sets a running graph's parameters on the message thread. In step 2
+  values are only set on a graph that is not running yet. **In step 3, parameter changes are
+  applied on the audio thread, from the command queue, never on the message thread while the
+  graph runs.**
+- **Absolute caps.** NaN and infinity in the stream become 0 before any plugin sees them (so
+  they cannot stick in a filter's state). After the graph and the fade, NaN and infinity become
+  0 and every sample is clamped to +-1.0, on both amplifier channels, whatever the graph did.
+  The test reads the exponent bits, so it holds whatever the optimisation flags.
+- **The graph is handed over through one atomic, after a fade handshake.** The message thread
+  takes the graph only after the output has faded out. It turns the fade-in request off, then
+  moves a serial number on; a cycle hands that serial back only if it began with the fade-in off
+  and ended at gain 0, and the message thread waits for exactly its serial. While it holds the
+  graph, cycles output silence instead of waiting.
+- **A graph swap costs only the fades.** A new graph is built, prepared and settled beside the
+  running one, on its own buffers; the audio thread does not know it yet. The swap is then a
+  30 ms fade-out, a pointer swap and a 30 ms fade-in.
+- **Fades.** The output fades in over 30 ms at every start, after a rate change, after a
+  quantum the graph had to be primed for and after every graph swap. It fades out over 30 ms
+  before them and at a stop.
 - **Values in force from the first audible sample.** JUCE's LV2 wrapper prepares a plugin's
   DSP when it is instantiated, with the default parameter values. A hosted LV2 plugin only
   takes parameter values while it processes (finding 2 of section 7). So every new graph runs
   on 1 s of silence, on the message thread, before it is heard. That is longer than loudness's
   longest glide.
-- **Block size.** JUCE's graph reallocates one output buffer when a call's block size differs
-  from the previous call's. Settling primes it at the quantum the cycles will bring. It only
-  happens on the audio thread if PipeWire changes its quantum while speakerd runs, which is
-  logged.
+- **Block size.** JUCE's graph reallocates its output buffer whenever a call's block size
+  differs from the previous call's (`AudioBuffer::setSize`, in `RenderSequence::perform`). So the
+  graph is only ever called with the block size it was primed at, on the message thread:
+  settling primes it at the quantum, and a quantum that is not a whole number of primed blocks
+  is primed anew (see Rate and block size). The audio thread never reallocates.
 
 ## Log lines
 
@@ -279,9 +337,11 @@ stable.
 | `unlinked from amplifier '<node>': linking again as soon as it is back` | the amplifier went away |
 | `playing: layer <layer>, <rate> Hz, quantum <n>` | both sides linked and cycles running: from here a player is heard. Once per linking |
 | `pipewire: the graph now runs at <rate> Hz: re-prepared the plugins` | after a rate change |
-| `pipewire: the quantum changed to <n> (...)` | the quantum changed while running |
-| `lost PipeWire: stopping` | exit status 3 follows |
-| `stopping` | on SIGINT, SIGTERM, SIGHUP; exit status 0 follows |
+| `pipewire: the quantum changed to <n>: the graph runs it as <k> block(s) of <p>` | the quantum became a whole multiple of the size the graph is primed for (`<p>`): no dropout |
+| `pipewire: the quantum changed to <n>: faded out, primed the graph for it and faded back in` | any other quantum: after the gap |
+| `pipewire: a link failed: <reason> (<error>): <node>:<port> -> <node>:<port>` | a link speakerd made failed; at most once per 10 s per pair of ports |
+| `lost PipeWire` | the connection to PipeWire, the filter or the input sink failed; `stopping` and exit status 3 follow |
+| `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after a sink or filter that could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0) |
 | `render: <n> samples at <rate> Hz in blocks of <b>, layer <layer>, written to <path>` | the render is done |
 | `render: <reason>` | the render failed; exit status 4 follows |
 
@@ -307,7 +367,8 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `GraphDocument.*` | the graph document, version 1: parsing and checks |
 | `GraphBuilder.*` | the document as an `AudioProcessorGraph`, the way `PluginGraph::restoreFromXml` does it; the passthrough graph |
 | `LV2State.*` | the plugin's own state into and out of the hosted build's LV2 state |
-| `Engine.*` | the running graph, the audio-thread entry point, the fades, the hand-over between the threads, settling |
+| `Engine.*` | the running graph, the audio-thread entry point, the fades, the hand-over between the threads, settling, priming |
+| `Samples.h` | the absolute caps: NaN and infinity to 0, clamping |
 | `PipeWireNode.*` | the input sink, the `pw_filter` node, and the links |
 | `Render.*` | the offline render |
 | `DeviceConfig.*` | `device.json` |

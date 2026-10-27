@@ -1,6 +1,7 @@
 #include "GraphBuilder.h"
 
 #include "LV2State.h"
+#include "Samples.h"
 
 #include <cmath>
 #include <map>
@@ -163,6 +164,10 @@ namespace speakerd
                             woofer[i] = 0.5f * gain * (fl[i] + fr[i]);
                         break;
                 }
+
+                // The cap is absolute: a stream above full scale (a player's volume above 1)
+                // still reaches the woofer at -20 dBFS at most, and NaN or infinity as silence.
+                samples::cap (woofer, n, gain);
             }
 
             double getTailLengthSeconds() const override                 { return 0.0; }
@@ -241,6 +246,13 @@ namespace speakerd
 
             reachesAmplifier = reachesAmplifier || c.dstNode == GraphDocument::outputNode;
         }
+
+        // JUCE's graph accepts a loop and renders it, giving silence to the connection that
+        // closes it (its render sequence finds no buffer for that source). No document means
+        // that, and AudioPluginHost does not stop it either, so a loop fails the layer here.
+        for (const auto& [node, pluginName] : loaded)
+            if (graph->isAnInputTo (NodeID { node->uid }, NodeID { node->uid }))
+                return juce::Result::fail (node->describe() + " feeds itself: the graph has a loop");
 
         if (! reachesAmplifier)
             out.warnings.add ("no connection reaches the output node: the amplifier gets silence");

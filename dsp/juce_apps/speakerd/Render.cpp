@@ -49,6 +49,8 @@ namespace speakerd::render
         const auto inputChannels = (int) input.numChannels;
         juce::AudioBuffer<float> in (2, blockSize), out (2, blockSize);
 
+        // Every block is a full one, as every cycle of the live node is: the last is padded with
+        // zeros, and only its real samples are written.
         for (juce::int64 position = 0; position < input.lengthInSamples; position += blockSize)
         {
             const auto n = (int) juce::jmin ((juce::int64) blockSize, input.lengthInSamples - position);
@@ -61,7 +63,7 @@ namespace speakerd::render
 
             const float* inPointers[] { in.getReadPointer (0), in.getReadPointer (1) };
             float* outPointers[]      { out.getWritePointer (0), out.getWritePointer (1) };
-            engine.process (inPointers, outPointers, n, input.sampleRate);
+            engine.process (inPointers, outPointers, blockSize, input.sampleRate);
 
             if (! writer->writeFromAudioSampleBuffer (out, 0, n))
                 return juce::Result::fail ("writing " + output.getFullPathName() + " failed");

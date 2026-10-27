@@ -19,10 +19,12 @@ namespace speakerd
         Players play into a sink called `<name>` (pw-play --target speakerd). The session manager
         only links a player into an adapter node, which a pw_filter cannot be in PipeWire 0.3.65
         (it has no node format for WirePlumber 0.4.13 to read), so the sink is a separate node in
-        front of the filter: an existing sink of that name if there is one (a speaker can create
-        it in its PipeWire configuration, so that it outlives speakerd), otherwise a null-audio-sink
-        that speakerd creates and that goes when speakerd goes. Its monitor ports carry what is
-        played into it, in the same cycle.
+        front of the filter: an existing sink of that name if there is one (the speaker's
+        PipeWire configuration defines it, or an earlier speakerd left it), otherwise a
+        null-audio-sink that speakerd creates with object.linger, so that it stays when speakerd
+        goes: a stream playing into it stays there, the amplifier gets silence, and the next
+        speakerd adopts the sink. Its monitor ports carry what is played into it, in the same
+        cycle.
 
         speakerd links everything itself, watching the registry: the sink's monitor_FL and
         monitor_FR to the filter's inputs, and the filter's outputs to the amplifier's two input
@@ -53,7 +55,7 @@ namespace speakerd
             linking. */
         juce::Result start();
 
-        /** Unlinks and destroys what start() created, and disconnects. */
+        /** Unlinks, destroys the filter, and disconnects. A sink speakerd created stays. */
         void stop();
 
         /** True once the connection to PipeWire is lost, or the node failed. */

@@ -76,15 +76,27 @@ namespace speakerd::lv2state
         if (auto r = wrap (current.toString(), uri, pluginState, wrapped); r.failed())
             return r;
 
-        instance.setStateInformation (wrapped.toRawUTF8(), (int) wrapped.getNumBytesAsUTF8());
-
-        // Read it back: a state the plugin did not take would otherwise be silently ignored.
-        juce::MemoryBlock check;
-        if (auto r = extract (instance, check); r.failed())
+        // The plugin's own state before (S0) and after (S1) the restore. A plugin ignores a
+        // state it cannot read (JUCE plugins do, silently), and the LV2 wrapper still reports
+        // success, so the only evidence is the state itself.
+        juce::MemoryBlock before;
+        if (auto r = unwrap (current.toString(), uri, before); r.failed())
             return r;
 
-        if (check.isEmpty() && ! pluginState.isEmpty())
+        instance.setStateInformation (wrapped.toRawUTF8(), (int) wrapped.getNumBytesAsUTF8());
+
+        juce::MemoryBlock after;
+        if (auto r = extract (instance, after); r.failed())
+            return r;
+
+        if (after.isEmpty() && ! pluginState.isEmpty())
             return juce::Result::fail ("the plugin did not take the state");
+
+        // A state other than the current one that leaves the current one unchanged was not taken.
+        // The limit: a state that restates the current values in other bytes (another attribute
+        // order, say) is reported as not taken too. That fails the layer, which is the safe side.
+        if (pluginState != before && after == before)
+            return juce::Result::fail ("the plugin did not take the state: its state did not change");
 
         return juce::Result::ok();
     }

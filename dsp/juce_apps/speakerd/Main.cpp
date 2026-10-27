@@ -26,10 +26,10 @@ namespace
     /** Exit status (README.md). Passthrough is not an error: speakerd plays. */
     enum ExitCode
     {
-        exitOk       = 0,   // stopped by SIGINT/SIGTERM/SIGHUP, or the render was written
+        exitOk       = 0,   // stopped by SIGINT/SIGTERM/SIGHUP, at any point, or the render was written
         exitFailure  = 1,   // anything else that stops speakerd
         exitUsage    = 2,   // bad command line
-        exitPipeWire = 3,   // the PipeWire node could not be created, or the connection was lost
+        exitPipeWire = 3,   // the input sink or the filter could not be started, or PipeWire was lost
         exitRender   = 4    // the render could not read IN.wav or write OUT.wav
     };
 
@@ -47,6 +47,7 @@ namespace
         bool render = false;
         juce::File renderIn, renderOut;
         int block = defaultBlock;
+        bool blockGiven = false;
     };
 
     void printUsage()
@@ -62,7 +63,8 @@ namespace
                      "                      otherwise found by URI in ~/.lv2, /usr/lib/lv2, /usr/local/lib/lv2\n"
                      "  --render IN OUT     no PipeWire: run IN.wav through the graph, write the woofer\n"
                      "                      and tweeter channels to OUT.wav\n"
-                     "  --block N           the render's block size (default 1024, the live quantum)\n";
+                     "  --block N           the render's block size (default 1024, the live quantum);\n"
+                     "                      render only: the live node runs at PipeWire's quantum\n";
     }
 
     juce::File absoluteFile (const juce::String& path)
@@ -113,6 +115,7 @@ namespace
             else if (arg == "--block" && hasValues (1))
             {
                 options.block = juce::String (argv[++i]).getIntValue();
+                options.blockGiven = true;
 
                 if (options.block < 1 || options.block > 65536)
                 {
@@ -125,6 +128,12 @@ namespace
                 std::cerr << "speakerd: unknown or incomplete argument " << arg << "\n";
                 return false;
             }
+        }
+
+        if (options.blockGiven && ! options.render)
+        {
+            std::cerr << "speakerd: --block is for the render only: the live node runs at PipeWire's quantum\n";
+            return false;
         }
 
         if (options.stateDir == juce::File())
@@ -186,8 +195,8 @@ namespace
     }
 
     //==============================================================================
-    /** Watches the live node from the message thread: the audio thread's requests, the links
-        to the amplifier, and the "playing" line. */
+    /** Watches the live node from the message thread: a stop request, the audio thread's
+        requests, the links to the amplifier, and the "playing" line. */
     class Controller final : private juce::Timer
     {
     public:
@@ -204,20 +213,43 @@ namespace
     private:
         void timerCallback() override
         {
+            // The signal thread only sets the flag; stopping is done here, on the message thread.
             if (quitRequested.load())
+            {
+                stopTimer();
                 return juce::MessageManager::getInstance()->stopDispatchLoop();
+            }
 
             if (node.hasFailed())
             {
-                log ("lost PipeWire: stopping");
+                log ("lost PipeWire");
                 exitCode = exitPipeWire;
                 stopTimer();
                 return juce::MessageManager::getInstance()->stopDispatchLoop();
             }
 
-            if (const auto rate = engine.service(); rate > 0.0)
-                log ("pipewire: the graph now runs at " + juce::String (juce::roundToInt (rate))
+            if (const auto changes = engine.getQuantumChanges(); changes != seenQuantumChanges)
+            {
+                seenQuantumChanges = changes;
+                const auto quantum = engine.getLastBlockSize();
+                const auto primed = engine.getPrimedBlockSize();
+
+                // A quantum that is not a whole number of primed blocks is re-primed by service(),
+                // which says so.
+                if (primed > 0 && quantum % primed == 0)
+                    log ("pipewire: the quantum changed to " + juce::String (quantum) + ": the graph runs it as "
+                         + juce::String (quantum / primed) + " block(s) of " + juce::String (primed));
+            }
+
+            const auto serviced = engine.service();
+
+            if (serviced.rate > 0.0)
+                log ("pipewire: the graph now runs at " + juce::String (juce::roundToInt (serviced.rate))
                      + " Hz: re-prepared the plugins");
+
+            if (serviced.primedBlock > 0)
+                log ("pipewire: the quantum changed to " + juce::String (serviced.primedBlock)
+                     + ": faded out, primed the graph for it and faded back in");
 
             if (const auto links = node.getLinkCount(); links != seenLinks)
             {
@@ -232,20 +264,13 @@ namespace
                      + " Hz, quantum " + juce::String (engine.getLastBlockSize()));
                 announcedPlaying = true;
             }
-
-            if (const auto changes = engine.getBlockSizeChanges(); changes != seenBlockChanges)
-            {
-                seenBlockChanges = changes;
-                log ("pipewire: the quantum changed to " + juce::String (engine.getLastBlockSize())
-                     + " (the graph reallocated its output buffer once, on the audio thread)");
-            }
         }
 
         Engine& engine;
         PipeWireNode& node;
         const juce::String layer;
         juce::uint64 seenLinks = 0, cyclesAtLink = 0;
-        int seenBlockChanges = 0;
+        int seenQuantumChanges = 0;
         bool announcedPlaying = false;
         int exitCode = exitOk;
     };
@@ -256,9 +281,16 @@ namespace
         PipeWireNode node (engine, options.nodeName, device);
         PipeWireNode::Clock clock;
 
-        // speakerd starts right after PipeWire; if it is not there yet, wait for it.
+        // speakerd starts right after PipeWire; if it is not there yet, wait for it. Every way
+        // out says "stopping" once, last.
         for (bool announced = false;;)
         {
+            if (quitRequested.load())
+            {
+                log ("stopping");
+                return exitOk;
+            }
+
             const auto connected = node.connect (clock);
 
             if (connected.wasOk())
@@ -269,13 +301,8 @@ namespace
 
             announced = true;
 
-            for (int i = 0; i < 10; ++i)
-            {
-                if (quitRequested.load())
-                    return exitOk;
-
+            for (int i = 0; i < 10 && ! quitRequested.load(); ++i)
                 juce::Thread::sleep (100);
-            }
         }
 
         log ("pipewire: " + juce::String (juce::roundToInt (clock.rate)) + " Hz, quantum " + juce::String (clock.quantum)
@@ -287,9 +314,18 @@ namespace
         auto layer = loadFirstWorkingLayer (options.stateDir, builder, device.role, clock.rate, maxBlock, options.firstLayer);
         engine.install (std::move (layer.built.graph), clock.rate, maxBlock, clock.quantum);
 
+        if (quitRequested.load())
+        {
+            log ("stopping");
+            node.stop();
+            return exitOk;
+        }
+
         if (const auto started = node.start(); started.failed())
         {
             log (started.getErrorMessage());
+            log ("stopping");
+            node.stop();
             return exitPipeWire;
         }
 
@@ -338,7 +374,8 @@ namespace
     }
 
     /** SIGINT, SIGTERM and SIGHUP stop speakerd cleanly, with a fade. They are blocked in every
-        thread and taken by this one. */
+        thread and taken by this one, which only sets quitRequested: the Controller's timer and
+        the wait for PipeWire poll it, on the message thread. */
     void handleSignalsOnOwnThread (const sigset_t& signals)
     {
         std::thread ([signals]
@@ -346,12 +383,7 @@ namespace
             int signal = 0;
 
             if (sigwait (&signals, &signal) == 0)
-            {
                 quitRequested = true;
-
-                if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
-                    mm->stopDispatchLoop();
-            }
         }).detach();
     }
 }

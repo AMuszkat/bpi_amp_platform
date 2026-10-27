@@ -36,7 +36,8 @@ namespace speakerd
             if (! json.isObject())
                 return juce::Result::fail ("not a JSON object");
 
-            if (const auto& version = json["version"]; ! version.isVoid() && (! (version.isInt() || version.isInt64()) || (int) version != 1))
+            // As an int64: a version of 2^32 + 1 read as an int would pass for 1.
+            if (const auto& version = json["version"]; ! version.isVoid() && (! (version.isInt() || version.isInt64()) || (juce::int64) version != 1))
                 return juce::Result::fail ("unsupported version " + version.toString() + " (this speakerd reads version 1)");
 
             juce::String role;

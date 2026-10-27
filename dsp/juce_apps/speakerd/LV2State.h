@@ -15,7 +15,13 @@ namespace speakerd::lv2state
         reading it back out: the same document state works whichever build is hosted. */
 
     /** Restores `pluginState` (the plugin's own format) into a hosted LV2 instance of a JUCE
-        plugin. Must run on the message thread, while the instance is not processing. */
+        plugin. Must run on the message thread, while the instance is not processing.
+
+        Checks that the plugin took it, from the plugin's own state before (S0) and after (S1)
+        the restore: it fails if S1 is empty, or if the given state differs from S0 and S1
+        still equals S0 ("its state did not change"). What this proves is that the state
+        changed, not that every value in it arrived. A given state that restates the current
+        values in other bytes is reported as not taken. */
     juce::Result restore (juce::AudioPluginInstance& instance, const juce::MemoryBlock& pluginState);
 
     /** Reads the plugin's own state out of a hosted LV2 instance of a JUCE plugin. */

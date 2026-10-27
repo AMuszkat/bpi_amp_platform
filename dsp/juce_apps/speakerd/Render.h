@@ -17,7 +17,8 @@ namespace speakerd
         /** Opens the input. Fails unless it is a WAV file with one or two channels. */
         juce::Result openInput (const juce::File&, std::unique_ptr<juce::AudioFormatReader>&);
 
-        /** Runs every sample of `input` through `engine` and writes `output`. */
+        /** Runs every sample of `input` through `engine`, in full blocks of `blockSize` (the
+            last one padded with zeros), and writes `output`: as long as the input. */
         juce::Result run (Engine&, juce::AudioFormatReader& input, const juce::File& output, int blockSize);
     }
 }
