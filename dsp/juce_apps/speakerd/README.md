@@ -39,8 +39,9 @@ speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--l
 | 4 | the render could not read `IN.wav` or write `OUT.wav` |
 
 No loadable layer is not an error: speakerd plays passthrough and keeps running. If PipeWire
-is not there yet, speakerd waits for it, trying every second. Every way out of the live mode
-logs `stopping` once, as its last line before it exits.
+is not there yet, speakerd waits for it, trying every second. From the moment it starts
+waiting for PipeWire, every way out logs `stopping` once, as its last line before it exits
+(a bad command line or `--lv2-bundle`, exit 2, comes earlier and does not).
 
 **Which build runs.** lilv keeps the first plugin of a URI it sees, and it sees the default
 paths first. A `--lv2-bundle` whose URI is also in `~/.lv2` is therefore ignored, and speakerd
@@ -100,9 +101,9 @@ the same cycle, so the sink adds no latency.
 
 **Whose sink.** If a node called `speakerd` exists when speakerd starts, speakerd uses it.
 Otherwise speakerd creates a null-audio-sink of that name with `object.linger = true`, and the
-sink stays in PipeWire when speakerd stops: a stream playing into it stays there, unlinked, so
-the amplifier gets silence, and the next speakerd adopts the sink and fades in under the running
-stream. Were the sink to go, WirePlumber would move the stream to the default sink, which on a
+sink stays in PipeWire when speakerd stops: a stream playing into it stays there, nothing reads
+the sink's monitor, so the amplifier gets silence, and the next speakerd adopts the sink and
+fades in under the running stream. Were the sink to go, WirePlumber would move the stream to the default sink, which on a
 speaker is the amplifier: full range, at full level, tweeter included.
 
 A lingering sink only exists once speakerd has run since PipeWire started. So **before any
@@ -143,8 +144,8 @@ fades back in.
 speakerd only reads these files. At start it tries `graph.json`, `graph.lkg.json` and
 `factory.json` in that order, from the one `--from` names, and uses the first that **loads
 completely**: it parses, every plugin in it is found, instantiated and takes its state and
-every parameter value, every connection is possible, and there is no loop. It says on stderr why each layer
-before it failed. If none loads, it plays **passthrough**.
+every parameter value, every connection is possible, and there is no loop. It says on stderr
+why each layer before it failed. If none loads, it plays **passthrough**.
 
 ## device.json
 
@@ -254,11 +255,11 @@ Not in version 1: bus layouts (each plugin keeps its default), and the Mine pin.
 
 The last layer, used when no other loads. The speaker's own channel goes to the woofer only, at
 **-20 dB**, and the tweeter gets digital silence. Left plays FL, right plays FR, and mono plays
-(FL + FR) / 2. The woofer is then clamped to +-0.1, and NaN or infinity becomes 0, so the woofer
-never sees more than -20 dBFS, even from a stream above full scale (a player's volume above 1,
-or a float WAV over 0 dBFS). No plugin is involved, so it works even with no LV2 plugin
-installed at all. With no crossover running, a full-range signal must
-never reach the tweeter. speakerd announces passthrough loudly:
+(FL + FR) / 2. The woofer is then clamped to +-0.1, and NaN or infinity becomes 0, so the
+woofer never sees more than -20 dBFS, even from a stream above full scale (a player's volume
+above 1, or a float WAV over 0 dBFS). No plugin is involved, so it works even with no LV2 plugin
+installed at all. With no crossover running, a full-range signal must never reach the tweeter.
+speakerd announces passthrough loudly:
 
 ```
 speakerd: *** PASSTHROUGH: no state layer loaded ***
@@ -271,8 +272,8 @@ speakerd: using layer passthrough: woofer = FL at -20 dB, tweeter muted
 uses the same `Engine`, the same settling (below) and the same block size as the live node,
 1024 unless `--block` says otherwise. Every block is a full one, as every cycle of the live node
 is: the last is padded with zeros and only its real samples are written, so `OUT.wav` is as long
-as `IN.wav`. `IN.wav` may be mono or stereo. A mono input feeds both
-FL and FR, which is what a mono player gets through PipeWire. `OUT.wav` has two channels, the
+as `IN.wav`. `IN.wav` may be mono or stereo. A mono input feeds both FL and FR, which is what a
+mono player gets through PipeWire. `OUT.wav` has two channels, the
 woofer and the tweeter, at the input's rate, as 32-bit integer PCM. The render starts at full
 level (the live node fades in once, at start, before anything plays). Pointing the same
 document's URI at `.../loudness` instead of `.../loudness_headless` gives what the complete
