@@ -77,7 +77,14 @@ amplifier channels with its frequency and level intact, on each speaker, and the
 are independent. On a machine with Podman both speakers run inside the development
 container described below, on bookworm's PipeWire 0.3.65 and WirePlumber 0.4.13, the
 versions the boards run; natively where there is no container runtime. `speakerd`
-(`dsp/juce_apps/speakerd`) runs on a virtual speaker by hand. Its scenario, `ampd`, the
+(`dsp/juce_apps/speakerd`) runs on the speakers in four scenarios, which compare what it
+plays with its own offline render of the same document through the complete build:
+`speakerd_same_sound` (the headless build gives the complete build's gain within 0.05 dB from
+40 Hz to 6 kHz, level detector included), `speakerd_state_layers` (a broken layer falls back
+to the next, said in the log and heard), `passthrough_safety` (with no plugin or no layer
+the tweeter is silent and the woofer capped at -20 dBFS, for left, right and mono, also with
+the input above full scale) and `speakerd_start_order` (it plays when the amplifier or
+PipeWire start after it, when the amplifier comes back, and with no network). `ampd`, the
 Snapcast source and `tc netem` come next; the compose file comes with them, for CI.
 
 **Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
@@ -222,6 +229,9 @@ the architecture:
 | `power_cut` | a speaker killed mid-write boots on last known good, and on factory after a corrupted factory-candidate |
 | `two_controllers` | changes from two harness clients interleave and both see the same final state |
 | `catalogue` | a version-hash mismatch between a control and a headless build is refused |
+| `speakerd_same_sound` | `speakerd` running a plugin's headless build gives every test tone the gain of the complete build's offline render within 0.05 dB on both amplifier channels, and that gain is not 0 dB |
+| `speakerd_state_layers` | a broken current layer plays last known good, and with both broken factory, each said in the log and recognised by its sound |
+| `speakerd_start_order` | `speakerd` started before its amplifier or its PipeWire, or with no network, links and plays the complete build's sound once they are there, and again when the amplifier comes back |
 | `passthrough_safety` | with every plugin removed, the tweeter capture is silent and the woofer capture is capped |
 | `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately |
 | `monitor_freshness` | with 5 % packet loss and 20 ms jitter, every frame drawn is less than 50 ms old at the 99th percentile, and the speaker never holds more than one pending frame per stream |

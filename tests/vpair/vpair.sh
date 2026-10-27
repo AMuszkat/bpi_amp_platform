@@ -3,6 +3,7 @@
 # WirePlumber and D-Bus session, on this machine. See README.md.
 #
 #     tests/vpair/vpair.sh up | down | status
+#     tests/vpair/vpair.sh up right               # one speaker only (also for down)
 #     tests/vpair/vpair.sh run left pw-link -l    # run a pw-* tool against one speaker
 #     eval "$(tests/vpair/vpair.sh env left)"     # the same, for a shell in the same place
 #
@@ -30,6 +31,15 @@ speaker_env() {
 }
 
 is_up() { [ -f "$BASE/$1/pids" ] && kill -0 $(cat "$BASE/$1/pids") 2> /dev/null; }
+
+# The speakers named on the command line, or both.
+speakers() {
+    [ $# -gt 0 ] || set -- "${SPEAKERS[@]}"
+    local s
+    for s; do
+        case " ${SPEAKERS[*]} " in *" $s "*) echo "$s" ;; *) echo "vpair: no speaker '$s' (left or right)" >&2; exit 2 ;; esac
+    done
+}
 
 start_speaker() {
     local s="$1" d="$BASE/$1"
@@ -82,11 +92,15 @@ case "${1:-}" in
         need wireplumber "apt install wireplumber"
         need dbus-daemon "apt install dbus"
         need pw-link "apt install pipewire-bin"
+        shift
+        chosen="$(speakers "$@")"
         mkdir -p "$BASE"
-        for s in "${SPEAKERS[@]}"; do start_speaker "$s"; done
+        for s in $chosen; do start_speaker "$s"; done
         ;;
     down)
-        for s in "${SPEAKERS[@]}"; do stop_speaker "$s"; done
+        shift
+        chosen="$(speakers "$@")"
+        for s in $chosen; do stop_speaker "$s"; done
         ;;
     status)
         for s in "${SPEAKERS[@]}"; do is_up "$s" && echo "$s: up" || echo "$s: down"; done
@@ -101,7 +115,7 @@ case "${1:-}" in
         exec "$@"
         ;;
     *)
-        echo "usage: $0 up | down | status | env <speaker> | run <speaker> <command...>" >&2
+        echo "usage: $0 up [speaker...] | down [speaker...] | status | env <speaker> | run <speaker> <command...>" >&2
         exit 2
         ;;
 esac
