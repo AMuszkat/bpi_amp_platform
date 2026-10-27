@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Stop hook: refuses to end a turn that changed the virtual pair, the firmware agent or the
 JUCE applications while the virtual pair tests are red. Runs them only when such files
-changed and PipeWire is installed; takes about ten seconds.
+changed, through tools/test.sh (in the development container when Podman is installed, else
+natively when PipeWire is), without recording a result; takes about ten seconds.
 """
 
 import json
@@ -24,14 +25,14 @@ def main():
     touched = [l for l in changed if any(l[3:].startswith(w) for w in WATCH)]
     if not touched:
         return 0
-    if not (shutil.which("pipewire") and shutil.which("wireplumber")):
-        print("virtual pair files changed but PipeWire is not installed here: tests not run.")
+    if not (shutil.which("podman") or (shutil.which("pipewire") and shutil.which("wireplumber"))):
+        print("virtual pair files changed but neither Podman nor PipeWire is installed here: tests not run.")
         return 0
-    result = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests/vpair"],
+    result = subprocess.run([os.path.join(ROOT, "tools", "test.sh"), "vpair", "--no-record"],
                             cwd=ROOT, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
         print("the virtual pair tests fail with the current changes:\n"
-              + result.stderr[-3000:], file=sys.stderr)
+              + (result.stdout + result.stderr)[-3000:], file=sys.stderr)
         return 2
     print("virtual pair tests pass.")
     return 0

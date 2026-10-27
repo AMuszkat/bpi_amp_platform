@@ -80,7 +80,9 @@ load_local_config
 
 SELF="$0"
 CONTAINERFILE="$TOOLS_DIR/Containerfile"
-IMAGE="localhost/juce-plugins-arm64-builder:bookworm"
+# The same image is the development container of the whole repository (the root
+# tools/container.sh), so the two scripts name it alike and label it alike.
+IMAGE="localhost/bpi-amp-builder:bookworm"
 
 # juce_plugins/ is bind-mounted at /work, so the container sees every path below as /work/...
 C_ROOT="/work"
@@ -253,11 +255,15 @@ require_podman() {
     fi
 }
 
+# The image carries the hash of the Containerfile it was built from, so an image that
+# predates an edit of the Containerfile is rebuilt rather than used.
+containerfile_hash() { sha256sum "$CONTAINERFILE" | cut -c1-16; }
+
 build_image() {
     require_podman
     echo ">>> Building builder image $IMAGE (first time takes a few minutes)..."
     # Feed the Containerfile on stdin so no build context is uploaded (it has no COPY).
-    podman build -t "$IMAGE" - < "$CONTAINERFILE"
+    podman build --label "bpi.containerfile=$(containerfile_hash)" -t "$IMAGE" - < "$CONTAINERFILE"
     echo "Image ready."
     echo ""
 }
@@ -266,6 +272,9 @@ ensure_image() {
     require_podman
     if ! podman image exists "$IMAGE"; then
         echo ">>> Builder image not found."
+        build_image
+    elif [ "$(podman image inspect --format '{{ index .Labels "bpi.containerfile" }}' "$IMAGE")" != "$(containerfile_hash)" ]; then
+        echo ">>> Builder image is older than the Containerfile."
         build_image
     fi
 }

@@ -6,10 +6,13 @@ runs a plugin's **control** build (its editor, no DSP) and each speaker runs its
 build (its DSP, no editor), and the two exchange parameter values and saved state.
 
 ```bash
-JUCE_INSTALL_DIR=/path/to/juce-install dsp/juce_apps/plugin-check/run.sh loudness
+dsp/juce_apps/plugin-check/run.sh loudness     # or tools/test.sh unit, for every plugin
 ```
 
-`run.sh` builds `<plugin>`, `<plugin>_control` and `<plugin>_headless` natively, builds this
+`run.sh` runs in the development container when Podman is installed (`tools/container.sh`),
+against the JUCE install in `JUCE_INSTALL_DIR` (default `build/juce-install` at the
+repository root, made on first use). It builds `<plugin>`, `<plugin>_control` and
+`<plugin>_headless` for x86_64, builds this
 checker, loads the three LV2 bundles through JUCE's own plugin hosting, and checks:
 
 | Check | Why it matters |

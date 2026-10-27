@@ -68,5 +68,23 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends qemu-user-static \
  && rm -rf /var/lib/apt/lists/*
 
+# The same image is the development environment of the remote plugin host: the root
+# tools/container.sh runs the x86_64 builds and both test rungs of
+# docs/autonomous-development.md in it, so a developer machine needs Podman and nothing else.
+#   * libpipewire-0.3-dev            speakerd's pw_filter node; :arm64 for its board build
+#   * pipewire, wireplumber, dbus    the virtual pair (tests/vpair). Bookworm ships PipeWire
+#                                    0.3.65 and WirePlumber 0.4.13, the versions the boards run
+#   * python3-numpy                  the virtual pair's harness
+#   * xvfb, openbox, imagemagick,    plugin-check's editor check and its screenshot
+#     fonts-dejavu-core
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libpipewire-0.3-dev libpipewire-0.3-dev:arm64 \
+      pipewire pipewire-bin wireplumber dbus dbus-session-bus-common \
+      python3 python3-numpy \
+      xvfb openbox imagemagick fonts-dejavu-core \
+      procps \
+ && rm -rf /var/lib/apt/lists/*
+
 # juce_plugins/ is bind-mounted here; each step sets its own working directory.
 WORKDIR /work

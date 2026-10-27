@@ -3,6 +3,9 @@
 #     tools/pw-inspect.sh [left|right]
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/tools/container.sh"
+# A virtual speaker lives where the virtual pair runs; any other PipeWire is the one here.
+[ -n "${1:-}" ] && container_or_native "$0" "$@"
 if [ -n "${1:-}" ]; then
     eval "$("$ROOT/tests/vpair/vpair.sh" env "$1")" || exit 1
     echo "=== virtual speaker: $1"

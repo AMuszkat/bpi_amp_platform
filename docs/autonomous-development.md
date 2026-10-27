@@ -74,12 +74,24 @@ session and a null-sink amplifier, so the rung already runs where containers can
 cloud sessions agents work in have no container runtime). A Python harness plays into and
 records from each speaker, and three tests prove the audio path: a tone arrives at both
 amplifier channels with its frequency and level intact, on each speaker, and the speakers
-are independent. `speakerd`, `ampd`, the Snapcast source and `tc netem` come next; the
-compose file comes with them, for CI.
+are independent. On a machine with Podman both speakers run inside the development
+container described below, on bookworm's PipeWire 0.3.65 and WirePlumber 0.4.13, the
+versions the boards run; natively where there is no container runtime. `speakerd`, `ampd`,
+the Snapcast source and `tc netem` come next; the compose file comes with them, for CI.
 
 **Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
 complete, control and headless targets and checks that they fit together (same parameters,
 state that moves between them, identical sound).
+
+**The development container** is the builder image itself. Besides the aarch64 toolchain
+it carries what rungs 1 and 2 need on x86_64: the PipeWire headers `speakerd` builds
+against (native and `:arm64`), PipeWire, WirePlumber and D-Bus for the virtual pair,
+numpy for its harness, and Xvfb, openbox and ImageMagick for the editor check.
+`tools/container.sh` keeps one long-running container per checkout and git worktree, with
+the checkout mounted at its own path, and `tools/build.sh`, `tools/test.sh`,
+`tests/vpair/vpair.sh` and the harness move into it themselves. A developer machine needs
+Podman and git and nothing else; CI and the cloud sessions run the same scripts natively
+(`BPI_CONTAINER=0`, or no Podman).
 
 **Rung 3, the hardware lab.** The boards named in the gitignored `local.env`, reached over ssh
 with the existing `make`/`build-podman.sh -install` paths. The probe is the amplifier itself:

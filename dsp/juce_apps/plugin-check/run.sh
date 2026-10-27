@@ -4,8 +4,12 @@
 #
 #     juce_apps/plugin-check/run.sh <plugin> [--no-editor]
 #
+# Runs in the development container when Podman is installed (tools/container.sh at the
+# repository root; BPI_CONTAINER=0 runs it natively).
+#
 # Environment:
-#   JUCE_INSTALL_DIR   a JUCE install (cmake --install of juce_plugins/JUCE)   default /opt/juce
+#   JUCE_INSTALL_DIR   a JUCE install (cmake --install of juce_plugins/JUCE)
+#                      default build/juce-install at the repository root, made when missing
 #   BUILD_DIR          where builds and the report go         default juce_apps/plugin-check/build-check
 #
 # The editor check needs an X display. With no DISPLAY set, it starts Xvfb and a window
@@ -15,11 +19,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
+. "$ROOT/../tools/container.sh"
+container_or_native "$0" "$@"
 PLUGIN="${1:?usage: $0 <plugin> [--no-editor]}"
 EDITOR=1
 [ "${2:-}" = "--no-editor" ] && EDITOR=0
 
-JUCE_INSTALL_DIR="${JUCE_INSTALL_DIR:-/opt/juce}"
+ensure_juce
 BUILD_DIR="$(mkdir -p "${BUILD_DIR:-$HERE/build-check}" && cd "${BUILD_DIR:-$HERE/build-check}" && pwd)"
 SRC="$ROOT/juce_plugins/$PLUGIN"
 [ -f "$SRC/CMakeLists.txt" ] || { echo "No plugin '$PLUGIN' in $ROOT/juce_plugins" >&2; exit 2; }

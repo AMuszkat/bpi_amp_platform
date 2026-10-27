@@ -20,7 +20,8 @@ juce_plugins/
 ├── tools/                      the build system, shared by every plugin
 │   ├── build-podman.sh           recommended: containerised cross-build, deploy, local debug
 │   ├── common.sh                 config loading + plugin discovery used by the scripts
-│   ├── Containerfile             the builder image (Debian bookworm + aarch64 cross toolchain)
+│   ├── Containerfile             the builder image (Debian bookworm + aarch64 cross toolchain),
+│   │                             also the repository's development container (tools/container.sh)
 │   ├── toolchain-aarch64-linux.cmake
 │   ├── build-aarch64.sh          alternative: cross-build on a bare Linux host
 │   ├── build-native-linux.sh     alternative: build on the ARM board itself

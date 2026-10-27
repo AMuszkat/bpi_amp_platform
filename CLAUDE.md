@@ -68,10 +68,11 @@ needs a change outside its files says so and stops.
   may bypass the status (never the lock) once with `BPI_DEPLOY_OVERRIDE=1 <command>`; it is
   logged in `tests/.status/overrides.log`. Create `.claude/lab.lock` whenever the boards are
   on a bench.
-- **Skills**: `/build` (a plugin or app, native or aarch64), `/test` (`unit` = plugin-check,
+- **Skills**: `/build` (a plugin or app, x86_64 or aarch64), `/test` (`unit` = plugin-check,
   `vpair` = the virtual pair, `all`; writes the status file), `/vpair` (operate the virtual
   pair), `/pw-inspect` (a PipeWire graph, summarised), `/juce` (JUCE knowledge). Their
-  scripts are in `tools/` and work without Claude.
+  scripts are in `tools/`, work without Claude, and run in the development container
+  (below).
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
   `controller-dev`, `board-dev`, `verifier`, `reviewer`, `board-ops`, each limited to its
   area and tools as the document's table says.
@@ -79,29 +80,27 @@ needs a change outside its files says so and stops.
 
 ## Developing the remote plugin host
 
-Everything below runs on a Linux x86_64 machine with no boards attached.
+Everything below runs on a Linux x86_64 machine with no boards attached, and needs only
+**Podman** and git: the builds and both test rungs run in the **development container**,
+the builder image of `dsp/juce_plugins/tools/Containerfile` (Debian bookworm, so PipeWire
+0.3.65 and WirePlumber 0.4.13, the versions the boards run).
 
 ```sh
 git clone --recurse-submodules <this repository>
-sudo apt install build-essential cmake ninja-build pkg-config \
-    libasound2-dev libpipewire-0.3-dev libfreetype-dev libfontconfig1-dev \
-    libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl-dev \
-    libcurl4-openssl-dev ladspa-sdk lv2-dev lilv-utils \
-    pipewire pipewire-bin wireplumber dbus python3-numpy \
-    xvfb openbox imagemagick                     # editor checks on a headless machine
-
-# JUCE, once (any prefix; the scripts take JUCE_INSTALL_DIR)
-cmake -S dsp/juce_plugins/JUCE -B build/juce -G Ninja -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=$PWD/build/juce-install -DJUCE_BUILD_EXTRAS=OFF -DJUCE_BUILD_EXAMPLES=OFF
-cmake --build build/juce && cmake --install build/juce
-
-# Rung 1: a plugin's complete, control and headless builds fit together
-JUCE_INSTALL_DIR=$PWD/build/juce-install dsp/juce_apps/plugin-check/run.sh loudness
-
-# Rung 2: the virtual pair
-python3 -m unittest discover -s tests/vpair -v
+tools/test.sh all                # rung 1 (plugin-check) and rung 2 (the virtual pair)
+tools/build.sh loudness          # one plugin or application, into build/
+tools/container.sh               # a shell in the container
 ```
 
+The scripts move into the container themselves (`tools/container.sh`, which says how), so
+nothing changes in how they are called. The first run builds the image and a JUCE install
+in `build/juce-install`, which takes a few minutes; later runs start at once. Each checkout
+and each git worktree has its own long-running container, with the checkout mounted at its
+own path, so worktrees can run the virtual pair at the same time.
+`BPI_CONTAINER=0` runs the same scripts natively instead, where Podman is missing (cloud
+sessions) or the packages are installed (CI): the package list is the one in
+`.github/workflows/ci.yml`.
+
 The board builds are unchanged: `dsp/juce_plugins/tools/build-podman.sh` cross-compiles the
-plugins, `firmware/Makefile` the kernel side. See `docs/autonomous-development.md` for the
-three test rungs and what each one proves.
+plugins in the same image, `firmware/Makefile` the kernel side. See
+`docs/autonomous-development.md` for the three test rungs and what each one proves.

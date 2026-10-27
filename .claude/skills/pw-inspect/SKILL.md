@@ -15,5 +15,6 @@ port, and every link. Read it top to bottom: a stream that is there but unlinked
 WirePlumber target problem; a node that is absent never registered.
 
 Underneath it is `pw-dump` (everything, as JSON), `pw-link -l` (links) and `pw-top -b -n 1`
-(load per node). Run those directly for detail; `pw-top` is the one that shows how much of
+(load per node). Run those directly for detail, through `tests/vpair/vpair.sh run <speaker>`
+for a virtual speaker, since it may live in the development container; `pw-top` is the one that shows how much of
 the quantum each node uses, which is the first thing to look at when there are xruns.

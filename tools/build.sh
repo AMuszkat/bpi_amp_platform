@@ -3,25 +3,28 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-what="${1:?usage: $0 <plugin|plugin-check> [complete|control|headless|all|aarch64]}"
+what="${1:?usage: $0 <plugin|app> [complete|control|headless|all|aarch64]}"
 kind="${2:-all}"
-JUCE_INSTALL_DIR="${JUCE_INSTALL_DIR:-/opt/juce}"
 
+# The aarch64 build runs its own container, from the host.
 if [ "$kind" = aarch64 ]; then
     exec dsp/juce_plugins/tools/build-podman.sh "$what"
 fi
 
-[ -d "$JUCE_INSTALL_DIR" ] || { echo "no JUCE install at $JUCE_INSTALL_DIR; set JUCE_INSTALL_DIR (see CLAUDE.md)" >&2; exit 2; }
+. tools/container.sh
+container_or_native "$0" "$@"
+ensure_juce
 
-if [ "$what" = plugin-check ]; then
-    cmake -S dsp/juce_apps/plugin-check -B build/plugin-check -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR"
-    cmake --build build/plugin-check -j"$(nproc)"
-    echo "built build/plugin-check/plugin-check_artefacts/Release/plugin-check"
+# An application: a folder of dsp/juce_apps (plugin-check, speakerd, the controller).
+if [ -f "dsp/juce_apps/$what/CMakeLists.txt" ]; then
+    cmake -S "dsp/juce_apps/$what" -B "build/$what" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR"
+    cmake --build "build/$what" -j"$(nproc)"
+    echo "built build/$what/${what}_artefacts/Release/"
     exit 0
 fi
 
 src="dsp/juce_plugins/$what"
-[ -f "$src/CMakeLists.txt" ] || { echo "no plugin '$what' in dsp/juce_plugins" >&2; exit 2; }
+[ -f "$src/CMakeLists.txt" ] || { echo "no plugin '$what' in dsp/juce_plugins and no application in dsp/juce_apps" >&2; exit 2; }
 cmake -S "$src" -B "build/$what" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR"
 
 targets=()

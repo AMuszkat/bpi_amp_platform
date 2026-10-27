@@ -17,29 +17,36 @@ monitor, which is exactly what the MAX98397s would have received.
 ## Running
 
 ```bash
-sudo apt install pipewire pipewire-bin wireplumber dbus python3-numpy
-python3 -m unittest discover -s tests/vpair -v
+python3 -m unittest discover -s tests/vpair -v     # or tools/test.sh vpair, which records the result
 ```
+
+With Podman installed, the pair and the tests run in the development container
+(`tools/container.sh`, Debian bookworm: PipeWire 0.3.65 and WirePlumber 0.4.13, as on the
+boards), and the commands here move there themselves. Without it, or with `BPI_CONTAINER=0`,
+they run natively and need `pipewire pipewire-bin wireplumber dbus python3-numpy`.
 
 The tests bring the pair up and take it down themselves. By hand:
 
 ```bash
 tests/vpair/vpair.sh up                     # both speakers
-eval "$(tests/vpair/vpair.sh env left)"     # point pw-cli, pw-dump, pw-play ... at one of them
-pw-link -l
+tests/vpair/vpair.sh run left pw-link -l    # a pw-* tool against one of them
 tests/vpair/vpair.sh down
 ```
 
-The speakers keep their sockets, state and logs in `$VPAIR_DIR` (default `/tmp/vpair`), one
-folder each. Keep that path short: PipeWire's socket path must fit in 108 bytes.
+`eval "$(tests/vpair/vpair.sh env left)"` points a shell at one speaker; with the container,
+do that in a shell inside it (`tools/container.sh`).
+
+The speakers keep their sockets, state and logs in `$VPAIR_DIR` (default `/tmp/vpair`, in
+the container when it is used), one folder each. Keep that path short: PipeWire's socket
+path must fit in 108 bytes.
 
 ## Files
 
 | File | What it is |
 |---|---|
 | `speaker.conf` | PipeWire configuration of one virtual speaker |
-| `vpair.sh` | starts, stops and describes the pair |
-| `harness.py` | plays into and records from a speaker, plus signal analysis |
+| `vpair.sh` | starts, stops and describes the pair, runs a tool against one speaker |
+| `harness.py` | plays into and records from a speaker, plus signal analysis; moves the test run into the container when the pair lives there |
 | `test_audio_path.py` | the pair itself works: tones arrive intact on both channels, the speakers are independent |
 
 ## Two things worth knowing
@@ -47,6 +54,9 @@ folder each. Keep that path short: PipeWire's socket path must fit in 108 bytes.
 - **PipeWire needs its access module even with nothing to protect.** Without
   `libpipewire-module-access` a client connects but is never granted permissions, so
   `pw-dump` and `pw-cli` hang with no error.
+- **WirePlumber 0.4 exits where there is no systemd** unless Bluetooth is off: its
+  Bluetooth monitor watches logind. `vpair.sh` turns it off for each speaker, which has no
+  Bluetooth anyway.
 - **The amplifier only has ports once WirePlumber runs.** A bare PipeWire with a null sink
   shows no ports: the session manager configures them. `vpair.sh up` waits for
   `amplifier:playback_FL` before it reports a speaker as up.

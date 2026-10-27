@@ -11,6 +11,10 @@ jobs:
   rungs-1-and-2:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # Natively, with the packages below: the runners have Podman, and the scripts would
+    # otherwise move into the development container (tools/container.sh).
+    env:
+      BPI_CONTAINER: "0"
     steps:
       - uses: actions/checkout@v4
         with:

@@ -3,7 +3,11 @@
 # WirePlumber and D-Bus session, on this machine. See README.md.
 #
 #     tests/vpair/vpair.sh up | down | status
-#     eval "$(tests/vpair/vpair.sh env left)"     # point pw-* tools at one speaker
+#     tests/vpair/vpair.sh run left pw-link -l    # run a pw-* tool against one speaker
+#     eval "$(tests/vpair/vpair.sh env left)"     # the same, for a shell in the same place
+#
+# On a machine with Podman the pair runs in the development container (tools/container.sh),
+# and this script moves there itself; `env` is then only useful inside the container.
 #
 # VPAIR_DIR is where the speakers keep their sockets and state (default /tmp/vpair). Keep it
 # short: a PipeWire socket path must fit in 108 bytes.
@@ -11,10 +15,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/../../tools/container.sh"
+container_or_native "$0" "$@"
 BASE="${VPAIR_DIR:-/tmp/vpair}"
 SPEAKERS=(left right)
 
-need() { command -v "$1" > /dev/null || { echo "vpair: '$1' is not installed ($2)" >&2; exit 2; }; }
+need() { command -v "$1" > /dev/null || { echo "vpair: '$1' is not installed ($2, or install Podman to use the container)" >&2; exit 2; }; }
 
 speaker_env() {
     local d="$BASE/$1"
@@ -30,6 +36,11 @@ start_speaker() {
     if is_up "$s"; then echo "$s: already up"; return; fi
     rm -rf "$d"; mkdir -p "$d/run" "$d/config" "$d/state"
     [ ${#d} -lt 80 ] || { echo "vpair: VPAIR_DIR is too long for PipeWire's socket path" >&2; exit 2; }
+
+    # A virtual speaker has no Bluetooth. For it WirePlumber 0.4 (bookworm's, as on the
+    # boards) watches logind, and exits where there is no systemd, as in the container.
+    mkdir -p "$d/config/wireplumber/bluetooth.lua.d"
+    echo 'bluez_monitor.enabled = false' > "$d/config/wireplumber/bluetooth.lua.d/80-no-bluetooth.lua"
 
     # WirePlumber needs a session bus; each speaker gets its own.
     dbus-daemon --session --fork --print-address=3 --print-pid=4 3> "$d/dbus.address" 4> "$d/dbus.pid"
@@ -83,8 +94,14 @@ case "${1:-}" in
     env)
         speaker_env "${2:?usage: $0 env <left|right>}"
         ;;
+    run)
+        [ $# -ge 3 ] || { echo "usage: $0 run <left|right> <command...>" >&2; exit 2; }
+        eval "$(speaker_env "$2")"
+        shift 2
+        exec "$@"
+        ;;
     *)
-        echo "usage: $0 up | down | status | env <speaker>" >&2
+        echo "usage: $0 up | down | status | env <speaker> | run <speaker> <command...>" >&2
         exit 2
         ;;
 esac

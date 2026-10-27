@@ -9,7 +9,9 @@ tools a person would use, and analyses what the "amplifier" of each speaker rece
 """
 
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -20,6 +22,23 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 VPAIR = HERE / "vpair.sh"
 RATE = 48000
+
+
+def _into_the_container():
+    """Where the virtual pair runs in the development container (tools/container.sh, chosen
+    by BPI_CONTAINER as for the shell scripts), the tests must run there too: re-runs this
+    very command line in it."""
+    if os.environ.get("BPI_IN_CONTAINER") or os.environ.get("BPI_CONTAINER", "auto") == "0":
+        return
+    if os.environ.get("BPI_CONTAINER") != "1" and not shutil.which("podman"):
+        return
+    container = str(HERE.parent.parent / "tools" / "container.sh")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(container, [container, "python3", *sys.orig_argv[1:]])
+
+
+_into_the_container()
 
 
 def tone(freq_hz, level_dbfs, seconds, rate=RATE):

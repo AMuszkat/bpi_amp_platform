@@ -9,15 +9,18 @@ description: Run the remote plugin host's tests and record the result for the de
 tools/test.sh unit | vpair | all
 ```
 
-Runs from the repository root. Every run records its result for the current commit with
+Runs from the repository root, in the development container when Podman is installed
+(`tools/container.sh`), natively with `BPI_CONTAINER=0`. Every run records its result for the current commit with
 `tools/status.py`, in `tests/.status/<commit>.json`; the deploy gate in
 `.claude/hooks/pre-bash.py` refuses to let anything reach a board unless both `unit` and
 `vpair` read `pass` for the exact commit, with a clean tree.
 
-| Rung | What runs | Needs |
+| Rung | What runs | Natively, needs |
 |---|---|---|
-| `unit` | `dsp/juce_apps/plugin-check/run.sh <plugin>` for each plugin whose `CMakeLists.txt` lists `TARGETS` | a JUCE install in `JUCE_INSTALL_DIR` (see the root `CLAUDE.md`); Xvfb and openbox for the editor check, else it is skipped |
+| `unit` | `dsp/juce_apps/plugin-check/run.sh <plugin>` for each plugin whose `CMakeLists.txt` lists `TARGETS` | the JUCE build packages; Xvfb and openbox for the editor check, else it is skipped. The JUCE install is made on first use |
 | `vpair` | `python3 -m unittest discover -s tests/vpair` | `pipewire`, `wireplumber`, `dbus`, `python3-numpy` |
+
+The container has all of them.
 
 Read the report, not just the exit status: `unit` writes
 `dsp/juce_apps/plugin-check/build-check/<plugin>-report.txt` with one line per check, and a
