@@ -12,8 +12,15 @@ also builds and runs speakerd on a speaker, and renders through it offline.
     with Pair() as pair, Speakerd(pair["left"], state_dir(d, current=doc),
                                   bundles=[built("loudness", "headless")]):
         received = pair["left"].play_and_record(x, target="speakerd", record_target="amplifier")
+
+    from harness import Player, Recorder
+    with Player(pair["left"], long_tone, target="speakerd") as stream:   # in the background
+        with Recorder(pair["left"], "amplifier", fmt="f32") as recorder:
+            ...
+            received = recorder.stop()
 """
 
+import itertools
 import json
 import os
 import shutil
@@ -30,6 +37,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 VPAIR = HERE / "vpair.sh"
+VPAIR_DIR = Path(os.environ.get("VPAIR_DIR", "/tmp/vpair"))
 RATE = 48000
 
 
@@ -141,12 +149,35 @@ def _write_wav(path, samples, rate=RATE):
 
 
 def _read_wav(path):
-    with wave.open(str(path), "rb") as w:
-        width, channels, frames = w.getsampwidth(), w.getnchannels(), w.getnframes()
-        raw = w.readframes(frames)
-    dtype = {2: "<i2", 4: "<i4"}[width]
-    x = np.frombuffer(raw, dtype=dtype).reshape(-1, channels).astype(np.float64)
-    return x / float(2 ** (8 * width - 1))
+    """A WAV file as an (n, channels) array of floats, full scale 1.0: 16- or 32-bit integer PCM,
+    or 32-bit float, as pw-record and speakerd's render write them. A float file's samples are
+    returned as they are, above full scale and NaN included. A file whose writer was stopped
+    before it finished its header is read to its end."""
+    data = Path(path).read_bytes()
+    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError(f"{path} is not a WAV file")
+    fmt, frames, at = None, None, 12
+    while at + 8 <= len(data):
+        chunk, size = data[at:at + 4], struct.unpack("<I", data[at + 4:at + 8])[0]
+        if chunk == b"fmt ":
+            fmt = struct.unpack("<HHIIHH", data[at + 8:at + 24])
+            if fmt[0] == 0xFFFE:   # WAVE_FORMAT_EXTENSIBLE: the format is in its sub-format GUID
+                fmt = (struct.unpack("<H", data[at + 32:at + 34])[0],) + fmt[1:]
+        elif chunk == b"data":
+            end = len(data) if size in (0, 0xFFFFFFFF) else min(len(data), at + 8 + size)
+            frames = data[at + 8:end]
+            break
+        at += 8 + size + (size & 1)
+    if fmt is None or frames is None:
+        raise ValueError(f"{path} has no fmt or data chunk")
+    tag, channels, _, _, _, bits = fmt
+    dtype, scale = {(1, 16): ("<i2", 2.0 ** 15), (1, 32): ("<i4", 2.0 ** 31),
+                    (3, 32): ("<f4", 1.0)}.get((tag, bits), (None, None))
+    if dtype is None:
+        raise ValueError(f"{path}: format {tag}, {bits} bits is not read here")
+    width = channels * bits // 8
+    x = np.frombuffer(frames[:len(frames) // width * width], dtype=dtype).reshape(-1, channels)
+    return x.astype(np.float64) / scale
 
 
 # ---------------------------------------------------------------------------------------------
@@ -165,50 +196,97 @@ class Speaker:
                 key, _, value = assignment.partition("=")
                 self.env[key] = value.strip("'")
 
+    def health(self):
+        """Nothing ("") while this speaker's PipeWire and WirePlumber run; otherwise which is gone,
+        with the end of its log, for a failure message. A test that waits for a link or a port
+        and gets none fails with this, rather than with a bare timeout."""
+        gone = []
+        for daemon in ("pipewire", "wireplumber"):
+            try:
+                os.kill(int((VPAIR_DIR / self.name / f"{daemon}.pid").read_text()), 0)
+                continue
+            except (OSError, ValueError):
+                pass
+            log = VPAIR_DIR / self.name / f"{daemon}.log"
+            tail = log.read_text(errors="replace").splitlines()[-8:] if log.exists() else []
+            gone.append(f"{self.name}: {daemon} is not running"
+                        + (" (WirePlumber 0.4.13 dies silently 5 s after a null sink that went "
+                           "idle less than 5 s earlier is destroyed: see remove_sink())"
+                           if daemon == "wireplumber" else "")
+                        + "; the end of its log:\n" + "\n".join("    " + line for line in tail))
+        return "\n".join(gone)
+
     def run(self, *args, timeout=10):
-        return subprocess.run(list(args), env=self.env, check=True, capture_output=True,
-                              text=True, timeout=timeout).stdout
+        """Runs a tool against this speaker, as `vpair.sh run <speaker> <tool...>`, and returns
+        what it printed. Fails when the tool does."""
+        return subprocess.run([str(VPAIR), "run", self.name, *args], env=self.env, check=True,
+                              capture_output=True, text=True, timeout=timeout).stdout
 
-    def _recorder(self, target, path):
-        return subprocess.Popen(
-            ["pw-record", "--target", target, "-P", "{ stream.capture.sink = true }",
-             "--rate", str(RATE), "--channels", "2", "--format", "s32", str(path)],
-            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def links(self):
+        """The links in this speaker's PipeWire, as pw-link -l lists them: a set of
+        ("node:output port", "node:input port") pairs."""
+        pairs, port = set(), None
+        for line in self.run("pw-link", "-l").splitlines():
+            if not line.startswith(" "):
+                port = line.strip()
+            elif line.strip().startswith("|->") and port is not None:
+                pairs.add((port, line.strip()[len("|->"):].strip()))
+        return pairs
 
-    def play_and_record(self, samples, target="amplifier", margin=0.4, record_target=None):
+    def wait_for_links(self, wanted, timeout=5.0, what="the links", process=None):
+        """Waits until every (output, input) pair in `wanted` is linked, polling pw-link, and
+        returns the links. Fails with the links there are on a timeout, or when `process` (the
+        player or recorder that is to be linked) exits first."""
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                have = self.links()
+            except subprocess.SubprocessError:   # pw-link failed: no PipeWire, say why below
+                have = set()
+            if set(wanted) <= have:
+                return have
+            exited = process is not None and process.poll() is not None
+            if exited or time.monotonic() > deadline:
+                why = (f"its process exited with status {process.returncode}" if exited
+                       else f"not within {timeout} s")
+                health = self.health()
+                raise AssertionError(
+                    f"{self.name}: {what} did not appear ({why}): wanted "
+                    + ", ".join(f"{o} -> {i}" for o, i in sorted(wanted)) + "; there are "
+                    + (", ".join(f"{o} -> {i}" for o, i in sorted(have)) or "none")
+                    + (f"\n{health}" if health else ""))
+            time.sleep(0.02)
+
+    def play_and_record(self, samples, target="amplifier", record_target=None, fmt="s32", tail=0.4):
         """Plays `samples` (mono, or (n, 2) for FL and FR) into `target` and returns what the
         monitor of `record_target` (default: `target` itself) received, as an (n, 2) array:
-        column 0 is the woofer channel, column 1 the tweeter channel. The player has finished
-        when this returns."""
-        with tempfile.TemporaryDirectory() as tmp:
-            src, rec = Path(tmp) / "play.wav", Path(tmp) / "rec.wav"
-            _write_wav(src, samples)
+        column 0 is the woofer channel, column 1 the tweeter channel. The recording is linked
+        before the player starts, and the player has finished when this returns."""
+        return self.play_and_record_many(samples, target, [(record_target or target, fmt)], tail)[0]
 
-            recorder = self._recorder(record_target or target, rec)
-            try:
-                time.sleep(margin)
-                subprocess.run(["pw-play", "--target", target, str(src)], env=self.env,
-                               check=True, capture_output=True,
-                               timeout=len(samples) / RATE + 10)
-                time.sleep(margin)
-            finally:
-                recorder.terminate()
-                recorder.wait(timeout=5)
+    def play_and_record_many(self, samples, target, records, tail=0.4):
+        """Plays `samples` into `target` while recording each (node, format) of `records` at
+        once (format "s32" or "f32", see Recorder), and returns the recordings in that order.
+        After the player has finished, the recordings go on for `tail` seconds: what the player
+        handed over is still on its way through the graph."""
+        recorders = []
+        try:
+            for node, fmt in records:
+                recorders.append(Recorder(self, node, fmt).start())
+            with Player(self, samples, target, linked=False) as player:
+                player.wait(timeout=len(samples) / RATE + 10)
+            time.sleep(tail)
+            return [recorder.stop() for recorder in recorders]
+        finally:
+            for recorder in recorders:
+                recorder.close()
 
-            return _read_wav(rec)
-
-    def record(self, seconds, target="amplifier"):
-        """Records `target`'s monitor for `seconds`, playing nothing."""
-        with tempfile.TemporaryDirectory() as tmp:
-            rec = Path(tmp) / "rec.wav"
-            recorder = self._recorder(target, rec)
-            try:
-                time.sleep(seconds)
-            finally:
-                recorder.terminate()
-                recorder.wait(timeout=5)
-
-            return _read_wav(rec)
+    def record(self, seconds, target="amplifier", fmt="s32"):
+        """Records `target`'s monitor for `seconds` from the moment it is linked, playing
+        nothing."""
+        with Recorder(self, target, fmt) as recorder:
+            time.sleep(seconds)
+            return recorder.stop()
 
     def create_sink(self, name):
         """Adds a null sink like the amplifier (woofer FL, tweeter FR) to this speaker's
@@ -218,8 +296,150 @@ class Speaker:
                  + " media.class = Audio/Sink audio.position = [ FL FR ] node.driver = true"
                  + " monitor.channel-volumes = false object.linger = true }")
 
+    def has_sink(self, name):
+        """Whether a sink called `name`, with its ports, is in this speaker's PipeWire."""
+        return any(line.startswith(name + ":playback_") for line in self.run("pw-link", "-i").splitlines())
+
+    def remove_sink(self, name):
+        """Destroys a null sink made by create_sink() while a player of silence keeps it running.
+        WirePlumber 0.4.13 dies silently about 5 s after the destroy of a null sink that went idle
+        less than 5 s earlier (its suspend timer is still pending), and new nodes get no ports
+        from then on. A sink that runs has no such timer."""
+        with Player(self, silence(10.0), target=name):
+            self.remove_node(name)
+
     def remove_node(self, name):
+        """Destroys a node. For a null sink use remove_sink(), unless it is running."""
         self.run("pw-cli", "destroy", name)
+
+    def set_quantum(self, quantum):
+        """Forces this speaker's quantum (pw-metadata -n settings 0 clock.force-quantum), or
+        lets it go back to its own with 0. PipeWire 0.3.65 rounds a forced quantum down to a
+        power of two (clock.power-of-two-quantum, true by default, as on the boards)."""
+        self.run("pw-metadata", "-n", "settings", "0", "clock.force-quantum", str(quantum))
+
+
+_names = itertools.count(1)
+
+
+def _stop_process(process):
+    """SIGTERM, and SIGKILL if that does not end it within 5 s."""
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+class Recorder:
+    """pw-record of one node's monitor on a speaker (a sink's monitor ports), as 32-bit integer
+    ("s32", which cannot show anything above full scale) or 32-bit float ("f32", which shows
+    every value as it is, NaN and above full scale included). start(), or entering a `with`
+    block, returns once WirePlumber has linked the recorder to the node, so nothing played
+    after it is missed. stop() returns the recording, (n, 2); close(), or leaving the block,
+    ends it whatever happened."""
+
+    def __init__(self, speaker, target, fmt="s32", timeout=5.0):
+        if fmt not in ("s32", "f32"):
+            raise ValueError(f"no recording format {fmt}: s32 or f32")
+        self.speaker, self.target, self.fmt, self.timeout = speaker, target, fmt, timeout
+        self.name = f"vpair-record-{os.getpid()}-{next(_names)}"
+        self.process, self._tmp = None, None
+
+    def start(self):
+        self._tmp = tempfile.mkdtemp(prefix="vpair-record-")
+        self.path = Path(self._tmp) / "record.wav"
+        self.process = subprocess.Popen(
+            ["pw-record", "--target", self.target,
+             "-P", "{ stream.capture.sink = true node.name = " + self.name + " }",
+             "--rate", str(RATE), "--channels", "2", "--format", self.fmt, str(self.path)],
+            env=self.speaker.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        try:
+            self.speaker.wait_for_links(
+                {(f"{self.target}:monitor_{c}", f"{self.name}:input_{c}") for c in ("FL", "FR")},
+                self.timeout, f"the recorder of {self.target}", self.process)
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def stop(self):
+        """Ends the recording and returns it."""
+        _stop_process(self.process)
+        try:
+            return _read_wav(self.path)
+        finally:
+            self.close()
+
+    def close(self):
+        if self.process is not None:
+            _stop_process(self.process)
+        if self._tmp is not None:
+            shutil.rmtree(self._tmp, ignore_errors=True)
+            self._tmp = None
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+class Player:
+    """pw-play of `samples` (mono, or (n, 2) for FL and FR) into `target` on a speaker, in the
+    background, for a `with` block. Entering returns once WirePlumber has linked the player to
+    `target` (unless `linked` is False); leaving stops it if it still plays. Its node is named
+    `name` (a unique vpair-play-... by default), which is how pw-link shows its ports."""
+
+    def __init__(self, speaker, samples, target="amplifier", linked=True, timeout=5.0, name=None):
+        self.speaker, self.samples, self.target = speaker, samples, target
+        self.linked, self.timeout = linked, timeout
+        self.name = name or f"vpair-play-{os.getpid()}-{next(_names)}"
+        self.process, self._tmp = None, None
+
+    def __enter__(self):
+        self._tmp = tempfile.mkdtemp(prefix="vpair-play-")
+        path = Path(self._tmp) / "play.wav"
+        _write_wav(path, self.samples)
+        self.process = subprocess.Popen(
+            ["pw-play", "--target", self.target, "-P", "{ node.name = " + self.name + " }", str(path)],
+            env=self.speaker.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True)
+        if self.linked:
+            try:
+                self.speaker.wait_for_links(
+                    {(f"{self.name}:output_{c}", f"{self.target}:playback_{c}") for c in ("FL", "FR")},
+                    self.timeout, f"the player into {self.target}", self.process)
+            except BaseException:
+                self.__exit__(None, None, None)
+                raise
+        return self
+
+    def playing(self):
+        return self.process.poll() is None
+
+    def wait(self, timeout):
+        """Waits for the player to finish, and fails if it did not play to the end."""
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"pw-play into {self.target} did not finish within {timeout} s")
+        if self.process.returncode != 0:
+            raise AssertionError(f"pw-play into {self.target} exited with status "
+                                 f"{self.process.returncode}: {self.process.stderr.read()}")
+
+    def __exit__(self, *exc):
+        if self.process is not None:
+            _stop_process(self.process)
+            self.process.stderr.close()
+        if self._tmp is not None:
+            shutil.rmtree(self._tmp, ignore_errors=True)
+            self._tmp = None
+        return False
 
 
 class Pair:
@@ -240,9 +460,8 @@ class Pair:
                                 timeout=60)
         if result.returncode == 0:
             return
-        base = Path(os.environ.get("VPAIR_DIR", "/tmp/vpair"))
         logs = []
-        for log in sorted(base.glob("*/*.log")):
+        for log in sorted(VPAIR_DIR.glob("*/*.log")):
             tail = log.read_text(errors="replace").splitlines()[-15:]
             logs.append(f"  {log}:\n" + "\n".join("    " + line for line in tail))
         subprocess.run([str(VPAIR), "down"], check=False, capture_output=True, timeout=30)
@@ -362,21 +581,23 @@ class Speakerd:
     It runs with `state` as its state directory, the LV2 `bundles` given and an empty HOME, so
     it sees exactly those plugins (lilv would otherwise prefer copies in ~/.lv2). Entering
     waits for the log line `wait_for` (by default the "playing" line, from which a player is
-    heard). Leaving stops it with SIGTERM and checks that it said "stopping" and exited 0;
-    after a failure inside the block it is stopped all the same, killed if need be.
+    heard; None waits for nothing). Leaving stops it with SIGTERM, if it still runs, and checks
+    that "stopping" was its last line, said once, and that it exited with `exit_status`; after
+    a failure inside the block it is stopped all the same, killed if need be.
 
         with Speakerd(speaker, state, bundles=[bundle]) as sd:
             sd.wait_for("linked to amplifier ")
     """
 
     def __init__(self, speaker, state, bundles=(), args=(), wait_for="playing: ", timeout=30,
-                 prefix=()):
+                 prefix=(), exit_status=0):
         self.speaker = speaker
         self.command = [*prefix, str(built("speakerd")), "--state-dir", str(state)]
         for bundle in bundles:
             self.command += ["--lv2-bundle", str(bundle)]
         self.command += list(args)
         self.first_wait, self.first_timeout = wait_for, timeout
+        self.exit_status = exit_status
         self.lines = []
         self.process = None
         self._changed = threading.Condition()
@@ -405,28 +626,41 @@ class Speakerd:
         with self._changed:
             return [line for line in self.lines[after:] if line.startswith("speakerd: " + text)]
 
-    def wait_for(self, text, timeout=30, after=0):
-        """Waits for a log line starting with "speakerd: " + `text`, from line `after` on, and
-        returns it. Fails, with speakerd's output, on a timeout or when speakerd exits."""
+    def own_lines(self):
+        """speakerd's own lines (those starting with "speakerd: "), without what the libraries
+        it loads print."""
+        with self._changed:
+            return [line for line in self.lines if line.startswith("speakerd: ")]
+
+    def wait_for(self, text, timeout=30, after=0, required=True):
+        """Waits for a log line starting with "speakerd: " + `text` (or with any of the texts,
+        given a tuple), from line `after` on, and returns it. Fails, with speakerd's output, on
+        a timeout (or returns None, if not `required`) or when speakerd exits."""
+        texts = (text,) if isinstance(text, str) else tuple(text)
+        wanted = " or ".join(f"'{t}'" for t in texts)
         deadline = time.monotonic() + timeout
         with self._changed:
             while True:
                 for line in self.lines[after:]:
-                    if line.startswith("speakerd: " + text):
+                    if any(line.startswith("speakerd: " + t) for t in texts):
                         return line
                 remaining = deadline - time.monotonic()
                 if self.process.poll() is not None and not self._reader.is_alive():
                     raise AssertionError(self._report(
                         f"speakerd exited with status {self.process.returncode} before it "
-                        f"said '{text}'"))
+                        f"said {wanted}"))
                 if remaining <= 0:
+                    if not required:
+                        return None
                     raise AssertionError(self._report(
-                        f"speakerd did not say '{text}' within {timeout} s"))
+                        f"speakerd did not say {wanted} within {timeout} s"))
                 self._changed.wait(min(remaining, 0.5))
 
     def _report(self, what):
+        health = self.speaker.health()
         return (f"{what}\n  command: {' '.join(self.command)}\n  its output:\n"
-                + "\n".join("    " + line for line in self.lines))
+                + "\n".join("    " + line for line in self.lines)
+                + (f"\n{health}" if health else ""))
 
     # Running ------------------------------------------------------------------------------
 
@@ -449,6 +683,23 @@ class Speakerd:
         self._stop(check=exc_type is None)
         return False
 
+    def stop(self, timeout=10):
+        """Sends SIGTERM and waits for speakerd to exit, with its whole log read; returns its
+        exit status. Leaving the block then checks the status and the log."""
+        if self.process.poll() is None:
+            self.process.send_signal(signal.SIGTERM)
+        return self.wait_exit(timeout)
+
+    def wait_exit(self, timeout=10):
+        """Waits for speakerd to exit on its own, with its whole log read, and returns its exit
+        status. Fails, with its output, if it still runs after `timeout` seconds."""
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(self._report(f"speakerd still runs after {timeout} s"))
+        self._reader.join(timeout=5)
+        return self.process.returncode
+
     def _stop(self, check):
         try:
             if self.process.poll() is None:
@@ -463,11 +714,14 @@ class Speakerd:
             self._reader.join(timeout=5)
             self.process.stdout.close()
             if check:
-                if self.process.returncode != 0:
+                if self.process.returncode != self.exit_status:
                     raise AssertionError(self._report(
-                        f"speakerd exited with status {self.process.returncode}, not 0"))
-                if not self.lines_starting("stopping"):
-                    raise AssertionError(self._report("speakerd did not say 'stopping'"))
+                        f"speakerd exited with status {self.process.returncode}, not "
+                        f"{self.exit_status}"))
+                own = self.own_lines()
+                if own.count("speakerd: stopping") != 1 or own[-1] != "speakerd: stopping":
+                    raise AssertionError(self._report(
+                        "speakerd did not say 'stopping' once, as its last line"))
         finally:
             shutil.rmtree(self._home, ignore_errors=True)
 
