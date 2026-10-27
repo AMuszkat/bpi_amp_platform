@@ -58,6 +58,25 @@ path must fit in 108 bytes.
 | `harness.py` | plays into and records from a speaker, signal analysis, builds and runs `speakerd` and its offline render; moves the test run into the container when the pair lives there |
 | `__init__.py` | puts the harness on the path for `python3 -m unittest tests.vpair.<module>` |
 | `test_audio_path.py` | the pair itself works: tones arrive intact on both channels, the speakers are independent |
+| `test_speakerd_same_sound.py` | speakerd running the headless build sounds like the complete build |
+| `test_speakerd_state_layers.py` | a broken layer falls back to the next one, identified by the log and by its sound |
+| `test_passthrough_safety.py` | the `passthrough_safety` scenario: with no plugin or no layer, the tweeter is silent and the woofer capped |
+| `test_speakerd_start_order.py` | speakerd plays whatever starts after it: the amplifier, PipeWire; and with no network |
+
+## What the scenarios prove
+
+Each module's docstring states its pass criteria exactly; this is the summary. All of them
+run `speakerd` (`dsp/juce_apps/speakerd`) on a virtual speaker with an empty `HOME` and the
+bundles named on its command line, play into its `speakerd` sink and record the amplifier.
+The reference is speakerd's own offline render (`--render`) of the same document pointed at
+the complete build of the plugin, which is what the plugin outside speakerd outputs.
+
+| Module | Pass when |
+|---|---|
+| `test_speakerd_same_sound` | loudness's headless build, from a hand-written `graph.json` with non-default values in Auto mode, gives every tone from 40 Hz to 6 kHz, at two levels, the gain of the complete build within 0.05 dB on both amplifier channels, with a residual under -80 dBFS; and the gain is not 0 dB, and depends on the level |
+| `test_speakerd_state_layers` | a half-written or plugin-less `graph.json` plays `graph.lkg.json`, and with both broken speakerd plays `factory.json`, each said in the log and heard: the 100 Hz gain matches that layer's render within 0.05 dB and is at least 1 dB from every other layer's |
+| `test_passthrough_safety` | with every plugin removed or no layer at all, for role left, right and mono: the tweeter is below -120 dBFS, the woofer is the own channel at -20 dB within 0.05 dB and never above -20 dBFS, also with the input above full scale |
+| `test_speakerd_start_order` | started before its amplifier exists, with the amplifier going away and coming back, before PipeWire runs, and in a network namespace with no network, speakerd links, says it plays, and plays the complete build's gain within 0.05 dB, holding no IP socket |
 
 ## speakerd in a test
 
