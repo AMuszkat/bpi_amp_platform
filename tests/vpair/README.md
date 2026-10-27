@@ -21,6 +21,11 @@ python3 -m unittest discover -s tests/vpair -v     # or tools/test.sh vpair, whi
 python3 -m unittest -v tests.vpair.test_passthrough_safety    # one module, from the repository root
 ```
 
+`tools/test.sh vpair` records `vpair: pass` or `fail` for the deploy gate, with a note
+(`vpair_note`) of how many tests ran, which failed, and which were skipped and why. A skipped
+test does not fail the run, but a pass with skips says so: `test_no_network` skips where
+`unshare -rn` is refused, as on GitHub's runners.
+
 A scenario that runs speakerd builds what it needs first, once per test run:
 `tools/build.sh speakerd`, and loudness's `headless` and `complete` builds. The builds are
 incremental, so this takes about a second when nothing changed, and the first run of a fresh
@@ -55,13 +60,16 @@ path must fit in 108 bytes.
 |---|---|
 | `speaker.conf` | PipeWire configuration of one virtual speaker |
 | `vpair.sh` | starts, stops and describes the pair or one speaker of it, runs a tool against one speaker |
-| `harness.py` | plays into and records from a speaker, signal analysis, builds and runs `speakerd` and its offline render; moves the test run into the container when the pair lives there |
+| `harness.py` | plays into and records from a speaker, also in the background, once the links exist; signal analysis, builds and runs `speakerd` and its offline render; moves the test run into the container when the pair lives there |
 | `__init__.py` | puts the harness on the path for `python3 -m unittest tests.vpair.<module>` |
 | `test_audio_path.py` | the pair itself works: tones arrive intact on both channels, the speakers are independent |
 | `test_speakerd_same_sound.py` | speakerd running the headless build sounds like the complete build |
 | `test_speakerd_state_layers.py` | a broken layer falls back to the next one, identified by the log and by its sound |
 | `test_passthrough_safety.py` | the `passthrough_safety` scenario: with no plugin or no layer, the tweeter is silent and the woofer capped |
 | `test_speakerd_start_order.py` | speakerd plays whatever starts after it: the amplifier, PipeWire; and with no network |
+| `test_speakerd_restart.py` | speakerd stopped under a playing stream leaves the amplifier silent and the stream on its sink; the next one adopts it |
+| `test_speakerd_second_instance.py` | a second speakerd on the same PipeWire refuses, and the first plays on |
+| `test_speakerd_quantum_change.py` | the quantum changes while a stream plays, and the gain comes back each time |
 
 ## What the scenarios prove
 
@@ -75,8 +83,11 @@ the complete build of the plugin, which is what the plugin outside speakerd outp
 |---|---|
 | `test_speakerd_same_sound` | loudness's headless build, from a hand-written `graph.json` with non-default values in Auto mode, gives every tone from 40 Hz to 6 kHz, at two levels, the gain of the complete build within 0.05 dB on both amplifier channels, with a residual under -80 dBFS; and the gain is not 0 dB, and depends on the level |
 | `test_speakerd_state_layers` | a half-written or plugin-less `graph.json` plays `graph.lkg.json`, and with both broken speakerd plays `factory.json`, each said in the log and heard: the 100 Hz gain matches that layer's render within 0.05 dB and is at least 1 dB from every other layer's |
-| `test_passthrough_safety` | with every plugin removed or no layer at all, for role left, right and mono: the tweeter is below -120 dBFS, the woofer is the own channel at -20 dB within 0.05 dB and never above -20 dBFS, also with the input above full scale |
+| `test_passthrough_safety` | with every plugin removed or no layer at all, for role left, right and mono: every sample of the tweeter capture is exactly 0, the woofer is the own channel at -20 dB within 0.05 dB and never above -20 dBFS; with the input above full scale, the `speakerd` sink's monitor, recorded as floats, peaks above 0 dBFS (so the cap holds the woofer, not PipeWire), and the woofer still does not exceed -20 dBFS; and speakerd's render of that input with no layer is the own channel at -20 dB clamped to -20 dBFS sample for sample, peaking at exactly -20 dBFS, with a tweeter of zeros |
 | `test_speakerd_start_order` | started before its amplifier exists, with the amplifier going away and coming back, before PipeWire runs, and in a network namespace with no network, speakerd links, says it plays, and plays the complete build's gain within 0.05 dB, holding no IP socket |
+| `test_speakerd_restart` | speakerd stopped by SIGTERM while a stream plays exits with status 0 and "stopping" last; the amplifier is then silent for 1 s (woofer below -100 dBFS, tweeter all zeros) and the stream stays linked to the `speakerd` sink alone; a new speakerd says it uses the sink that exists and gives the render's gain within 0.05 dB, under the same stream |
+| `test_speakerd_second_instance` | a second speakerd on the same PipeWire says that another one runs (its `speakerd-dsp` exists), then `stopping`, and exits with status 3, and the first still gives the render's gain within 0.05 dB (not 6 dB more). It needs the refusal in speakerd, which came after step 2's first speakerd: against one without it, it fails, and says so |
+| `test_speakerd_quantum_change` | with a stream playing, the quantum forced to 256, 2048 and back to 1024: speakerd says each change (re-primed, or run as several blocks), the gain comes back to the render's within 0.05 dB on both channels after each, and the amplifier, recorded as floats throughout, holds no NaN, infinity or sample above full scale. The gap at a change is printed, not asserted: PipeWire 0.3.65 drops out or jumps at a quantum change by itself |
 
 ## speakerd in a test
 
@@ -96,18 +107,33 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
 - `state_dir()` writes `device.json` and the layers. A layer is a document, a string (written
   as it is, for a broken file), or `None` for no file.
 - `Speakerd` starts speakerd with the speaker's environment and an empty `HOME`, and waits for
-  a log line, by default the `playing:` line from which a player is heard. `sd.wait_for(text,
-  after=sd.mark())` waits for a later line. A timeout, or speakerd exiting, fails the test with
-  speakerd's whole output. Leaving the block sends SIGTERM and checks for `stopping` and exit
-  status 0. After a failure speakerd is stopped all the same. Log lines are matched as speakerd's
-  README lists them, after the `speakerd: ` prefix.
-- `play_and_record()` plays into one node and records another. The player has finished when
-  it returns, so it is always stopped before speakerd.
+  a log line, by default the `playing:` line from which a player is heard (`wait_for=None`
+  waits for none). `sd.wait_for(text, after=sd.mark())` waits for a later line, or for the
+  first of several given as a tuple. A timeout, or speakerd exiting, fails the test with
+  speakerd's whole output. `sd.stop()` sends SIGTERM and `sd.wait_exit()` waits for speakerd to
+  exit on its own; both return its exit status. Leaving the block sends SIGTERM if it still
+  runs, and checks that `stopping` was its last line, said once, and that it exited with
+  `exit_status` (0 unless given). After a failure speakerd is stopped all the same. Log lines
+  are matched as speakerd's README lists them, after the `speakerd: ` prefix.
+- `play_and_record()` plays into one node and records another; `play_and_record_many()`
+  records several at once. Each recording is linked before the player starts, and the player
+  has finished when they return, so it is always stopped before speakerd.
+- `Player(speaker, samples, target)` plays in the background for a `with` block, from the
+  moment WirePlumber has linked it to `target`: a stream that outlives a speakerd, or one a
+  test changes things under. `Recorder(speaker, node)` records a node's monitor for a `with`
+  block or from `start()` to `stop()`, from the moment it is linked. `speaker.links()` is
+  `pw-link -l` as a set of `("node:port", "node:port")` pairs, and `speaker.wait_for_links()`
+  waits for some. `speaker.run()` runs a tool through `vpair.sh run`.
 - Samples beyond full scale are written as a 32-bit float WAV, which pw-play and PipeWire carry
-  through unclipped. Recordings are 32-bit integer, so a capture cannot show anything above
-  0 dBFS.
+  through unclipped. Recordings are 32-bit integer (`fmt="s32"`, the default), which cannot show
+  anything above 0 dBFS, or 32-bit float (`fmt="f32"`), which shows every value as it is, NaN
+  and above full scale included.
 - `Pair.down(name)` and `Pair.up(name)` take one speaker down and up again, for a scenario
-  that starts something before that speaker's PipeWire runs.
+  that starts something before that speaker's PipeWire runs. `speaker.create_sink(name)` adds a
+  null sink like the amplifier and `speaker.remove_sink(name)` destroys it (see Worth knowing).
+  `speaker.set_quantum(n)` forces a speaker's quantum, and `set_quantum(0)` lets it go.
+- A wait for a link, a port or a log line that times out says, in its failure, whether the
+  speaker's PipeWire or WirePlumber has gone, with the end of its log (`speaker.health()`).
 
 ## Worth knowing
 
@@ -120,6 +146,21 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
 - **The amplifier only has ports once WirePlumber runs.** A bare PipeWire with a null sink
   shows no ports: the session manager configures them. `vpair.sh up` waits for
   `amplifier:playback_FL` before it reports a speaker as up.
+- **WirePlumber 0.4.13 dies silently about 5 s after a null sink is destroyed that went idle
+  less than 5 s earlier** (its suspend timer is still pending), and from then on new nodes get
+  no ports. `remove_sink()` therefore destroys a sink while a player of silence keeps it
+  running. Destroy a sink some other way only while it runs, or more than 5 s after it went
+  idle.
+- **The `speakerd` sink stays.** speakerd leaves its input sink in PipeWire when it stops (on
+  purpose: speakerd's README, "Whose sink"), so within one module, which keeps the pair up, every
+  speakerd after the first on a speaker adopts the sink the first one made.
+- **A forced quantum is rounded down to a power of two.** PipeWire 0.3.65 does that by default
+  (`clock.power-of-two-quantum`, as on the boards): `clock.force-quantum 1536` runs at 1024.
+- **PipeWire glitches on a quantum change by itself.** A tone played straight into the
+  amplifier, quantum 1024 to 256 to 2048 to 1024, jumps by 0.6 to 0.9 of its amplitude at each
+  change and drops out for 42 ms at the change to 2048, the same every time.
+- **A recording often starts with a quantum or two of zeros**, before the first buffer reaches
+  the recorder. The recorder is linked before anything is played, so a capture misses nothing.
 
 ## Next
 
