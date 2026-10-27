@@ -287,7 +287,7 @@ namespace
         {
             if (quitRequested.load())
             {
-                log ("stopping");
+                logLast ("stopping");
                 return exitOk;
             }
 
@@ -316,7 +316,7 @@ namespace
 
         if (quitRequested.load())
         {
-            log ("stopping");
+            logLast ("stopping");
             node.stop();
             return exitOk;
         }
@@ -324,7 +324,8 @@ namespace
         if (const auto started = node.start(); started.failed())
         {
             log (started.getErrorMessage());
-            log ("stopping");
+            node.stopLinking();
+            logLast ("stopping");
             node.stop();
             return exitPipeWire;
         }
@@ -336,7 +337,10 @@ namespace
             exitCode = controller.getExitCode();
         }
 
-        log ("stopping");
+        // No new link, and no line about one, once speakerd says it is stopping: the links that
+        // exist stay for the fade-out.
+        node.stopLinking();
+        logLast ("stopping");
         engine.fadeOut();
         node.stop();
         return exitCode;

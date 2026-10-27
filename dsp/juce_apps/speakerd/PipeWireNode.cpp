@@ -68,6 +68,21 @@ namespace speakerd
 
         int syncSeq = 0;
         bool synced = false;
+
+        // Linking waits for the registry to settle: a registry change asks for one round trip
+        // (pw_core_sync), and the links are updated when it comes back. PipeWire sends every
+        // change of one event (a node going away: its links, then its ports, then the node) before
+        // it answers a sync it reads afterwards, so speakerd never links to a port that is
+        // already going away.
+        int settleSeq = -1;
+        bool settlePending = false;
+        bool linkingStopped = false;
+
+        /** Errors PipeWire reports that are not a lost connection: logged at most once per
+            this many milliseconds. */
+        static constexpr juce::uint32 errorLogInterval = 10000;
+        juce::uint32 errorLogged = 0;
+        bool anyErrorLogged = false;
         Clock clock;
 
         // The registry, as far as linking needs it. PipeWire loop thread only.
@@ -128,26 +143,68 @@ namespace speakerd
         {
             auto& self = *static_cast<Impl*> (data);
 
-            if (id == PW_ID_CORE && seq == self.syncSeq)
+            if (id != PW_ID_CORE)
+                return;
+
+            if (seq == self.syncSeq)
             {
                 self.synced = true;
                 pw_thread_loop_signal (self.loop, false);
+            }
+
+            if (self.settlePending && seq == self.settleSeq)
+            {
+                self.settlePending = false;
+                self.updateLinks();
             }
         }
 
         static void onCoreError (void* data, uint32_t id, int, int res, const char* message)
         {
             auto& self = *static_cast<Impl*> (data);
+            const auto text = juce::String::fromUTF8 (message != nullptr ? message : "") + " (" + errorText (res) + ")";
 
             // Errors on other objects (a link that could not be made) reach their own proxy.
             if (id != PW_ID_CORE)
                 return;
 
-            log ("pipewire: connection error: " + juce::String::fromUTF8 (message != nullptr ? message : "")
-                 + " (" + errorText (res) + ")");
+            // Only a broken connection is fatal: the client library reports it on the core with
+            // -EPIPE, which is also what pw_stream and pw_filter take as a lost connection.
+            // PipeWire also reports on the core an error about one of speakerd's objects, for
+            // instance the destroy of a link the server had already dropped ("unknown resource
+            // <id>"), when a link and its peer go away together. That is not fatal.
+            if (res != -EPIPE)
+            {
+                const auto now = juce::Time::getMillisecondCounter();
 
+                if (! self.anyErrorLogged || now - self.errorLogged >= errorLogInterval)
+                {
+                    self.anyErrorLogged = true;
+                    self.errorLogged = now;
+                    log ("pipewire: error, carrying on: " + text);
+                }
+
+                return;
+            }
+
+            log ("pipewire: connection error: " + text);
             self.failed = true;
             pw_thread_loop_signal (self.loop, false);
+        }
+
+        /** Updates the links once the registry has settled (see settleSeq). */
+        void requestLinkUpdate()
+        {
+            if (core == nullptr || settlePending)
+                return;
+
+            const auto seq = pw_core_sync (core, PW_ID_CORE, 0);
+
+            if (seq < 0)
+                return updateLinks();
+
+            settleSeq = seq;
+            settlePending = true;
         }
 
         static void onGlobal (void* data, uint32_t id, uint32_t, const char* type, uint32_t, const spa_dict* props)
@@ -164,7 +221,7 @@ namespace speakerd
             else
                 return;
 
-            self.updateLinks();
+            self.requestLinkUpdate();
         }
 
         static void onGlobalRemove (void* data, uint32_t id)
@@ -173,7 +230,7 @@ namespace speakerd
             self.nodes.erase (id);
             self.ports.erase (id);
             self.links.erase (id);
-            self.updateLinks();
+            self.requestLinkUpdate();
         }
 
         static void onFilterState (void* data, pw_filter_state, pw_filter_state state, const char* error)
@@ -196,7 +253,7 @@ namespace speakerd
                         log ("pipewire: node '" + self.filterName + "' registered as id " + juce::String (self.ownNode));
                     }
 
-                    self.updateLinks();
+                    self.requestLinkUpdate();
                     break;
 
                 case PW_FILTER_STATE_UNCONNECTED:
@@ -334,7 +391,7 @@ namespace speakerd
             someone removed, and makes the missing ones. */
         void updateLinks()
         {
-            if (filter == nullptr || ownNode == SPA_ID_INVALID)
+            if (filter == nullptr || ownNode == SPA_ID_INVALID || linkingStopped)
                 return;
 
             for (auto it = ownLinks.begin(); it != ownLinks.end();)
@@ -519,6 +576,8 @@ namespace speakerd
 
         d.failed = false;
         d.synced = false;
+        d.settlePending = false;
+        d.linkingStopped = false;
         pw_core_add_listener (d.core, &d.coreListener, &Impl::coreEvents, &d);
         d.registry = pw_core_get_registry (d.core, PW_VERSION_REGISTRY, 0);
         pw_registry_add_listener (d.registry, &d.registryListener, &Impl::registryEvents, &d);
@@ -626,6 +685,18 @@ namespace speakerd
             return juce::Result::fail ("cannot connect the PipeWire node: " + errorText (result));
 
         return juce::Result::ok();
+    }
+
+    void PipeWireNode::stopLinking()
+    {
+        auto& d = *impl;
+
+        if (d.loop == nullptr)
+            return;
+
+        pw_thread_loop_lock (d.loop);
+        d.linkingStopped = true;
+        pw_thread_loop_unlock (d.loop);
     }
 
     void PipeWireNode::stop()

@@ -35,7 +35,7 @@ speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--l
 | 0 | stopped by SIGINT, SIGTERM or SIGHUP, at any point, also while it waits for PipeWire (after fading out, if it played), or the render was written |
 | 1 | not used yet: kept for other failures |
 | 2 | bad command line, or a `--lv2-bundle` from which no plugin loaded |
-| 3 | the input sink or the filter node could not be started, or the connection to PipeWire was lost |
+| 3 | the input sink or the filter node could not be started, the connection to PipeWire was lost (the daemon went away), or the filter or the input sink failed. An amplifier or a link that goes away is not a failure: speakerd links again when it is back |
 | 4 | the render could not read `IN.wav` or write `OUT.wav` |
 
 No loadable layer is not an error: speakerd plays passthrough and keeps running. If PipeWire
@@ -80,7 +80,16 @@ speakerd:monitor_FR  -> speakerd-dsp:input_FR      speakerd-dsp:output_tweeter -
 
 The amplifier node and its ports come from `device.json`. speakerd links as soon as all the
 ports exist, and again whenever they come back: the amplifier may appear after speakerd, or go
-away and return. Nobody runs `pw-link`. The links belong to speakerd and go when it goes.
+away and return, and speakerd keeps running. Nobody runs `pw-link`. The links belong to
+speakerd and go when it goes.
+
+It links once the registry has settled: after a change it waits one round trip to PipeWire
+(`pw_core_sync`), because PipeWire sends every change of one event (a node going away: its
+links, then its ports, then the node) before it answers. Linking on the first change of such
+a burst would link to a port that is already going away; with PipeWire 0.3.65 that ends in an
+error on the core about the link speakerd then destroys. Only a lost connection (`-EPIPE` on the
+core, as `pw_stream` and `pw_filter` read it) is fatal; any other error is logged and speakerd
+carries on.
 
 **Why a sink in front of the filter.** WirePlumber 0.4.13 (the boards' version) links a
 player only into an adapter node, one whose node format it can read. A `pw_filter` in
@@ -320,28 +329,36 @@ stable.
 
 | Line | When |
 |---|---|
-| `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
-| `starting at layer <name> (--from)` | `--from` names a layer after `current` |
+| `speakerd <version>, state dir <dir>` | always, first |
 | `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or broken |
+| `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
+| `lv2 bundle <path>: <URI>` | a `--lv2-bundle` loaded |
+| `--lv2-bundle <path>: not a directory`, `--lv2-bundle <path>: no LV2 plugin loaded from it: ...` | a `--lv2-bundle` that did not load; exit status 2 follows |
+| `cannot connect to PipeWire: <reason>: trying again every second`, `PipeWire did not answer: trying again every second`, `cannot start the PipeWire client loop: trying again every second` | PipeWire is not there (yet); said once, however long it takes |
 | `pipewire: <rate> Hz, quantum <n>, largest quantum <n>` | connected to PipeWire |
+| `starting at layer <name> (--from)` | `--from` names a layer after `current` |
 | `layer <name> (<file>): FAILED: <reason>` | a layer that did not load; `<name>` is `current`, `last-known-good` or `factory` |
 | `layer <name> (<file>): warning: <text>` | a clamped value, or no connection to the amplifier |
 | `layer <name> (<file>): loaded, revision <n>, <k> plugin node(s)` | the layer that loaded |
 | `using layer <name> (<file>), revision <n>` | the layer speakerd plays from |
 | `*** PASSTHROUGH: no state layer loaded ***` then `using layer passthrough: woofer = <channel> at -20 dB, tweeter muted` | no layer loaded |
 | `pipewire: created the input sink '<name>'` or `pipewire: input sink '<name>' exists: using it` | at start |
+| `cannot create the input sink '<name>': <reason>`, `cannot create the PipeWire node: <reason>`, `cannot connect the PipeWire node: <reason>` | the sink or the filter could not be started; `stopping` and exit status 3 follow |
 | `pipewire: node '<name>-dsp' registered as id <id>` | the filter is in PipeWire |
 | `waiting for amplifier '<node>' and its ports (...)`, `waiting for input sink '<name>' and its ports (...)` | a peer is not there (yet) |
 | `linked to amplifier '<node>' (output_woofer -> <port>, output_tweeter -> <port>)` | the outputs are linked |
 | `linked to input sink '<name>' (monitor_FL -> input_FL, monitor_FR -> input_FR)` | the inputs are linked |
-| `unlinked from amplifier '<node>': linking again as soon as it is back` | the amplifier went away |
-| `playing: layer <layer>, <rate> Hz, quantum <n>` | both sides linked and cycles running: from here a player is heard. Once per linking |
+| `unlinked from amplifier '<node>': linking again as soon as it is back`, `unlinked from input sink '<name>': ...` | a peer went away; speakerd keeps running and links again when it is back |
+| `playing: layer <layer>, <rate> Hz, quantum <n>` | both sides linked and cycles running: from here a player is heard. Once per linking (not when the peer goes away again before two cycles have run) |
 | `pipewire: the graph now runs at <rate> Hz: re-prepared the plugins` | after a rate change |
 | `pipewire: the quantum changed to <n>: the graph runs it as <k> block(s) of <p>` | the quantum became a whole multiple of the size the graph is primed for (`<p>`): no dropout |
 | `pipewire: the quantum changed to <n>: faded out, primed the graph for it and faded back in` | any other quantum: after the gap |
-| `pipewire: a link failed: <reason> (<error>): <node>:<port> -> <node>:<port>` | a link speakerd made failed; at most once per 10 s per pair of ports |
-| `lost PipeWire` | the connection to PipeWire, the filter or the input sink failed; `stopping` and exit status 3 follow |
-| `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after a sink or filter that could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0) |
+| `pipewire: a link failed: <reason> (<error>): <node>:<port> -> <node>:<port>` | a link speakerd made failed; at most once per 10 s per pair of ports. Not fatal |
+| `pipewire: could not create a link: <error>` | the request for a link failed in the client. Not fatal |
+| `pipewire: error, carrying on: <message> (<error>)` | PipeWire reported an error that is not a lost connection, such as one about a link that went away with its peer; at most once per 10 s. Not fatal |
+| `pipewire: connection error: <message> (<error>)`, `pipewire: node '<name>-dsp' failed: <error>`, `pipewire: the input sink '<name>' failed: ...` | the connection to PipeWire was lost (the core reports `-EPIPE`), or the filter or the input sink failed; `lost PipeWire` follows |
+| `lost PipeWire` | after one of those; `stopping` and exit status 3 follow |
+| `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after a sink or filter that could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0). Nothing is logged after it; speakerd makes no new link once it has said it, and the output fades out through the links it has |
 | `render: <n> samples at <rate> Hz in blocks of <b>, layer <layer>, written to <path>` | the render is done |
 | `render: <reason>` | the render failed; exit status 4 follows |
 

@@ -29,7 +29,14 @@ namespace speakerd
         speakerd links everything itself, watching the registry: the sink's monitor_FL and
         monitor_FR to the filter's inputs, and the filter's outputs to the amplifier's two input
         ports named in device.json. It links as soon as the ports exist and again whenever they
-        come back, so nobody has to run pw-link, and the amplifier may appear after speakerd.
+        come back, so nobody has to run pw-link, and the amplifier may appear after speakerd, or
+        go away and return. It links once the registry has settled (one round trip after a
+        change), so it never links to a port that is going away.
+
+        Only a lost connection (the core's -EPIPE), a failed filter or a failed input sink is
+        fatal (hasFailed()). PipeWire also reports errors about speakerd's own objects on the
+        core, for instance when a link and its peer go away together; those are logged and
+        speakerd carries on.
 
         Everything except the process callback runs on PipeWire's own (non-real-time) loop
         thread. This class never opens a socket other than PipeWire's. */
@@ -55,10 +62,14 @@ namespace speakerd
             linking. */
         juce::Result start();
 
+        /** From now on, makes no link and logs nothing about links; the links that exist stay,
+            so the output can fade out through them. For a stop. */
+        void stopLinking();
+
         /** Unlinks, destroys the filter, and disconnects. A sink speakerd created stays. */
         void stop();
 
-        /** True once the connection to PipeWire is lost, or the node failed. */
+        /** True once the connection to PipeWire is lost, or the filter or the input sink failed. */
         bool hasFailed() const noexcept;
 
         /** True while the filter is linked on both sides: the input sink to its inputs, its
