@@ -45,12 +45,12 @@ flowchart TB
 
     subgraph SR["Speaker R"]
         direction TB
-        subgraph AR["ampd: control plane"]
-            agR["agent<br/>persists, applies, mDNS"]:::ctl
+        subgraph AR["ampd"]
+            agR["network agent<br/>persists, applies, mDNS"]:::ctl
         end
         stR[("state files<br/>graph, device role")]:::sto
-        subgraph SDR["speakerd: audio engine"]
-            engR["graph engine<br/>headless plugins<br/>real-time thread"]:::aud
+        subgraph SDR["speakerd"]
+            engR["headless plugin host<br/>runs the plugin graph<br/>real-time thread"]:::aud
         end
         ampR["PipeWire sink<br/>2 x MAX98397<br/>woofer + tweeter"]:::hw
         agR -- "local socket" --> engR
@@ -61,13 +61,13 @@ flowchart TB
 
     subgraph SL["Speaker L, the hub"]
         direction TB
-        subgraph AL["ampd: control plane"]
+        subgraph AL["ampd"]
             hub["hub role<br/>graph document, parameters,<br/>catalogue, fan-out"]:::ctl
-            agL["agent<br/>persists, applies, mDNS"]:::ctl
+            agL["network agent<br/>persists, applies, mDNS"]:::ctl
         end
         stL[("state files<br/>graph, device role")]:::sto
-        subgraph SDL["speakerd: audio engine"]
-            engL["graph engine<br/>headless plugins<br/>real-time thread"]:::aud
+        subgraph SDL["speakerd"]
+            engL["headless plugin host<br/>runs the plugin graph<br/>real-time thread"]:::aud
         end
         ampL["PipeWire sink<br/>2 x MAX98397<br/>woofer + tweeter"]:::hw
         hub --> agL
@@ -90,9 +90,10 @@ How to read it:
   arrows carry audio, thin arrows carry settings, dotted arrows are read once at boot.
 - **The controller holds no audio.** It is a plugin host whose plugins are editors only. Every
   edit leaves through the bridge to the hub.
-- **Each speaker runs two daemons.** `ampd` is the control plane: network, state files, the
-  hub role. `speakerd` is the audio engine: the plugin graph inside PipeWire. Audio never
-  passes through `ampd`, and `speakerd` never talks to the network.
+- **Each speaker runs two daemons.** `speakerd` is the **headless plugin host**: it runs the
+  plugin graph inside PipeWire. `ampd` is the speaker's **network agent**: it talks to the
+  hub, keeps the state files and, on the left speaker, is the hub. Audio never passes through
+  `ampd`, and `speakerd` never talks to the network.
 - **The hub is a role of `ampd` on the left speaker.** It holds the truth and fans each
   change out to the agent on the right speaker. Without the controller, without the hub or
   without the network, each `speakerd` keeps playing from its own state files.
@@ -131,9 +132,51 @@ flowchart LR
 
 ## 2. The pieces
 
-The controller side is one application. The speaker side is two daemons with a hard line
-between them: everything that can wait is in `ampd`, everything that cannot is in
-`speakerd`.
+Three programs make up the system. Each has one job, and each lacks something on purpose.
+
+| Program | Runs on | What it is | What it never does |
+|---|---|---|---|
+| **Controller app** | laptop or tablet | the plugin host GUI | process audio |
+| **`speakerd`** | every speaker | the headless plugin host | touch the network |
+| **`ampd`** | every speaker | the speaker's network agent, and the hub on the left speaker | touch audio |
+
+The controller and `speakerd` are the two halves of today's AudioPluginHost. The window goes
+to the controller, the engine goes to the speaker, and the session document travels between
+them:
+
+<!-- diagram: halves -->
+```mermaid
+flowchart LR
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+
+    subgraph APH["AudioPluginHost today"]
+        direction TB
+        w["GUI<br/>canvas, pins, plugin windows"]:::ctl
+        e["graph engine<br/>AudioProcessorGraph + audio device"]:::aud
+        d[("session document<br/>.filtergraph")]:::sto
+        w --- e --- d
+    end
+    subgraph C["Controller app"]
+        direction TB
+        w2["GUI<br/>canvas, pins, plugin windows"]:::ctl
+        d2[("session document")]:::sto
+        w2 --- d2
+    end
+    subgraph S["speakerd, on each speaker"]
+        direction TB
+        e2["graph engine<br/>AudioProcessorGraph + PipeWire"]:::aud
+        d3[("session document")]:::sto
+        e2 --- d3
+    end
+    APH -- "keeps the GUI" --> C
+    APH -- "keeps the engine" --> S
+    C <-. "same document, through ampd" .-> S
+```
+
+On the speaker, the line between the two daemons is simple: everything that can wait is in
+`ampd`, everything that cannot is in `speakerd`.
 
 <!-- diagram: inside -->
 ```mermaid
@@ -148,7 +191,7 @@ flowchart LR
 
     subgraph SPK["One speaker"]
         direction LR
-        subgraph AMPD["ampd (control plane)"]
+        subgraph AMPD["ampd: network agent"]
             direction TB
             disc["mDNS<br/>advertise, find the hub"]:::ctl
             rx["receive parameters (OSC)<br/>and graph revisions (TCP)"]:::ctl
@@ -157,7 +200,7 @@ flowchart LR
             persist["persist state<br/>atomic writes"]:::ctl
         end
         files[("graph.json<br/>graph.lkg.json<br/>factory.json<br/>device.json")]:::sto
-        subgraph SD["speakerd (audio engine)"]
+        subgraph SD["speakerd: headless plugin host"]
             direction TB
             cmd["command queue<br/>(lock-free)"]:::aud
             eng["AudioProcessorGraph<br/>headless plugins"]:::aud
@@ -179,6 +222,7 @@ flowchart LR
 
 | | `speakerd` | `ampd` |
 |---|---|---|
+| What it is | the headless plugin host | the speaker's network agent |
 | Job | runs the plugin graph | everything that talks to the outside |
 | Owns | the running graph and its parameter values | the state files, the network, the hub role, the catalogue |
 | Talks to | PipeWire, and the local socket | the hub, controllers, mDNS, the web page, `speakerd` |
@@ -202,21 +246,39 @@ proxy processor keeps the APVTS, so the editors work untouched. The bridge does 
 the plugin: the host already sees every parameter of every node, so one bridge in the host
 forwards them all. A control build knows nothing about the network.
 
-**ampd and the hub.** `ampd` runs on every speaker next to `speakerd`. It persists the state,
-hands updates to `speakerd`, advertises the speaker over mDNS and, on exactly one speaker,
-acts as the **hub**: the one place that holds the truth. The truth has two parts, the
-**graph document** with a revision number and the **parameter values** keyed by node uid and
-parameter ID. The hub also keeps the **catalogue** (which plugin builds, at which version
-hash, each speaker has installed) and refuses a graph that references a plugin a speaker lacks.
+**speakerd: the headless plugin host.** `speakerd` is AudioPluginHost with the window
+removed: the same graph engine (`AudioProcessorGraph`), the same session format, loading the
+headless builds of the plugins. It adds only what an unattended host inside a speaker needs:
 
-**speakerd.** AudioPluginHost's graph engine without the GUI, running as a native PipeWire
-client through `pw_filter`, so it sits inside the PipeWire graph cycle and adds no buffering.
-Going through the ALSA compatibility layer instead, as AudioPluginHost does today, would add
-one or two periods of latency before the plugins even run. It loads headless builds through
-JUCE's own LV2 or VST3 hosting. That matters: JUCE's LV2 wrapper exposes parameters as patch
-properties, not as LV2 control ports, so PipeWire's own `module-filter-chain` could load the
-plugins but never change a parameter. JUCE hosting understands its own parameters, and the DSP
-stays JUCE from end to end.
+- **Native PipeWire audio.** It is a node inside the PipeWire cycle through `pw_filter`.
+  AudioPluginHost goes through the ALSA compatibility layer, which adds one or two periods of
+  latency before the plugins even run.
+- **Starts on its own.** At boot it loads the first state layer that works (current, last
+  known good, factory, passthrough) and reads the speaker's role from `device.json`. Nobody
+  has to open a session.
+- **A command socket instead of a GUI.** Parameter changes and graph revisions arrive from
+  `ampd` over a local socket and reach the audio thread through a lock-free queue.
+- **Safe structural changes.** Adding, removing or moving a plugin fades the output for about
+  30 ms, so it never clicks.
+- **The role-aware input.** It resolves the "Mine" input pin to FL or FR from the speaker's
+  role.
+- **Self-reporting.** It measures time per node and counts xruns, because nobody is watching
+  a window.
+
+It hosts the plugins through JUCE's own LV2 or VST3 hosting, which understands JUCE's
+parameters, so the DSP stays JUCE from end to end. It never touches the network.
+
+**ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
+does everything that talks to the outside: it advertises the speaker over mDNS, receives
+parameter changes and graph revisions, hands them to `speakerd`, persists the state files that
+`speakerd` reads at boot, builds the plugin catalogue and serves the knob, IR receiver and web
+page. It never touches audio.
+
+**The hub** is a role of `ampd` on the left speaker: the one place that holds the truth. The
+truth has two parts, the **graph document** with a revision number and the **parameter
+values** keyed by node uid and parameter ID. The hub also keeps the **catalogue** (which plugin
+builds, at which version hash, each speaker has installed) and refuses a graph that references
+a plugin a speaker lacks.
 
 ## 3. A knob in a fake GUI
 
@@ -492,7 +554,7 @@ Board addresses, user names and deploy targets stay in the gitignored `local.env
 <!-- diagram: roadmap -->
 ```mermaid
 flowchart LR
-    s1["Step 1<br/>Add SPEAKER_CONTROL to one plugin.<br/>Load it in the stock AudioPluginHost:<br/>the editor works, no sound. Proves the proxy."] --> s2["Step 2<br/>speakerd: PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
+    s1["Step 1<br/>Add SPEAKER_CONTROL to one plugin.<br/>Load it in the stock AudioPluginHost:<br/>the editor works, no sound. Proves the proxy."] --> s2["Step 2<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
     s2 --> s3["Step 3<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin."]
     s3 --> s4["Step 4<br/>Catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
 ```
