@@ -1,0 +1,29 @@
+# ── Private, machine-specific settings ─────────────────────────────
+# Copy config/local.env.example -> config/local.env; never commit the copy.
+config/local.env
+.claude/settings.local.json
+CMakeUserPresets.json
+
+# ── Measurement data & generated output ────────────────────────────
+# Captures and reconstructed IRs (the small sample IRs in python_dsp_tools/examples/ ARE tracked).
+python_dsp_tools/data/
+# Generated at the repo root by the older scripts (lib writes to the cwd); the tracked
+# copies of the C++ headers live in juce_plugins/crossover and juce_plugins/firConv.
+/*.wav
+/*.hpp
+*.html
+
+# ── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ── Editors / OS ───────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~

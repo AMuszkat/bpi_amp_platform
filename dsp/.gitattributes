@@ -1,0 +1,3 @@
+# The JUCE patches carry CRLF context lines on purpose (the JUCE sources they patch use CRLF);
+# never let git convert their line endings, or they stop applying.
+juce_plugins/patches/*.patch -text

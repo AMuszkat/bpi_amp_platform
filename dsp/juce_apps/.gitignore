@@ -1,0 +1,5 @@
+# Build output of the applications in this folder.
+build/
+build-*/
+**/*_artefacts/
+**/JuceLibraryCode/

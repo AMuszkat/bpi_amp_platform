@@ -1,0 +1,58 @@
+# ── Build output directories ───────────────────────────────────────
+# build-podman/ (shared JUCE install here, per-plugin builds in <plugin>/build-podman/),
+# build-aarch64/, build-native/ ... from the scripts in tools/.
+cmake-build/
+cmake-build-*/
+build/
+Builds/
+build-*/
+
+# JUCE generated code & per-target artefacts
+**/*_artefacts/
+**/JuceLibraryCode/
+
+# ── Compiled objects & firmware images ─────────────────────────────
+*.o
+*.obj
+*.lo
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# ── Built plugin / app bundles ─────────────────────────────────────
+*.vst3/
+*.lv2/
+*.component/
+*.au/
+*.app/
+*.aaxplugin/
+
+# ── CMake cache/generated files ────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+CMakeUserPresets.json
+
+# ── Local debug state (tools/build-podman.sh <plugin> -debug-linux) ─
+# Per-developer plugin-host sessions; regenerated automatically on the first
+# -debug-linux run if missing.
+plugin_host_debug/
+
+# ── macOS and editor noise ─────────────────────────────────────────
+.DS_Store
+*.swp
+*.autosave
+
+# AudioPluginHost built by tools/build-podman.sh -setup-host: the build, the patched JUCE
+# export it is built from (juce-src/), and the patch-set stamp. Nothing here is source.
+pluginHost/

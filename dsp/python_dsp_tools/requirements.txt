@@ -1,0 +1,28 @@
+# Pip/venv fallback dependency list. The PRIMARY, supported setup is conda/miniforge via
+# ./setup_env.sh (which also installs the native PortAudio/libsndfile libs). Use this file
+# only for a plain pip/venv install; on Linux you must also provide PortAudio yourself
+# (e.g. apt install libportaudio2) for sounddevice to work.
+#
+# After installing these, also install the shared package itself (from this folder):
+#     pip install -e .
+
+# DSP core (hard requirements for nearfield/lib.py)
+numpy
+scipy
+
+# GUIs (measurement/near_field_gui.py, tuning/dsp_gui.py) -- PySide6 provides the Qt binding used via pyqtgraph.Qt;
+# swap for PyQt5/PyQt6 if preferred.
+pyqtgraph
+PySide6
+
+# Audio capture / file I/O.
+# sounddevice also needs the PortAudio system library on Linux: apt install libportaudio2
+sounddevice
+soundfile
+
+# Used by the older scripts in scripts/ (not required by the GUIs).
+librosa
+matplotlib
+plotly
+plotly-resampler
+bokeh

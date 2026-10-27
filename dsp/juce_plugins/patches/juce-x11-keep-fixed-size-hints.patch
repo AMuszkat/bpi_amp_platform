@@ -1,0 +1,35 @@
+JUCE X11: keep a fixed-size window's min/max size hints across setBounds().
+
+Applied by tools/build-podman.sh -setup-host to a clean export of the pinned JUCE commit when
+building the AudioPluginHost used by -debug-linux. The JUCE submodule is never modified.
+
+XWindowSystem::setBounds() calls updateConstraints(), which sets PMinSize|PMaxSize for a
+non-resizable window, then immediately rewrites WM_NORMAL_HINTS with only USSize|USPosition.
+XSetWMNormalHints replaces the whole property, so the limits never survive: GNOME treats every
+fixed-size JUCE window as maximisable, and a maximised plugin window stretches the editor.
+Verified on JUCE 8.0.12 (submodule 501c0767) by sending _NET_WM_STATE maximise to the
+loudness editor window: 1244x1004 -> 3840x2096 before this patch.
+
+--- a/modules/juce_gui_basics/native/juce_XWindowSystem_linux.cpp
++++ b/modules/juce_gui_basics/native/juce_XWindowSystem_linux.cpp
+@@ -1781,6 +1781,20 @@
+             hints->y      = newBounds.getY();
+             hints->width  = newBounds.getWidth();
+             hints->height = newBounds.getHeight();
++
++            // updateConstraints() above has just published PMinSize|PMaxSize for a fixed-size
++            // window, but XSetWMNormalHints replaces the WHOLE property -- so without this the
++            // limits are wiped on every setBounds and the window manager sees every
++            // non-resizable window as resizable. GNOME then maximises it on Super+Up, a
++            // top-edge drag or a title double-click, and a fixed-size plugin editor ends up
++            // stretched across the whole screen. Carry the limits into this write too.
++            if ((peer->getStyleFlags() & ComponentPeer::windowIsResizable) == 0)
++            {
++                hints->min_width  = hints->max_width  = newBounds.getWidth();
++                hints->min_height = hints->max_height = newBounds.getHeight();
++                hints->flags |= PMinSize | PMaxSize;
++            }
++
+             X11Symbols::getInstance()->xSetWMNormalHints (display, windowH, hints.get());
+         }
+ 

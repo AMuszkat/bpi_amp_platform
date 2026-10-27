@@ -1,0 +1,4 @@
+# Parameter values (normalised 0..1) that plugin-check sets before its audio check, so the
+# check exercises the DSP instead of a flat, do-nothing setting. One <paramID>=<value> per line.
+mode=0.25         # Force 1: setting 1 regardless of level
+s0_e0_gain=0.75   # setting 1, EQ1 gain +12 dB

@@ -1,0 +1,18 @@
+# Makes the shared `nearfield` package importable from every tool folder
+# (measurement/, tuning/, scripts/). setup_env.sh installs it editable:
+#     pip install -e python_dsp_tools
+# so edits to nearfield/lib.py take effect without reinstalling.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nearfield"
+version = "0.1.0"
+description = "Near-field loudspeaker measurement and DSP filter design core"
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0-only" }
+dependencies = ["numpy", "scipy"]   # everything else is optional; see requirements.txt
+
+[tool.setuptools]
+packages = ["nearfield"]

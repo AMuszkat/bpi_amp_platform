@@ -1,0 +1,72 @@
+# Builder image shared by every JUCE plugin in juce_plugins/ (tools/build-podman.sh).
+#
+# Purpose: cross-compile the plugin from a Linux container to Debian ARM64
+# (aarch64) — the target for the Banana Pi CM4 IO (Amlogic A311D).
+#
+# Why a container instead of the UTM VM in tools/build-linux-vm.sh:
+#   * On a Linux host the container runs NATIVELY (shared kernel, no virtualisation),
+#     so the cross build is as fast as the host — this is the case we optimise for.
+#   * It still works on macOS / Windows, where Podman runs the same container inside
+#     its own lightweight Linux VM ("podman machine"). Slower there, identical result.
+#
+# The host is amd64, the target is aarch64, so we CROSS-compile (same approach as
+# tools/build-aarch64.sh + tools/toolchain-aarch64-linux.cmake). Everything the build needs is
+# baked in here so the bash script only has to orchestrate `podman run`.
+#
+# Note: `debian:bookworm` is a multi-arch tag, so on an arm64 host this pulls the
+# arm64 image and the "cross" toolchain below is effectively native — still correct,
+# just not actually cross-compiling.
+
+FROM debian:bookworm
+
+# Enable the arm64 architecture next to the host's, then install everything at once.
+# Two sets of JUCE dev libraries are installed on purpose:
+#   * native  -> used to build JUCE's `juceaide` helper, which must RUN on the host
+#   * :arm64  -> linked into the plugin itself, which runs on the TARGET
+RUN dpkg --add-architecture arm64 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      \
+      # --- native build tools (run on the host architecture) ---------------
+      ca-certificates git \
+      cmake ninja-build pkg-config \
+      build-essential \
+      \
+      # --- aarch64 cross toolchain (emits ARM64 code) ----------------------
+      # provides aarch64-linux-gnu-gcc / -g++ named by toolchain-aarch64-linux.cmake
+      crossbuild-essential-arm64 \
+      \
+      # --- JUCE Linux deps, NATIVE: needed to build the juceaide helper ----
+      # These also cover the native Debug build and the AudioPluginHost that
+      # `tools/build-podman.sh <plugin> -debug-linux` / `-setup-host` produce.
+      libfreetype-dev libfontconfig1-dev libasound2-dev \
+      libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+      libxinerama-dev libxrender-dev libgl1-mesa-dev \
+      \
+      # ladspa.h, required by AudioPluginHost (-setup-host): it compiles with
+      # JUCE_PLUGINHOST_LADSPA=1, which is set in its own CMakeLists and so cannot
+      # be turned off from the command line.
+      ladspa-sdk \
+      \
+      # --- JUCE Linux deps, :arm64: linked into the plugin for the target --
+      libfreetype-dev:arm64 libfontconfig1-dev:arm64 libasound2-dev:arm64 \
+      libx11-dev:arm64 libxext-dev:arm64 libxrandr-dev:arm64 libxcursor-dev:arm64 \
+      libxinerama-dev:arm64 libxrender-dev:arm64 libgl1-mesa-dev:arm64 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Troubleshooting: if a *native* -dev package ever refuses to co-install next to its
+# :arm64 twin (a Multi-Arch conflict), drop the native copy of that one library —
+# only freetype/fontconfig are strictly needed natively (to build juceaide).
+
+# JUCE generates each plugin's LV2/VST3 manifest with a small helper that it compiles
+# for the TARGET and then RUNS against the built plugin. Cross-compiling, that helper
+# is an ARM64 binary the amd64 host can't execute — so we run it under qemu user-mode
+# emulation. The build passes -DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/qemu-aarch64-static,
+# which makes CMake invoke the helper as `qemu-aarch64-static <helper> <plugin>` (no
+# binfmt/privileges needed; qemu is called explicitly).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends qemu-user-static \
+ && rm -rf /var/lib/apt/lists/*
+
+# juce_plugins/ is bind-mounted here; each step sets its own working directory.
+WORKDIR /work
