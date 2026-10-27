@@ -191,6 +191,29 @@ namespace speakerd
     {
         park();     // and keep the graph: from now on every cycle is silent
         fadePosition = 0;
+
+        // The cycle that ended the fade has run, but its output may not have reached the
+        // amplifier yet: destroying the node now can drop it, and the end of the ramp with it
+        // (a step to zero, measured on the virtual pair). So two silent cycles go by first,
+        // unless no cycle runs.
+        const auto start = juce::Time::getMillisecondCounter();
+        auto lastProgress = start;
+        const auto target = cycles.load() + 2;
+
+        for (auto lastCycles = cycles.load(); lastCycles < target;)
+        {
+            juce::Thread::sleep (2);
+            const auto now = juce::Time::getMillisecondCounter();
+
+            if (const auto c = cycles.load(); c != lastCycles)
+            {
+                lastCycles = c;
+                lastProgress = now;
+            }
+
+            if (now - lastProgress > 100 || now - start > 1000)
+                break;
+        }
     }
 
     //==============================================================================

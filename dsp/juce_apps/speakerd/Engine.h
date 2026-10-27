@@ -96,7 +96,9 @@ namespace speakerd
             block and fades back in. Call it often, from a timer. */
         Serviced service();
 
-        /** Fades the output out and keeps it silent, for a clean stop. */
+        /** Fades the output out and keeps it silent, for a clean stop. Returns after two
+            silent cycles more, so that the end of the fade has reached the amplifier before
+            the node goes. */
         void fadeOut();
 
         double getSampleRate() const noexcept      { return preparedRateForReaders.load(); }

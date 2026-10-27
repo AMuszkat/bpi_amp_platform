@@ -310,7 +310,10 @@ build outputs: the reference a live capture is compared with.
   30 ms fade-out, a pointer swap and a 30 ms fade-in.
 - **Fades.** The output fades in over 30 ms at every start, after a rate change, after a
   quantum the graph had to be primed for and after every graph swap. It fades out over 30 ms
-  before them and at a stop.
+  before them and at a stop. At a stop, two silent cycles go by after the fade-out before the
+  node is destroyed: the cycle that ends the ramp has run by then, but its output may not have
+  reached the amplifier, and destroying the node at once dropped it (a step to zero, measured on
+  the virtual pair).
 - **Values in force from the first audible sample.** JUCE's LV2 wrapper prepares a plugin's
   DSP when it is instantiated, with the default parameter values. A hosted LV2 plugin only
   takes parameter values while it processes (finding 2 of section 7). So every new graph runs
