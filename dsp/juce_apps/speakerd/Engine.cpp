@@ -394,6 +394,18 @@ namespace speakerd
             }
         }
 
+        // The output limits of device.json, before the cap: constants, read here only.
+        if (outputLimits.gain < 1.0f)
+        {
+            juce::FloatVectorOperations::multiply (woofer, outputLimits.gain, numSamples);
+
+            if (! outputLimits.tweeterMuted)
+                juce::FloatVectorOperations::multiply (tweeter, outputLimits.gain, numSamples);
+        }
+
+        if (outputLimits.tweeterMuted)
+            juce::FloatVectorOperations::clear (tweeter, numSamples);   // exact zeros
+
         // The absolute cap, whatever the graph did.
         samples::cap (woofer, numSamples, outputLimit);
         samples::cap (tweeter, numSamples, outputLimit);

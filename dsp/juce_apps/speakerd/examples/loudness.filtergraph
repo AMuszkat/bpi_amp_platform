@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<FILTERGRAPH>
+  <FILTER uid="1" x="0.5" y="0.1" useARA="0">
+    <PLUGIN name="Audio Input" descriptiveName="" format="Internal" category="I/O devices"
+            manufacturer="JUCE" version="1.0" file="" uniqueId="246006c0"
+            isInstrument="0" fileTime="0" infoUpdateTime="0" numInputs="0"
+            numOutputs="2" isShell="0" hasARAExtension="0" uid="246006c0"/>
+    <STATE>0.</STATE>
+    <LAYOUT>
+      <INPUTS>
+        <BUS index="0" layout="disabled"/>
+      </INPUTS>
+      <OUTPUTS>
+        <BUS index="0" layout="L R"/>
+      </OUTPUTS>
+    </LAYOUT>
+  </FILTER>
+  <FILTER uid="2" x="0.25" y="0.1" useARA="0">
+    <PLUGIN name="MIDI Input" descriptiveName="" format="Internal" category="I/O devices"
+            manufacturer="JUCE" version="1.0" file="" uniqueId="a9e4f9eb"
+            isInstrument="0" fileTime="0" infoUpdateTime="0" numInputs="0"
+            numOutputs="0" isShell="0" hasARAExtension="0" uid="a9e4f9eb"/>
+    <STATE>0.</STATE>
+    <LAYOUT>
+      <INPUTS>
+        <BUS index="0" layout="disabled"/>
+      </INPUTS>
+      <OUTPUTS>
+        <BUS index="0" layout="disabled"/>
+      </OUTPUTS>
+    </LAYOUT>
+  </FILTER>
+  <FILTER uid="3" x="0.5" y="0.9" useARA="0">
+    <PLUGIN name="Audio Output" descriptiveName="" format="Internal" category="I/O devices"
+            manufacturer="JUCE" version="1.0" file="" uniqueId="724248cb"
+            isInstrument="0" fileTime="0" infoUpdateTime="0" numInputs="2"
+            numOutputs="0" isShell="0" hasARAExtension="0" uid="724248cb"/>
+    <STATE>0.</STATE>
+    <LAYOUT>
+      <INPUTS>
+        <BUS index="0" layout="L R"/>
+      </INPUTS>
+      <OUTPUTS>
+        <BUS index="0" layout="disabled"/>
+      </OUTPUTS>
+    </LAYOUT>
+  </FILTER>
+  <FILTER uid="4" x="0.25" y="0.9" useARA="0">
+    <PLUGIN name="MIDI Output" descriptiveName="" format="Internal" category="I/O devices"
+            manufacturer="JUCE" version="1.0" file="" uniqueId="9d5bbb00"
+            isInstrument="0" fileTime="0" infoUpdateTime="0" numInputs="0"
+            numOutputs="0" isShell="0" hasARAExtension="0" uid="9d5bbb00"/>
+    <STATE>0.</STATE>
+    <LAYOUT>
+      <INPUTS>
+        <BUS index="0" layout="disabled"/>
+      </INPUTS>
+      <OUTPUTS>
+        <BUS index="0" layout="disabled"/>
+      </OUTPUTS>
+    </LAYOUT>
+  </FILTER>
+  <FILTER uid="5" x="0.5" y="0.5" useARA="0" uiLastX_Normal="240" uiLastY_Normal="180"
+          uiopen_Normal="0">
+    <PLUGIN name="loudness" format="LV2" category="Plugin" manufacturer="yourcompany"
+            version="" file="https://github.com/AMuszkat/bpi_amp_dsp_tuning/loudness"
+            uniqueId="32e250f" isInstrument="0" fileTime="1a1804e6600" infoUpdateTime="1a1805a33b4"
+            numInputs="1" numOutputs="1" isShell="0" hasARAExtension="0"
+            uid="32e250f"/>
+    <STATE>2361.7fFczA2b57xKmkFcnUmXtL1as8RPMU2b5sVXz8hXvk1Wg0FbeQ1bv8Ec04VZtc1Kr8Vcj4VYyM2KyElckQ1TzEFck4iBIDFHvMWYzoCTxU1bkQGH6nPBrYmL5DFbvwVZkMGUuABOnQGcvMmNu7xYoQGZ0IlKi8VauDTS0MmdqEFcuHFbo8UXsA2WjMGbeQWctklam8BauUGYtU1by4CH6nPBrYmL5.2axQGHaoPBIvlcxnyb40lXuwFHhTlagIFakQlHfriBIj.byUFc5XWXrUWYfDiKvnPBcABKfrkBIj.a1IiNykWah8FafHhYxUVYWgVYkwVZtclHfriBIj.byUFc5XWXrUWYf.iKvnPBcAxNJjvbzEFckoybzEFckAxVJjPB7fFczA2b57xKmkFcnUmXtL1as8RPMU2b5sVXz8hXvk1Wg0FbeQ1bv8Ec04VZtc1Kr8Vcj4VYyMmNSQWXzU1TzIWZtclOfHRLzfSNtXUSpwzYlIVPt3hKOshYWElbAg1XqkjLh8FNrEFNHIESz4RZHYFUrEVZ3XTVuQSLYgCRRUEUYQ0RyfDdOkiKB8DTEoFUAACUQQUUpQ0TzLzSPUjZTEDLDgzaQY0SnQjQiEWRBgTLEYTXvTkUOgFVCwDctjFR0MyPOAUQpQUPvPDRuEkUOgFRVQlcEEiX4kjPHESQFEFLUY0Sn4RZKYGR3sTN1MDUAkTUP0TPRokZvjFRpUkQiglKnM1Y2Y0XqASZHY2LBwDZ2f1S23RUPIUQTMkYpYTV3fDdYI2ZFk0ZIIDRwTjQgASUV8DZlMDSz4RZHU2LC8DTEoFUAACQH8VTV8DZlYEY4EUaHYFVWgkbUcUV3fDdLQmKogTcyLzSPUjZTEDLDgzaQY0SnoWLgoVUrgjYXcEVxU0UYgCRBwDctjFR0MyPOAUQpQUPvPDRuEkUOgFRWkkbIIDRwTjQgASUV8DZHMUS1MiPLg1Mn8zMtTETRUDUSYlZFkENHgmX1cSUYY2MqkEdUYkXn4BZic1cVM1ZvjFRw3RZKYmKCwjctjGSyPzPMEiZ40DdhkFR0MyPOAUQpQUPvPDRuEkUOgFSGwTYUYDSkMlUX8FMrgjYXcEVxU0UYgCRBwDctjFR0MyPOAUQpQUPvPDRuEkUOgFSGwTYUYDSkUTaHYFVWgkbUcUV3fjPLQmXCwjctLDS14xPMICVC4TdhMESvXVZHU2LC8DTEoFUAACQH8VTV8DZLcDSkUkULUVVrI1ZE0FRlg0UXIWUWkENHIESw3RZKYGR3sTN1MDUAkTUP0TPRokZvjFR4ETdWsVQ4cUaEYkVzkjPHESQFEFLUY0Sn4RZKYGR3sTN1MDUAkTUP0TPRokZvjFR4ETdWsVQ4c0cIIDRwTjQgASUV8DZtj1Rx3xPLYmKCwjcPkWSwXVdLICQS0zLHg2R4X2PTETRUAUSAIkVpASZHkWP4ckdmwlXn4BZic1cVM1ZvjFRyg0PLQmKogTcyLzSPUjZTEDLDgzaQY0SnwzULUVUFwTYYwlXqUTaHYFVWgkbUcUV3fjTLomKosjcHg2R4X2PTETRUAUSAIkVpASZHkWQ4c0ZAk2UsUjUZQWRBgTLEYTXvTkUOgFUosjcHg2R4X2PTETRUAUSAIkVpASZHkWQ4c0ZAk2U2kjPHESQFEFLUY0Sn4RZKIiKCwjctLDS1AUdMEiY4wjLDMUSyfDdKkicCQUPIUETMEjTZoFLogTdEk2UqUTdWwVRWk0cIIDRwTjQgASUV8DZDkVS1MiPLg1Mn8zMtTETRUDUSYlZFkENHgmX2cSUYc2Mvj0YqwVXn4BZic1cVM1ZvjFR1MiPLg1Mn8zMtTETRUDUSYlZFkENHgmX2cSUYc2MUIFZtf1XmcmUisFLogjcyfWS14xPLYmKCwjdhkVSyvTdMcGUC4DZ2f1S23RUPIUQTMkYpYTV3fDdhc2MEMlaI0FRlg0UXIWUWkENHI0R5QUZKYGR3sTN1MDUAkTUP0TPRokZvjFR4kTdWsVP4cEaIcUV2kjPHESQFEFLUY0SnQzPLY2LBwDZ2f1S23RUPIUQTMkYpYTV3fDdhg2MUkkc2.SVmsFagglKnM1Y2Y0XqASZHMyLBwDZ2f1S23RUPIUQTMkYpYTV3fDdhg2MUkkc2TkXn4BZic1cVM1ZvjFR1MiPNYmKCwjctLDS2QzTNgmKS4DdpkFR0MyPOAUQpQUPvPDRuEkUOgFSswTYUYESkkEahsVQsgjYXcEVxU0UYgCR3wDLtj1R1gDdKkicCQUPIUETMEjTZoFLogTdIk2UqUTdW0VQVoEcIIDRwTjQgASUV8DZ5gGSz4RZHU2LC8DTEoFUAACQH8VTV8DZL0FSkUkULUVQsgjYXcEVxU0UYgCRBwDchMDS14xPLYmKC0jLXMjS4I1TLAiYogTcyLzSPUjZTEDLDgzaQY0SnwTaLUVTGoEdIIDRwTjQgASUV8DZ5gFSyLiPLg1Mn8zMtTETRUDUSYlZFkENHgmX4cSUYY2MqkEdUYkXn4BZic1cVM1ZvjFRw3RZKYmKCwjctjGSyPzPMEiZ40DdhkFR0MyPOAUQpQUPvPDRuEkUOgFSxvTYUYDSkMlUX8FMrgjYXcEVxU0UYgCRBwDctjFR0MyPOAUQpQUPvPDRuEkUOgFSxvTYUYDSkUTaHYFVWgkbUcUV3fjPLQmXCwjctLDS14xPMICVC4TdhMESvXVZHU2LC8DTEoFUAACQH8VTV8DZLICSkUkULUVVrI1ZE0FRlg0UXIWUWkENHIESw3RZKYGR3sTN1MDUAkTUP0TPRokZvjFR40TdWsVQ4cUaEYkVzkjPHESQFEFLUY0Sn4RZKYGR3sTN1MDUAkTUP0TPRokZvjFR40TdWsVQ4c0cIIDRwTjQgASUV8DZtj1Rx3xPLYmKCwjcPkWSwXVdLICQS0zLHg2R4X2PTETRUAUSAIkVpASZHkWS4ckdmwlXn4BZic1cVM1ZvjFRyQTZLQmKogTcyLzSVsFUQcUPRE1azXjT0.SZHgmKosjcHIDRyUjQjgzaW8DZHMDS14xPLQmKogjYHESX5EkLgMWTpgENHI0R3YVZKYGRBgjd3XjXDkjUOgFRC4DctjFR0MyPOUmKUAkTEQ0TEEUUQIUSq8jKtHhBIzEHtnfB</STATE>
+    <LAYOUT>
+      <INPUTS>
+        <BUS index="0" layout="C"/>
+      </INPUTS>
+      <OUTPUTS>
+        <BUS index="0" layout="C"/>
+      </OUTPUTS>
+    </LAYOUT>
+  </FILTER>
+  <CONNECTION srcFilter="1" srcChannel="0" dstFilter="5" dstChannel="0"/>
+  <CONNECTION srcFilter="5" srcChannel="0" dstFilter="3" dstChannel="0"/>
+</FILTERGRAPH>

@@ -4,9 +4,11 @@
 //
 //     speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--lv2-bundle PATH]...
 //     speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...
+//     speakerd --import-filtergraph FILE [--prefer-headless] [--lv2-bundle PATH]...
 
 #include "DeviceConfig.h"
 #include "Engine.h"
+#include "FilterGraph.h"
 #include "GraphBuilder.h"
 #include "Log.h"
 #include "PipeWireNode.h"
@@ -28,7 +30,7 @@ namespace
     {
         exitOk       = 0,   // stopped by SIGINT/SIGTERM/SIGHUP, at any point, or the render was written
         exitFailure  = 1,   // anything else that stops speakerd
-        exitUsage    = 2,   // bad command line
+        exitUsage    = 2,   // bad command line, or --import-filtergraph failed
         exitPipeWire = 3,   // the input sink or the filter could not be started, or PipeWire was lost
         exitRender   = 4    // the render could not read IN.wav or write OUT.wav
     };
@@ -48,12 +50,16 @@ namespace
         juce::File renderIn, renderOut;
         int block = defaultBlock;
         bool blockGiven = false;
+        juce::File importFile;          // --import-filtergraph
+        bool preferHeadless = false;
+        juce::StringArray layerOptions; // the options of the live mode and the render that were given
     };
 
     void printUsage()
     {
         std::cerr << "usage: speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--lv2-bundle PATH]...\n"
                      "       speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...\n"
+                     "       speakerd --import-filtergraph FILE [--prefer-headless] [--lv2-bundle PATH]...\n"
                      "\n"
                      "  --state-dir DIR     graph.json, graph.lkg.json, factory.json and device.json\n"
                      "  --node-name NAME    the sink players play into (default speakerd); the graph runs in NAME-dsp\n"
@@ -64,7 +70,11 @@ namespace
                      "  --render IN OUT     no PipeWire: run IN.wav through the graph, write the woofer\n"
                      "                      and tweeter channels to OUT.wav\n"
                      "  --block N           the render's block size (default 1024, the live quantum);\n"
-                     "                      render only: the live node runs at PipeWire's quantum\n";
+                     "                      render only: the live node runs at PipeWire's quantum\n"
+                     "  --import-filtergraph FILE\n"
+                     "                      write an AudioPluginHost session as a graph document to stdout\n"
+                     "  --prefer-headless   with --import-filtergraph: a complete build's URI becomes its\n"
+                     "                      _headless sibling's, when that plugin is found\n";
     }
 
     juce::File absoluteFile (const juce::String& path)
@@ -78,6 +88,9 @@ namespace
         {
             const juce::String arg (argv[i]);
             const auto hasValues = [&] (int count) { return i + count < argc; };
+
+            if (arg == "--state-dir" || arg == "--node-name" || arg == "--from" || arg == "--render" || arg == "--block")
+                options.layerOptions.addIfNotAlreadyThere (arg);
 
             if (arg == "--help" || arg == "-h")
             {
@@ -112,6 +125,14 @@ namespace
                 options.renderIn = absoluteFile (argv[++i]);
                 options.renderOut = absoluteFile (argv[++i]);
             }
+            else if (arg == "--import-filtergraph" && hasValues (1))
+            {
+                options.importFile = absoluteFile (argv[++i]);
+            }
+            else if (arg == "--prefer-headless")
+            {
+                options.preferHeadless = true;
+            }
             else if (arg == "--block" && hasValues (1))
             {
                 options.block = juce::String (argv[++i]).getIntValue();
@@ -128,6 +149,24 @@ namespace
                 std::cerr << "speakerd: unknown or incomplete argument " << arg << "\n";
                 return false;
             }
+        }
+
+        if (options.importFile != juce::File())
+        {
+            if (! options.layerOptions.isEmpty())
+            {
+                std::cerr << "speakerd: --import-filtergraph takes --prefer-headless and --lv2-bundle only, not "
+                          << options.layerOptions.joinIntoString (", ") << "\n";
+                return false;
+            }
+
+            return true;
+        }
+
+        if (options.preferHeadless)
+        {
+            std::cerr << "speakerd: --prefer-headless is for --import-filtergraph only\n";
+            return false;
         }
 
         if (options.blockGiven && ! options.render)
@@ -161,7 +200,17 @@ namespace
 
         log ("device: role " + toString (device.role) + ", amplifier '" + device.amplifierNode + "' (woofer "
              + device.wooferPort + ", tweeter " + device.tweeterPort + ")");
+        log (device.limits.has_value() ? "device: limits: " + device.limits->describe() : juce::String ("device: no limits"));
         return device;
+    }
+
+    /** device.json's limits as the engine applies them. -100 dB or less is silence. */
+    OutputLimits outputLimitsOf (const DeviceConfig& device)
+    {
+        if (! device.limits.has_value())
+            return {};
+
+        return { (float) juce::Decibels::decibelsToGain (device.limits->gainDb), device.limits->tweeterMuted };
     }
 
     bool loadBundles (juce::AudioPluginFormatManager& formats, const juce::StringArray& bundles)
@@ -282,7 +331,7 @@ namespace
 
     int runLive (const Options& options, const DeviceConfig& device, juce::AudioPluginFormatManager& formats)
     {
-        Engine engine;
+        Engine engine (outputLimitsOf (device));
         PipeWireNode node (engine, options.nodeName, device);
         PipeWireNode::Clock clock;
 
@@ -367,7 +416,7 @@ namespace
         GraphBuilder builder (formats);
         auto layer = loadFirstWorkingLayer (options.stateDir, builder, device.role, rate, maxBlock, options.firstLayer);
 
-        Engine engine;
+        Engine engine (outputLimitsOf (device));
         engine.install (std::move (layer.built.graph), rate, maxBlock, options.block, false);
 
         if (const auto rendered = render::run (engine, *input, options.renderOut, options.block); rendered.failed())
@@ -379,6 +428,27 @@ namespace
         log ("render: " + juce::String (input->lengthInSamples) + " samples at " + juce::String (juce::roundToInt (rate))
              + " Hz in blocks of " + juce::String (options.block) + ", layer " + layer.describe() + ", written to "
              + options.renderOut.getFullPathName());
+        return exitOk;
+    }
+
+    /** --import-filtergraph: the session as a graph document on stdout, what was mapped on
+        stderr. Exit status 0, or 2 with the reason. */
+    int runImport (const Options& options, juce::AudioPluginFormatManager& formats)
+    {
+        filtergraph::ImportOptions importOptions;
+        importOptions.preferHeadless = options.preferHeadless;
+        importOptions.formats = &formats;
+        importOptions.note = [] (const juce::String& line) { log ("import: " + line); };
+
+        juce::String document;
+
+        if (const auto imported = filtergraph::import (options.importFile, importOptions, document); imported.failed())
+        {
+            log ("import: FAILED: " + imported.getErrorMessage());
+            return exitUsage;
+        }
+
+        std::cout << document << std::endl;
         return exitOk;
     }
 
@@ -410,10 +480,11 @@ int main (int argc, char* argv[])
 
     std::signal (SIGPIPE, SIG_IGN);
 
+    const bool importing = options.importFile != juce::File();
     sigset_t signals;
     sigemptyset (&signals);
 
-    if (! options.render)
+    if (! options.render && ! importing)
     {
         // Before any thread starts, so that every thread inherits the mask.
         sigaddset (&signals, SIGINT);
@@ -425,14 +496,21 @@ int main (int argc, char* argv[])
     // The message manager only: speakerd has no GUI and opens no display.
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
 
-    if (! options.render)
+    if (! options.render && ! importing)
         handleSignalsOnOwnThread (signals);
+
+    juce::AudioPluginFormatManager formats;
+
+    if (importing)
+    {
+        juce::addHeadlessDefaultFormatsToManager (formats);
+        return loadBundles (formats, options.bundles) ? runImport (options, formats) : exitUsage;
+    }
 
     log (juce::String ("speakerd ") + SPEAKERD_VERSION + ", state dir " + options.stateDir.getFullPathName());
 
     const auto device = loadDevice (options.stateDir);
 
-    juce::AudioPluginFormatManager formats;
     juce::addHeadlessDefaultFormatsToManager (formats);
 
     if (! loadBundles (formats, options.bundles))
