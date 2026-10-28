@@ -31,7 +31,8 @@ Pass when:
 - firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it is
   capped, the live speakerd sink has the drop-in's properties and is the default sink, it is
   linked from the sink to the amplifier and nothing else feeds the amplifier, no AudioPluginHost
-  runs, the amplifier drives, and no restart or xrun in 3 s;
+  runs, the amplifier drives, and no restart or xrun in 3 s; and with the amplifier made the
+  default sink (as `wpctl set-default` would), smoke fails, saying so and how to undo it;
 - snapcast-setup.sh --route speakerd finds the drop-in's sink in the running PipeWire and routes;
 - with a PipeWire that does NOT load the drop-in (the file installed, the speaker started without
   it): the route into speakerd is refused and client-rt.conf left as it was, both with no
@@ -52,6 +53,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -102,7 +104,7 @@ class Installed(unittest.TestCase):
                  "--role", "left", "--amplifier", "amplifier", "--factory", factory,
                  "--allow-tweeter-without-crossover", env=no_pipewire)
         firmware("speakerd-setup.sh", "install", "--bundle", bundles[1], "--home", cls.user_home, "--no-systemd",
-                 env=no_pipewire)
+                 "--allow-tweeter-without-crossover", env=no_pipewire)
         cls.lib = cls.user_home / ".local/lib/speakerd"
 
         # An older copy of the bundle in the home's own ~/.lv2, broken: were it the one loaded,
@@ -261,6 +263,34 @@ class Installed(unittest.TestCase):
                       "pass amplifier drives the graph", "pass no restart in 3 s", "pass no xrun in 3 s"):
             self.assertIn(check, result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_smoke_fails_when_the_amplifier_is_the_default_sink(self):
+        speaker = self.pair["left"]
+        env = {k: v for k, v in speaker.env.items() if k.startswith(("XDG_", "DBUS_"))}
+
+        def default_is(name):
+            for _ in range(50):
+                if f'"name":"{name}"' in speaker.run("pw-metadata", "-n", "default", "0", "default.audio.sink").replace(" ", ""):
+                    return True
+                time.sleep(0.1)
+            return False
+
+        speaker.run("pw-metadata", "-n", "default", "0", "default.configured.audio.sink", '{ "name": "amplifier" }',
+                    "Spa:String:JSON")
+        try:
+            self.assertTrue(default_is("amplifier"), "WirePlumber did not make the amplifier the default sink")
+            result = firmware("speakerd-setup.sh", "smoke", "--home", self.user_home, "--no-systemd",
+                              "--log", self.log["left"], "--window", "0", env=env, check=False)
+            print("\n  " + next((line for line in result.stdout.splitlines() if "default sink" in line), "?"))
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("FAIL the default sink is the amplifier 'amplifier'", result.stdout)
+            self.assertIn("wpctl set-default", result.stdout)
+        finally:
+            # WirePlumber keeps the default it has when the key goes: the speakerd sink first.
+            speaker.run("pw-metadata", "-n", "default", "0", "default.configured.audio.sink", '{ "name": "speakerd" }',
+                        "Spa:String:JSON")
+            self.assertTrue(default_is("speakerd"), "the speakerd sink did not become the default again")
+            speaker.run("pw-metadata", "-n", "default", "-d", "0", "default.configured.audio.sink")
 
     def test_the_route_into_speakerd(self):
         env = {k: v for k, v in self.pair["left"].env.items() if k.startswith(("XDG_", "DBUS_"))}

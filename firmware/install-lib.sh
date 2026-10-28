@@ -134,6 +134,7 @@ make_bundle() {
     cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py} "$out/firmware/speakerd/"
     cp -p "$FIRMWARE_DIR/pipewire/pipewire.conf" "$out/firmware/pipewire/"
     cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf.d/*.conf "$out/firmware/pipewire/pipewire.conf.d/"
+    chmod 755 "$out"/firmware/{setup.sh,speakerd-setup.sh,snapcast-setup.sh} "$out"/firmware/speakerd/{speakerd-run,setup-helper.py}
 
     commit="$(git -C "$repo" rev-parse HEAD 2> /dev/null || echo unknown)"
     dirty=no; [ -z "$(git -C "$repo" status --porcelain 2> /dev/null)" ] || dirty=yes
@@ -159,6 +160,60 @@ version_value() {   # $1 = VERSION file, $2 = key
 }
 
 # ---------------------------------------------------------------------------------------------
+# The deploy gate: what the pre-bash hook enforces on an agent's commands, enforced again where
+# no hook runs (a person's shell, a script calling a script).
+
+# Nothing reaches a board while a lab lock exists (this checkout's or the main checkout's). With
+# $1 = status also not unless tests/.status/<HEAD>.json says unit: pass and vpair: pass, both run
+# on a clean tree, and the tree is clean now. BPI_DEPLOY_OVERRIDE=1, set by a person in their
+# own shell, bypasses the test status (logged in tests/.status/overrides.log), never a lock.
+# $1 = lock | status, $2 = what is refused, for the message.
+deploy_gate() {
+    local need="$1" what="$2" repo common main="" lock head dirty why=""
+    repo="$(cd "$FIRMWARE_DIR/.." && pwd)"
+    common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" || common=""
+    [ -z "$common" ] || main="$(dirname "$common")"
+    for lock in "$repo/.claude/lab.lock" ${main:+"$main/.claude/lab.lock"}; do
+        [ ! -e "$lock" ] || die "the lab is locked ($lock exists): nothing may reach a board. A person removes the lock when the boards are free."
+    done
+    [ "$need" = status ] || return 0
+    if [ -z "$common" ]; then
+        why="$repo is not a git checkout, so nothing says what was tested"
+    else
+        head="$(git -C "$repo" rev-parse HEAD)"
+        dirty="$(git -C "$repo" status --porcelain)"
+        if [ -n "$dirty" ]; then
+            why="the working tree has uncommitted changes: commit first, so that what is deployed is what was tested"
+        else
+            why="$(python3 - "$repo/tests/.status/$head.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        s = json.load(f)
+    if not isinstance(s, dict):
+        raise ValueError("not a JSON object")
+except (OSError, ValueError) as e:
+    print(f"no readable test status {sys.argv[1]} ({e}): run tools/test.sh all first")
+    sys.exit()
+bad = [f"{k}: {s.get(k, 'not run')}" + ("" if s.get(k + "_tree") == "clean" else f" (tree {s.get(k + '_tree', '?')})")
+       for k in ("unit", "vpair") if s.get(k) != "pass" or s.get(k + "_tree") != "clean"]
+if bad:
+    print("the test status of this commit is not green on a clean tree: " + ", ".join(bad))
+PY
+)"
+        fi
+    fi
+    [ -n "$why" ] || return 0
+    if [ "${BPI_DEPLOY_OVERRIDE:-}" = 1 ]; then
+        mkdir -p "$repo/tests/.status"
+        printf '%s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${head:0:12}" "${dirty:+dirty }" "$what" >> "$repo/tests/.status/overrides.log"
+        warn "BPI_DEPLOY_OVERRIDE=1: going on although $why (logged in tests/.status/overrides.log)"
+        return 0
+    fi
+    die "refusing to $what: $why. A person may bypass this once with BPI_DEPLOY_OVERRIDE=1, in their own shell."
+}
+
+# ---------------------------------------------------------------------------------------------
 # The remote mode: copy one bundle, run an installer's local mode on the board, clean up.
 
 # $1 = [user@]host, $2 = the bundle folder, $3 = the script (in firmware/), the rest its
@@ -172,6 +227,8 @@ remote_run() {
     local host="$1" bundle="$2" script="$3" rdir rc inner
     shift 3
     case "$host" in root@*) die "ssh to the board as its audio user, not root ($host)" ;; esac
+    # The gate, as for tools/board.sh. Only the tests' hosts (.invalid: they cannot exist) skip it.
+    case "${host##*@}" in *.invalid) ;; *) deploy_gate status "run firmware/$script on $host" ;; esac
     command -v ssh > /dev/null || die "ssh is not installed"
     # shellcheck disable=SC2016  # expanded on the board: its own $HOME
     rdir="$(ssh -- "$host" 'mkdir -p "$HOME/.cache" && mktemp -d "$HOME/.cache/bpi-amp-setup.XXXXXX"')" \

@@ -86,48 +86,13 @@ case "$command" in
 esac
 
 # --- The gate ------------------------------------------------------------------------------------
-main_checkout() {
-    local common
-    common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" && dirname "$common" || echo "$ROOT"
-}
-for lock in "$ROOT/.claude/lab.lock" "$(main_checkout)/.claude/lab.lock"; do
-    [ ! -e "$lock" ] || die "the lab is locked ($lock exists): nothing may reach a board. A person removes the lock when the boards are free."
-done
-
-if [ "$command" != status ] && [ "$command" != journal ]; then
-    head="$(git -C "$ROOT" rev-parse HEAD)"
-    dirty="$(git -C "$ROOT" status --porcelain)"
-    status_file="$ROOT/tests/.status/$head.json"
-    why=""
-    [ -z "$dirty" ] || why="the working tree has uncommitted changes: commit first, so that what is deployed is what was tested"
-    if [ -z "$why" ]; then
-        why="$(python3 - "$status_file" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        s = json.load(f)
-    if not isinstance(s, dict):
-        raise ValueError("not a JSON object")
-except (OSError, ValueError) as e:
-    print(f"no readable test status {sys.argv[1]} ({e}): run /test all (tools/test.sh all) first")
-    sys.exit()
-bad = [f"{k}: {s.get(k, 'not run')}" + ("" if s.get(k + "_tree") == "clean" else f" (tree {s.get(k + '_tree', '?')})")
-       for k in ("unit", "vpair") if s.get(k) != "pass" or s.get(k + "_tree") != "clean"]
-if bad:
-    print("the test status of this commit is not green on a clean tree: " + ", ".join(bad))
-PY
-)"
-    fi
-    if [ -n "$why" ]; then
-        if [ "${BPI_DEPLOY_OVERRIDE:-}" = 1 ]; then
-            mkdir -p "$ROOT/tests/.status"
-            printf '%s %s %stools/board.sh %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${head:0:12}" "${dirty:+dirty }" "$command" \
-                >> "$ROOT/tests/.status/overrides.log"
-            warn "BPI_DEPLOY_OVERRIDE=1: going on although $why (logged in tests/.status/overrides.log)"
-        else
-            die "refusing to $command: $why. A person may bypass this once with BPI_DEPLOY_OVERRIDE=1."
-        fi
-    fi
+# The installers' gate (firmware/install-lib.sh): the lab locks for every command; for deploy,
+# smoke and rollback also a green test status for HEAD on a clean tree, unless a person set
+# BPI_DEPLOY_OVERRIDE=1 in their own shell (logged).
+if [ "$command" = status ] || [ "$command" = journal ]; then
+    deploy_gate lock "tools/board.sh $command"
+else
+    deploy_gate status "tools/board.sh $command"
 fi
 
 TARGET="$(board_target)"

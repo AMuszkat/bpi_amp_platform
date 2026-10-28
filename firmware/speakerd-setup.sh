@@ -135,7 +135,8 @@ Options:
                               factory.json (speakerd --import-filtergraph --prefer-headless --device).
   --allow-tweeter-without-crossover
                               accept a factory graph in which the stream reaches the tweeter other than
-                              through a crossover's high band. For the virtual pair only: never on a board.
+                              through a crossover's high band. Only with --home (the virtual pair tests):
+                              refused on a board and in target-remote mode.
   --stop-plugin-host          stop a running AudioPluginHost (and disable a systemd unit that starts
                               it) instead of refusing to install while one runs. It is stopped only
                               once every other check has passed.
@@ -192,7 +193,7 @@ while [ $# -gt 0 ]; do
         --tweeter-port)    TWEETER_PORT="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --factory)         FACTORY="${2:?}"; shift 2 ;;
         --import-filtergraph) IMPORT_FILTERGRAPH="${2:?}"; remote "$1" "$2"; shift 2 ;;
-        --allow-tweeter-without-crossover) ALLOW_FULL_RANGE_TWEETER=1; remote "$1"; shift ;;
+        --allow-tweeter-without-crossover) ALLOW_FULL_RANGE_TWEETER=1; shift ;;
         --stop-plugin-host) STOP_PLUGIN_HOST=1; remote "$1"; shift ;;
         --keep)            KEEP_VERSIONS="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --purge)           PURGE=1; remote "$1"; shift ;;
@@ -219,6 +220,11 @@ case "$ARCH" in aarch64 | native) ;; *) die "--arch is aarch64 or native" ;; esa
 case "$ROLE" in "" | left | right | mono) ;; *) die "--role is left, right or mono" ;; esac
 case "$KEEP_VERSIONS" in [2-9] | [1-9][0-9]) ;; *) die "--keep takes a number of versions, 2 or more" ;; esac
 case "$WINDOW" in [0-9] | [0-9][0-9] | [0-9][0-9][0-9]) ;; *) die "--window takes whole seconds, 0 to 999" ;; esac
+# A factory graph that feeds the tweeter other than through a crossover's high band is for the
+# virtual pair tests only (--home), never for a board.
+if [ "$ALLOW_FULL_RANGE_TWEETER" -eq 1 ] && { [ "$MODE" = target-remote ] || [ -z "$HOME_OVERRIDE" ]; }; then
+    die "--allow-tweeter-without-crossover is for the virtual pair tests (--home) only, never for a board"
+fi
 
 # ----------------------------------------------------------------------------
 # bundle (development machine) and the remote mode
@@ -360,6 +366,8 @@ speakerd_version() {   # $1 = the binary
     out="$(HOME="$WORK/empty-home" timeout 10 "$1" --version 2>&1)" || VERSION_STATUS=$?
     [ "$VERSION_STATUS" -eq 0 ] || out=""
     FOUND_VERSION="$(sed -n -E 's/^[^0-9]*([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p' <<< "$out" | head -n 1)"
+    # The whole line, with the build's commit when speakerd says it ("speakerd 0.2.1 (<commit>)").
+    FOUND_BUILD="$(head -n 1 <<< "$out")"
 }
 
 # Whether version $1 is $2 or newer.
@@ -375,6 +383,14 @@ require_speakerd_version() {
     if [ -z "$FOUND_VERSION" ] || ! version_at_least "$FOUND_VERSION" "$SPEAKERD_MIN_VERSION"; then
         die "$2 is ${FOUND_VERSION:-too old to say its version (no --version)}: a board needs speakerd $SPEAKERD_MIN_VERSION or newer, the first that enforces device.json's limits. An older one would ignore the cap."
     fi
+}
+
+# Whether systemd says a unit is enabled. $1 = user|system, $2 = the unit. Without systemd
+# (--no-systemd) nothing is known: not enabled.
+unit_enabled() {
+    [ "$NO_SYSTEMD" -eq 0 ] || return 1
+    if [ "$1" = user ]; then systemctl --user is-enabled --quiet "$2" 2> /dev/null
+    else systemctl is-enabled --quiet "$2" 2> /dev/null; fi
 }
 
 # The AudioPluginHost processes that run (any user), by command name.
@@ -408,28 +424,58 @@ plugin_host_autostarts() {
 }
 
 # Refuses while an AudioPluginHost runs, unless --stop-plugin-host (then stop_plugin_host does
-# it, once nothing else can refuse), and says loudly what would start one again.
+# it, once nothing else can refuse). $1 = install also refuses while anything would start one
+# again at boot or login, beside speakerd: a desktop autostart, a profile, rc.local or the
+# crontab always (a person removes them), a systemd unit unless --stop-plugin-host disables it
+# (or did). $1 = running checks only the running one (setup.sh before it restarts PipeWire).
 refuse_plugin_host() {
-    local pids autostarts f
+    local mode="${1:-install}" pids autostarts f unit blocking=()
     pids="$(plugin_host_pids)"
-    autostarts="$(plugin_host_autostarts)"
     if [ -n "$pids" ]; then
         if [ "$STOP_PLUGIN_HOST" -eq 0 ]; then
             loud "$PLUGIN_HOST runs (pid $pids). It feeds the amplifier today, and speakerd would feed it" \
-                 "too: two plugin hosts at once, the tweeter included. Refusing to install." \
+                 "too: two plugin hosts at once, the tweeter included. Refusing." \
                  "Close it, or pass --stop-plugin-host to have it stopped."
             exit 1
         fi
         info "$PLUGIN_HOST runs (pid $pids): it will be stopped once every check has passed (--stop-plugin-host)"
     fi
-    if [ -n "$autostarts" ]; then
-        local lines=("$PLUGIN_HOST is started at boot or login by:")
-        while read -r f; do lines+=("    $f"); done <<< "$autostarts"
-        lines+=("speakerd-run waits for it to exit before it starts speakerd, but remove it: two plugin"
-                "hosts must never feed the amplifier. --stop-plugin-host disables the systemd units.")
-        loud "${lines[@]}"
+    [ "$mode" = install ] || return 0
+    autostarts="$(plugin_host_autostarts)"
+    [ -n "$autostarts" ] || return 0
+    while read -r f; do
+        [ -n "$f" ] || continue
+        unit="$(basename "$f")"
+        case "$f" in
+            "$H"/.config/systemd/user/*.service)
+                if [ "$STOP_PLUGIN_HOST" -eq 1 ]; then info "$f: will be disabled (--stop-plugin-host)"; continue; fi
+                if grep -qxF "user $unit" "$PLUGIN_HOST_UNITS" 2> /dev/null && ! unit_enabled user "$unit"; then
+                    continue    # an earlier install disabled it, and it stayed so
+                fi
+                blocking+=("$f: a user unit; pass --stop-plugin-host, or: systemctl --user disable --now $unit") ;;
+            /etc/systemd/system/*.service)
+                if grep -qxF "system $unit" "$PLUGIN_HOST_UNITS" 2> /dev/null && ! unit_enabled system "$unit"; then
+                    continue
+                fi
+                if [ "$STOP_PLUGIN_HOST" -eq 1 ] && sudo -n true 2> /dev/null; then
+                    info "$f: will be disabled (--stop-plugin-host)"; continue
+                fi
+                blocking+=("$f: a system unit; run: sudo systemctl disable --now $unit") ;;
+            /etc/systemd/user/*.service)
+                blocking+=("$f: a unit for every user; run: sudo systemctl --global disable $unit") ;;
+            "the crontab of "*)
+                blocking+=("$f: remove the line that starts $PLUGIN_HOST (crontab -e)") ;;
+            *.desktop)
+                blocking+=("$f: a desktop autostart; delete the file") ;;
+            *)
+                blocking+=("$f: remove the line that starts $PLUGIN_HOST") ;;
+        esac
+    done <<< "$autostarts"
+    if [ ${#blocking[@]} -gt 0 ]; then
+        loud "$PLUGIN_HOST would start again at boot or login, and feed the amplifier beside speakerd:" \
+             "${blocking[@]/#/    }" "Refusing to install until these are gone."
+        exit 1
     fi
-    return 0
 }
 
 # Notes a unit stop_plugin_host disabled, once, for uninstall.
@@ -464,16 +510,18 @@ stop_plugin_host() {
         unit="$(basename "$f")"
         case "$f" in
             "$H"/.config/systemd/user/*.service)
-                if dry; then info "(dry-run) would disable the user unit $unit"
+                if grep -qxF "user $unit" "$PLUGIN_HOST_UNITS" 2> /dev/null && ! unit_enabled user "$unit"; then continue
+                elif dry; then info "(dry-run) would disable the user unit $unit"
                 elif sc disable --now "$unit"; then
                     record_unit user "$unit"; ok "Disabled the user unit $unit"
-                else warn "could not disable $unit"; fi ;;
+                else die "could not disable the user unit $unit: systemctl --user disable --now $unit"; fi ;;
             /etc/systemd/system/*.service)
-                if dry; then info "(dry-run) would disable the system unit $unit"
+                if grep -qxF "system $unit" "$PLUGIN_HOST_UNITS" 2> /dev/null && ! unit_enabled system "$unit"; then continue
+                elif dry; then info "(dry-run) would disable the system unit $unit"
                 elif [ "$NO_SYSTEMD" -eq 0 ] && sudo -n systemctl disable --now "$unit" 2> /dev/null; then
                     record_unit system "$unit"; ok "Disabled the system unit $unit"
-                else warn "disable it by hand: sudo systemctl disable --now $unit"; fi ;;
-            *) warn "remove $PLUGIN_HOST from $f by hand" ;;
+                else die "could not disable the system unit $unit: sudo systemctl disable --now $unit"; fi ;;
+            *) ;;   # refuse_plugin_host refused these already
         esac
     done <<< "$(plugin_host_autostarts)"
 }
@@ -537,7 +585,16 @@ check_bundle() {
     check_libraries
     require_speakerd_version "$BUNDLE/bin/speakerd" "the bundle's speakerd"
     BUNDLE_SPEAKERD_VERSION="$FOUND_VERSION"
-    ok "speakerd $BUNDLE_SPEAKERD_VERSION (at least $SPEAKERD_MIN_VERSION)"
+    BUNDLE_SPEAKERD_BUILD="$FOUND_BUILD"
+    ok "$BUNDLE_SPEAKERD_BUILD (at least $SPEAKERD_MIN_VERSION)"
+    # speakerd says the commit it was built from; the bundle, the commit it was made at. Apart,
+    # the artifacts were built before the deployed commit was checked out.
+    local built_from bundled_at
+    built_from="$(sed -n -E 's/.*\(([0-9a-f]{7,40})(-dirty)?\).*/\1/p' <<< "$BUNDLE_SPEAKERD_BUILD")"
+    bundled_at="$(version_value "$BUNDLE/VERSION" commit)"
+    if [ -n "$built_from" ] && [ -n "$bundled_at" ] && [[ "$bundled_at" != "$built_from"* ]]; then
+        warn "speakerd was built from commit $built_from, the bundle made at ${bundled_at:0:12}: rebuild after checking out the commit you deploy (tools/build.sh speakerd aarch64)"
+    fi
     check_lv2_shadows
 }
 
@@ -672,8 +729,8 @@ require_live_sink() {
 restart_pipewire() {
     [ "$DROPIN_CHANGED" -eq 1 ] || return 0
     if dry || [ "$NO_RESTART" -eq 1 ]; then info "PipeWire needs a restart for the speakerd sink (not done: --dry-run/--no-restart)"; return 0; fi
-    info "Restarting PipeWire, so that the speakerd sink exists"
-    sc restart pipewire.service wireplumber.service || die "could not restart PipeWire (systemctl --user restart pipewire wireplumber): the speakerd sink does not exist yet"
+    info "Restarting PipeWire, for the speakerd sink's drop-in ($([ -f "$DROPIN" ] && echo added || echo removed))"
+    sc restart pipewire.service wireplumber.service || die "could not restart PipeWire (systemctl --user restart pipewire wireplumber): the running PipeWire does not have the new configuration"
     sc restart pipewire-pulse.service 2> /dev/null || true
     # snapclient's stream went with the old PipeWire.
     if [ "$NO_SYSTEMD" -eq 0 ] && systemctl --user is-enabled snapclient.service > /dev/null 2>&1; then
@@ -716,7 +773,10 @@ prepare_factory() {
     elif [ -n "$FACTORY" ]; then
         cp "$FACTORY" "$doc"
     else
-        if [ -f "$STATE/factory.json" ]; then ok "Keeping $STATE/factory.json"
+        if [ -f "$STATE/factory.json" ]; then
+            helper graph "$STATE/factory.json" "${allow[@]}" > /dev/null \
+                || die "the factory.json there is (kept) is refused (see above): replace it with --factory or --import-filtergraph"
+            ok "Keeping $STATE/factory.json"
         else
             loud "No factory graph: until there is one (--factory or --import-filtergraph), speakerd plays" \
                  "PASSTHROUGH: the own channel to the woofer only, at -20 dB, the tweeter muted."
@@ -743,15 +803,35 @@ install_version() {
     chmod 755 "$tmpdst/bin/speakerd" "$tmpdst/bin/speakerd-run"
     if [ -d "$BUNDLE/lv2" ]; then cp -a "$BUNDLE/lv2" "$tmpdst/lv2"; else mkdir -p "$tmpdst/lv2"; fi
     cp -p "$BUNDLE/VERSION" "$tmpdst/VERSION"
-    echo "speakerd_version=$BUNDLE_SPEAKERD_VERSION" >> "$tmpdst/VERSION"
+    { echo "speakerd_version=$BUNDLE_SPEAKERD_VERSION"; echo "speakerd_build=$BUNDLE_SPEAKERD_BUILD"; } >> "$tmpdst/VERSION"
     # This installer, so that status, rollback and uninstall work on the board without a bundle.
     cp -p "$FIRMWARE_DIR"/{setup.sh,install-lib.sh,speakerd-setup.sh,snapcast-setup.sh} "$tmpdst/setup/"
     cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py} "$tmpdst/setup/speakerd/"
     cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf "$tmpdst/setup/pipewire/"
     cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf.d/*.conf "$tmpdst/setup/pipewire/pipewire.conf.d/"
+    # firmware/CLAUDE.md calls these directly: executable, whatever the copy they came from kept.
+    chmod 755 "$tmpdst"/setup/{setup.sh,speakerd-setup.sh,snapcast-setup.sh} "$tmpdst"/setup/speakerd/{speakerd-run,setup-helper.py}
     rm -rf "$dst"; mv "$tmpdst" "$dst"
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUNDLE_ID" >> "$LIB/installed.log"
     ok "Installed version $BUNDLE_ID in $dst"
+}
+
+# The tweeter rule over every layer speakerd may load: graph.json and graph.lkg.json (ampd's)
+# load before factory.json. $1 = refuse (any layer that breaks it refuses) | warn.
+check_layers() {
+    local mode="$1" f out bad=()
+    for f in graph.json graph.lkg.json factory.json; do
+        [ -f "$STATE/$f" ] || continue
+        out="$(helper graph "$STATE/$f" 2>&1)" || bad+=("$f: ${out#setup-helper: }")
+    done
+    [ ${#bad[@]} -gt 0 ] || return 0
+    if [ "$mode" = refuse ]; then
+        loud "Refusing: a layer speakerd may load feeds the tweeter other than through a crossover's high band:" \
+             "${bad[@]/#/    }"
+        exit 1
+    fi
+    loud "A layer speakerd may load feeds the tweeter other than through a crossover's high band (the" \
+         "tweeter is muted now; turning it on will be refused):" "${bad[@]/#/    }"
 }
 
 # Writes what prepare_device and prepare_factory made. Sets DEVICE_CHANGED, FACTORY_CHANGED.
@@ -797,39 +877,49 @@ prune_versions() {
 # stopped (status 2: a bundle shadowed by a system LV2 folder).
 check_started() {   # $1 = epoch seconds of the restart
     [ "$NO_SYSTEMD" -eq 0 ] || return 0
-    local log="" line wait="${SPEAKERD_START_WAIT:-15}"
+    local log="" run="" line wait="${SPEAKERD_START_WAIT:-15}"
+    # Only what follows the first start in the window counts: restarting a running speakerd
+    # records the OLD one's end ("speakerd ended: clean") after the moment of the restart. An end
+    # after that start is the new one's: a crash.
     for _ in $(seq 1 $((wait * 2))); do
         log="$(journalctl --user -u speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
-        grep -qE '^speakerd: device(: limits|\.json: FAILED)' <<< "$log" && break
+        run="$(awk '/^speakerd-run: starting speakerd/ { found = 1 } found' <<< "$log")"
+        grep -qE '^speakerd: device(: limits|\.json: FAILED)' <<< "$run" && break
         sleep 0.5
     done
     # A speakerd that refuses its bundles (status 2) has said its device line already: give it
     # the time to go.
     if [ "$wait" -ge 2 ]; then sleep 2; else sleep 1; fi
     log="$(journalctl --user -u speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
-    if ! systemctl --user is-active --quiet speakerd.service || grep -qE '^speakerd-run: speakerd ended' <<< "$log"; then
-        loud "speakerd is not running after its start (systemctl --user status speakerd):" \
-             "$(grep -E '^speakerd(-run)?: ' <<< "$log" | tail -n 5)"
+    run="$(awk '/^speakerd-run: starting speakerd/ { found = 1 } found' <<< "$log")"
+    if [ -z "$run" ]; then
+        loud "speakerd-run did not start speakerd within $wait s (see the journal: an AudioPluginHost it waits for?)." \
+             "If 'journalctl --user -n 5' shows no entries, $AUDIO_USER cannot read the journal (Armbian: a volatile" \
+             "or unsplit journal, or $AUDIO_USER not in the systemd-journal group): fix that first, nothing here can be checked."
         exit 1
     fi
-    if line="$(grep -m1 '^speakerd: device.json: FAILED' <<< "$log")"; then
+    if ! systemctl --user is-active --quiet speakerd.service || grep -qE '^speakerd-run: speakerd ended' <<< "$run"; then
+        loud "speakerd is not running after its start (systemctl --user status speakerd):" \
+             "$(grep -E '^speakerd(-run)?: ' <<< "$run" | tail -n 5)"
+        exit 1
+    fi
+    if line="$(grep -m1 '^speakerd: device.json: FAILED' <<< "$run")"; then
         loud "speakerd could not read device.json and plays with its fail-safe defaults:" "${line#speakerd: }"
         exit 1
     fi
-    if line="$(grep -m1 -E "$NO_SINK_LINE" <<< "$log")"; then
+    if line="$(grep -m1 -E "$NO_SINK_LINE" <<< "$run")"; then
         loud "PipeWire had no speakerd sink, so speakerd made one: the drop-in is not loaded." "${line#speakerd: }"
         exit 1
     fi
-    if line="$(grep -m1 '^speakerd: device: limits: ' <<< "$log")"; then
+    if line="$(grep -m1 '^speakerd: device: limits: ' <<< "$run")"; then
         if [[ ! "$line" =~ $LIMITS_LINE ]]; then
             loud "speakerd does not play device.json's limits:" "${line#speakerd: }"
             exit 1
         fi
         ok "${line#speakerd: }"
     else
-        loud "speakerd has said nothing about its limits within $wait s. If 'journalctl --user -n 5' shows no" \
-             "entries, $AUDIO_USER cannot read the journal (Armbian: a volatile or unsplit journal, or" \
-             "$AUDIO_USER not in the systemd-journal group): fix that first, nothing here can be checked."
+        loud "speakerd started but has said nothing about its limits within $wait s: a speakerd that does not" \
+             "say them must not play on a board (journalctl --user -u speakerd -b)."
         exit 1
     fi
 }
@@ -870,6 +960,7 @@ do_install() {
         fi
     fi
     prune_versions
+    dry || check_layers warn
 
     if dry; then ok "Dry run: nothing changed"; return 0; fi
     [ "$unit_changed" -eq 0 ] || sc daemon-reload
@@ -903,7 +994,7 @@ EOF
 # status, rollback, uninstall, limits, check, sink
 # ----------------------------------------------------------------------------
 do_status() {
-    local id current previous mark
+    local id current previous mark build
     current="$(link_target "$LIB/current")"; previous="$(link_target "$LIB/previous")"
     echo "speakerd on $AUDIO_USER@$(hostname) (home $H)"
     if [ -d "$LIB" ]; then
@@ -912,8 +1003,11 @@ do_status() {
             id="$(basename "$id")"
             [ -f "$LIB/$id/VERSION" ] || continue
             mark=""; [ "$id" = "$previous" ] && mark=previous; [ "$id" = "$current" ] && mark=current
-            printf '    %-9s %s  (speakerd %s, commit %s, dirty %s, bundled %s)\n' "$mark" "$id" \
-                "$(version_value "$LIB/$id/VERSION" speakerd_version)" \
+            # The whole --version line (with the commit speakerd was built from); an install
+            # from before it recorded only the number.
+            build="$(version_value "$LIB/$id/VERSION" speakerd_build)"
+            [ -n "$build" ] || build="speakerd $(version_value "$LIB/$id/VERSION" speakerd_version)"
+            printf '    %-9s %s  (%s, commit %s, dirty %s, bundled %s)\n' "$mark" "$id" "$build" \
                 "$(version_value "$LIB/$id/VERSION" commit | cut -c1-12)" "$(version_value "$LIB/$id/VERSION" dirty)" \
                 "$(version_value "$LIB/$id/VERSION" bundled)"
         done
@@ -932,12 +1026,11 @@ do_status() {
     else
         echo "  device.json: none"
     fi
+    local out
     for id in graph.json graph.lkg.json factory.json; do
-        if [ -f "$STATE/$id" ]; then
-            echo "  $id: $(helper graph "$STATE/$id" --allow-tweeter-without-crossover 2> /dev/null | sed -n "s/^summary='\(.*\)'$/\1/p")"
-        else
-            echo "  $id: none"
-        fi
+        if [ ! -f "$STATE/$id" ]; then echo "  $id: none"
+        elif out="$(helper graph "$STATE/$id" 2>&1)"; then echo "  $id: $(sed -n "s/^summary='\(.*\)'$/\1/p" <<< "$out")"
+        else echo "  $id: *** ${out#setup-helper: } ***"; fi
     done
     if [ -f "$DROPIN" ]; then echo "  sink: $DROPIN"; else echo "  sink: not configured ($DROPIN)"; fi
     read_live_sink
@@ -971,7 +1064,14 @@ do_rollback() {
     else
         require_speakerd_version "$LIB/$previous/bin/speakerd" "the previous version's speakerd ($previous)"
     fi
-    if dry; then info "(dry-run) would make $previous current and $current previous"; return 0; fi
+    if dry; then info "(dry-run) would make $previous current and $current previous, and cap device.json"; return 0; fi
+    # Other plugin builds (another crossover) play from here: under the cap, as after an
+    # install, until a person lifts it again. The cap first, then the switch.
+    if [ -f "$STATE/device.json" ]; then
+        helper device "$STATE/device.json" --gain-db "$CAP_GAIN_DB" --tweeter-limit "$CAP_TWEETER" > /dev/null \
+            || die "cannot cap device.json: not rolling back"
+        ok "device.json capped: output at $CAP_GAIN_DB dB, tweeter $CAP_TWEETER"
+    fi
     point "$LIB/current" "$previous"
     point "$LIB/previous" "$current"
     ok "current -> $previous (previous -> $current; rollback again to go back)"
@@ -992,6 +1092,7 @@ restore_routing() {
         cp -p "$CLIENT_RT.before-speakerd" "$CLIENT_RT.tmp.$$" && mv -f "$CLIENT_RT.tmp.$$" "$CLIENT_RT"
         rm -f "$CLIENT_RT.before-speakerd"
         ok "Restored snapclient's routing from before speakerd ($CLIENT_RT)"
+        check_snapclient_target
         if [ "$NO_RESTART" -eq 0 ] && [ "$NO_SYSTEMD" -eq 0 ] && systemctl --user is-enabled snapclient.service > /dev/null 2>&1; then
             if sc restart snapclient.service; then ok "Restarted snapclient"; else warn "could not restart snapclient"; fi
         fi
@@ -1003,8 +1104,36 @@ restore_routing() {
     if [ "$NO_RESTART" -eq 1 ] || [ "$NO_SYSTEMD" -eq 1 ]; then args+=(--no-restart); fi
     if test_mode; then args+=(--client-home "$H"); fi
     bash "$FIRMWARE_DIR/snapcast-setup.sh" "${args[@]}" || die "could not restore snapclient's routing: not uninstalling"
-    warn "snapclient now plays into Ap.cap (the AudioPluginHost route). If this PipeWire has no Ap.cap,"
-    warn "WirePlumber sends it to the default sink: the amplifier, full range."
+    dry || check_snapclient_target
+}
+
+# After the routing is restored: the node snapclient's rule names must exist in the running
+# PipeWire, or WirePlumber sends snapclient to the default sink, the amplifier, full range and
+# uncapped (a --base-conf pipewire.conf, say, has no Ap.cap). If it does not, snapclient is
+# stopped and disabled, and said so.
+check_snapclient_target() {
+    local target why
+    target="$(awk '/application\.name *= *"Snapclient"/ { s = 1 }
+                   s && /^[^#]*target\.object *= *"/ { match($0, /target\.object *= *"[^"]*"/); v = substr($0, RSTART, RLENGTH)
+                                                         sub(/^[^"]*"/, "", v); sub(/"$/, "", v); print v; exit }' \
+              "$CLIENT_RT" 2> /dev/null)"
+    if [ -z "$target" ]; then
+        why="names no target for snapclient"
+    elif pw_dump "$WORK/route.json"; then
+        if helper node "$WORK/route.json" "$target" > /dev/null 2>&1; then ok "snapclient's target '$target' exists"; return 0; fi
+        why="sends it to '$target', which the running PipeWire does not have"
+    elif test_mode; then
+        warn "no PipeWire reachable: snapclient's target '$target' is not checked (test mode)"; return 0
+    else
+        why="sends it to '$target', and the running PipeWire cannot be reached to check that it exists"
+    fi
+    if dry; then warn "(dry-run) snapclient's restored routing $why: snapclient would be stopped and disabled"; return 0; fi
+    loud "snapclient's restored routing $why: WirePlumber would send it to the default sink, the" \
+         "amplifier, full range and uncapped. Stopping and disabling snapclient. Give it a target that" \
+         "exists (firmware/snapcast-setup.sh --mode target --routing-only --route ...), then:" \
+         "systemctl --user enable --now snapclient"
+    sc stop snapclient.service 2> /dev/null || true
+    sc disable snapclient.service 2> /dev/null || true
 }
 
 # Re-enables the AudioPluginHost units install disabled (--stop-plugin-host).
@@ -1065,6 +1194,9 @@ do_limits() {
             loud "Lifting the cap: output at $gain dB, tweeter $tweeter. A person is at the speaker (--person-present)."
         fi
     fi
+    # The tweeter goes on only if no layer speakerd may load feeds it other than through a
+    # crossover's high band: what it plays now may be ampd's graph.json, not the factory.
+    if [ "$tweeter" = on ] && [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ]; then check_layers refuse; fi
     if dry; then info "(dry-run) would set the limits to output at $gain dB, tweeter $tweeter"; return 0; fi
     out="$(helper device "$STATE/device.json" --gain-db "$gain" --tweeter-limit "$tweeter")" || die "cannot write device.json"
     eval "$out"
@@ -1187,8 +1319,6 @@ do_smoke() {
         yes) pass "the speakerd sink is the drop-in's (priority.session 1500, priority.driver 0)" ;;
         *)   failed "the speakerd sink is not the drop-in's: $LIVE_SINK_WHY" ;;
     esac
-    if [ "$DEFAULT_SINK" = speakerd ]; then pass "the default sink is speakerd"
-    else noted "the default sink is '${DEFAULT_SINK:-unknown}', not speakerd: a stream with no target plays straight into it"; fi
 
     # The links: the sink into speakerd-dsp, speakerd-dsp into the amplifier, and nothing else into it.
     amp="$(json_get "$device" 'd["amplifier"]["node"] if isinstance(d.get("amplifier"), dict) else d.get("amplifier")')"
@@ -1208,6 +1338,10 @@ do_smoke() {
         if [ -z "$feeders" ]; then pass "nothing but speakerd-dsp plays into $amp"
         else failed "something else plays into the amplifier: $(tr '\n' ';' <<< "$feeders")"; fi
     fi
+    if [ "$DEFAULT_SINK" = speakerd ]; then pass "the default sink is speakerd"
+    elif [ -n "$amp" ] && [ "$DEFAULT_SINK" = "$amp" ]; then
+        failed "the default sink is the amplifier '$amp' (chosen with wpctl?): a stream with no target plays straight into it, full range and uncapped. wpctl set-default <the id of 'speakerd input' in wpctl status>"
+    else noted "the default sink is '${DEFAULT_SINK:-unknown}', not speakerd: a stream with no target plays into it"; fi
     snap="$(grep -E '^[^ ]*([Ss]napcast|[Ss]napclient)[^ ]*:output_' <<< "$links")"
     if [ -z "$snap" ]; then said "no snapclient stream in PipeWire now"
     elif ! grep -qv ' -> speakerd:playback_' <<< "$snap"; then pass "snapclient plays into the speakerd sink"
@@ -1233,7 +1367,7 @@ do_smoke() {
             elif [[ " $drivers " == *" $amp "* ]] && [[ " $followers " == *" speakerd-dsp "* ]]; then pass "$amp drives the graph (followers: $followers)"
             else noted "who drives speakerd-dsp was NOT measured (drivers: ${drivers:-none}; followers: ${followers:-none}): play a quiet stream into the speakerd sink while smoke runs"; fi
         else
-            noted "who drives the graph was NOT measured: nothing ran (no profiler module, or nothing plays: play a quiet stream into the speakerd sink while smoke runs)"
+            noted "who drives the graph was NOT measured: nothing ran. Either nothing plays (play a quiet stream into the speakerd sink while smoke runs), or PipeWire has no profiler module (pw-profiler needs libpipewire-module-profiler in context.modules: firmware/CLAUDE.md, 'First deploy')"
         fi
     fi
 
@@ -1286,5 +1420,5 @@ case "$ACTION" in
     check)     do_check ;;
     sink)      do_sink ;;
     smoke)     do_smoke ;;
-    stop-plugin-host) refuse_plugin_host; stop_plugin_host ;;
+    stop-plugin-host) refuse_plugin_host running; stop_plugin_host ;;
 esac

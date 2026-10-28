@@ -88,7 +88,9 @@ Options:
   --amplifier <node>, --woofer-port <port>, --tweeter-port <port>
   --factory <file>            a graph document for factory.json (in target-remote mode, a local file).
   --import-filtergraph <file> an AudioPluginHost .filtergraph on the board, converted into factory.json.
-  --stop-plugin-host          stop a running AudioPluginHost instead of refusing.
+  --stop-plugin-host          stop a running AudioPluginHost (and disable its systemd units) instead of
+                              refusing. Checked whenever PipeWire restarts into the speakerd route
+                              (pipewire, speakerd, snapcast --server-ip), not only for speakerd.
   --plugin <plugin[:build]>   target-remote: a plugin bundle to copy, repeatable (default ${DEFAULT_PLUGINS[*]}).
   --arch <aarch64|native>     target-remote: the build tree the bundle comes from (default aarch64).
   --bundle <dir>              target: the bundle (default: the folder above this script, when it is one).
@@ -266,11 +268,30 @@ if selected snapcast; then
     fi
 fi
 
+# A running AudioPluginHost must not see PipeWire restart under it into the speakerd sink's
+# configuration: it would be linked to the amplifier again beside speakerd, full range. The
+# components that restart PipeWire: pipewire, speakerd (its sink) and snapcast's full setup
+# (--server-ip). With --route plugin-host and no speakerd, the plugin host is what plays: it
+# stays.
+STOP_PLUGIN_HOST=0
+[[ " ${SPEAKERD_ARGS[*]} " != *" --stop-plugin-host "* ]] || STOP_PLUGIN_HOST=1
+NO_PLUGIN_HOST=0
+if { selected pipewire || selected speakerd || { selected snapcast && [ -n "$SERVER_IP" ]; }; } \
+   && { [ "$ROUTE" = speakerd ] || selected speakerd; }; then
+    NO_PLUGIN_HOST=1
+    info "Checking for the old plugin host (PipeWire restarts)"
+    if [ "$STOP_PLUGIN_HOST" -eq 1 ]; then
+        speakerd_setup stop-plugin-host --stop-plugin-host --dry-run || die "the old plugin host cannot be stopped (see above): nothing was changed"
+    else
+        speakerd_setup stop-plugin-host --dry-run || die "the old plugin host runs (see above): nothing was changed"
+    fi
+fi
+
 # ----------------------------------------------------------------------------
 # Install, in boot order
 # ----------------------------------------------------------------------------
 # Every check has passed. The old plugin host goes first, before PipeWire restarts under it.
-if selected speakerd && [[ " ${SPEAKERD_ARGS[*]} " == *" --stop-plugin-host "* ]]; then
+if [ "$NO_PLUGIN_HOST" -eq 1 ] && [ "$STOP_PLUGIN_HOST" -eq 1 ]; then
     echo
     info "The old plugin host"
     speakerd_setup stop-plugin-host --stop-plugin-host

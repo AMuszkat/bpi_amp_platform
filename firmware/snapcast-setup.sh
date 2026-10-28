@@ -182,6 +182,11 @@ done
 [ -n "$MODE" ] || { usage; die "--mode is required"; }
 case "$MODE" in host|target|target-remote|both) ;; *) die "--mode must be host, target, target-remote or both" ;; esac
 case "$ROUTE" in speakerd|plugin-host) ;; *) die "--route must be speakerd or plugin-host" ;; esac
+# Without client-rt.conf (and the unit's PIPEWIRE_CONFIG_NAME) nothing routes snapclient: it
+# plays into the default sink, which a wpctl set-default may have made the amplifier.
+if [ "$ROUTE" = speakerd ] && [ "$TARGET_CLIENT_RT" -eq 0 ]; then
+    die "--route speakerd needs client-rt.conf: not with --no-client-rt"
+fi
 
 
 # ----------------------------------------------------------------------------
@@ -240,12 +245,18 @@ write_user_file() {  # $1 = path relative to CLIENT_HOME   $2 = content
     if [ "$DRY_RUN" -eq 1 ]; then
         info "(dry-run) would write $path (owner $CLIENT_USER):"; printf '%s\n' "$content" | sed 's/^/    /'; return 0
     fi
+    # Whole or not at all: a temporary file beside it, then a rename (a reader, or a power cut,
+    # never sees half a routing).
+    local tmp="$path.tmp.$$"
     # Into the test's folder, or into our own home: no root needed.
     if [ -n "$CLIENT_HOME_OVERRIDE" ] || { [ "$(id -u)" -ne 0 ] && [ "$(id -un)" = "$CLIENT_USER" ]; }; then
-        mkdir -p "$(dirname "$path")"; printf '%s\n' "$content" > "$path"; ok "Wrote $path"; return 0
+        mkdir -p "$(dirname "$path")"
+        { printf '%s\n' "$content" > "$tmp" && mv -f "$tmp" "$path"; } || { rm -f "$tmp"; die "cannot write $path"; }
+        ok "Wrote $path"; return 0
     fi
     run_root mkdir -p "$(dirname "$path")"
-    printf '%s\n' "$content" | run_root tee "$path" >/dev/null
+    { printf '%s\n' "$content" | run_root tee "$tmp" >/dev/null && run_root mv -f "$tmp" "$path"; } \
+        || { run_root rm -f "$tmp"; die "cannot write $path"; }
     run_root chown -R "$CLIENT_USER:$CLIENT_USER" "$CLIENT_HOME/$(echo "$rel" | cut -d/ -f1)"
     ok "Wrote $path"
 }
@@ -260,10 +271,12 @@ install_pkgs() {
         info "Installing via apt: $pkgs"
         [ "$DRY_RUN" -eq 1 ] && { echo "  (dry-run) apt-get install -y $pkgs"; return 0; }
         run_root apt-get update -y || warn "apt-get update failed; continuing"
+        # shellcheck disable=SC2086  # one word per package
         run_root apt-get install -y $pkgs || warn "apt install of '$pkgs' incomplete"
     elif command -v dnf >/dev/null 2>&1; then
         info "Installing via dnf: $pkgs"
         [ "$DRY_RUN" -eq 1 ] && { echo "  (dry-run) dnf install -y $pkgs"; return 0; }
+        # shellcheck disable=SC2086  # one word per package
         run_root dnf install -y $pkgs || warn "dnf install incomplete"
     elif command -v pacman >/dev/null 2>&1; then
         info "Installing via pacman: snapcast"
@@ -622,15 +635,26 @@ setup_routing_only() {
     resolve_client_user
     info "Routing snapclient into $(route_target) (--route $ROUTE; client-rt.conf only, user $CLIENT_USER)"
     check_route_target
-    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" unit="$CLIENT_HOME/.config/systemd/user/snapclient.service"
+    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" unit="$CLIENT_HOME/.config/systemd/user/snapclient.service" as=run_root
+    if [ -n "$CLIENT_HOME_OVERRIDE" ] || [ "$(id -un)" = "$CLIENT_USER" ]; then as=""; fi
+    # The rules reach snapclient only through its unit's PIPEWIRE_CONFIG_NAME=client-rt.conf.
+    # Into speakerd that is not optional: without it snapclient plays into the default sink.
+    if $as test -f "$unit"; then
+        if ! $as grep -q 'PIPEWIRE_CONFIG_NAME=client-rt.conf' "$unit"; then
+            local why="$unit does not point snapclient at client-rt.conf (no Environment=PIPEWIRE_CONFIG_NAME=client-rt.conf), so these rules would not reach it"
+            if [ "$ROUTE" = speakerd ] && [ "$DRY_RUN" -eq 0 ]; then
+                die "--route speakerd: $why. Not routing: re-run --mode target with --server-ip (it rewrites the unit), or add that line."
+            fi
+            warn "$why: re-run --mode target with --server-ip"
+        fi
+    else
+        warn "no snapclient user unit ($unit): these rules apply only to a snapclient started with PIPEWIRE_CONFIG_NAME=client-rt.conf"
+    fi
     if [ "$DRY_RUN" -eq 0 ] && [ -f "$crt" ] && [ ! -f "$crt.orig" ]; then
         cp -a "$crt" "$crt.orig" && ok "Backed up existing client-rt.conf -> $crt.orig"
     fi
     save_routing_before_speakerd
     write_user_file ".config/pipewire/client-rt.conf" "$(target_client_rt_conf)"
-    if [ -f "$unit" ] && ! grep -q 'PIPEWIRE_CONFIG_NAME=client-rt.conf' "$unit"; then
-        warn "$unit does not point snapclient at client-rt.conf, so these rules do not reach it: re-run --mode target with --server-ip"
-    fi
     if [ "$DO_RESTART" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ -z "$CLIENT_HOME_OVERRIDE" ]; then
         # A stream's target is read when it is created: restart snapclient.
         if as_user systemctl --user restart snapclient 2>/dev/null; then
@@ -714,9 +738,11 @@ UNIT
     # enable, then restart -- 'enable --now' is a no-op if it is already running, so a
     # re-run after a config change would otherwise keep the stale config.
     systemctl --user enable snapserver 2>/dev/null || true
-    systemctl --user restart snapserver 2>/dev/null \
-        && ok "snapserver (re)started as a user service" \
-        || warn "Could not start user snapserver; check: systemctl --user status snapserver"
+    if systemctl --user restart snapserver 2>/dev/null; then
+        ok "snapserver (re)started as a user service"
+    else
+        warn "Could not start user snapserver; check: systemctl --user status snapserver"
+    fi
     # Keep the user service alive when nobody is logged in (headless host).
     run_root loginctl enable-linger "$USER" 2>/dev/null && ok "Enabled linger for $USER" || true
 }
@@ -788,9 +814,11 @@ restart_pipewire() {
     [ "$DRY_RUN" -eq 1 ] && { info "(dry-run) would restart PipeWire"; return 0; }
     info "Restarting PipeWire (virtual sink)"
     if [ "$SCOPE" = "user" ] && [ "$(id -u)" -ne 0 ]; then
-        systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null \
-            && ok "Restarted user PipeWire services" \
-            || warn "Could not restart user PipeWire; run: systemctl --user restart pipewire wireplumber"
+        if systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null; then
+            ok "Restarted user PipeWire services"
+        else
+            warn "Could not restart user PipeWire; run: systemctl --user restart pipewire wireplumber"
+        fi
     else
         run_root systemctl restart pipewire pipewire-pulse wireplumber 2>/dev/null \
             || warn "Could not restart system PipeWire; restart it in the user's session instead"
@@ -806,7 +834,8 @@ setup_host() {
     install_pkgs snapserver
     # Migration: older versions of this script created a redundant null-audio-sink
     # that snapserver never captured (a non-working decoy). Remove it if present.
-    local stale="$(confd_dir)/60-snapcast-sink.conf"
+    local stale
+    stale="$(confd_dir)/60-snapcast-sink.conf"
     if [ "$DRY_RUN" -eq 0 ] && { [ -f "$stale" ] || run_root test -f "$stale" 2>/dev/null; }; then
         run_root rm -f "$stale" && ok "Removed stale redundant sink: $stale"
     fi
@@ -864,14 +893,18 @@ setup_target_local() {
     if [ "$DO_RESTART" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
         as_user systemctl --user daemon-reload 2>/dev/null || true
         # restart the audio stack so snapclient attaches to a fresh PipeWire graph.
-        as_user systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null \
-            && ok "Restarted PipeWire/WirePlumber for $CLIENT_USER" \
-            || warn "Could not restart PipeWire/WirePlumber for $CLIENT_USER (check: systemctl --user --machine=$CLIENT_USER@ status pipewire)"
+        if as_user systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null; then
+            ok "Restarted PipeWire/WirePlumber for $CLIENT_USER"
+        else
+            warn "Could not restart PipeWire/WirePlumber for $CLIENT_USER (check: systemctl --user --machine=$CLIENT_USER@ status pipewire)"
+        fi
         as_user systemctl --user enable snapclient 2>/dev/null || true
         # restart (not just enable --now) so a re-run picks up config changes.
-        as_user systemctl --user restart snapclient 2>/dev/null \
-            && ok "snapclient (re)started as $CLIENT_USER's user service" \
-            || warn "Could not start snapclient; check: systemctl --user --machine=$CLIENT_USER@ status snapclient"
+        if as_user systemctl --user restart snapclient 2>/dev/null; then
+            ok "snapclient (re)started as $CLIENT_USER's user service"
+        else
+            warn "Could not start snapclient; check: systemctl --user --machine=$CLIENT_USER@ status snapclient"
+        fi
     else
         info "Service written but not started (--no-restart/--dry-run)"
     fi

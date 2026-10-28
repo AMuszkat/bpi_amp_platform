@@ -325,8 +325,9 @@ def parse_options(args, with_value, flags=()):
 # Graph documents, version 1 (dsp/juce_apps/speakerd/README.md)
 
 def is_crossover(node):
-    identifier = str((node.get("plugin") or {}).get("identifier", ""))
-    return identifier.rstrip("/").rsplit("/", 1)[-1].lower().startswith("crossover") and not node.get("bypassed")
+    """A crossover that filters: not bypassed, and not a control build (an editor with no DSP)."""
+    name = str((node.get("plugin") or {}).get("identifier", "")).rstrip("/").rsplit("/", 1)[-1].lower()
+    return name.startswith("crossover") and not name.endswith("_control") and not node.get("bypassed")
 
 
 # The crossover's outputs (dsp/juce_plugins/crossover/README.md): channel 0 is the low band

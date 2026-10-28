@@ -20,6 +20,7 @@ also builds and runs speakerd on a speaker, and renders through it offline.
             received = recorder.stop()
 """
 
+import atexit
 import itertools
 import json
 import os
@@ -817,7 +818,9 @@ def stub_plugin_host(folder):
     returns its process; the caller kills it."""
     fake = Path(folder) / TEST_PLUGIN_HOST
     fake.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy("/bin/sleep", fake)
+    # Beside it, then renamed over it: an earlier stand-in may still be running the old file.
+    shutil.copy("/bin/sleep", fake.with_name(fake.name + ".new"))
+    os.replace(fake.with_name(fake.name + ".new"), fake)
     host = subprocess.Popen([str(fake), "120"])
     time.sleep(0.2)
     return host
@@ -828,6 +831,7 @@ def stub_speakerd():
     that does what its STUB_DIR/fate file says (see the file)."""
     if "path" not in _stub:
         out = Path(tempfile.mkdtemp(prefix="vpair-stub-")) / "speakerd"
+        atexit.register(shutil.rmtree, out.parent, True)
         subprocess.run(["cc", "-O1", "-Wall", "-o", str(out), str(HERE / "stub_speakerd.c")],
                        check=True, capture_output=True, text=True)
         _stub["path"] = out

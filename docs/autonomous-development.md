@@ -128,7 +128,8 @@ to the board and run their local mode there; they build nothing. Nothing is rout
 the `/board` skill (`.claude/skills/board`), builds the aarch64 artifacts and deploys, runs a
 smoke test that makes no sound (it plays, capped, through the drop-in's sink, linked, clocked
 by the amplifier, no restart or xrun for a while), reads the journal and rolls back, and
-refuses while the lab is locked or rung 2 is not green for the commit. Their local mode is
+refuses while the lab is locked or unless both rungs are green for the commit, run on a clean
+tree; the installers' remote modes apply the same gate themselves. Their local mode is
 tested on the virtual pair, their remote mode through a stand-in `ssh` that runs the board's
 side on the same machine; neither has run on a board yet, and the first deploy is a person's
 (section 8, and the staged procedure in `firmware/CLAUDE.md`). The smoke test does not yet
@@ -209,7 +210,7 @@ scripts from `.claude/hooks/`.
 ```mermaid
 flowchart LR
     ss["SessionStart<br/>pull the builder image, verify local.env exists<br/>and is gitignored, print the lab lock state"]
-    pre["PreToolUse<br/>Bash: block push to main, force push, raw ssh to boards<br/>Edit/Write: block private strings in tracked files<br/>/board deploy: require rung 2 green for HEAD, no lab lock"]
+    pre["PreToolUse<br/>Bash: block push to main and force push<br/>gate ssh, scp, rsync and /board: no lab lock,<br/>both rungs green for HEAD on a clean tree<br/>Edit/Write: block private strings in tracked files"]
     post["PostToolUse<br/>Edit of *.cpp/*.h: clang-format<br/>Edit of docs/*.md: render the Mermaid blocks to check syntax"]
     stop["Stop<br/>run /test unit when source changed<br/>refuse to end with a red build"]
     ss --> pre --> post --> stop
@@ -228,9 +229,14 @@ with their scripts in `tools/`; `/test` writes the status file the gate reads. `
 too (`tools/board.sh`); `/measure` and `/release` wait for `ampd` and the version hash.
 
 The deploy gate is the one that matters most. It reads `tests/.status/<commit>.json`, which
-the verifier writes after a rung 2 run, and refuses the deploy if the file is missing, red or
-for another commit. A human can override it only by deleting the lab lock and setting an
-environment variable for that one session, and the override is logged.
+`/test` writes after a run of both rungs, and refuses the deploy if the file is missing, red,
+for another commit or from a run on a dirty tree, or if the tree is dirty now; while
+`.claude/lab.lock` exists it refuses everything. Only a person can override the test status,
+never the lock: they run the one command in their own shell with the variable set, as in
+`BPI_DEPLOY_OVERRIDE=1 tools/board.sh deploy`, and the override is logged in
+`tests/.status/overrides.log`. An agent cannot: the hook refuses any command of its that sets
+the variable. `tools/board.sh` and the installers' remote modes apply the same gate
+themselves, for a person's shell where no hook runs.
 
 ## 5. The tests
 
@@ -264,9 +270,9 @@ the architecture:
 | `speakerd_quantum_change` | with a stream playing, the quantum changes and comes back, and after each change the gain is the render's again, with nothing non-finite or above full scale reaching the amplifier |
 | `speakerd_device_limits` | with `device.json` limits of -20 dB and the tweeter muted, live and in the render, the tweeter is exact zeros and the woofer is the unlimited capture minus 20 dB; a +6 dBFS input or a +20 dB boost never puts a sample above -20 dBFS (-40 in passthrough); a `device.json` without limits, with a misspelt key, broken or missing says so and plays the same way capped |
 | `speakerd_import` | AudioPluginHost's example session, imported, renders sample for sample like the same settings given as parameters, also with `--prefer-headless`; malformed sessions and one that sends the input straight to the tweeter are refused, with nothing on stdout |
-| `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install, rolls back both ways, and refuses, before it changes anything, without a role, while an AudioPluginHost runs, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph that reaches the tweeter other than through a crossover's high band; under systemd it fails unless `speakerd` runs and says exactly its limits; the remote mode and the board script quote every argument |
+| `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install and every rollback, rolls back both ways, and refuses, before it changes anything, without a role, while an AudioPluginHost runs or anything would start one again at boot or login, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph (new or kept) that reaches the tweeter other than through a crossover's high band; `limits` turns the tweeter on only when no layer does; routing into `speakerd` needs a snapclient unit that reads client-rt.conf; uninstall stops snapclient when the routing it restores names a node the running PipeWire lacks; under systemd it fails unless `speakerd` runs and says exactly its limits after its start, also when `limits` or `rollback` restart a running one; setup.sh refuses to restart PipeWire under a running AudioPluginHost; the remote mode and the board script quote every argument |
 | `speakerd_crash_restart` | the installed unit starts speakerd on current, on last known good after a crash (a real speakerd killed by SIGSEGV), on factory after three crashes within 60 s, on passthrough after three more on factory, and never while an AudioPluginHost runs |
-| `speakerd_installed` | on a speaker set up like a board, the persistent `speakerd` sink exists before speakerd and never drives while the amplifier exists, speakerd plays through it with the tweeter at exact zeros and the woofer at the render minus 20 dB, the deployed bundle runs and not an older copy in `~/.lv2`, and the smoke test passes; with a PipeWire that does not load the drop-in, nothing is routed into `speakerd` and smoke, `sink` and `install` refuse |
+| `speakerd_installed` | on a speaker set up like a board, the persistent `speakerd` sink exists before speakerd and never drives while the amplifier exists, speakerd plays through it with the tweeter at exact zeros and the woofer at the render minus 20 dB, the deployed bundle runs and not an older copy in `~/.lv2`, and the smoke test passes, and fails when the amplifier is the default sink; with a PipeWire that does not load the drop-in, nothing is routed into `speakerd` and smoke, `sink` and `install` refuse |
 | `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately |
 | `monitor_freshness` | with 5 % packet loss and 20 ms jitter, every frame drawn is less than 50 ms old at the 99th percentile, and the speaker never holds more than one pending frame per stream |
 | `scope_resolution` | a scope frame from the speaker is identical to the frame the complete build computes from the same Demo capture |
