@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <regex>
 #include <vector>
 
 namespace speakerd
@@ -67,30 +68,33 @@ namespace speakerd
     {
         Stream stream;
 
+        // Exactly the names ampd accepts (docs/protocol.md).
+        static const std::regex nodeStream ("^node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/(mon_[A-Za-z0-9_]{1,64})$");
+        std::smatch match;
+        const auto text = name.toStdString();
+
         if (name == levelStream)
         {
             stream.level = true;
         }
+        else if (std::regex_match (text, match, nodeStream))
+        {
+            stream.node = (juce::uint32) std::stoul (match[1].str());
+            stream.id = juce::String (match[2].str());
+        }
         else
         {
-            const auto parts = juce::StringArray::fromTokens (name, "/", {});
-            const auto validId = [] (const juce::String& id)
-            {
-                return id.startsWith ("mon_") && id.length() > 4
-                    && id.containsOnly ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.");
-            };
-
-            if (parts.size() != 3 || parts[0] != "node" || parts[1].isEmpty() || ! parts[1].containsOnly ("0123456789")
-                || parts[1].length() > 10 || parts[1].getLargeIntValue() > 0xffffffffLL || ! validId (parts[2]))
-                return juce::Result::fail ("no stream \"" + name + "\": a stream is output/level or node/<uid>/<mon_id> "
-                                           "(a monitor's ID starts with mon_)");
-
-            stream.node = (juce::uint32) parts[1].getLargeIntValue();
-            stream.id = parts[2];
+            return juce::Result::fail ("no stream \"" + name + "\": a stream is output/level or node/<uid>/<mon_id>, "
+                                       "with a plugin uid (16 or more) and a monitor's ID (mon_ and up to 64 of "
+                                       "A-Z, a-z, 0-9, _)");
         }
+
+        if (! (rateHz >= minRateHz))
+            return juce::Result::fail ("rate_hz must be at least " + rateText (minRateHz));
 
         stream.rateHz = juce::jmin (maxRateHz, rateHz);
         stream.due = Clock::now();
+        stream.cyclesAtLastValue = engine.getCycles();
         {
             const std::lock_guard<std::mutex> guard (lock);
 
@@ -233,8 +237,12 @@ namespace speakerd
                         if (levelSamples > 0)
                             lines.push_back (levelLine (t));
                     }
-                    else if (double value = 0.0; control.readMonitor (stream.node, stream.id, value))
+                    else if (double value = 0.0; engine.getCycles() != stream.cyclesAtLastValue
+                                                 && control.readMonitor (stream.node, stream.id, value))
                     {
+                        // Only once an audio cycle ran since the last value: the plugin's monitor
+                        // only moves while it processes, and the period otherwise measured nothing.
+                        stream.cyclesAtLastValue = engine.getCycles();
                         lines.push_back ("{\"op\":\"value\",\"stream\":\"" + name + "\",\"t\":" + t + ",\"v\":"
                                          + number (value, "%.7g") + "}");
                     }

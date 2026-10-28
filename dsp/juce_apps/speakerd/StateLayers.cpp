@@ -29,7 +29,8 @@ namespace speakerd
     }
 
     LoadedLayer loadFirstWorkingLayer (const juce::File& stateDir, GraphBuilder& builder, Role role,
-                                       double sampleRate, int maxBlock, const juce::String& firstLayer)
+                                       const TweeterRule& tweeterRule, double sampleRate, int maxBlock,
+                                       const juce::String& firstLayer)
     {
         const auto first = juce::jmax (0, layerNames().indexOf (firstLayer));
 
@@ -48,8 +49,23 @@ namespace speakerd
                 continue;
             }
 
+            if (file.getSize() > GraphDocument::maxDocumentBytes)
+            {
+                log (prefix + "FAILED: " + juce::String (file.getSize()) + " bytes: a document is at most "
+                     + juce::String (GraphDocument::maxDocumentBytes));
+                continue;
+            }
+
             GraphDocument doc;
             if (const auto r = GraphDocument::parse (file.loadFileAsString(), doc); r.failed())
+            {
+                log (prefix + "FAILED: " + r.getErrorMessage());
+                continue;
+            }
+
+            // A tweeter that plays only ever gets a crossover's high band.
+            juce::StringArray ruleWarnings;
+            if (const auto r = tweeterRule.check (doc, ruleWarnings); r.failed())
             {
                 log (prefix + "FAILED: " + r.getErrorMessage());
                 continue;
@@ -61,6 +77,9 @@ namespace speakerd
                 log (prefix + "FAILED: " + r.getErrorMessage());
                 continue;
             }
+
+            for (const auto& warning : ruleWarnings)
+                log (prefix + "warning: " + warning);
 
             for (const auto& warning : loaded.built.warnings)
                 log (prefix + "warning: " + warning);

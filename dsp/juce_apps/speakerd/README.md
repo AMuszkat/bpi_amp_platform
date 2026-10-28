@@ -32,6 +32,7 @@ speakerd --version
 | `--from LAYER` | start trying at this layer: `current` (the default), `last-known-good`, `factory` or `passthrough`. speakerd keeps no count of its own crashes, since it writes no file. Whatever restarts it after a crash (systemd, `ampd`) says where to start |
 | `--control-socket PATH` | the [local link](#the-local-link): listen on this Unix socket instead of `$XDG_RUNTIME_DIR/speakerd/control.sock`. For several speakerds on one machine (each with its own path), and for tests. Live mode only |
 | `--no-control-socket` | no local link at all: nothing changes the graph while speakerd runs. Live mode only; not with `--control-socket` |
+| `--allow-tweeter-without-crossover` | with `device.json`'s tweeter on, load a document that feeds the tweeter other than through a crossover's high band, with a warning, instead of refusing it ([the tweeter rule](#the-tweeter-rule)). For measurements on the virtual pair, never on a speaker; live mode and render |
 | `--lv2-bundle PATH` | also load this LV2 bundle (repeatable). Plugins are otherwise found by URI in `~/.lv2`, `/usr/lib/lv2` and `/usr/local/lib/lv2`; JUCE ignores `$LV2_PATH` |
 | `--render IN.wav OUT.wav` | the offline render: no PipeWire (see below) |
 | `--block N` | the render's block size, default 1024 (the speaker's quantum). Render only: the live node runs at PipeWire's quantum, and `--block` without `--render` is a bad command line |
@@ -337,17 +338,22 @@ what an `apply` on the [local link](#the-local-link) carries.
 This plays FL through loudness to the woofer, and leaves the tweeter silent. With
 `{ "node": 1, "channel": 2 }` as the first source it plays the speaker's own channel (Mine), FL
 on a left speaker and FR on a right one, so one document serves both speakers of a pair. **Only a crossover
-may feed the tweeter** (output channel 1): a full-range signal can destroy it. A test on the
-virtual pair may route a plugin to both channels, to measure both; a document for a board never
-does.
+may feed the tweeter** (output channel 1): a full-range signal can destroy it, and with the tweeter
+on speakerd refuses any other document ([the tweeter rule](#the-tweeter-rule)). A test on the
+virtual pair may route a plugin to both channels, to measure both, with
+`--allow-tweeter-without-crossover`; a document for a board never does.
 
 | Key | |
 |---|---|
 | `format` | optional; `"speakerd-graph"` if present |
 | `version` | `1` |
 | `revision` | an integer, 0 or more; logged, reported in the hello and the status, and compared by the hub |
-| `nodes` | the plugin nodes (may be empty) |
-| `connections` | per-channel connections (may be empty) |
+| `nodes` | the plugin nodes (may be empty), at most 64 |
+| `connections` | per-channel connections (may be empty), at most 512 |
+
+A layer file is at most 32 MiB (the local link's longest line, which bounds an `apply`, is the
+same), and the plugins' states together at most 24 MiB (each at most 16 MB); a document beyond
+any bound fails, with the reason.
 
 **Node uids.** 1 is the input node, the stream: output channel 0 is FL, 1 is FR, 2 is
 [Mine](#the-mine-channel) (from 0.3.0; an older speakerd fails a document that uses it). 2 is
@@ -392,6 +398,33 @@ values in other bytes (another attribute order, say) is reported as not taken, w
 layer: the safe side.
 
 Not in version 1: bus layouts (each plugin keeps its default).
+
+## The tweeter rule
+
+When `device.json`'s limits say `"tweeter": "on"`, a document in which anything but a crossover's
+high band reaches the tweeter (output node 2, channel 1) does not load: a layer at boot fails
+(speakerd tries the next one), and an `apply` fails, with the old graph playing on. It is the rule
+of the installer, `firmware/speakerd/setup-helper.py graph`, and of `ampd`, so all three agree:
+
+- **A crossover** is a node whose plugin identifier's last segment starts with `crossover` (any
+  case: the complete or the headless build) and does not end with `_control` (a control build
+  has no DSP), and that is not bypassed.
+- **The walk.** From the input node, along every output of every node reached, except a
+  crossover's high band (its output channel 1); a crossover's low band (channel 0) is walked like
+  any other output. An output that was walked and is connected to the tweeter is unsafe. So a
+  crossover's high band may reach the tweeter straight or through other plugins; the stream
+  straight from the input, a crossover's low band, a bypassed or control-build crossover's high
+  band, or anything downstream of those may not.
+- **The refusal**, logged as the layer's or the apply's failure: `the stream reaches the tweeter
+  other than through a crossover's high band (output 16:0; a crossover's channel 0 is its low
+  band): full range or the woofer's band on a tweeter can destroy it, and device.json's limits say
+  the tweeter is on`, naming every unsafe output (`<node>:<channel>`).
+- **With the tweeter muted** (and with a `device.json` that is missing, invalid or without
+  `limits`, which mutes it) nothing is checked: the tweeter gets exact zeros whatever the graph.
+- **`--allow-tweeter-without-crossover`** loads such a document anyway, with the same text as a
+  warning, ending `(allowed by --allow-tweeter-without-crossover)`, and says so loudly at start.
+  The virtual pair's measurements route one plugin to both channels with the tweeter on; a speaker
+  never runs with it.
 
 ## The Mine channel
 
@@ -492,11 +525,10 @@ and is refused if it differs. speakerd builds it beside the running graph, settl
 of silence off the audio path, and swaps it in under a 30 ms fade-out and a 30 ms fade-in (the
 plugins of the new graph start from silence, see the Real time section). It loads exactly as a
 layer must load; when it does not, the answer is `failed` with the reason and nothing was
-touched. **Applies are queued, never refused for being busy:** one that arrives while another
-is being built waits for it, and they are applied in order, each answered (a hub that rolls a
-failed revision back sends the previous one right behind it, and it must not be lost). At most 8
-are queued, the one being built included; a ninth fails at once (`8 revisions are waiting
-already`). An `apply` without an integer
+touched. **Applies are queued, at most 8:** one that arrives while another is being built
+waits for it, and they are applied in order, each answered (a hub that rolls a failed revision
+back sends the previous one right behind it, and it must not be lost). At most 8 are queued, the
+one being built included; a ninth fails at once (`8 revisions are waiting already`). An `apply` without an integer
 `revision` (0 or more) or without a `document` object fails at once. The message thread builds
 and settles it (the second of silence is computed, not waited for): with `loudness_headless`,
 `applied` comes about 100 ms after the `apply` on the virtual pair.
@@ -517,10 +549,14 @@ with no subscription the thread sleeps.
 | `output/level` | `[woofer_peak, woofer_rms, tweeter_peak, tweeter_rms]` in dBFS, of what the amplifier got since the previous value: after the fade, the limits of `device.json` and the caps, exactly the samples handed to PipeWire. RMS is the plain root mean square (a full-scale sine is 0 dBFS peak, -3.01 dBFS RMS). Silence, and anything below, is -120. Two decimals |
 | `node/<uid>/<mon_id>` | the value the hosted plugin last reported for its parameter `<mon_id>` (an ID that starts with `mon_`), in the plugin's own units, as a number |
 
-- **Rates.** Each stream is sampled at its own `rate_hz` (default 30, at most 60; above 60 is
-  60, 0 or less is refused). Subscribing again changes the rate. A period in which no audio cycle
-  ran sends no `output/level` value, so at the speaker's quantum (1024 at 48 kHz, 46.9 cycles a
-  second) 60 Hz gives about 47 values a second.
+- **Rates.** Each stream is sampled at its own `rate_hz` (default 30, from 0.1 to 60; above 60
+  is 60, below 0.1 is refused). Subscribing again changes the rate. **A period in which no audio
+  cycle ran sends nothing**, for either kind of stream (nothing was measured, and a plugin's
+  monitor only moves while it processes), so at the speaker's quantum (1024 at 48 kHz, 46.9
+  cycles a second) 60 Hz gives about 47 values a second.
+- **Names.** Exactly `^output/level$` and
+  `^node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}$` (a plugin uid, 16 and up,
+  and a monitor's ID), as `ampd` checks them; anything else is answered with an `error`.
 - **`t`** is speakerd's monotonic clock (`CLOCK_MONOTONIC`), in seconds, six decimals.
 - **Subscriptions belong to the connection**: they end when it closes, and `ampd` subscribes
   again after it reconnects. A `node/...` stream the running graph does not have sends nothing
@@ -569,8 +605,12 @@ build outputs: the reference a live capture is compared with.
   measures them into the level ring.
 - **Parameters reach the audio thread through a lock-free inbox.** Each graph has one slot per
   hosted parameter (newest value wins) and a lock-free queue of the slots that hold a new value,
-  each slot in it at most once, so it never overflows and the newest value is never lost,
-  however long no cycle runs. The link thread posts the normalised value; the audio thread, at
+  each slot in it at most once and only while it is marked queued: the audio thread takes a slot
+  out of the queue before it unmarks it. So the queue never holds more than one entry per
+  parameter and always has room, and the newest value is never lost, however long no cycle runs
+  and however many values arrive while the audio thread applies them (checked by a stress test:
+  bursts of every parameter, twice per round, posted while the audio side applies them, 20000
+  rounds: every parameter ends at its last value). The link thread posts the normalised value; the audio thread, at
   the top of a cycle, calls the hosted parameter's `setValue`: for JUCE's LV2 hosting an atomic
   store and a flag, no listener and no lock, and the plugin gets it as a `patch:Set` in that very
   `processBlock`. The inbox is swapped with its graph; a graph and its inbox are deleted only
@@ -658,6 +698,7 @@ stable.
 | `pipewire: connection error: <message> (<error>)`, `pipewire: node '<name>-dsp' failed: <error>`, `pipewire: the input sink '<name>' failed: ...` | the connection to PipeWire was lost (the core reports `-EPIPE`), or the filter or the input sink failed; `lost PipeWire` follows |
 | `pipewire: node '<name>-dsp' went away`, possibly followed by ` (<reason>)` | the filter node was destroyed (by PipeWire, or with `pw-cli destroy`); `lost PipeWire` follows, and often a `pipewire: error, carrying on: ...` line before it |
 | `lost PipeWire` | after one of those; `stopping` and exit status 3 follow |
+| `*** --allow-tweeter-without-crossover: the tweeter is on, and a document may feed it other than through a crossover's high band; for measurements, never on a speaker ***` | at start, with that option and the tweeter on |
 | `local link: listening on <path>` | the local link is up (after the PipeWire node, before `playing:`) |
 | `local link: off (--no-control-socket)` | no local link, as asked |
 | `local link: FAILED: <reason>: speakerd plays without it` | the socket could not be made: no `XDG_RUNTIME_DIR` and no `--control-socket`, a path too long, a folder that cannot be made, something that is not a socket at the path, `another process listens on <path> (another speakerd?)`. Not fatal |

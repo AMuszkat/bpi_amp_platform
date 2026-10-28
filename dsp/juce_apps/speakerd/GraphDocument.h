@@ -22,6 +22,15 @@ namespace speakerd
         static constexpr juce::uint32 outputNode = 2;   // inputs: 0 = woofer, 1 = tweeter
         static constexpr juce::uint32 firstPluginNode = 16;
 
+        /** Bounds on a document: what a speaker's graph may hold, and what speakerd reads. A
+            node's own state is at most lv2state::maxStateBytes (16 MB); all of them together at
+            most maxStateBytesTotal; a layer file at most maxDocumentBytes of text (the local
+            link's longest line, which bounds an apply, is the same). */
+        static constexpr int maxPluginNodes = 64;
+        static constexpr int maxConnections = 512;
+        static constexpr size_t maxStateBytesTotal = 24u * 1024u * 1024u;
+        static constexpr juce::int64 maxDocumentBytes = 32 * 1024 * 1024;
+
         static constexpr int inputChannels  = 3;   // FL, FR, and Mine: the speaker's own channel, by its role
         static constexpr int outputChannels = 2;
         static constexpr int mineChannel    = 2;
@@ -66,5 +75,35 @@ namespace speakerd
 
         /** The same, for a document that is already JSON (the `document` of an `apply`). */
         static juce::Result parse (const juce::var& json, GraphDocument& out);
+
+        /** A crossover that filters, as firmware/speakerd/setup-helper.py's is_crossover says: the
+            last segment of the plugin identifier starts with "crossover" (any case), does not end
+            with "_control" (a control build has no DSP), and the node is not bypassed. */
+        static bool isCrossover (const Node&);
+
+        /** The crossover's high band: the only output that may feed the tweeter. */
+        static constexpr int crossoverHighBand = 1;
+
+        /** The outputs ("<node>:<channel>", sorted as text) through which the stream reaches the
+            tweeter (output node channel 1) other than through a crossover's high band; empty when
+            there are none. Exactly the graph walk of firmware/speakerd/setup-helper.py (graph):
+            from the input node, along every output of every node reached except a crossover's
+            high band, the low band included; an output that feeds the tweeter and was walked
+            is unsafe. */
+        juce::StringArray tweeterFeedsWithoutCrossover() const;
+    };
+
+    /** The rule that protects a tweeter that plays (device.json's limits say "tweeter": "on"):
+        a document in which anything but a crossover's high band reaches the tweeter does not
+        load, as a layer at boot or as a revision from the local link. With the tweeter muted it
+        does not apply. --allow-tweeter-without-crossover turns the refusal into a warning, for
+        the virtual pair's measurements. */
+    struct TweeterRule
+    {
+        bool tweeterOn = false;
+        bool allowWithoutCrossover = false;
+
+        /** Fails with the reason, or adds a warning when allowed. */
+        juce::Result check (const GraphDocument&, juce::StringArray& warnings) const;
     };
 }

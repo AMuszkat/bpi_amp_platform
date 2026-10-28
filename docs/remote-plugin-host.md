@@ -416,15 +416,16 @@ details, [protocol.md](protocol.md) the messages):
 - **A parameter is resolved on the link thread and applied on the audio thread.** The link
   thread finds the hosted parameter by node uid and ID, checks `seq` and turns the value
   (a number, a choice's text, a switch's `true`/`false`) into the normalised value. The audio
-  thread takes it from a lock-free inbox (one slot per parameter, newest wins, never full) at the
-  top of the next cycle and sets it with `setValue`, which for JUCE's LV2 hosting takes no lock,
-  so the step-2 rule holds: nobody sets a running graph's parameters from another thread.
+  thread takes it from a lock-free inbox (one slot per parameter, newest wins, a slot queued at
+  most once, so the queue always has room) at the top of the next cycle and sets it with
+  `setValue`, which for JUCE's LV2 hosting takes no lock, so the step-2 rule holds: nobody sets
+  a running graph's parameters from another thread.
   Measured on the virtual pair, every change lands on a cycle boundary, as a one-sample step,
   and twelve changes sent at random moments land within 17.4 ms of each other relative to their
   send times, less than one 21.3 ms cycle: each is in force from the next cycle.
-- **A revision is applied by the existing swap path**, and applies are queued in order, never
-  refused for being busy: a hub that rolls a failed revision back sends the previous one right
-  behind it. A parameter that arrives while a revision is being built goes to the playing graph
+- **A revision is applied by the existing swap path**, and applies are queued in order, at most
+  8 (the one being built included; a ninth fails at once): a hub that rolls a failed revision
+  back sends the previous one right behind it. A parameter that arrives while a revision is being built goes to the playing graph
   and again to the new one. The swap costs the two 30 ms fades and the rest of the cycle in
   which the fade-out ended (72.6 ms in all, measured); an apply that fails leaves the playing
   graph untouched, to the sample.
@@ -432,6 +433,12 @@ details, [protocol.md](protocol.md) the messages):
   `output/level` is measured by the audio thread into a lock-free ring only while subscribed (3
   us per 1024-sample cycle on x86_64) and tracks a stepped tone within 0.01 dB; a plugin's
   monitor is the value JUCE's LV2 hosting last received from it (section 5).
+- **A tweeter that plays only ever gets a crossover's high band.** With `device.json`'s tweeter
+  on, `speakerd` refuses a layer or a revision in which anything else reaches the tweeter, by the
+  same graph walk as the installer and `ampd` (a crossover is the crossover plugin, complete or
+  headless, not a control build, not bypassed; only its output channel 1 may lead to the
+  tweeter). With the tweeter muted nothing is checked. The virtual pair's measurements, which
+  route one plugin to both channels, run with `--allow-tweeter-without-crossover`.
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it advertises the speaker over mDNS, receives
