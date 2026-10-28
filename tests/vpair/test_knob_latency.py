@@ -17,12 +17,15 @@ quantum (21.3 ms at the boards' 1024) whatever ampd does. So the whole criterion
 quantum of 128 (2.7 ms), where it measures ampd and speakerd rather than the phase of two clocks;
 at the boards' quantum, 1024, the 60 ms is checked and the difference printed.
 
-A change is measured when both captures are intact around it: steady for the 0.6 s up to the
-send, at the new level 3 ms after the change began, no dropout in the 30 ms after it, and steady again at the new level (more than 6 dB
-moved, the way the change goes) from 50 ms to 500 ms after it. Under load (several test runs at
-once) PipeWire sometimes breaks a capture with an xrun; such a change is not a measurement of
-ampd and speakerd, so it is set aside and said, and at least 5 changes must be measured. That is
-the precondition retried, never the criterion: a measured change that is late fails.
+A change is set aside (said, and not measured) only on evidence that does not come from the
+change itself: the recorder lost samples around the send (its time mapping moved), the capture
+was not steady from 0.6 s before the send to the send, or pw-profiler recorded an xrun or a late
+cycle for speakerd-dsp or the recorder in that window (harness.Profiler; the late-cycle count of
+speakerd's `speakerd/timing` stream will replace it). A change that is not at its new level 3 ms
+after it began, drops out in the 30 ms after it, or is not a clean change (steady again at a
+level more than 6 dB away, the way the change goes, from 50 ms to 500 ms after it), with no xrun
+or late cycle recorded there, is a FAILURE. Up to 30 changes are sent (10 at least), and at least
+5 must be measured.
 
 Pass when at least 5 changes are measured, and for every measured change:
 
@@ -43,7 +46,7 @@ from pathlib import Path
 
 import numpy as np
 
-from harness import (RATE, Controller, Player, SpeakerPair, TimedRecorder, block_levels, built, graph_document,
+from harness import (RATE, Controller, Player, Profiler, SpeakerPair, TimedRecorder, block_levels, built, graph_document,
                      lv2_uri, require_speakerd_local_link, revision_document, speaker_conf_with, tone)
 
 FREQ, LEVEL = 200.0, -20.0
@@ -61,39 +64,50 @@ def sine_fit(x, a, b):
     return basis @ c, float(np.hypot(*c))
 
 
+def aside(why):
+    """A problem that does not come from the change: the change is set aside, and said."""
+    return {"latency": None, "problem": why, "kind": "aside"}
+
+
+def broke(latency, why):
+    """A problem that may come from the change: a failure, unless PipeWire recorded an xrun or a
+    late cycle there."""
+    return {"latency": latency, "problem": why, "kind": "change"}
+
+
 def onset(x, recorder, quantum, t_send, change_db):
     """When the capture leaves the 200 Hz sine it played before `t_send`, and whether the
     capture around it is intact enough to measure: {"latency": seconds after the send or None,
-    "intact": None or why not}. Intact means: steady from 0.6 s before the send to the send (no
+    "problem": None or why not, "kind": "aside" (evidence that does not come from the change: the
+    recorder lost samples, the capture was not steady before the send) or "change" (what the change
+    itself could have done: a failure unless an xrun was recorded there)}. Intact means: steady from 0.6 s before the send to the send (no
     residual above 5 % of the tone), at its new level 3 ms after the change began (residual under
     10 %), no dropout in the 30 ms after the change (every 5 ms block within 6 dB
     of the quieter of the two levels), and steady again 50 ms to 500 ms after it, at a level that
     moved the way the change goes (by more than 6 dB), and the recording's time mapping the same
     in the second before the send and the second after it (within 1 ms: the recorder lost no
-    samples there). A capture that is not intact was broken by something else than the change (an
-    xrun, under load); its latency is not a measurement."""
+    samples there)."""
     t0, t0_after = recorder.local_t0(t_send)
     if t0 is None or t0_after is None:
-        return {"latency": None, "intact": "too few chunks recorded around the send"}
+        return aside("too few chunks recorded around the send")
     if abs(t0_after - t0) > 0.001:
-        return {"latency": None, "intact": f"the recording lost samples around the send (its time mapping moved "
-                                           f"{1000 * (t0_after - t0):+.1f} ms)"}
+        return aside(f"the recorder lost samples around the send (its time mapping moved {1000 * (t0_after - t0):+.1f} ms)")
     index = lambda t: int(round((t - t0) * RATE))
     a, b = index(t_send - 0.6), index(t_send - 0.1)
     if a < 0 or index(t_send + 1.6) > len(x):
-        return {"latency": None, "intact": "not recorded from 0.6 s before the send to 1.6 s after it"}
+        return aside("not recorded from 0.6 s before the send to 1.6 s after it")
     fit, amplitude = sine_fit(x, a, b)
     if amplitude < 1e-6:
-        return {"latency": None, "intact": "silent before the send"}
+        return aside("not steady before the send (silent)")
     residual = np.abs(x - fit)
     # Nothing before the send is the change (the mapping is good to a fraction of a millisecond).
     sent = index(t_send - 0.001)
     quiet = float(np.max(residual[a:sent])) / amplitude
     if quiet >= 0.05:
-        return {"latency": None, "intact": f"not steady before the send (residual {quiet:.3f} of the tone)"}
+        return aside(f"not steady before the send (residual {quiet:.3f} of the tone)")
     after = np.nonzero(residual[sent:] > 0.05 * amplitude)[0]
     if len(after) == 0:
-        return {"latency": None, "intact": None}
+        return {"latency": None, "problem": None, "kind": None}
     i = sent + int(after[0])
     # The sample was produced in the cycle of `quantum` samples it is in, and that cycle's samples
     # were delivered together at its end, t0 + (end of the cycle) / RATE: when the change was in
@@ -108,14 +122,14 @@ def onset(x, recorder, quantum, t_send, change_db):
     e, f = i + int(0.003 * RATE), i + int(0.05 * RATE)
     early = float(np.max(np.abs(x[e:f] - new_fit[e:f]))) / max(new_amplitude, 1e-12)
     if early >= 0.1:
-        return {"latency": latency, "intact": f"not at its new level 3 ms after it began (residual {early:.3f})"}
+        return broke(latency, f"not at its new level 3 ms after it began (residual {early:.3f})")
     blocks = block_levels(x[i:i + int(0.03 * RATE)], 0.005)
     floor = 20 * np.log10(min(amplitude, new_amplitude) / np.sqrt(2)) - 6.0
     if len(blocks) and float(np.min(blocks)) < floor:
-        return {"latency": latency, "intact": f"a dropout after the change ({float(np.min(blocks)):.1f} dBFS)"}
+        return broke(latency, f"a dropout after the change ({float(np.min(blocks)):.1f} dBFS)")
     if settled >= 0.05 or moved * np.sign(change_db - 6.0) <= 6.0:
-        return {"latency": latency, "intact": f"not a clean change ({moved:+.1f} dB, residual after it {settled:.3f})"}
-    return {"latency": latency, "intact": None}
+        return broke(latency, f"not a clean change ({moved:+.1f} dB, residual after it {settled:.3f})")
+    return {"latency": latency, "problem": None, "kind": None}
 
 
 class KnobLatency(unittest.TestCase):
@@ -136,6 +150,7 @@ class KnobLatency(unittest.TestCase):
                 Player(pair["left"], tone(FREQ, LEVEL, 2.0 + 1.2 * MORE + 3.0), target="speakerd"), \
                 Player(pair["right"], tone(FREQ, LEVEL, 2.0 + 1.2 * MORE + 3.0), target="speakerd"):
             recorders = {name: TimedRecorder(pair[name], latency=quantum).start() for name in ("left", "right")}
+            profilers = {name: Profiler(pair[name]).__enter__() for name in ("left", "right")}
             try:
                 time.sleep(1.5)
                 sends = []
@@ -152,14 +167,30 @@ class KnobLatency(unittest.TestCase):
                             break
             finally:
                 captures = {name: (r.stop()[0], r) for name, r in recorders.items()}
-        broken = []
+                # What PipeWire recorded for speakerd's graph, the recorder, and the cycles.
+                xruns = {name: p.events(["speakerd-dsp", recorders[name].name]) for name, p in profilers.items()}
+                for p in profilers.values():
+                    p.__exit__(None, None, None)
+        aside_, failures = [], []
         for k, t_send in enumerate(sends):
             row = {name: onset(x[:, 0], r, quantum, t_send, CHANGES[k]) for name, (x, r) in captures.items()}
-            why = [f"{name}: {r['intact']}" for name, r in row.items() if r["intact"]]
-            if why:
-                broken.append(f"change {k + 1}: " + "; ".join(why))
-                print(f"\n  quantum {quantum}, change {k + 1}: not measured, the capture was broken ({'; '.join(why)})",
-                      end="")
+            set_aside, failed = [], []
+            for name, r in row.items():
+                if r["kind"] == "aside":
+                    set_aside.append(f"{name}: {r['problem']}")
+                elif r["kind"] == "change":
+                    seen = [what for t, what in xruns[name] if t_send - 0.7 <= t <= t_send + 1.0]
+                    if seen:
+                        set_aside.append(f"{name}: {r['problem']}, with {seen[0]} recorded there (pw-profiler)")
+                    else:
+                        failed.append(f"{name}: {r['problem']}, and pw-profiler recorded no xrun or late cycle there")
+            if failed:
+                failures.append(f"change {k + 1} ({CHANGES[k]:+g} dB): " + "; ".join(failed))
+                print(f"\n  quantum {quantum}, change {k + 1}: FAILED: {'; '.join(failed)}", end="")
+                continue
+            if set_aside:
+                aside_.append(f"change {k + 1}: " + "; ".join(set_aside))
+                print(f"\n  quantum {quantum}, change {k + 1}: set aside: {'; '.join(set_aside)}", end="")
                 continue
             for name, r in row.items():
                 self.assertIsNotNone(r["latency"], f"quantum {quantum}, change {k + 1} ({CHANGES[k]:+g} dB): the "
@@ -168,15 +199,15 @@ class KnobLatency(unittest.TestCase):
             print(f"\n  quantum {quantum}, change {k + 1} to {CHANGES[k]:+g} dB: left {1000 * row['left']['latency']:.2f} ms, "
                   f"right {1000 * row['right']['latency']:.2f} ms, "
                   f"apart {1000 * abs(row['left']['latency'] - row['right']['latency']):.2f} ms", end="")
+        self.assertEqual(failures, [], f"quantum {quantum}: " + "\n  ".join(failures))
         self.assertGreaterEqual(len(results), AT_LEAST,
-                                f"quantum {quantum}: only {len(results)} of {len(sends)} changes could be measured, at least "
-                                f"{AT_LEAST} must be: the captures were broken by something else than the change "
-                                "(xruns: is the machine loaded?):\n  " + "\n  ".join(broken))
+                                f"quantum {quantum}: {len(results)} of {len(sends)} changes measured, at least {AT_LEAST} "
+                                "must be; set aside:\n  " + "\n  ".join(aside_))
         return results
 
     @staticmethod
     def measurable(captures, quantum, t_send, change_db):
-        return all(onset(x[:, 0], r, quantum, t_send, change_db)["intact"] is None for x, r in captures.values())
+        return all(onset(x[:, 0], r, quantum, t_send, change_db)["problem"] is None for x, r in captures.values())
 
     def check_latency(self, quantum, results):
         for k, row in enumerate(results):

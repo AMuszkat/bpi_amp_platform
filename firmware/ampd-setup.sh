@@ -8,7 +8,7 @@
 #
 #   ~/.local/lib/speakerd/<version>/bin/ampd    the program: it comes with speakerd's version
 #                                               (speakerd-setup.sh install puts it there)
-#   ~/.local/state/speakerd/ampd.json           name, hub or agent, listen, hub_address
+#   ~/.local/state/speakerd/ampd.json           name, hub or agent, listen, hub_address, secret (mode 600)
 #   ~/.config/systemd/user/ampd.service         firmware/ampd/ampd.service, byte for byte
 #
 # ampd never touches audio: the speaker plays without it. It writes graph.json and
