@@ -210,7 +210,7 @@ flowchart LR
         subgraph AMPD["ampd: network agent"]
             direction TB
             disc["mDNS<br/>advertise, find the hub"]:::ctl
-            rx["receive parameters (OSC)<br/>and graph revisions (TCP)"]:::ctl
+            rx["receive parameters (OSC from controllers,<br/>TCP from the hub) and graph revisions (TCP)"]:::ctl
             hubrole["hub role<br/>(left speaker only)"]:::ctl
             cat["plugin catalogue<br/>from ~/.lv2"]:::ctl
             persist["persist state<br/>atomic writes"]:::ctl
@@ -474,7 +474,7 @@ sequenceDiagram
     H->>H: update state, seq + 1, persist (debounced)
     par fan-out
         H->>SL: local socket: set param
-        H->>AR: OSC, seq
+        H->>AR: TCP control link, seq
         AR->>SR: local socket: set param
     end
     Note over SL,SR: heard at the next PipeWire cycle on both speakers
@@ -484,6 +484,19 @@ sequenceDiagram
 The gesture calls (`beginChangeGesture` / `endChangeGesture`) travel as well, so the hub can
 mark a parameter "being dragged by controller X" and other controllers can grey it out rather
 than fight over it.
+
+**Who may turn a knob.** A pair shares a secret, set at install in each speaker's `ampd.json`
+and given to each controller as a file; it never crosses the network. Every TCP connection
+starts with a handshake in which both ends prove they know it, over fresh random numbers from
+both sides, so neither a controller nor the right speaker believes a hub that cannot prove it,
+and the hub believes no controller that cannot. Each connection then derives a token that every
+OSC datagram carries: the hub takes knobs only from an authenticated controller, controllers
+ignore echoes without their token, and the right speaker takes no OSC at all, only the hub's
+TCP link. A controller connects to a hub without a secret only when told to (`--insecure`).
+This authenticates the links; it does not encrypt them, so someone placed in the network path
+could still alter messages after a handshake ([protocol.md](protocol.md), "Authentication").
+Whatever reaches a speaker, the output cap, the tweeter mute and the tweeter rule are enforced
+on the speaker itself.
 
 ## 4. Editing the graph
 

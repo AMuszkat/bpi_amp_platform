@@ -61,16 +61,16 @@ that parameter is active.
 | Link | Form |
 |---|---|
 | local, control | `{"op":"param","node":16,"id":"s0_e0_gain","value":4.5,"seq":1234,"origin":"ctl-mac"}` |
-| knobs (OSC) | `/bpi/param` `,isfis`: node, id, value, seq, origin |
+| knobs (OSC) | `/bpi/param` `,isfiss`: node, id, value, seq, origin, token (see Authentication) |
 
 - The controller sends a moving knob over OSC, at most 50 messages a second per parameter, and
   **the last value of every gesture over the control link** (UDP may lose it). With no gesture
   (a typed value, a preset), it sends over the control link only.
 - The hub accepts a change it can address (the node exists in the current revision and has
   that parameter; a `mon_` ID never), stamps `seq`, updates its state, applies it to its own
-  `speakerd` (local), sends it to every agent (OSC, and over control when it came over
-  control) and echoes it to every controller (OSC, and over control when it came over
-  control). A change it cannot address is answered, on the control link only, with
+  `speakerd` (local), sends it to every agent over the control link (agents take no OSC)
+  and echoes it to every controller (OSC with that controller's token, and over control when
+  it came over control). A change it cannot address is answered, on the control link only, with
   `{"op":"error","about":"param","node":..,"id":..,"reason":".."}`.
 - An agent applies what the hub sends to its `speakerd` (local) and keeps it in its state.
 - `speakerd` looks the parameter up when the line arrives (on its socket thread), and hands
@@ -83,7 +83,7 @@ that parameter is active.
 | Link | Form |
 |---|---|
 | local, control | `{"op":"gesture","node":16,"id":"s0_e0_gain","state":"begin","origin":"ctl-mac"}` (`state`: `begin` or `end`) |
-| knobs (OSC) | `/bpi/gesture` `,isss`: node, id, state, origin |
+| knobs (OSC) | `/bpi/gesture` `,issss`: node, id, state, origin, token |
 
 The hub relays gestures to the controllers only (agents and `speakerd` have no use for them),
 and keeps, per parameter, who is dragging it, so a controller that connects mid-drag sees it.
@@ -119,17 +119,19 @@ node's current `params`), a number, a time and an origin:
 
 ## Hello, state and reconnection
 
-On the control link the first line each side sends is a `hello`:
+On the control link the hub speaks first and both sides prove the pair's secret before
+anything else (the handshake is in "Authentication" below; these show the other fields):
 
 ```json
-{"op":"hello","role":"controller","name":"ctl-mac","osc_port":9000,"protocol":1}
-{"op":"hello","role":"agent","name":"right","revision":7,"time":"2026-10-28T09:10:00Z","protocol":1}
-{"op":"hello","role":"hub","name":"left","revision":8,"protocol":1}
+{"op":"hello","role":"hub","name":"left","revision":8,"seq":1234,"nonce":"<Ns>","protocol":1}
+{"op":"hello","role":"controller","name":"ctl-mac","osc_port":9000,"protocol":1,"nonce":"<Nc>","auth":"<client proof>"}
+{"op":"hello","role":"agent","name":"right","revision":7,"time":"2026-10-28T09:10:00Z","protocol":1,"nonce":"<Nc>","auth":"<client proof>"}
+{"op":"welcome","auth":"<server proof>"}
 ```
 
 - **A controller** then gets `{"op":"state","revision":8,"seq":1234,"document":{...},"speakers":[{"name":"left","role":"left","online":true,"layer":"current"},{"name":"right",...}],"gestures":[...]}`
   and builds its graph from it; it never pushes its own older copy (rule 3 of section 8). The hub
-  sends OSC echoes to the controller's address and `osc_port`.
+  sends OSC echoes, stamped with the controller's token, to its address and `osc_port`.
 - **An agent** whose revision is older than the hub's gets `apply` of the hub's revision and
   then every parameter (control). One whose revision is newer (it changed while the hub was
   off, and revisions compare by `time`, then by origin name) is asked
@@ -151,7 +153,7 @@ On the control link the first line each side sends is a `hello`:
 
 ## Monitoring (step 3: values)
 
-A **stream** is `output/level` or `node/<uid>/<mon_id>`:
+A **stream** is `output/level`, `speakerd/timing` or `node/<uid>/<mon_id>`:
 
 - `output/level`: what the amplifier gets, after the limits: `[woofer_peak, woofer_rms,
   tweeter_peak, tweeter_rms]` in dBFS, over the last period, built into `speakerd` for any graph.
@@ -215,8 +217,8 @@ later; an older one fails the layer.
 from the hub, never by `ampd`:
 
 ```json
-{"version":1,"name":"left","hub":true,"listen":"0.0.0.0","hub_address":null}
-{"version":1,"name":"right","hub":false,"listen":"0.0.0.0","hub_address":"bpi-amp.local"}
+{"version":1,"name":"left","hub":true,"listen":"0.0.0.0","hub_address":null,"secret":"<the pair's secret>"}
+{"version":1,"name":"right","hub":false,"listen":"0.0.0.0","hub_address":"bpi-amp.local","secret":"<the pair's secret>"}
 ```
 
 Discovery over mDNS replaces `hub_address` later; until then it is written at install.
@@ -269,8 +271,8 @@ These settle what version 1 left open; every implementation follows them.
     `applied` is sent once the new graph has run one audio cycle (or 200 ms after the swap
     when no cycle runs).
 19. **Monitor streams.** `v` is an array for `output/level` and a plain number for
-    `node/<uid>/<mon_id>`. Each stream has its own rate (`rate_hz`, default 30, capped at 60,
-    0 or less refused); a period with no audio cycle sends nothing, so at a quantum of 1024 at
+    `node/<uid>/<mon_id>`. Each stream has its own rate (`rate_hz`, default 30; outside 0.1 to
+    60 it is refused with an error); a period with no audio cycle sends nothing, so at a quantum of 1024 at
     48 kHz a stream gives about 47 values a second at most. RMS is plain RMS (a full-scale sine
     reads -3.01 dBFS); -120 is the floor. A `subscribe` to a name that is no stream is answered
     `{"op":"error","about":"subscribe","stream":..,"reason":..}`; a well-formed `node/...`
@@ -278,7 +280,7 @@ These settle what version 1 left open; every implementation follows them.
 20. **`status`** is answered with the `hello`'s fields and `"op":"status"`.
 21. **Files.** `speakerd` writes no state file; it creates and removes its socket.
 22. **The agent's `hello`** also carries `layer`, `speakerd` (its version), `device_role` and
-    `osc_port`; later changes of its speaker go to the hub as
+    `osc_port` (unused since agents take no OSC; kept for compatibility); later changes of its speaker go to the hub as
     `{"op":"status","speakerd":..,"layer":..,"revision":..}` on the control link.
 23. **`apply` carries `time` and `origin`** as well (and ampd writes them at the top of
     `graph.json`, which `speakerd` ignores), so an agent can compare revisions by time.
@@ -329,7 +331,8 @@ neither a fake hub nor a forged datagram is believed.
      link).
   4. The client checks the server's proof before it believes or applies anything, and that the
      server's `name` is the one it expected (on the monitor link, the speaker's name in the
-     hub's `state`); until then it
+     hub's `state`; on the control link, the hub's name when one is configured, else the proven
+     name is shown); until then it
      sends nothing but its `hello`. An agent never applies a revision, a parameter or an `apply`
      from a hub that has not proved itself.
 - **A session key** per control connection, `K = HMAC("session:<Ns>:<Nc>")` (hex), gives the
