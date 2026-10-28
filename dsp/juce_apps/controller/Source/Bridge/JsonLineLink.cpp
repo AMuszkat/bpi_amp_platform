@@ -2,30 +2,55 @@
 
 #include "GraphDocument.h"
 
+#if JUCE_WINDOWS
+ #error "JsonLineLink's socket loop is POSIX (poll, a wake-up pipe): it needs a Windows port"
+#endif
+
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#ifndef MSG_NOSIGNAL
+ #define MSG_NOSIGNAL 0   // macOS: SIGPIPE is ignored for the whole process (Main.cpp)
+#endif
+
 namespace bpi
 {
     namespace
     {
         enum EventKind { eventConnected, eventDisconnected, eventMessage };
+
+        void setNonBlocking (int fd)
+        {
+            const auto flags = fcntl (fd, F_GETFL, 0);
+            if (flags >= 0)
+                fcntl (fd, F_SETFL, flags | O_NONBLOCK);
+        }
     }
 
-    JsonLineLink::JsonLineLink (const juce::String& linkName, const juce::String& h, int p)
-        : Thread (linkName), host (h), port (p)
+    JsonLineLink::JsonLineLink (const juce::String& linkName, const juce::String& h, int p, size_t maxQueuedBytes)
+        : Thread (linkName), host (h), port (p), maxQueued (maxQueuedBytes)
     {
+        if (pipe (wakeFds) == 0)
+        {
+            setNonBlocking (wakeFds[0]);
+            setNonBlocking (wakeFds[1]);
+        }
     }
 
     JsonLineLink::~JsonLineLink()
     {
         signalThreadShouldExit();
-
-        {
-            const juce::ScopedLock sl (socketLock);
-            if (socket != nullptr)
-                socket->close();
-        }
-
+        wake();
         stopThread (4000);
         cancelPendingUpdate();
+
+        for (auto fd : wakeFds)
+            if (fd >= 0)
+                close (fd);
     }
 
     void JsonLineLink::start()
@@ -33,29 +58,58 @@ namespace bpi
         startThread();
     }
 
+    void JsonLineLink::wake()
+    {
+        if (wakeFds[1] >= 0)
+        {
+            const char byte = 1;
+            [[maybe_unused]] const auto written = write (wakeFds[1], &byte, 1);   // full pipe: already awake
+        }
+    }
+
+    size_t JsonLineLink::getQueuedBytes() const
+    {
+        const std::lock_guard<std::mutex> lock (outLock);
+        return outBytes;
+    }
+
+    void JsonLineLink::clearQueue()
+    {
+        const std::lock_guard<std::mutex> lock (outLock);
+        outQueue.clear();
+        outBytes = 0;
+        frontWritten = 0;
+        overflowed = false;
+    }
+
     bool JsonLineLink::send (const juce::var& message)
     {
-        const auto line = document::toJson (message) + "\n";
-        const auto* data = line.toRawUTF8();
-        auto remaining = (int) line.getNumBytesAsUTF8();
-
-        const juce::ScopedLock sl (socketLock);
-
-        if (socket == nullptr || ! connected.load())
+        if (! connected.load())
             return false;
 
-        while (remaining > 0)
+        auto line = (document::toJson (message) + "\n").toStdString();
+
         {
-            const auto written = socket->write (data, remaining);
+            const std::lock_guard<std::mutex> lock (outLock);
 
-            if (written <= 0)
-                return false;   // the reader notices the close and reconnects
+            if (overflowed.load())
+                return false;
 
-            data += written;
-            remaining -= written;
+            // One line always fits an empty queue; beyond the bound the peer has stopped
+            // reading, and waiting for it is not an option on the message thread.
+            if (outBytes > 0 && outBytes + line.size() > maxQueued)
+            {
+                overflowed = true;
+            }
+            else
+            {
+                outBytes += line.size();
+                outQueue.push_back (std::move (line));
+            }
         }
 
-        return true;
+        wake();
+        return ! overflowed.load();
     }
 
     void JsonLineLink::post (int kind, juce::var message, juce::String text)
@@ -97,29 +151,32 @@ namespace bpi
     {
         while (! threadShouldExit())
         {
-            auto s = std::make_unique<juce::StreamingSocket>();
+            juce::StreamingSocket s;
 
-            if (! s->connect (host, port, 1000))
+            if (! s.connect (host, port, 1000))
             {
                 wait (1000);
                 continue;
             }
 
-            {
-                const juce::ScopedLock sl (socketLock);
-                socket = std::move (s);
-                connected = true;
-            }
+            const auto fd = s.getRawSocketHandle();
+            setNonBlocking (fd);
 
+            // A bounded kernel buffer: otherwise Linux grows it to megabytes for a peer that
+            // stopped reading, and those stale lines would sit beyond the queue's bound.
+            const int sendBuffer = (int) kernelSendBufferBytes;
+            setsockopt (fd, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof (sendBuffer));
+
+            clearQueue();   // nothing of an earlier connection goes out on this one
+            ++connectionCount;
+            connected = true;
             post (eventConnected, {});
-            const auto why = readUntilClosed (*socket);
 
-            {
-                const juce::ScopedLock sl (socketLock);
-                connected = false;
-                socket->close();
-                socket.reset();
-            }
+            const auto why = serviceUntilClosed (fd);
+
+            connected = false;
+            s.close();
+            clearQueue();
 
             if (! threadShouldExit())
             {
@@ -129,25 +186,109 @@ namespace bpi
         }
     }
 
-    juce::String JsonLineLink::readUntilClosed (juce::StreamingSocket& s)
+    bool JsonLineLink::writeQueued (int fd, juce::String& error)
+    {
+        for (;;)
+        {
+            const std::string* front = nullptr;
+
+            {
+                const std::lock_guard<std::mutex> lock (outLock);
+
+                if (outQueue.empty())
+                    return true;
+
+                front = &outQueue.front();
+            }
+
+            const auto remaining = front->size() - frontWritten;
+            const auto n = ::send (fd, front->data() + frontWritten, remaining, MSG_NOSIGNAL | MSG_DONTWAIT);
+
+            if (n < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                    return true;   // the kernel's buffer is full: poll says when it drains
+
+                error = "writing failed: " + juce::String (std::strerror (errno));
+                return false;
+            }
+
+            const std::lock_guard<std::mutex> lock (outLock);
+            outBytes -= (size_t) n;
+            frontWritten += (size_t) n;
+
+            if (frontWritten == front->size())
+            {
+                outQueue.pop_front();
+                frontWritten = 0;
+            }
+            else
+            {
+                return true;   // a partial write: the buffer is full
+            }
+        }
+    }
+
+    juce::String JsonLineLink::serviceUntilClosed (int fd)
     {
         juce::MemoryBlock pending;
         char buffer[65536];
 
         while (! threadShouldExit())
         {
-            const auto ready = s.waitUntilReady (true, 200);
+            if (overflowed.load())
+                return "the peer stopped reading: more than " + juce::String ((juce::int64) maxQueued)
+                       + " bytes were waiting to be sent";
+
+            const auto haveOutput = getQueuedBytes() > 0;
+
+            pollfd fds[2] {};
+            fds[0].fd = fd;
+            fds[0].events = (short) (POLLIN | (haveOutput ? POLLOUT : 0));
+            fds[1].fd = wakeFds[0];
+            fds[1].events = POLLIN;
+
+            const auto ready = poll (fds, wakeFds[0] >= 0 ? 2 : 1, 200);
 
             if (ready < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+
+                return "poll failed: " + juce::String (std::strerror (errno));
+            }
+
+            if ((fds[1].revents & POLLIN) != 0)
+            {
+                char drain[256];
+                while (read (wakeFds[0], drain, sizeof (drain)) > 0) {}
+            }
+
+            if ((fds[0].revents & (POLLERR | POLLNVAL)) != 0)
                 return "the connection failed";
 
-            if (ready == 0)
+            if ((fds[0].revents & POLLOUT) != 0 || (haveOutput && (fds[0].revents & POLLIN) == 0))
+            {
+                juce::String error;
+                if (! writeQueued (fd, error))
+                    return error;
+            }
+
+            if ((fds[0].revents & (POLLIN | POLLHUP)) == 0)
                 continue;
 
-            const auto n = s.read (buffer, (int) sizeof (buffer), false);
+            const auto n = ::recv (fd, buffer, sizeof (buffer), MSG_DONTWAIT);
 
-            if (n <= 0)
-                return "the peer closed the connection";   // readable and empty
+            if (n == 0)
+                return "the peer closed the connection";
+
+            if (n < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                    continue;
+
+                return "reading failed: " + juce::String (std::strerror (errno));
+            }
 
             pending.append (buffer, (size_t) n);
 
@@ -161,9 +302,7 @@ namespace bpi
                 if (newline == end)
                 {
                     if (pending.getSize() > maxLineBytes)
-                    {
                         return "a line longer than 32 MiB";
-                    }
 
                     break;
                 }

@@ -36,6 +36,7 @@ controller --hub HOST --script FILE [--gui] [--test-probe] [--trace]
 | `--script FILE` | the test mode (below) |
 | `--gui` | with `--script`: open the windows too |
 | `--test-probe` | add the test probe to the plugins (below) |
+| `--send-queue-limit BYTES` | what a link may hold for a peer that stopped reading before it drops the connection and reconnects (default 4 MiB) |
 | `--trace` | every line in and out, on stderr |
 | `--version`, `--help` | |
 
@@ -75,6 +76,12 @@ docs/protocol.md asks of a controller:
   an edit made while one is waiting is undone with a note. A `graph` message from the hub with
   a newer revision (another controller's edit) is applied to the canvas; nodes that stay keep
   their open windows.
+- **Never waiting for a peer.** The control and monitor links do all their socket work on their
+  own threads: `send()` only queues the line and wakes the link, so the message thread (the UI,
+  the knobs) never blocks on a hub that is slow, stalled or stopped. The kernel's send buffer
+  is bounded (64 KiB), and the queue too: a peer that has not read for more than
+  `--send-queue-limit` bytes is dropped, and the link connects again, starting from the hub's
+  `state`. Lines from an earlier connection are never sent on a new one.
 - **Placeholders.** A node whose plugin has no control build in this controller is shown as
   a placeholder (orange frame) with the pins its connections use: it is never dropped from
   a proposal.
@@ -126,9 +133,12 @@ timeout (in seconds, the last argument where shown; default 5) passes.
 | `expect-speaker NAME online/offline [s]` | |
 | `main-window X Y W H` | places the main window (`--gui`) |
 | `screenshot FILE` | every window, as JUCE paints it, into one PNG (`--gui`) |
+| `sweep UID SECONDS` | sets every parameter of a node on every tick, without a gesture (a preset morph): as much traffic as the control link takes, 50 a second per parameter |
 | `sleep MS`, `print TEXT` | |
 
-Lines starting with `#` are comments. Each command prints, for example:
+Lines starting with `#` are comments. Every line carries `max_tick_ms`, the longest gap between two
+ticks of the test mode's timer during that step: the message thread's pulse (10 ms when all is
+well). Each command prints, for example:
 
 ```json
 {"step":4,"cmd":"wait-echo","line":"wait-echo 16 s0_e0_gain 4.5","ok":true,"ms":3,"value":4.5,"seq":1001,"origin":"ctl-test","link":"control","echoes":2}
@@ -137,7 +147,8 @@ Lines starting with `#` are comments. Each command prints, for example:
 {"result":"fail","steps":9,"failed":1}
 ```
 
-`state` prints `{"state": {...}}` with `connected`, `synced`, `hub`, `revision`, `seq`, `pending`
+`state` prints `{"state": {...}}` with `connected`, `connections_made` (control link connections
+so far), `queued_bytes` (waiting to be written to the hub), `synced`, `hub`, `revision`, `seq`, `pending`
 (the revision waiting for an answer, or null), `outcome` (`applied N` or `rejected N: reason`),
 `status`, `nodes` (uid, kind: `input`, `output`, `control` or `placeholder`; for plugins name,
 identifier, bypassed, `params` and `monitors` in the plugin's units, `monitor_speaker`),
@@ -185,8 +196,11 @@ gesture's end over the control link (and late echoes of its own ignored); anothe
 echoes applied; proposals applied (add, connect, bypass, disconnect: revisions 8 to 11, the new
 node with all 35 loudness parameters and the headless URI); a rejection and a stale base undone;
 another controller's revision with a placeholder kept untouched in the next proposal; monitor
-subscriptions moving between speakers and the output levels; no edit without a hub; and a
-reconnect that takes the new hub's state and pushes nothing. Each test prints its numbers.
+subscriptions moving between speakers and the output levels; no edit without a hub; a
+reconnect that takes the new hub's state and pushes nothing; a hub that stops reading during a
+3 s sweep (its receive buffer 4 KiB), with the message thread ticking on and the backed-up lines
+going out in order once it reads again; and one that never reads again, dropped past a 64 KiB
+queue and reconnected. Each test prints its numbers.
 
 The screenshot run opens the loudness control editor and the test probe beside the canvas and
 writes `build/controller-check/controller-screen.png` (the X screen) and `controller-juce.png`

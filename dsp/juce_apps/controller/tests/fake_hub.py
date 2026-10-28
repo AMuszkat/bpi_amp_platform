@@ -119,7 +119,7 @@ class FakeHub:
     right speaker's, where only its monitor link listens."""
 
     def __init__(self, left="127.0.3.1", right="127.0.3.2", name="left",
-                 document=None, ports=(7450, 7451, 7452)):
+                 document=None, ports=(7450, 7451, 7452), control_rcvbuf=None):
         self.left, self.right, self.name = left, right, name
         self.control_port, self.knobs_port, self.monitor_port = ports
         self.document = copy.deepcopy(document or default_document())
@@ -141,6 +141,8 @@ class FakeHub:
         self.controllers = {}             # name -> {"conn", "osc": (host, port)}
         self.subscriptions = {"left": {}, "right": {}}   # speaker -> stream -> rate
         self.gestures = {}                # (node, id) -> origin
+        self.control_rcvbuf = control_rcvbuf   # SO_RCVBUF of the control link's connections
+        self.stalled = set()              # control connections that stopped reading
         self.lock = threading.RLock()
         self._servers = []
         self._connections = set()        # open TCP connections, closed by stop()
@@ -174,7 +176,12 @@ class FakeHub:
         for address, port, handler in ((self.left, self.control_port, Control),
                                        (self.left, self.monitor_port, monitor_handler("left")),
                                        (self.right, self.monitor_port, monitor_handler("right"))):
-            server = _LineServer((address, port), handler)
+            server = _LineServer((address, port), handler, bind_and_activate=False)
+            if handler is Control and self.control_rcvbuf:
+                # Inherited by every accepted connection: a small window fills quickly.
+                server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.control_rcvbuf)
+            server.server_bind()
+            server.server_activate()
             threading.Thread(target=server.serve_forever, daemon=True).start()
             self._servers.append(server)
 
@@ -187,6 +194,7 @@ class FakeHub:
     def stop(self):
         """Stops like a hub that goes away: every connection closes."""
         self._stop.set()
+        self.stalled = set()
         for s in self._servers:
             s.shutdown()
             s.server_close()
@@ -275,6 +283,16 @@ class FakeHub:
                        "time": "2026-10-28T09:15:02Z", "origin": origin, "document": copy.deepcopy(self.document)}
         self._to_controllers(message)
 
+    def stall_controllers(self):
+        """The hub stops reading every control connection open now (as if stalled or stopped);
+        connections made later are served normally."""
+        with self.lock:
+            self.stalled = {c["conn"] for c in self.controllers.values()}
+
+    def resume_controllers(self):
+        with self.lock:
+            self.stalled = set()
+
     def set_speaker(self, name, online):
         with self.lock:
             for s in self.speakers:
@@ -297,6 +315,8 @@ class FakeHub:
         name = None
         try:
             for raw in conn.rfile:
+                while conn in self.stalled and not self._stop.is_set():
+                    time.sleep(0.01)
                 line = raw.decode().strip()
                 if not line:
                     continue

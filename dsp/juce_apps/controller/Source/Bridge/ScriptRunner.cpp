@@ -127,10 +127,17 @@ namespace bpi
 
         auto& step = steps[current];
         const auto first = ! started;
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+
+        if (lastTickMs > 0.0)
+            maxTickGapMs = juce::jmax (maxTickGapMs, now - lastTickMs);
+
+        lastTickMs = now;
 
         if (first)
         {
             started = true;
+            maxTickGapMs = 0.0;
             startedMs = juce::Time::getMillisecondCounterHiRes();
             deadlineMs = startedMs + defaultTimeoutSeconds * 1000.0;
             waitDetail = juce::var();
@@ -152,6 +159,7 @@ namespace bpi
         o->setProperty ("line", step.line);
         o->setProperty ("ok", ok);
         o->setProperty ("ms", juce::roundToInt (juce::Time::getMillisecondCounterHiRes() - startedMs));
+        o->setProperty ("max_tick_ms", juce::roundToInt (maxTickGapMs));
 
         if (error.isNotEmpty())
             o->setProperty ("error", error);
@@ -301,6 +309,41 @@ namespace bpi
             }
 
             return false;
+        }
+
+        if (cmd == "sweep")
+        {
+            // sweep <uid> <seconds>: every parameter of a node, every tick, without a gesture
+            // (a preset morph): as much as the control link carries, 50 a second per parameter.
+            if (! need (2)) return true;
+            auto* n = graph.graph.getNodeForId (NodeID { uidArg (arg (1)) });
+
+            if (n == nullptr || n->properties["kind"].toString() != nodeKind::control)
+                return edit (false, "no control node " + arg (1));
+
+            const auto durationMs = arg (2).getDoubleValue() * 1000.0;
+
+            if (first)
+            {
+                deadlineMs = startedMs + durationMs + 10000.0;
+                sweepTicks = sweepValues = 0;
+            }
+
+            ++sweepTicks;
+
+            for (auto* p : n->getProcessor()->getParameters())
+            {
+                if (params::isMonitor (params::idOf (*p)))
+                    continue;
+
+                p->setValueNotifyingHost ((sweepTicks % 2) != 0 ? 0.25f : 0.75f);
+                ++sweepValues;
+            }
+
+            if (juce::Time::getMillisecondCounterHiRes() - startedMs < durationMs)
+                return false;
+
+            return edit (true, {}, object ({ { "ticks", sweepTicks }, { "values", sweepValues } }));
         }
 
         if (cmd == "wait-echo")

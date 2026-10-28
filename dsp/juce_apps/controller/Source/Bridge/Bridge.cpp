@@ -77,7 +77,7 @@ namespace bpi
     {
     public:
         MonitorLink (Bridge& b, const juce::String& speakerName, const juce::String& host, int port)
-            : bridge (b), speaker (speakerName), link ("monitor " + speakerName, host, port)
+            : bridge (b), speaker (speakerName), link ("monitor " + speakerName, host, port, b.options.sendQueueLimit)
         {
             link.onConnected = [this]
             {
@@ -318,7 +318,7 @@ namespace bpi
     {
         oscOut.connect (options.hubHost, options.knobsPort);
 
-        control = std::make_unique<JsonLineLink> ("control", options.hubHost, options.controlPort);
+        control = std::make_unique<JsonLineLink> ("control", options.hubHost, options.controlPort, options.sendQueueLimit);
 
         control->onConnected = [this]
         {
@@ -332,6 +332,7 @@ namespace bpi
             synced = false;
             pending.reset();
             setStatus ("hub " + control->getAddress() + ": " + why + "; reconnecting");
+            std::cerr << "[bridge] control link " << control->getAddress() << ": " << why << "; reconnecting" << std::endl;
         };
 
         control->onMessage = [this] (const juce::var& m) { trace ("<", "control", m); handleControl (m); };
@@ -757,11 +758,17 @@ namespace bpi
 
         if (seq != 0)
         {
-            if (st.haveSeq && ! seqNewer (seq, st.lastSeq))
-                return;   // UDP reordered it, or the other link already brought it
+            // Older: UDP reordered it. The same seq again: the other link's copy, kept only when
+            // it is the control link's exact value after OSC's 32-bit float (docs/protocol.md,
+            // clarification 26).
+            const auto sameAgainExact = st.haveSeq && seq == st.lastSeq && link == "control" && ! st.lastSeqFromControl;
+
+            if (st.haveSeq && ! seqNewer (seq, st.lastSeq) && ! sameAgainExact)
+                return;
 
             st.lastSeq = seq;
             st.haveSeq = true;
+            st.lastSeqFromControl = link == "control";
         }
 
         if (origin == options.name && (st.gestureActive || nowMs() < st.ownEchoQuietUntil))
@@ -1187,7 +1194,9 @@ namespace bpi
         for (const auto& [key, origin] : remoteGestures)
             gestures.add (object ({ { "node", (int) key.uid }, { "id", key.id }, { "origin", origin } }));
 
-        return object ({ { "connected", isConnected() }, { "synced", synced }, { "hub", hubName },
+        return object ({ { "connected", isConnected() }, { "connections_made", getConnectionCount() },
+                         { "queued_bytes", control != nullptr ? (juce::int64) control->getQueuedBytes() : (juce::int64) 0 },
+                         { "synced", synced }, { "hub", hubName },
                          { "revision", revision }, { "seq", (juce::int64) lastSeq },
                          { "pending", pending.has_value() ? juce::var (pending->revision) : juce::var() },
                          { "outcome", lastOutcome }, { "status", status },

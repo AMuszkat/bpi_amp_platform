@@ -45,6 +45,7 @@ namespace bpi
             int oscPort = 0;                     // where the hub sends echoes; 0 = any free port
             std::map<juce::String, juce::String> speakerAddresses;   // speaker name -> host
             int monitorRateHz = 30;
+            size_t sendQueueLimit = JsonLineLink::defaultMaxQueuedBytes;   // per link, before it reconnects
             bool trace = false;                  // every line in and out on stderr
         };
 
@@ -59,6 +60,7 @@ namespace bpi
         bool isSynced() const noexcept       { return synced; }   // the hub's state arrived
         juce::int64 getRevision() const noexcept   { return revision; }
         juce::uint32 getLastSeq() const noexcept   { return lastSeq; }
+        int getConnectionCount() const             { return control != nullptr ? control->getConnectionCount() : 0; }
         bool hasPendingProposal() const noexcept   { return pending.has_value(); }
         juce::String getHubName() const            { return hubName; }
         juce::String getStatus() const             { return status; }
@@ -141,6 +143,7 @@ namespace bpi
             bool pendingOverControl = false;
             juce::uint32 lastSeq = 0;
             bool haveSeq = false;
+            bool lastSeqFromControl = false;
         };
 
         class NodeWatcher;

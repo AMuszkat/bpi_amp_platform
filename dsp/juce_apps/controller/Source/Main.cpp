@@ -33,6 +33,8 @@ namespace bpi
   --script FILE          test mode: run FILE's commands, print JSON lines, exit 0 on success
   --gui                  with --script: show the windows too (screenshots, plugin windows)
   --test-probe           add the test probe plugin (a control build with a monitor, mon_level)
+  --send-queue-limit N   bytes a link may hold for a peer that stopped reading before it
+                         reconnects (default 4194304)
   --trace                every line in and out on stderr
   --version
 )";
@@ -83,6 +85,13 @@ namespace bpi
                 else if (a == "--gui")              c.scriptGui = true;
                 else if (a == "--test-probe")       c.testProbe = true;
                 else if (a == "--trace")            c.bridge.trace = true;
+                else if (a == "--send-queue-limit")
+                {
+                    const auto v = value();
+                    if (v.isEmpty() || ! v.containsOnly ("0123456789") || v.getLargeIntValue() < 1024)
+                        c.error = "--send-queue-limit takes a number of bytes, 1024 or more";
+                    c.bridge.sendQueueLimit = (size_t) v.getLargeIntValue();
+                }
                 else if (a == "--version")          c.version = true;
                 else if (a == "--help" || a == "-h") c.help = true;
                 else if (a == "--speaker")
