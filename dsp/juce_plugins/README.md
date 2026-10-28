@@ -170,9 +170,9 @@ checks that the three builds fit together. So far `loudness` is split this way.
 controller as read-only parameters whose IDs start with `mon_`
 ([`../../docs/protocol.md`](../../docs/protocol.md)): in every build, declared last with
 `addParameter()` (not through the APVTS, so no saved state carries them), not automatable, of
-category output meter. The complete and headless builds write them from the audio thread with
-`setValue()` and run a notifier thread so that JUCE's LV2 wrapper reports them to the host; in
-the control build the plugin's getters read them. `loudness/Monitors.h` has the helpers, and
+category output meter. The complete and headless builds publish them from the audio thread
+(`setValue()` and, when the value moved, a notification, without which JUCE's LV2 wrapper does
+not report them to the host); in the control build the plugin's getters read them. `loudness/Monitors.h` has the helpers, and
 `<plugin>/plugin-check.monitors.h` names the getters for plugin-check.
 
 ## JUCE

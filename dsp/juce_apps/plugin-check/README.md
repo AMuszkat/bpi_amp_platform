@@ -26,6 +26,7 @@ checker, loads the three LV2 bundles through JUCE's own plugin hosting, and chec
 | the three builds have the same monitors (`mon_` parameters) | the controller subscribes to what the speaker publishes |
 | no build's saved state carries a monitor (the plugin's own state, decoded from the LV2 state) | a monitor is measured, never restored |
 | the hosted headless build, after a -20 dBFS tone, publishes each monitor within its tolerance of what the complete build's getter reads for the same tone (the hosted complete build too) | this is how `speakerd` reads a monitor |
+| ... and so does a fresh headless instance, 40 times over, each played at 44.1, 48 and 96 kHz and then destroyed | `speakerd` creates and destroys instances on every graph it applies |
 | the control build's editor opens (and a screenshot) | the editor runs without its DSP |
 
 Before that, `run.sh` runs the **in-process check** (`in-process/`) on each build: the build's
@@ -48,7 +49,14 @@ The editor check needs an X display. Without `DISPLAY` the script starts `Xvfb` 
 if they are installed (a window manager is needed: without one, opening an LV2 editor fails
 with an X `BadAtom` error) and skips the check otherwise.
 
-## Three things this checker found
+The editor stays up until `run.sh` has a screenshot of it painted (at most 40 s of trying),
+because under load an editor can take seconds to paint for the first time. Under load the
+embedded editor also sometimes stays an unpainted rectangle for good: JUCE's XEmbed host never
+maps the plugin's window into its own. An editor still unpainted after 3 s is therefore nudged
+(plugin-check hides and shows its window, which makes the host look at the client again), and
+the report says so. Under full CPU load about one run in three needed one nudge; all painted.
+
+## Four things this checker found
 
 - **LV2 state carries the plugin's URI.** JUCE saves an LV2 plugin's state as a preset whose
   subject and state key are built from the plugin URI, and the control and headless builds
@@ -63,7 +71,15 @@ with an X `BadAtom` error) and skips the check otherwise.
   heard about through `AudioProcessorListener::audioProcessorParameterChanged()`, and
   `setValue()` tells no listener. With the audio thread writing a monitor that way and nothing
   else, the hosted headless build's `mon_levelDb` stayed at -120 while the plugin's own value was
-  -21.7. A plugin therefore runs a notifier thread that tells the listeners when a monitor moved
-  (`juce_plugins/loudness/Monitors.h`); the wrapper reports it after the next cycle. The value
-  reaches the host only while the plugin processes, which is why the monitor check plays its
-  tone in real time for half a second before reading.
+  -21.7. A plugin therefore also notifies the listeners when a monitor moved, from the audio
+  thread (`juce_plugins/loudness/Monitors.h` says why no other thread is safe), and the wrapper
+  reports it at the end of the same cycle.
+- **Several copies of JUCE in one process can leave X errors fatal.** Every LV2 bundle carries
+  its own JUCE, and each copy saves, replaces and restores the process's X error handler, the
+  plugins' copies on their own message threads. The saves and restores can interleave and leave
+  Xlib's default handler in place, which exits the process on any X error. Under
+  load the embedded editor is sometimes configured to 0x0 before it has its size (BadValue in
+  `X_ConfigureWindow`), and plugin-check died with the editor window never painted. The checker
+  installs a handler that ignores X errors before it opens the editor, and says so in the
+  report when it replaced Xlib's default or ignored an error. The controller compiles its
+  control builds in, with one copy of JUCE, so it is not exposed to this.

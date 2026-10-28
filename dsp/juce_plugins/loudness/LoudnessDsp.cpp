@@ -60,8 +60,9 @@ void LoudnessProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     // The monitors are written at most about 60 times a second, counted in samples, and the
     // first block writes them.
-    samplesPerMonitorWrite   = juce::jmax (1, juce::roundToInt (currentSampleRate / 60.0));
-    samplesUntilMonitorWrite = 0;
+    samplesPerMonitorWrite    = juce::jmax (1, juce::roundToInt (currentSampleRate / 60.0));
+    samplesUntilMonitorWrite  = 0;
+    monitorWritesUntilRefresh = 0;
 
     reset();
 }
@@ -239,16 +240,23 @@ void LoudnessProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     writeMonitors (numSamples);
 }
 
-void LoudnessProcessor::writeMonitors (int numSamples) noexcept
+void LoudnessProcessor::writeMonitors (int numSamples)
 {
-    // Audio thread. A plain store into each monitor parameter (Monitors.h): no notification,
-    // no allocation, no lock. The notifier tells the host.
+    // Audio thread, at most about 60 times a second. Monitors.h says why the listeners are
+    // told from here and what that costs: no allocation, and no lock anyone else takes.
     samplesUntilMonitorWrite -= numSamples;
 
     if (samplesUntilMonitorWrite > 0)
         return;
 
     samplesUntilMonitorWrite = samplesPerMonitorWrite;
-    monitors::write (*monitorLevelDb, levelDb.load (std::memory_order_relaxed));
-    monitors::write (*monitorActiveSetting, (float) activeSetting.load (std::memory_order_relaxed));
+
+    // Every value again about once a second, so a host that missed one catches up.
+    const bool refresh = --monitorWritesUntilRefresh <= 0;
+
+    if (refresh)
+        monitorWritesUntilRefresh = 60;
+
+    monitors::publish (*monitorLevelDb, levelDb.load (std::memory_order_relaxed), refresh);
+    monitors::publish (*monitorActiveSetting, (float) activeSetting.load (std::memory_order_relaxed), refresh);
 }

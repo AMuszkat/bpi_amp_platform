@@ -82,7 +82,17 @@ if [ "$EDITOR" = 1 ] && [ -z "${DISPLAY:-}" ]; then
     fi
 fi
 
-[ "$EDITOR" = 1 ] && args+=(--show-editor 8)
+# With ImageMagick, the editor stays up until the screenshot is taken (at most 60 s); without
+# it, for 8 s.
+SHOT_DONE="$BUILD_DIR/$PLUGIN-editor-shot.done"
+rm -f "$SHOT_DONE" "$SHOT_DONE.nudge"
+if [ "$EDITOR" = 1 ]; then
+    if command -v import > /dev/null; then
+        args+=(--show-editor 60 --editor-until "$SHOT_DONE")
+    else
+        args+=(--show-editor 8)
+    fi
+fi
 
 REPORT="$BUILD_DIR/$PLUGIN-report.txt"
 : > "$REPORT"
@@ -108,20 +118,28 @@ CHECK=$!
 
 # Screenshot the control editor while it is up, when ImageMagick is there.
 if [ "$EDITOR" = 1 ] && command -v import > /dev/null; then
-    for _ in $(seq 1 60); do grep -q '^EDITOR ' "$REPORT" 2>/dev/null && break; sleep 0.5; done
+    # The editor opens after every other check, which under load takes a while: wait for it
+    # for as long as plugin-check runs.
+    while kill -0 $CHECK 2> /dev/null && ! grep -q '^EDITOR ' "$REPORT"; do sleep 0.5; done
     shot="$BUILD_DIR/$PLUGIN-control-editor.png"
     # The screen is black apart from the editor, and a window that has not painted yet is a
-    # plain rectangle of one or two colours; under load that can last seconds. So capture
-    # again while the editor is up (it stays for 8 s), keep the most colourful capture, and
-    # stop at the first that shows a painted editor.
+    # plain rectangle of one or two colours; under load that can last seconds, and so can each
+    # capture. So capture until one shows a painted editor (or 40 s have gone), keeping the
+    # most colourful, and only then tell plugin-check to close the editor.
+    # An editor still unpainted after 3 s is nudged (plugin-check hides and shows its window,
+    # see showEditor in Main.cpp), and again every 3 s after that.
     best=0
-    for _ in $(seq 1 14); do
+    until=$((SECONDS + 40))
+    nudge_at=$((SECONDS + 3))
+    while grep -q '^EDITOR ' "$REPORT" && kill -0 $CHECK 2> /dev/null && [ $SECONDS -lt $until ]; do
         sleep 0.5
         import -window root "$shot.next.png" 2> /dev/null || continue
         colours="$(convert "$shot.next.png" -format '%k' info: 2> /dev/null || echo 0)"
         if [ "${colours:-0}" -gt "$best" ]; then best="$colours"; mv -f "$shot.next.png" "$shot"; fi
         [ "$best" -gt 16 ] && break
+        if [ $SECONDS -ge $nudge_at ]; then touch "$SHOT_DONE.nudge"; nudge_at=$((SECONDS + 3)); fi
     done
+    touch "$SHOT_DONE"
     rm -f "$shot.next.png"
     if [ "$best" -gt 16 ]; then
         echo "Screenshot: $shot"

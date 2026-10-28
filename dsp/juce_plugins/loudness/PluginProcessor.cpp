@@ -67,11 +67,7 @@ LoudnessProcessor::LoudnessProcessor()
     addMonitors();
 }
 
-LoudnessProcessor::~LoudnessProcessor()
-{
-    // Joins the notifier's thread while the parameters it watches still exist.
-    monitorNotifier.reset();
-}
+LoudnessProcessor::~LoudnessProcessor() = default;
 
 //==============================================================================
 void LoudnessProcessor::addMonitors()
@@ -91,13 +87,6 @@ void LoudnessProcessor::addMonitors()
     monitorActiveSetting = setting.get();
     addParameter (level.release());
     addParameter (setting.release());
-
-   #if ! SPEAKER_CONTROL
-    // The builds that measure tell the host when a monitor moves. The control build gets its
-    // values from outside, and whoever sets them notifies as it sees fit.
-    monitorNotifier = std::make_unique<monitors::Notifier> (
-        juce::Array<juce::AudioProcessorParameter*> { monitorLevelDb, monitorActiveSetting });
-   #endif
 }
 
 //==============================================================================

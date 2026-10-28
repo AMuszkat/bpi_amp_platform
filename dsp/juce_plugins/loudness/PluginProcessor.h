@@ -162,7 +162,7 @@ private:
     //==============================================================================
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void addMonitors();
-    void writeMonitors (int numSamples) noexcept;
+    void writeMonitors (int numSamples);
     int chooseSetting (float detectedDb) noexcept;
     void updateGlideTargets (int setting) noexcept;
     void refreshDetectorSettings() noexcept;
@@ -208,12 +208,12 @@ private:
     std::array<std::atomic<float>, LoudnessIDs::numBands> liveGain { }, liveFreq { }, liveQ { };
 
     // The monitors, owned by the AudioProcessor like every parameter (not by the APVTS, so
-    // they stay out of the saved state). The audio thread writes them from the atomics above
-    // about 60 times a second; the notifier reports them to the host (Monitors.h).
+    // they stay out of the saved state). The audio thread publishes them from the atomics
+    // above about 60 times a second (Monitors.h).
     juce::AudioParameterFloat* monitorLevelDb = nullptr;
     juce::AudioParameterInt* monitorActiveSetting = nullptr;
-    std::unique_ptr<monitors::Notifier> monitorNotifier;
     int samplesPerMonitorWrite = 800, samplesUntilMonitorWrite = 0;   // audio thread only
+    int monitorWritesUntilRefresh = 0;                                // audio thread only
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LoudnessProcessor)
 };
