@@ -7,8 +7,10 @@ instructions alone cannot:
 - nothing reaches a board (ssh, scp, rsync, the deploy targets of the build scripts, the
   /board skill's tools/board.sh) while the lab lock .claude/lab.lock exists, or without a
   green test status for the exact commit being deployed (tests/.status/<commit>.json,
-  written by /test), with a clean tree. Looking at a board (tools/board.sh status or
-  journal) only needs the lab to be unlocked.
+  written by /test, both rungs run on a clean tree), with a clean tree now. Looking at a board
+  (tools/board.sh status or journal) only needs the lab to be unlocked. The lab lock of the
+  main checkout counts in a worktree too;
+- no command lifts a speaker's output cap (--person-present): that is a person's, at the speaker.
 
 Override, logged: a command that starts with BPI_DEPLOY_OVERRIDE=1 deploys regardless of
 the test status (never regardless of the lab lock).
@@ -36,6 +38,8 @@ DEPLOY = re.compile(r"(^|[\s;&|(])(ssh|scp|rsync|sftp)\s|build-podman\.sh\b.*\s-
                     r"|\btools/board\.sh\b")
 # Reading a board changes nothing on it: the lab lock applies, the test status does not.
 BOARD_READ = re.compile(r"\btools/board\.sh\s+(status|journal)\b")
+# Lifting the output cap is a person's, at the speaker, in their own shell: never an agent's.
+PERSON_ONLY = re.compile(r"--person-present\b")
 
 
 def refuse(msg):
@@ -59,10 +63,20 @@ def check_commit(command):
     return 0
 
 
+def lab_locks():
+    """The lab lock of this checkout and of the main checkout, when this one is a worktree."""
+    locks = [LAB_LOCK]
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    if common:
+        locks.append(os.path.join(os.path.dirname(common), ".claude", "lab.lock"))
+    return locks
+
+
 def check_deploy(command):
-    if os.path.exists(LAB_LOCK):
-        return refuse(f"the lab is locked ({LAB_LOCK} exists): nothing may reach a board. "
-                      "A person removes the lock when the boards are free.")
+    for lock in lab_locks():
+        if os.path.exists(lock):
+            return refuse(f"the lab is locked ({lock} exists): nothing may reach a board. "
+                          "A person removes the lock when the boards are free.")
     if BOARD_READ.search(command) and not DEPLOY.search(BOARD_READ.sub("", command)):
         return 0
     override = command.lstrip().startswith("BPI_DEPLOY_OVERRIDE=1")
@@ -71,9 +85,13 @@ def check_deploy(command):
     status_file = os.path.join(STATUS_DIR, f"{head}.json")
     status = {}
     if os.path.exists(status_file):
-        with open(status_file) as f:
-            status = json.load(f)
-    green = status.get("unit") == "pass" and status.get("vpair") == "pass"
+        try:
+            with open(status_file) as f:
+                status = json.load(f)
+        except (OSError, ValueError):
+            status = {"unreadable": status_file}
+    green = (status.get("unit") == "pass" and status.get("vpair") == "pass"
+             and status.get("unit_tree") == "clean" and status.get("vpair_tree") == "clean")
 
     if override:
         os.makedirs(STATUS_DIR, exist_ok=True)
@@ -104,6 +122,9 @@ def main():
         rc = check_commit(command)
         if rc:
             return rc
+    if PERSON_ONLY.search(command):
+        return refuse("--person-present lifts the output cap of a speaker: a person does that, in "
+                      "their own shell at the speaker, after a smoke test and a listen. Not an agent.")
     if DEPLOY.search(command):
         return check_deploy(command)
     return 0
