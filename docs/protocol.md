@@ -285,29 +285,61 @@ These settle what version 1 left open; every implementation follows them.
 29. **The hub's own address** in `state.speakers`, when it listens on every address, is the
     one the controller connected to.
 
-## Authentication (version 1, from the review of step 3)
+## Authentication
 
 Every pair has a **secret**: 16 to 256 printable characters without spaces, in each speaker's
 `ampd.json` (`"secret"`, mode 0600, written by the installer from a file, never printed) and in
-each controller's settings. It never crosses the network.
+each controller's settings (as a file). It never crosses the network. Both ends of every
+TCP link prove they know it, and every OSC datagram carries a token derived from it, so
+neither a fake hub nor a forged datagram is believed.
 
-- **The proof** is `"auth"`: the lowercase hex HMAC-SHA256, keyed with the secret's UTF-8
-  bytes, of the UTF-8 string `<nonce>:<role>:<name>`, with the role and name of the same
-  `hello`.
-- **Control link.** The hub always speaks first:
-  `{"op":"hello","role":"hub","name":..,"revision":..,"seq":..,"nonce":"<32 hex>","protocol":1}`.
-  A controller or agent reads it before sending its own `hello` with `"auth"`. Agents
-  connecting to the hub do the same.
-- **Monitor link.** On connect the speaker sends
-  `{"op":"hello","role":"speaker","name":..,"nonce":..,"protocol":1}`; the client answers
-  `{"op":"hello","role":"controller","name":..,"auth":..}` before any `subscribe`.
-- **Refusal.** A missing or wrong proof, on either link, gets
-  `{"op":"error","about":"hello","reason":..}` and the connection closes.
-- **OSC** is accepted by the hub only from the IP address of an authenticated controller, and
-  by an agent only from its hub. A second agent with a connected agent's name replaces it only
-  with a valid proof.
+- **Proofs** are lowercase hex HMAC-SHA256, keyed with the secret's UTF-8 bytes, of a UTF-8
+  string. The two directions use different prefixes, so a proof can never be reflected back:
+  - client: `HMAC("client:<Ns>:<Nc>:<role>:<name>")`, with the role and name of the client's
+    `hello`;
+  - server: `HMAC("server:<Ns>:<Nc>:<role>:<name>")`, with the role and name of the server's
+    `hello`.
+
+  `Ns` and `Nc` are the server's and the client's nonces: 32 lowercase hex characters (128
+  bits) from a cryptographic random source, new for every connection. Proofs are compared in
+  constant time, as bytes; anything else (a missing, non-hex or wrong proof, a missing or
+  malformed nonce) gets `{"op":"error","about":"hello","reason":..}` and the connection
+  closes.
+- **The handshake,** on the control link (the hub is the server; a controller or an agent the
+  client) and on the monitor link (the speaker is the server, a controller the client):
+  1. The server speaks first:
+     `{"op":"hello","role":"hub","name":..,"revision":..,"seq":..,"nonce":"<Ns>","protocol":1}`
+     (`"role":"speaker"`, with only `name`, `nonce` and `protocol`, on the monitor link).
+  2. The client answers with its own nonce and proof:
+     `{"op":"hello","role":"controller","name":..,"osc_port":..,"protocol":1,"nonce":"<Nc>","auth":"<client proof>"}`.
+  3. The server checks it and answers `{"op":"welcome","auth":"<server proof>"}` before
+     anything else (before `state` on the control link, before any `value` on the monitor
+     link).
+  4. The client checks the server's proof before it believes or applies anything; until then it
+     sends nothing but its `hello`. An agent never applies a revision, a parameter or an `apply`
+     from a hub that has not proved itself.
+- **A session key** per control connection, `K = HMAC("session:<Ns>:<Nc>")` (hex), gives the
+  **OSC token** `T = first 32 hex characters of HMAC-SHA256(K, "osc")`.
+- **OSC carries the token.** `/bpi/param` is `,isfiss` (node, id, value, seq, origin, token) and
+  `/bpi/gesture` is `,issss` (node, id, state, origin, token). The hub accepts a datagram only
+  with the token of an authenticated controller connection from that datagram's source
+  address; it stamps its echoes to each controller with that controller's token, and a
+  controller ignores OSC without its own token. A datagram without a valid token is dropped
+  and counted, never answered.
+- **Agents ignore OSC.** The hub sends every parameter to an agent over the control link, which
+  is authenticated both ways; an agent drops every datagram.
+- **What this does not stop.** An attacker who can read a connection's traffic can replay its
+  OSC datagrams (within that session's range of values) and, by placing itself in the path
+  (ARP or mDNS spoofing), relay a handshake and then alter messages afterwards: the links are
+  authenticated, not encrypted or signed per message. On a home network that is out of scope
+  for now; TLS or a per-message MAC is the step after. Nothing over the network can lift the
+  output cap, unmute the tweeter, or (while the tweeter is on) feed it other than through a
+  crossover's high band: those are enforced by `device.json` and the tweeter rule on the
+  speaker.
 - **Limits.** A hub takes at most 32 control peers and 32 monitor clients with at most 32
-  subscriptions each; a controller with more than 1 MiB unread is dropped. A document has at
-  most 64 plugin nodes and 512 connections.
+  subscriptions each, and at most 16 connections per link still in their handshake (10 s
+  each); a controller with more than 1 MiB unread is dropped. A document has at most 64
+  plugin nodes and 512 connections.
 - **No secret configured** (only before an installer has run): `ampd` logs it loudly and
-  accepts every peer.
+  accepts every peer, sending no `welcome` proof (`"auth":null`); a controller connects to
+  such a hub only when told to (`--insecure`), and says so.
