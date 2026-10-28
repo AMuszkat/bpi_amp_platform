@@ -24,9 +24,13 @@
     How a host learns of them. JUCE's LV2 wrapper (juce_audio_plugin_client_LV2.cpp) sends the
     host a patch:Set after processBlock() in each run() only for the parameters its
     ParameterStorage was told about through AudioProcessorListener::audioProcessorParameterChanged();
-    a bare setValue() tells no listener and never reaches the host. So publish() also calls
-    sendValueChangedMessageToListeners(), and the wrapper sends the value at the end of the
-    same run().
+    a bare setValue() tells no listener and never reaches the host. So under that wrapper
+    publish() also calls sendValueChangedMessageToListeners(), and the wrapper sends the value
+    at the end of the same run(). Under any other wrapper (VST3 in a DAW, or no wrapper at all)
+    it only stores the value: nothing there reads monitors through the host, the plugin's own
+    editor reads the getters, and JUCE's VST3 wrapper would answer a notification on the audio
+    thread with MessageManager::isThisTheMessageThread(), which takes a mutex the message
+    thread takes all the time.
 
     Why from the audio thread. A first version notified from a thread of its own, and that is
     not safe: the wrapper destroys its ParameterStorage (which removes itself from the
@@ -38,11 +42,13 @@
     one point that is always safe, and it is what the wrapper itself does for every parameter
     the host sets (setValueFromHost() calls setValueNotifyingHost() on the audio thread).
 
-    The cost on the audio thread, on a change only: the monitor's own listener lock, which
+    The cost on the audio thread, under the LV2 wrapper and only when a monitor's value moved by
+    at least one step of its range (or once a second): the monitor's own listener lock, which
     nothing else ever takes, so it is uncontended (one compare-and-swap in glibc, no syscall);
     a walk of the processor's listeners, which the LV2 wrapper changes only at construction and
     destruction; and the wrapper's ParameterStorage, which sets an atomic flag. Nothing
-    allocates.
+    allocates. That lock is the named exception to "no lock on the audio thread" in
+    dsp/CLAUDE.md.
 */
 namespace monitors
 {
@@ -78,17 +84,29 @@ namespace monitors
                    .withCategory (juce::AudioProcessorParameter::outputMeter);
     }
 
-    /** Audio thread: stores a monitor's value, in the parameter's own units, and tells the
-        processor's listeners (the plugin wrapper) when it changed, or always when `refresh`
-        is set, so a host that missed one catches up. */
-    inline void publish (juce::RangedAudioParameter& monitor, float value, bool refresh)
+    /** Whether a processor must tell its listeners about its monitors for a host to see them:
+        only under JUCE's LV2 wrapper (see above). */
+    inline bool hostNeedsNotifying (const juce::AudioProcessor& processor) noexcept
+    {
+        return processor.wrapperType == juce::AudioProcessor::wrapperType_LV2;
+    }
+
+    /** Audio thread: stores a monitor's value, in the parameter's own units. With `notify`
+        (hostNeedsNotifying()), also tells the processor's listeners when the stored value moved,
+        or always when `refresh` is set, so a host that missed one catches up. */
+    inline void publish (juce::RangedAudioParameter& monitor, float value, bool notify, bool refresh)
     {
         const auto normalised = monitor.convertTo0to1 (value);
 
-        if (! refresh && juce::exactlyEqual (normalised, monitor.getValue()))
-            return;
+        // Compared as the parameter stores it, snapped to its range's step: a level that moves
+        // by less than a step changes nothing, and notifies nobody.
+        const bool changed = ! juce::exactlyEqual (monitor.convertFrom0to1 (normalised),
+                                                   monitor.convertFrom0to1 (monitor.getValue()));
 
-        monitor.setValue (normalised);
-        monitor.sendValueChangedMessageToListeners (normalised);
+        if (changed)
+            monitor.setValue (normalised);
+
+        if (notify && (changed || refresh))
+            monitor.sendValueChangedMessageToListeners (monitor.getValue());
     }
 }

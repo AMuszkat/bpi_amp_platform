@@ -21,9 +21,11 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <set>
 
 #if __has_include("plugin-check.monitors.h")
  #include "plugin-check.monitors.h"
@@ -79,6 +81,31 @@ namespace
 
     float denormalised (juce::RangedAudioParameter& p) { return p.convertFrom0to1 (p.getValue()); }
 
+    /** Counts what a plugin wrapper's AudioProcessorListener would hear about the monitors. */
+    struct MonitorNotificationCounter final : juce::AudioProcessorListener
+    {
+        std::set<int> monitorIndices;
+        std::map<int, int> counts, changes;     // notifications, and those that carried a new value
+        std::map<int, float> lastValue;
+        int total = 0;
+
+        void audioProcessorParameterChanged (juce::AudioProcessor*, int index, float value) override
+        {
+            if (monitorIndices.count (index) == 0)
+                return;
+
+            ++counts[index];
+            ++total;
+
+            if (lastValue.count (index) == 0 || ! juce::exactlyEqual (lastValue[index], value))
+                ++changes[index];
+
+            lastValue[index] = value;
+        }
+
+        void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+    };
+
     juce::String savedState (juce::AudioProcessor& p)
     {
         juce::MemoryBlock block;
@@ -111,13 +138,15 @@ namespace
         }
     }
 
-    /** The same tone as plugin-check's: a 100 Hz sine at -20 dBFS, 2 s at 48 kHz in 512-sample
-        blocks. */
-    void playTone (juce::AudioProcessor& p)
+    /** The same tone as plugin-check's: a 100 Hz sine at -20 dBFS, at 48 kHz in 512-sample
+        blocks, 2 s unless told otherwise. `mark` is called once `markAt` seconds have played. */
+    void playTone (juce::AudioProcessor& p, double seconds = 2.0,
+                   double markAt = -1.0, const std::function<void()>& mark = {})
     {
         constexpr double sampleRate = 48000.0;
         constexpr int blockSize = 512;
-        const int total = (int) (2.0 * sampleRate);
+        const int total = (int) (seconds * sampleRate);
+        const int markPosition = markAt >= 0.0 ? (int) (markAt * sampleRate) : -1;
         const int channels = juce::jmax (1, p.getTotalNumInputChannels(), p.getTotalNumOutputChannels());
 
         p.setRateAndBufferSizeDetails (sampleRate, blockSize);
@@ -131,6 +160,9 @@ namespace
             const int n = juce::jmin (blockSize, total - pos);
             block.setSize (channels, n, false, false, true);
             block.clear();
+
+            if (mark && pos <= markPosition && markPosition < pos + n)
+                mark();
 
             for (int i = 0; i < n; ++i)
                 block.setSample (0, i, 0.1f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 100.0 * (pos + i) / sampleRate));
@@ -317,6 +349,61 @@ int main (int argc, char* argv[])
        #if SPEAKER_COMPLETE
         std::cout << "EXPECT " << id << "=" << read << ":" << getter->tolerance << std::endl;
        #endif
+    }
+
+    // 4. Who is told. A host sees a monitor only if the plugin tells the processor's listeners,
+    //    which is needed only under JUCE's LV2 wrapper (Monitors.h); under any other wrapper the
+    //    plugin must not (JUCE's VST3 wrapper would take a mutex on the audio thread). Under LV2,
+    //    a steady tone must not notify on every write: a monitor notifies when its stored value
+    //    moves by a step, and once a second anyway.
+    for (const auto type : { juce::AudioProcessor::wrapperType_LV2, juce::AudioProcessor::wrapperType_VST3 })
+    {
+        juce::AudioProcessor::setTypeOfNextNewPlugin (type);
+        std::unique_ptr<juce::AudioProcessor> wrapped (createPluginFilter());
+        juce::AudioProcessor::setTypeOfNextNewPlugin (juce::AudioProcessor::wrapperType_Undefined);
+
+        MonitorNotificationCounter counter;
+
+        for (auto& [id, param] : monitorsOf (*wrapped))
+            counter.monitorIndices.insert (param->getParameterIndex());
+
+        setProbes (*wrapped, probes);
+        wrapped->addListener (&counter);
+
+        int totalBeforeLastSecond = 0;
+        playTone (*wrapped, 3.0, 2.0, [&]
+        {
+            totalBeforeLastSecond = counter.total;
+            counter.counts.clear();
+            counter.changes.clear();
+        });
+        wrapped->removeListener (&counter);
+
+        if (type == juce::AudioProcessor::wrapperType_LV2)
+        {
+            // In the last second: at least the refresh; otherwise only notifications that carry
+            // a new value (a step of the range), plus at most two refreshes.
+            juce::String problem, counts;
+
+            for (const auto index : counter.monitorIndices)
+            {
+                const auto n = counter.counts[index], changed = counter.changes[index];
+                const auto name = wrapped->getParameters()[index]->getName (64);
+                counts << name << " " << n << " (" << changed << " new values); ";
+
+                if (n < 1 || n > changed + 2)
+                    problem << name << ": " << n << " notifications, " << changed << " with a new value; ";
+            }
+
+            report (problem.isEmpty() && totalBeforeLastSecond > 0,
+                    "under the LV2 wrapper the monitors notify the listeners on a change of a step, and once a second",
+                    (problem.isEmpty() ? "last second of a steady tone, 60 writes: " + counts : problem).dropLastCharacters (2));
+        }
+        else
+        {
+            report (counter.total == 0, "under the VST3 wrapper the monitors notify nobody",
+                    juce::String (counter.total) + " notifications");
+        }
     }
    #endif
    #else
