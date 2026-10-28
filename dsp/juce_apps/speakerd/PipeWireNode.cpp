@@ -634,7 +634,15 @@ namespace speakerd
         if (d.loop == nullptr)
         {
             d.loop = pw_thread_loop_new ("speakerd-pw", nullptr);
-            d.context = d.loop != nullptr ? pw_context_new (pw_thread_loop_get_loop (d.loop), nullptr, 0) : nullptr;
+
+            // PipeWire's client-rt.conf: client.conf plus module-rt, which gives the graph's data
+            // thread real-time priority (RTKit, or RLIMIT_RTPRIO), whatever the environment says.
+            // PIPEWIRE_CONFIG_NAME, when set, still wins.
+            auto* contextProps = pw_properties_new (PW_KEY_CONFIG_NAME, "client-rt.conf", nullptr);
+            d.context = d.loop != nullptr ? pw_context_new (pw_thread_loop_get_loop (d.loop), contextProps, 0) : nullptr;
+
+            if (d.loop == nullptr)
+                pw_properties_free (contextProps);
 
             if (d.context == nullptr || pw_thread_loop_start (d.loop) < 0)
             {
@@ -710,6 +718,13 @@ namespace speakerd
         // PipeWire configuration, or left by an earlier speakerd), or a new one. A new one
         // lingers: it stays in PipeWire when speakerd stops, so that a stream playing into it
         // stays there, and the amplifier gets silence, until the next speakerd adopts it.
+        //
+        // A null sink is always a driver (node.driver = false is ignored), and PipeWire gives a
+        // group of linked nodes to the driver with the highest priority.driver. So the sink has
+        // the lowest there is, 0: the amplifier must drive the graph with its DAC's clock, never
+        // the sink's timer. Not a negative number: PipeWire 0.3.65 compares it as if unsigned.
+        // It is what firmware/pipewire/pipewire.conf.d/60-speakerd-sink.conf gives the sink a
+        // board defines, and a sink speakerd has to make itself means that drop-in is missing.
         if (d.findNode (d.sinkName) != SPA_ID_INVALID)
         {
             log ("pipewire: input sink '" + d.sinkName + "' exists: using it");
@@ -724,6 +739,7 @@ namespace speakerd
                                              // What the monitor carries is exactly what was played.
                                              "monitor.channel-volumes", "false",
                                              PW_KEY_OBJECT_LINGER,      "true",
+                                             PW_KEY_PRIORITY_DRIVER,    "0",
                                              nullptr);
 
             d.ownSink = static_cast<pw_proxy*> (pw_core_create_object (d.core, "adapter", PW_TYPE_INTERFACE_Node,
@@ -738,6 +754,9 @@ namespace speakerd
 
             pw_proxy_add_listener (d.ownSink, &d.sinkListener, &Impl::sinkEvents, &d);
             log ("pipewire: created the input sink '" + d.sinkName + "'");
+            log ("*** NO INPUT SINK CONFIGURED: PipeWire had no node '" + d.sinkName + "', so speakerd made it; "
+                 "a speaker must define it in its PipeWire configuration (on a board, the drop-in "
+                 "60-speakerd-sink.conf is missing) ***");
         }
 
         // Silent until its links are active (Engine::setOutputGate).

@@ -187,15 +187,34 @@ Otherwise speakerd creates a null-audio-sink of that name with `object.linger = 
 sink stays in PipeWire when speakerd stops: a stream playing into it stays there, nothing reads
 the sink's monitor, so the amplifier gets silence, and the next speakerd adopts the sink and
 fades in under the running stream. Were the sink to go, WirePlumber would move the stream to the default sink, which on a
-speaker is the amplifier: full range, at full level, tweeter included.
+speaker is the amplifier: full range, at full level, tweeter included. speakerd then says loudly
+that no sink was configured (Log lines): on a board, it means the firmware's drop-in is missing.
+
+**The amplifier drives, never the sink.** A null sink is always a driver (`node.driver =
+false` is ignored), and PipeWire gives a group of linked nodes to the driver with the highest
+`priority.driver`. The sink speakerd makes has `priority.driver = 0`, the lowest there is (not
+a negative number: PipeWire 0.3.65 compares it as if unsigned), so the amplifier's DAC clocks
+the graph, not the sink's timer: checked with `pw-profiler` on the virtual pair, the amplifier
+drives both with `priority.driver = 1000` and at a tie (0, where the amplifier, made first, wins).
+A board's amplifier needs a `priority.driver` above 0 (`firmware/pipewire/pipewire.conf` gives it
+1000). With the amplifier gone, the sink drives its players on its own.
 
 A lingering sink only exists once speakerd has run since PipeWire started. So **before any
 deploy, a speaker must create the sink in its PipeWire configuration** (`context.objects`, an
 `adapter` with `factory.name = support.null-audio-sink`, `node.name = "speakerd"`,
-`media.class = "Audio/Sink"`, `audio.position = [ FL FR ]`, `monitor.channel-volumes = false`),
-so that a stream has somewhere safe to go from the moment PipeWire starts, before speakerd and
-between its restarts. This is the same rule `firmware/` already follows for snapclient's
-target.
+`media.class = "Audio/Sink"`, `audio.position = [ FL FR ]`, `monitor.channel-volumes = false`,
+`priority.driver = 0`; the firmware's drop-in is
+`firmware/pipewire/pipewire.conf.d/60-speakerd-sink.conf`), so that a stream has somewhere safe
+to go from the moment PipeWire starts, before speakerd and between its restarts. This is the
+same rule `firmware/` already follows for snapclient's target.
+
+**Real-time thread.** speakerd creates its PipeWire context with `client-rt.conf` (PipeWire's
+`client.conf` plus `module-rt`), so the graph's data thread asks for real-time priority (RTKit,
+or `RLIMIT_RTPRIO`) whatever the environment; `PIPEWIRE_CONFIG_NAME`, when set, still decides.
+On the virtual pair the data thread runs `SCHED_FIFO` at priority 88, and with
+`PIPEWIRE_CONFIG_NAME=client.conf` at normal priority. A user's own
+`~/.config/pipewire/client-rt.conf` replaces PipeWire's (snapcast's routing file has no
+`module-rt`), which is why the board's unit gives speakerd an empty `HOME`.
 
 **Rate and block size.** At start speakerd reads `default.clock.rate`, `default.clock.quantum`
 and `default.clock.quantum-limit` from the PipeWire core. It prepares the graph for blocks up
@@ -468,6 +487,7 @@ stable.
 | `using layer <name> (<file>), revision <n>` | the layer speakerd plays from |
 | `*** PASSTHROUGH: no state layer loaded ***` then `using layer passthrough: woofer = <channel> at -20 dB, tweeter muted` | no layer loaded |
 | `pipewire: created the input sink '<name>'` or `pipewire: input sink '<name>' exists: using it` | at start |
+| `*** NO INPUT SINK CONFIGURED: PipeWire had no node '<name>', so speakerd made it; a speaker must define it in its PipeWire configuration (on a board, the drop-in 60-speakerd-sink.conf is missing) ***` | right after `created the input sink`: no PipeWire configuration defines the sink. On a board the firmware's drop-in is missing, and between speakerd's restarts a stream could reach the amplifier |
 | `pipewire: another speakerd already runs on this PipeWire (node '<name>-dsp' exists)` | at start, before any sink line: another speakerd runs on this PipeWire; this one makes nothing, the other is not touched; `stopping` and exit status 3 follow |
 | `cannot create the input sink '<name>': <reason>`, `cannot create the PipeWire node: <reason>`, `cannot connect the PipeWire node: <reason>` | the sink or the filter could not be started; `stopping` and exit status 3 follow |
 | `pipewire: node '<name>-dsp' registered as id <id>` | the filter is in PipeWire |
