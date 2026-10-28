@@ -269,6 +269,28 @@ why). The proxy processor keeps the APVTS, so the editors work untouched. The br
 live in the plugin: the host already sees every parameter of every node, so one bridge in the
 host forwards them all. A control build knows nothing about the network.
 
+**What step 3 built in the controller.** `dsp/juce_apps/controller/README.md` has the details.
+
+- **No audio, by construction.** No audio device type is compiled in and `juce_audio_devices`
+  is not linked; `AudioProcessorGraph` is kept only as the canvas's model and is never prepared.
+  The plugin list is the control builds compiled in; nothing is scanned or loaded from disk.
+- **A control build is compiled in from its control target.** The controller adds each plugin's
+  own `CMakeLists.txt` and reads its `<plugin>_control` target (the shared-code target of
+  `juce_add_plugin`) for its sources, its plugin definitions and its JUCE modules, and compiles
+  those sources into itself with its own JUCE configuration, `createPluginFilter` renamed per
+  plugin. Linking the target's static library instead does not work: it carries a second JUCE
+  compiled as a plugin, whose public definitions redefine the application's
+  (`JUCE_STANDALONE_APPLICATION`), and every plugin's library defines `createPluginFilter`.
+  Adding a plugin is adding its name to one list.
+- **The canvas mirrors the hub's document.** It is built from the hub's `state` on every
+  connection, never pushed from the controller's own copy, and edits are refused while there is
+  no state. A structural edit is proposed as the accepted document with the edit applied, so
+  what the controller cannot show travels on untouched: a plugin without a control build is a
+  placeholder node, never dropped. A rejected proposal is undone on the canvas.
+- **A test mode** (`controller --hub HOST --script FILE`) runs commands and prints JSON lines, so
+  rung 2 can drive the controller without a display; a fake hub in its `tests/` checks the bridge
+  without `ampd`.
+
 **speakerd: the headless plugin host.** `speakerd` is AudioPluginHost with the window
 removed: the same graph engine (`AudioProcessorGraph`), the same session format, loading the
 headless builds of the plugins. It adds only what an unattended host inside a speaker needs:
