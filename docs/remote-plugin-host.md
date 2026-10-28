@@ -658,7 +658,9 @@ The **Mine** pin resolves per speaker from its device role (left, right, or a su
 speaker). Wiring FL or FR explicitly still works, for a graph that is deliberately asymmetric.
 Trim and delay per speaker are parameters of the input node and are device state, not group
 state. The controller shows the group graph; a small per-speaker panel (role, trim, delay,
-mute) sits beside it.
+mute) sits beside it. Trim and delay are not in `device.json` yet: `speakerd` 0.2.0 rejects
+keys it does not know (a misspelt `limits` must not pass silently), so they arrive with the
+version that applies them.
 
 ## 7. Build system
 
@@ -751,7 +753,7 @@ flowchart LR
         pass["Layer 4: passthrough<br/>woofer only, tweeter muted,<br/>level capped at -20 dB"]:::sto
         cur -- "fails to load" --> lkg -- "fails to load" --> fac -- "fails to load" --> pass
     end
-    dev[("device.json<br/>role, trim, delay<br/>set once, never from the hub")]:::sto
+    dev[("device.json<br/>role, amplifier ports, limits<br/>set once, never from the hub")]:::sto
     sd["speakerd<br/>reads at boot"]:::aud
     ampd --> cur
     ampd -- "promotes" --> lkg
@@ -830,7 +832,7 @@ are reachable without the controller app:
 |---|---|
 | Controller app | Nothing changes. Both speakers play their current revision. |
 | Network | Each speaker plays its current revision with its own role. No new changes until it returns. Audio from Snapcast stops (it is network audio), a local input keeps working. |
-| Hub (left speaker off) | The right speaker keeps its revision. With `partner-lost = sum` in its device file it switches to an L+R mix, so a single speaker still plays the whole song. |
+| Hub (left speaker off) | The right speaker keeps its revision. With `partner-lost = sum` in its device file (planned: `speakerd` 0.2.0 rejects keys it does not know, so this arrives with the version that applies it) it switches to an L+R mix, so a single speaker still plays the whole song. |
 | Right speaker off | The hub keeps working, the app shows the speaker as offline, changes queue and are applied when it returns. |
 | Both speakers rebooted, out of sync | The hub's revision wins when they meet. If the right speaker is newer (it was changed while the left was off), the hub adopts it, because revisions carry a timestamp and an origin. |
 | A graph that crashes `speakerd` | systemd restarts it on last known good within a second. After three crashes in a minute it starts on factory and tells the hub; after three more on factory, on passthrough. `speakerd` writes no file, so it keeps no count of its own crashes: the unit's wrapper (`firmware/speakerd/speakerd-run`) does, and starts it with `--from last-known-good`, `--from factory` or `--from passthrough`. |

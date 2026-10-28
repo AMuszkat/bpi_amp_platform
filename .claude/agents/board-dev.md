@@ -19,5 +19,5 @@ Rules:
   `docs/autonomous-development.md` section 5, with that section's pass criterion as its
   assertion. Never weaken a criterion to pass.
 - Test with `/vpair` and `/test vpair`. You never run anything on a real board: that is
-  `board-ops`, through the `/board` skill, once it exists.
+  `board-ops`, through the `/board` skill (`tools/board.sh`).
 - You do not touch plugins, `speakerd` or the controller.
