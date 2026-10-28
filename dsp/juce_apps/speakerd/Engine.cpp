@@ -33,27 +33,55 @@ namespace speakerd
         auto& s = slots[(size_t) slot];
         s.value.store (normalised, std::memory_order_relaxed);
 
-        // In the queue at most once: whoever turns `queued` on puts the slot in. The consumer
-        // turns it off before it reads the value, so a value stored after that is either read
-        // now or queued again: the newest value is never lost.
+        // In the queue at most once: whoever turns `queued` on puts the slot in, and the
+        // consumer takes it out of the queue before it turns `queued` off. So the queue never
+        // holds more than numSlots entries and always has room. A value stored after the
+        // consumer turned `queued` off is either read by it or queued again: the newest value
+        // is never lost.
         if (! s.queued.exchange (true, std::memory_order_acq_rel))
         {
-            const auto scope = fifo.write (1);
+            bool written = false;
+            {
+                const auto scope = fifo.write (1);
 
-            if (scope.blockSize1 > 0)
-                queue[(size_t) scope.startIndex1] = slot;
-            else if (scope.blockSize2 > 0)
-                queue[(size_t) scope.startIndex2] = slot;
+                if (scope.blockSize1 > 0)
+                    queue[(size_t) scope.startIndex1] = slot, written = true;
+                else if (scope.blockSize2 > 0)
+                    queue[(size_t) scope.startIndex2] = slot, written = true;
+            }
+
+            // Cannot happen (see above); should it, the slot must not stay marked as queued, or
+            // no later value would ever reach it.
+            if (! written)
+            {
+                jassertfalse;
+                s.queued.store (false, std::memory_order_release);
+            }
         }
     }
 
     void ParameterInbox::applyPending() noexcept
     {
-        const auto scope = fifo.read (fifo.getNumReady());
-
-        const auto apply = [this] (int slot)
+        // Only what is there now: a producer that keeps posting cannot hold the audio thread.
+        for (auto remaining = fifo.getNumReady(); remaining > 0; --remaining)
         {
+            int slot = -1;
+            {
+                // Out of the queue first (the read finishes at the end of this scope), and only
+                // then `queued` off: the slot is never marked queued without being in the queue.
+                const auto scope = fifo.read (1);
+
+                if (scope.blockSize1 > 0)
+                    slot = queue[(size_t) scope.startIndex1];
+                else if (scope.blockSize2 > 0)
+                    slot = queue[(size_t) scope.startIndex2];
+            }
+
+            if (! juce::isPositiveAndBelow (slot, numSlots))
+                break;
+
             auto& s = slots[(size_t) slot];
+
             // An exchange, not a store: it reads the producer's exchange (acquire), so the value
             // that producer stored before it is the one read below, or the producer, coming
             // after this, finds `queued` off and queues the slot again.
@@ -64,10 +92,7 @@ namespace speakerd
             // plugin receives it as a patch:Set at the top of its next processBlock.
             if (s.parameter != nullptr)
                 s.parameter->setValue (value);
-        };
-
-        for (int i = 0; i < scope.blockSize1; ++i)  apply (queue[(size_t) (scope.startIndex1 + i)]);
-        for (int i = 0; i < scope.blockSize2; ++i)  apply (queue[(size_t) (scope.startIndex2 + i)]);
+        }
     }
 
     //==============================================================================

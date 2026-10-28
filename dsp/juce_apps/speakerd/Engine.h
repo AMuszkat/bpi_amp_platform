@@ -28,8 +28,11 @@ namespace speakerd
         value; the audio thread, at the top of a cycle, before the graph runs, sets every posted
         value on its hosted parameter (AudioProcessorParameter::setValue: for JUCE's LV2 hosting,
         an atomic store and a flag, which the plugin receives as a patch:Set in that very
-        processBlock). A slot is in the queue at most once, so the queue never overflows and the
-        newest value is never lost, however long the audio thread does not run.
+        processBlock). A slot is in the queue at most once and only while its `queued` flag is
+        on: the producer turns the flag on and then queues it, the consumer takes it out of the
+        queue (the read finished) and only then turns the flag off. So the queue holds at most
+        numSlots entries and always has room, and the newest value is never lost, however long
+        the audio thread does not run and however many values arrive while it applies them.
 
         One producer at a time (the caller serialises them), one consumer: the audio thread. It
         belongs to one graph and is swapped with it (Engine::install). */

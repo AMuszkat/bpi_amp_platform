@@ -30,13 +30,21 @@ namespace speakerd
           parameter, in its own units. Sent as a number. A stream the running graph does not have
           (no such node or parameter) sends nothing, until a revision has it.
 
+        A period in which no audio cycle ran sends nothing, for either kind: nothing was measured,
+        and a plugin's monitor only moves while it processes.
+
+        Stream names are exactly ^output/level$ and
+        ^node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}$ (a plugin uid, 16 and up),
+        as ampd checks them.
+
         `t` is speakerd's monotonic clock (CLOCK_MONOTONIC), in seconds. Subscriptions belong to
         the connection that made them, and end with it. */
     class Monitor
     {
     public:
         static constexpr double defaultRateHz = 30.0;
-        static constexpr double maxRateHz = 60.0;
+        static constexpr double minRateHz = 0.1;     // below is refused
+        static constexpr double maxRateHz = 60.0;    // above is this
         static constexpr double levelDrainSeconds = 0.05;
         static constexpr double floorDb = -120.0;
 
@@ -46,8 +54,8 @@ namespace speakerd
         void start();
         void stop();
 
-        /** Link thread. Fails, with the reason, for a stream name that is neither output/level
-            nor node/<uid>/mon_<...>. Subscribing again changes the rate. */
+        /** Link thread. Fails, with the reason, for a stream name other than the two forms above,
+            or a rate below minRateHz. Subscribing again changes the rate. */
         juce::Result subscribe (juce::uint64 connection, const juce::String& stream, double rateHz);
         void unsubscribe (juce::uint64 connection, const juce::String& stream);
 
@@ -64,6 +72,7 @@ namespace speakerd
             juce::String id;
             double rateHz = defaultRateHz;
             Clock::time_point due;
+            juce::uint64 cyclesAtLastValue = 0;     // node streams: the audio cycles counted at the last value
         };
 
         void run();

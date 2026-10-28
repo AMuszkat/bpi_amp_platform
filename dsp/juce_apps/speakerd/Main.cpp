@@ -3,7 +3,7 @@
 // state layer that loads, with no network, no X11 and no controller. See README.md.
 //
 //     speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--control-socket PATH | --no-control-socket]
-//              [--lv2-bundle PATH]...
+//              [--allow-tweeter-without-crossover] [--lv2-bundle PATH]...
 //     speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...
 //     speakerd --import-filtergraph FILE [--device DEVICE_JSON] [--prefer-headless]
 //              [--allow-unsafe-routing] [--lv2-bundle PATH]...
@@ -69,6 +69,7 @@ namespace
         bool preferHeadless = false, allowUnsafeRouting = false;
         juce::String controlSocket;     // --control-socket; empty: the default path
         bool noControlSocket = false;   // --no-control-socket
+        bool allowTweeterWithoutCrossover = false;   // the virtual pair's measurements only
         juce::StringArray layerOptions; // the options of the live mode and the render that were given
         juce::StringArray importOptions;
         juce::StringArray liveOptions;  // the options of the live mode only
@@ -77,7 +78,8 @@ namespace
     void printUsage()
     {
         std::cerr << "usage: speakerd --state-dir DIR [--node-name NAME] [--from LAYER]\n"
-                     "                [--control-socket PATH | --no-control-socket] [--lv2-bundle PATH]...\n"
+                     "                [--control-socket PATH | --no-control-socket] [--allow-tweeter-without-crossover]\n"
+                     "                [--lv2-bundle PATH]...\n"
                      "       speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...\n"
                      "       speakerd --import-filtergraph FILE [--device DEVICE_JSON] [--prefer-headless]\n"
                      "                [--allow-unsafe-routing] [--lv2-bundle PATH]...\n"
@@ -91,6 +93,9 @@ namespace
                      "                      the local link to ampd: listen on this Unix socket instead of\n"
                      "                      $XDG_RUNTIME_DIR/speakerd/control.sock\n"
                      "  --no-control-socket no local link: nothing changes the graph while speakerd runs\n"
+                     "  --allow-tweeter-without-crossover\n"
+                     "                      with the tweeter on, load a document that feeds it other than through a\n"
+                     "                      crossover's high band, with a warning (for measurements, never a speaker)\n"
                      "  --lv2-bundle PATH   also load this LV2 bundle (repeatable); plugins are\n"
                      "                      otherwise found by URI in ~/.lv2, /usr/lib/lv2, /usr/local/lib/lv2\n"
                      "  --render IN OUT     no PipeWire: run IN.wav through the graph, write the woofer\n"
@@ -127,6 +132,9 @@ namespace
 
             if (arg == "--device" || arg == "--prefer-headless" || arg == "--allow-unsafe-routing")
                 options.importOptions.addIfNotAlreadyThere (arg);
+
+            if (arg == "--allow-tweeter-without-crossover")
+                options.layerOptions.addIfNotAlreadyThere (arg);
 
             if (arg == "--control-socket" || arg == "--no-control-socket")
             {
@@ -177,6 +185,10 @@ namespace
             else if (arg == "--no-control-socket")
             {
                 options.noControlSocket = true;
+            }
+            else if (arg == "--allow-tweeter-without-crossover")
+            {
+                options.allowTweeterWithoutCrossover = true;
             }
             else if (arg == "--lv2-bundle" && hasValues (1))
             {
@@ -286,6 +298,20 @@ namespace
              + device.wooferPort + ", tweeter " + device.tweeterPort + ")");
         log ("device: limits: " + device.describeLimits());
         return device;
+    }
+
+    /** The tweeter rule for this device.json and command line (GraphDocument.h). */
+    TweeterRule tweeterRuleOf (const DeviceConfig& device, const Options& options)
+    {
+        TweeterRule rule;
+        rule.tweeterOn = ! device.limits.tweeterMuted;
+        rule.allowWithoutCrossover = options.allowTweeterWithoutCrossover;
+
+        if (rule.tweeterOn && rule.allowWithoutCrossover)
+            log ("*** --allow-tweeter-without-crossover: the tweeter is on, and a document may feed it other than "
+                 "through a crossover's high band; for measurements, never on a speaker ***");
+
+        return rule;
     }
 
     /** device.json's limits as the engine applies them: always some, the fail-safe at least.
@@ -454,9 +480,10 @@ namespace
         // Prepared for the largest block a cycle can bring; settled at the quantum it will bring.
         const auto maxBlock = juce::jmax (clock.quantumLimit, clock.quantum);
         GraphBuilder builder (formats);
-        Control control (engine, builder, versionText());
-        control.installLayer (loadFirstWorkingLayer (options.stateDir, builder, device.role, clock.rate, maxBlock,
-                                                     options.firstLayer),
+        const auto tweeterRule = tweeterRuleOf (device, options);
+        Control control (engine, builder, versionText(), tweeterRule);
+        control.installLayer (loadFirstWorkingLayer (options.stateDir, builder, device.role, tweeterRule, clock.rate,
+                                                     maxBlock, options.firstLayer),
                               clock.rate, maxBlock, clock.quantum);
 
         if (quitRequested.load())
@@ -543,7 +570,8 @@ namespace
         const auto maxBlock = juce::jmax (defaultQuantumLimit, options.block);
 
         GraphBuilder builder (formats);
-        auto layer = loadFirstWorkingLayer (options.stateDir, builder, device.role, rate, maxBlock, options.firstLayer);
+        auto layer = loadFirstWorkingLayer (options.stateDir, builder, device.role, tweeterRuleOf (device, options), rate,
+                                            maxBlock, options.firstLayer);
 
         Engine engine (outputLimitsOf (device), device.role);
         engine.install ({ std::move (layer.built.graph), nullptr }, rate, maxBlock, options.block, false);
