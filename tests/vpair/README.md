@@ -31,7 +31,8 @@ test does not fail the run, but a pass with skips says so: `test_no_network` ski
 `unshare -rn` is refused, as on GitHub's runners.
 
 A scenario that runs speakerd builds what it needs first, once per test run:
-`tools/build.sh speakerd`, and loudness's `headless` and `complete` builds. The builds are
+`tools/build.sh speakerd`, and loudness's `headless` and `complete` builds (and
+`tools/build.sh controller` for `test_controller_end_to_end`). The builds are
 incremental, so this takes about a second when nothing changed, and the first run of a fresh
 checkout takes the minutes of a full build.
 
@@ -93,6 +94,7 @@ path must fit in 108 bytes.
 | `test_tweeter_rule.py` | with a speaker's tweeter on, ampd refuses every revision that breaks the tweeter rule; with it muted, it refuses none |
 | `test_drag_during_revision.py` | a value set while a revision applies is kept, everywhere, and after a speakerd restart |
 | `test_ampd_persistence.py` | `graph.json` follows the values, speakerd boots on it, `graph.lkg.json` follows a revision that played long enough |
+| `test_controller_end_to_end.py` | the real controller in its script test mode against the real pair: connect, knob, edits, a refusal, monitors, another secret, and its GUI under Xvfb |
 
 ## Before and after the speakerd that enforces the limits
 
@@ -135,6 +137,7 @@ the complete build of the plugin, which is what the plugin outside speakerd outp
 | `test_tweeter_rule` | on the pair (loudness and the crossover): with both tweeters on, a revision with the stream straight to the tweeter, one with the crossover's low band on it and one with the crossover bypassed are each rejected with "left: the tweeter is on here (device.json) and ..." and both graph.json stay on revision 1; a crossover's high band is applied on both; with the right's tweeter on only, the straight one is rejected with "right: ..." and the left rolled back; with both muted, all four are applied |
 | `test_speakerd_tweeter_rule` | speakerd run as on a board (allow_tweeter=False) with the tweeter on: a graph.json sending loudness to both channels fails with "the stream reaches the tweeter ... (output 16:0;" and graph.lkg.json plays, its render's level within 0.05 dB on both channels; an apply of it on the local link is answered `failed` with that reason and the capture goes on (level within 0.05 dB, no 10 ms block 0.5 dB off); and 15 documents (straight from FL and from Mine, a low band, a bypassed crossover, a control build, plugins before and after the bands, both bands or the high band to both channels, crossovers in series, several paths, an unreached plugin) get the same verdict and the same named outputs from `firmware/speakerd/tweeter_rule.py` and speakerd's render |
 | `test_drag_during_revision` | while controller B's revision 2 applies (the right's ampd held 1.5 s), controller A drags node 16's gain and ends at +6 dB: the graph sent, both graph.json, A, B and a later controller have +6 dB, and after the left's speakerd restarts its 200 Hz gain is its graph.json's render within 0.05 dB, 3 dB or more from B's document's |
+| `test_controller_end_to_end` | the real controller (`tools/build.sh controller`, its script test mode, `--trace`) against the real pair (the Mine pin through loudness, a stereo 200 Hz tone, left -20 and right -32 dBFS, the tweeter muted): (a) synced and proven on revision 1 with the hub's document on its canvas, both speakers online on layer current, both monitor links connected; no `error` reaches it, ampd ignores, drops or refuses nothing, one control connection, no OSC echo dropped; (b) nine `set`s (+12 / 0 dB, 1.2 s apart) echoed, each heard on both captures within 60 ms of its line (knob_latency's onset() and set-asides, at least 5 measured), both graph.json at the last value within 2 s; a 1 s `drag` to 3.5 dB heard on both through at least 10 intermediate 20 ms blocks, then at the render's 200 Hz level within 0.1 dB, its value echoed, in both graph.json, the hub's state and the controller; (c) `add loudness` applied (both graph.json have the node, its headless URI, 35 parameters), a `set` of its mode echoed, `disconnect 16:0 2:0` applied and heard (no woofer sample above -100 dBFS), two `connect-pins` putting the new node in the woofer's path applied and heard (the render's level within 0.1 dB), revision 5 in both graph.json, its state the hub's; with the right's device.json saying the tweeter is on, `connect-pins 1:0 2:1` rejected with "right: the tweeter is on here (device.json)", undone in it, rolled back on the left, both graph.json on revision 5, its state the hub's; (d) `open 16`: 8 `mon_levelDb` values from the left, then (`monitor-speaker 16 right`) from the right, each side's level as loudness's detector reads it (BallisticsFilter, computed here for 200 Hz) within 1 dB, the subscription moved; `output/level` woofer peak each side's level and RMS 3.01 dB under within 1 dB, 12 dB apart within 1 dB, tweeters under -100 dBFS; (e) another secret: not proven, not synced, the refusal in `refused`, revision 0, no plugin node, `refused <address>: its hello does not prove the pair's secret` in the hub's log, neither secret printed; (f) `--gui` under Xvfb and openbox (`harness.VirtualDisplay`), the tone stepping -30 / -12 dBFS: synced, both monitor links feeding levels above -60 dBFS, the window's `mon_levelDb` spanning more than 6 dB, `build/e2e-controller/controller-juce.png` and `controller-screen.png` written, neither one flat colour |
 | `test_ampd_persistence` | during a 2 s drag graph.json is replaced at most 3 times, and holds the last value on both speakers 1.2 s later; speakerd restarted with ampd stopped boots on graph.json and gives its render's gain within 0.05 dB, 3 dB or more from revision 1's original; graph.lkg.json follows after --lkg-after (4 s), and a speakerd restart starts that time again |
 
 ## speakerd in a test
@@ -271,10 +274,36 @@ with SpeakerPair(tmp, {"left": document, "right": document}, [built("loudness", 
 - `VPAIR_PREBUILT=<build tree>` makes `built()` use a build tree laid out like `build/` (another
   branch's speakerd and plugins, say) and build nothing.
 
+## The controller in a test
+
+```python
+from harness import ControllerScript, ScriptedController, VirtualDisplay
+
+script = ControllerScript()
+synced = script.add("wait-synced 15")
+knob = script.add("set 16 s0_e0_gain 6")
+script.add("wait-echo 16 s0_e0_gain 6")
+with ScriptedController(script, name="ctl-test", args=["--trace"]) as ctl:
+    arrived, line = ctl.step(knob)          # the step's JSON line and when it arrived
+    status, result = ctl.finish()           # its exit status and {"result": "pass", ...}
+```
+
+- `ControllerScript.add(line)` returns the step number the controller gives that line, so a test
+  finds each step's JSON line by it (dsp/juce_apps/controller/README.md, "Test mode").
+- `ScriptedController` runs `built("controller")` (tools/build.sh controller) with its own empty
+  HOME (its settings file, never the user's), the pair's secret in a file of mode 600 (`secret=`
+  another, or None for no file), `--hub` the left speaker's address, `--name` and `--hub-name left`.
+  `step(n)` waits for step n's line and fails, with everything the controller printed, when a step
+  failed or it exited first; `stderr_path` is its stderr (`--trace` writes every message there).
+  Leaving the block kills it if it still runs.
+- `VirtualDisplay()` is an Xvfb display (the first free number, `-displayfd`) with openbox, for
+  `--gui`: pass `env=display.env` to the controller; `display.screenshot(path)` captures the X
+  screen with ImageMagick's `import`.
+
 ## Before and after step 3's speakerd
 
 `test_knob_latency`, `test_graph_edit`, `test_hub_down`, `test_meter_values`, `test_ampd_restart`,
-`test_ampd_persistence`, `test_tweeter_rule` and `test_drag_during_revision` drive step 3's speakerd (0.3.0: the local socket, the Mine pin, the monitor
+`test_ampd_persistence`, `test_tweeter_rule`, `test_drag_during_revision` and `test_controller_end_to_end` drive step 3's speakerd (0.3.0: the local socket, the Mine pin, the monitor
 thread), and `test_meter_values` also loudness's `mon_` monitors. Against an older speakerd they fail
 at once, saying so (`harness.require_speakerd_local_link`). `test_ampd_protocol`,
 `test_two_controllers` and `test_firmware_ampd_install` need neither: they run ampd against stand-in
@@ -316,7 +345,6 @@ speakerds.
 
 ## Next
 
-A Snapcast source feeding both speakers, `tc netem` between them for packet loss, the
-controller's scripted mode as a client, and the rest of the acceptance scenarios of
+A Snapcast source feeding both speakers, `tc netem` between them for packet loss, and the rest of the acceptance scenarios of
 `docs/autonomous-development.md` (graph_rejected and catalogue with step 4's catalogue, power_cut,
 monitoring under loss, frames and records).

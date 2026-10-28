@@ -1739,6 +1739,7 @@ class TimedRecorder:
             self.process.terminate()
         self.process.wait(timeout=5)
         self._thread.join(timeout=5)
+        self.process.stdout.close()
         raw = b"".join(self.chunks)
         x = np.frombuffer(raw[:len(raw) // 8 * 8], dtype="<f4").reshape(-1, 2).astype(np.float64)
         offsets = sorted(t - n / RATE for t, n in self.stamps)
@@ -1749,6 +1750,8 @@ class TimedRecorder:
         if self.process is not None and self.process.poll() is None:
             self.process.kill()
             self.process.wait(timeout=5)
+        if self.process is not None and not self._thread.is_alive():
+            self.process.stdout.close()
 
     def __enter__(self):
         return self.start()
@@ -1898,6 +1901,191 @@ class SpeakerPair:
         return self._stack.__exit__(*exc)
 
 
+class ControllerScript:
+    """A script for the real controller's test mode (dsp/juce_apps/controller/README.md, "Test mode"),
+    built line by line: add() returns the step number the controller gives that line (it numbers the
+    lines that are not empty or comments, from 1), so a test finds each step's JSON line by it."""
+
+    def __init__(self):
+        self.lines, self.count = [], 0
+
+    def add(self, line):
+        line = line.strip()
+        self.lines.append(line)
+        if line and not line.startswith("#"):
+            self.count += 1
+            return self.count
+        return None
+
+    def text(self):
+        return "\n".join(self.lines) + "\n"
+
+
+class ScriptedController:
+    """The real controller (`built("controller")`) running a ControllerScript against the hub, for a
+    `with` block: its own HOME (a settings file of its own, never the user's), the pair's secret in a
+    file of mode 600 (`secret` None: no file), `--name`, `--hub-name`, and `args` (`--gui`, ...).
+    Every JSON line it prints is kept with the time it arrived (time.monotonic()); `step(n)` waits
+    for step n's line. Leaving the block kills it if it still runs; `finish()` waits for its end and
+    its result line. A failure says everything it printed."""
+
+    def __init__(self, script, hub=ADDRESS["left"], secret=TEST_SECRET, name="ctl-vpair", hub_name="left",
+                 args=(), env=None, timeout=120):
+        self.script, self.hub, self.secret, self.name = script, hub, secret, name
+        self.hub_name, self.args, self.extra_env, self.timeout = hub_name, list(args), env or {}, timeout
+        self.lines, self.process, self._tmp = [], None, None
+        self._changed = threading.Condition()
+
+    def __enter__(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="vpair-controller-"))
+        script = self._tmp / "script.txt"
+        script.write_text(self.script.text())
+        home = self._tmp / "home"
+        home.mkdir()
+        command = [str(built("controller")), "--hub", self.hub, "--name", self.name, "--script", str(script)]
+        if self.secret is not None:
+            secret = self._tmp / "secret"
+            secret.write_text(self.secret + "\n")
+            secret.chmod(0o600)
+            command += ["--secret-file", str(secret)]
+        if self.hub_name:
+            command += ["--hub-name", self.hub_name]
+        self.command = command + [str(a) for a in self.args]
+        self.stderr_path = self._tmp / "stderr.log"
+        self._stderr = open(self.stderr_path, "w")
+        self.process = subprocess.Popen(self.command, env=dict(os.environ, HOME=str(home), **self.extra_env),
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=self._stderr,
+                                        text=True, bufsize=1)
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+        return self
+
+    def _read(self):
+        for raw in self.process.stdout:
+            arrived = time.monotonic()
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                obj = {"unparsed": raw.rstrip("\n")}
+            with self._changed:
+                self.lines.append((arrived, obj))
+                self._changed.notify_all()
+        with self._changed:
+            self._changed.notify_all()
+
+    def output(self):
+        """Everything it printed, stdout and stderr, as text (stderr's end only)."""
+        with self._changed:
+            out = "\n".join(json.dumps(obj)[:600] for _, obj in self.lines)
+        err = self.stderr_path.read_text(errors="replace").splitlines()[-30:] if self.stderr_path.exists() else []
+        return f"  stdout:\n{out}\n  stderr (end):\n" + "\n".join("    " + line for line in err)
+
+    def report(self, what):
+        return f"the controller: {what}\n  command: {' '.join(self.command)}\n{self.output()}"
+
+    def step(self, number, timeout=None):
+        """Waits for step `number`'s line and returns (arrival time, the line). Fails when that step
+        failed, an earlier one did, the controller exited first, or `timeout` (default: the
+        controller's) passes."""
+        timeout = self.timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while True:
+                for arrived, obj in self.lines:
+                    if obj.get("ok") is False:
+                        raise AssertionError(self.report(f"step {obj.get('step')} ({obj.get('line')}) failed: "
+                                                         f"{obj.get('error')}"))
+                    if obj.get("step") == number:
+                        return arrived, obj
+                if self.process.poll() is not None and not self._reader.is_alive():
+                    raise AssertionError(self.report(f"it exited with status {self.process.returncode} "
+                                                     f"before step {number}"))
+                if time.monotonic() > deadline:
+                    raise AssertionError(self.report(f"no step {number} within {timeout} s"))
+                self._changed.wait(0.1)
+
+    def steps(self):
+        """Every step line so far, [(arrival, line)]."""
+        with self._changed:
+            return [(t, obj) for t, obj in self.lines if "step" in obj]
+
+    def finish(self, timeout=None):
+        """Waits for the controller to exit and returns (its exit status, its result line or None)."""
+        try:
+            self.process.wait(timeout=self.timeout if timeout is None else timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(self.report(f"still running after {timeout or self.timeout} s"))
+        self._reader.join(timeout=5)
+        with self._changed:
+            result = [obj for _, obj in self.lines if "result" in obj]
+        return self.process.returncode, (result[-1] if result else None)
+
+    def __exit__(self, *exc):
+        if self.process is not None:
+            _stop_process(self.process)
+            self._reader.join(timeout=5)
+            self.process.stdout.close()
+            self._stderr.close()
+        if self._tmp is not None:
+            shutil.rmtree(self._tmp, ignore_errors=True)
+        return False
+
+
+class VirtualDisplay:
+    """An X display for a `with` block, for the controller's windows (--gui): Xvfb, on the first free
+    display number it finds itself (-displayfd), with openbox as its window manager. Entering
+    returns once Xvfb takes connections and openbox has started (its --startup command ran);
+    `env` is {"DISPLAY": ...}. Leaving stops both."""
+
+    def __init__(self, size="1720x1000x24"):
+        self.size, self.processes, self.env = size, [], {}
+
+    def __enter__(self):
+        try:
+            for tool in ("Xvfb", "openbox"):
+                if not shutil.which(tool):
+                    raise AssertionError(f"no {tool}: the GUI check needs Xvfb and openbox (the development container has both)")
+            self._tmp = Path(tempfile.mkdtemp(prefix="vpair-display-"))
+            read, write = os.pipe()
+            with open(self._tmp / "xvfb.log", "w") as log:
+                xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write), "-screen", "0", self.size, "-nolisten", "tcp"],
+                                        pass_fds=(write,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
+            self.processes.append(xvfb)
+            os.close(write)
+            with os.fdopen(read) as pipe:
+                number = pipe.readline().strip()     # written once it takes connections
+            if not number.isdigit():
+                raise AssertionError("Xvfb did not start: " + (self._tmp / "xvfb.log").read_text()[-2000:])
+            self.env = {"DISPLAY": f":{number}"}
+            ready = self._tmp / "openbox-started"
+            self.processes.append(subprocess.Popen(["openbox", "--startup", f"touch {ready}"],
+                                                   env=dict(os.environ, **self.env), stdin=subprocess.DEVNULL,
+                                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            deadline = time.monotonic() + 10
+            while not ready.exists():
+                if self.processes[-1].poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError("openbox did not start within 10 s")
+                time.sleep(0.02)
+            return self
+        except BaseException:
+            self.__exit__()
+            raise
+
+    def screenshot(self, path):
+        """The whole X screen into `path` (PNG), with ImageMagick's import."""
+        subprocess.run(["import", "-window", "root", str(path)], env=dict(os.environ, **self.env), check=True,
+                       capture_output=True, timeout=30)
+        return Path(path)
+
+    def __exit__(self, *exc):
+        for process in reversed(self.processes):
+            _stop_process(process)
+        self.processes = []
+        if getattr(self, "_tmp", None):
+            shutil.rmtree(self._tmp, ignore_errors=True)
+        return False
+
+
 class Profiler:
     """pw-profiler on one speaker for a `with` block: what PipeWire itself recorded about each
     cycle, to tell a capture an xrun broke from one a change broke. events() is
@@ -1953,6 +2141,7 @@ class Profiler:
                 self.process.kill()
                 self.process.wait(timeout=5)
             self._thread.join(timeout=5)
+            self.process.stdout.close()
 
     def events(self, names=None):
         """What it recorded, [(time, what)]; `names` limits the followers to those whose node
