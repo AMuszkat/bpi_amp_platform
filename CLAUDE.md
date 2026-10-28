@@ -63,10 +63,13 @@ needs a change outside its files says so and stops.
 - **Hooks** (`.claude/settings.json`, scripts in `.claude/hooks/`) enforce the rules above:
   no private data in an edit or a commit, no push to `main`, no force push, and the
   **deploy gate**: nothing reaches a board (`ssh`, `scp`, `rsync`, `-install`,
-  `--target-host`) while `.claude/lab.lock` exists, or without `tests/.status/<commit>.json`
-  saying `unit: pass` and `vpair: pass` for the exact commit with a clean tree. A person
-  may bypass the status (never the lock) once with `BPI_DEPLOY_OVERRIDE=1 <command>`; it is
-  logged in `tests/.status/overrides.log`. Create `.claude/lab.lock` whenever the boards are
+  `--target-host`, the installers' `--mode target-remote`, `tools/board.sh`) while a
+  `.claude/lab.lock` exists, or without `tests/.status/<commit>.json` saying `unit: pass` and
+  `vpair: pass`, both run on a clean tree, for the exact commit of the checkout the command
+  runs in, with that tree clean. Agents may never use `--person-present` (lifting a speaker's
+  output cap) or `BPI_DEPLOY_OVERRIDE`: both are a person's, in their own shell
+  (`BPI_DEPLOY_OVERRIDE=1 tools/board.sh ...` bypasses the status, never the lock, and is
+  logged in `tests/.status/overrides.log`). Create `.claude/lab.lock` whenever the boards are
   on a bench.
 - **Skills**: `/build` (a plugin or app, x86_64 or aarch64), `/test` (`unit` = plugin-check,
   `vpair` = the virtual pair, `all`; writes the status file), `/vpair` (operate the virtual

@@ -8,7 +8,9 @@ description: The one way to reach a real speaker board (rung 3). `/board status|
 ```
 tools/board.sh status                      what is installed and what runs (reads only)
 tools/board.sh journal [-n N] [--follow]   journalctl --user -u speakerd on the board (reads only)
-tools/board.sh deploy [setup.sh options]   builds the aarch64 artifacts, installs them capped
+tools/board.sh deploy [--role R] [--plugin P[:kind]]... [--factory F] [--import-filtergraph F] [--only|--skip C]
+                                           builds the aarch64 artifacts, installs them capped;
+                                           any other installer option is a person's
 tools/board.sh smoke [--window S]          checks, without a sound, that speakerd plays capped
 tools/board.sh rollback                    makes the previous speakerd current again
 tools/board.sh --dry-run <command> ...     says what it would run; builds and reaches nothing
@@ -22,8 +24,9 @@ installer puts where, its options and its safety rules are in `firmware/CLAUDE.m
 **The gate.** Every command is refused while `.claude/lab.lock` exists: a person has the
 boards. `deploy`, `smoke` and `rollback` also need `tests/.status/<HEAD>.json` to say
 `unit: pass` and `vpair: pass`, run on a clean tree, and the tree clean now (run `/test all`
-first). The `pre-bash` hook enforces the same. `BPI_DEPLOY_OVERRIDE=1` is for a person only,
-never for an agent.
+first). The `pre-bash` hook enforces the same, on the checkout the command runs in, and
+refuses `BPI_DEPLOY_OVERRIDE` and `--person-present` from an agent: both are a person's, in
+their own shell.
 
 **The cap.** Every deploy writes `device.json` with `"limits": { "gain_db": -20.0, "tweeter":
 "muted" }`, also over limits a person lifted. Nothing in this skill lifts it: that is

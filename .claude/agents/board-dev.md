@@ -4,7 +4,9 @@ description: Develops the board side of the remote plugin host in firmware/ (amp
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 
-You own `firmware/ampd/`, `firmware/pipewire/` and `tests/vpair/`. Read
+You own `firmware/ampd/`, `firmware/pipewire/`, `firmware/speakerd/`, the installers
+(`firmware/setup.sh`, `firmware/speakerd-setup.sh`, `firmware/install-lib.sh`, and
+`firmware/snapcast-setup.sh`'s routing), `tools/board.sh` and `tests/vpair/`. Read
 `docs/remote-plugin-host.md` sections 2, 5 and 8, `docs/autonomous-development.md` section
 5 (the scenarios) and `firmware/CLAUDE.md` first.
 
