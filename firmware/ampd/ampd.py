@@ -131,19 +131,79 @@ def valid_stream(stream):
     return isinstance(stream, str) and any(pattern.fullmatch(stream) for pattern in STREAMS)
 
 
-def auth_of(secret, nonce, role, name):
-    """What a peer answers a nonce with: HMAC-SHA256 of "<nonce>:<role>:<name>" under the pair's
-    secret, in hex (firmware/CLAUDE.md, "ampd on a board": the secret never crosses the network)."""
-    return hmac.new(secret.encode(), f"{nonce}:{role}:{name}".encode(), hashlib.sha256).hexdigest()
+NONCE = re.compile(r"[0-9a-f]{32}")
+PROOF = re.compile(r"[0-9a-f]{64}")
+TOKEN = re.compile(r"[0-9a-f]{32}")
 
 
-def authenticated(secret, nonce, hello):
-    if secret is None:
-        return True
-    auth, role, name = hello.get("auth"), hello.get("role"), hello.get("name")
-    if not all(isinstance(v, str) for v in (auth, role, name)):
+def hmac_hex(key, text):
+    return hmac.new(key.encode(), text.encode(), hashlib.sha256).hexdigest()
+
+
+def proof(secret, side, ns, nc, role, name):
+    """docs/protocol.md, "Authentication": lowercase hex HMAC-SHA256, keyed with the secret, of
+    "<side>:<Ns>:<Nc>:<role>:<name>" (side "client" or "server", so a proof never reflects)."""
+    return hmac_hex(secret, f"{side}:{ns}:{nc}:{role}:{name}")
+
+
+def proof_holds(secret, side, ns, nc, role, name, got):
+    """Whether `got` is that proof: 64 lowercase hex characters, compared in constant time as
+    bytes. Anything else (not text, not ASCII, not hex) is false, never an exception."""
+    if not isinstance(got, str) or not PROOF.fullmatch(got) or not isinstance(role, str) or not isinstance(name, str):
         return False
-    return hmac.compare_digest(auth, auth_of(secret, nonce, role, name))
+    return hmac.compare_digest(got.encode("ascii"), proof(secret, side, ns, nc, role, name).encode("ascii"))
+
+
+def osc_token(secret, ns, nc):
+    """The OSC token of a control connection: the first 32 hex characters of HMAC-SHA256 keyed
+    with the session key K = HMAC(secret, "session:<Ns>:<Nc>") (hex, as its UTF-8 bytes), of "osc"."""
+    return hmac_hex(hmac_hex(secret, f"session:{ns}:{nc}"), "osc")[:32]
+
+
+def same_token(a, b):
+    return isinstance(a, str) and isinstance(b, str) and TOKEN.fullmatch(a) is not None \
+        and hmac.compare_digest(a.encode("ascii"), b.encode("ascii"))
+
+
+class Handshakes:
+    """Connections of one link still in their handshake: at most 16, 10 s each."""
+    LIMIT = 16
+
+    def __init__(self):
+        self.count = 0
+
+
+async def server_handshake(core, conn, handshakes, role, extra):
+    """The server's side of docs/protocol.md's handshake: hello with a nonce, the client's hello
+    with its nonce and proof checked, welcome with the server's proof. Returns (the client's
+    hello, its OSC token), or None after an error to the client (the caller closes)."""
+    if handshakes.count >= Handshakes.LIMIT:
+        conn.send({"op": "error", "about": "hello", "reason": f"{Handshakes.LIMIT} connections in their handshake already"})
+        return None
+    handshakes.count += 1
+    try:
+        ns = secrets.token_hex(16)
+        conn.send({"op": "hello", "role": role, "name": core.name, **extra, "nonce": ns, "protocol": PROTOCOL})
+        try:
+            hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
+        except (asyncio.TimeoutError, ProtocolError, ConnectionError):
+            return None
+        if hello is None or hello.get("op") != "hello":
+            conn.send({"op": "error", "about": "hello", "reason": "the first line is a hello"})
+            return None
+        if core.secret is None:
+            conn.send({"op": "welcome", "auth": None})
+            return hello, None
+        nc = hello.get("nonce")
+        if not isinstance(nc, str) or not NONCE.fullmatch(nc) \
+                or not proof_holds(core.secret, "client", ns, nc, hello.get("role"), hello.get("name"), hello.get("auth")):
+            THROTTLED.say(("auth", role, conn.address), f"refused {conn.address}: its hello does not prove the pair's secret")
+            conn.send({"op": "error", "about": "hello", "reason": "the hello does not prove the pair's secret"})
+            return None
+        conn.send({"op": "welcome", "auth": proof(core.secret, "server", ns, nc, role, core.name)})
+        return hello, osc_token(core.secret, ns, nc)
+    finally:
+        handshakes.count -= 1
 
 
 def bad_message(who, msg, error):
@@ -429,6 +489,8 @@ class Core:
         self.sd = self.monitor = self.role = None
         self.saved_seq = 0             # the hub's seq in graph.json, where it goes on from
         self.secret = config.get("secret")
+        self.handshakes = {"control": Handshakes(), "monitor": Handshakes()}
+        self.status_pending, self.status_written = None, -math.inf
         # Values set while a revision is being applied: the new revision keeps the ones it has.
         self.tracking, self.tracked = 0, {}
 
@@ -627,7 +689,20 @@ class Core:
         out.update(self.role.status())
         return out
 
+    def status_soon(self):
+        """The status changed in a way that may come often (a flood of datagrams): status.json
+        is written at most once a second, and always soon after the last change."""
+        if self.status_pending is not None:
+            return
+        wait = max(0.0, self.status_written + 1.0 - time.monotonic())
+        self.status_pending = asyncio.get_running_loop().call_later(wait, self._status_later)
+
+    def _status_later(self):
+        self.status_pending = None
+        self.status_changed()
+
     def status_changed(self):
+        self.status_written = time.monotonic()
         try:
             os.makedirs(self.runtime_dir, exist_ok=True)
             atomic_write(os.path.join(self.runtime_dir, "status.json"), json.dumps(self.status(), indent=1) + "\n",
@@ -857,8 +932,10 @@ class Peer:
         self.conn, self.role = conn, role
         name = hello.get("name")
         self.name = name if isinstance(name, str) and name else f"{role}@{conn.address}"
-        port = hello.get("osc_port", KNOB_PORT if role == "agent" else None)
-        self.osc = (conn.address, port) if good_int(port, 1, 65535) and conn.address else None
+        port = hello.get("osc_port")
+        # Agents get no OSC: every parameter goes to them over the control link.
+        self.osc = (conn.address, port) if role == "controller" and good_int(port, 1, 65535) and conn.address else None
+        self.token = None            # the OSC token of this connection (a controller's)
         self.pending = {}            # revision -> future of an apply's answer (agents)
         self.get_future = None
 
@@ -875,6 +952,7 @@ class Hub(Role):
         self.lock = None             # one revision at a time: proposals, catch-ups, adoptions
         self.udp = None
         self.bad = Throttled()
+        self.osc_dropped = 0         # datagrams without a valid token
 
     # speakerd ------------------------------------------------------------------------------------
 
@@ -939,12 +1017,13 @@ class Hub(Role):
     def status(self):
         return {"controllers": [c.name for c in self.controllers],
                 "agents": [dict(s) for _, s in sorted(self.speakers.items())],
-                "seq": self.seq, "gestures": len(self.gestures)}
+                "seq": self.seq, "gestures": len(self.gestures), "osc_dropped": self.osc_dropped}
 
-    def osc(self, peer, datagram):
+    def osc(self, peer, address, tags, *args):
+        """An OSC datagram to controller `peer`, stamped with its own token."""
         if self.udp is not None and peer.osc is not None:
             try:
-                self.udp.sendto(datagram, peer.osc)
+                self.udp.sendto(osc_encode(address, tags + "s", *args, peer.token or ""), peer.osc)
             except OSError as e:
                 self.bad.say(("osc-out", peer.name), f"cannot send OSC to {peer.name}: {e}")
 
@@ -980,13 +1059,14 @@ class Hub(Role):
         core.set_param((node, pid), value)
         core.sd.send_param(node, pid, value, origin)
         out = {"op": "param", "node": node, "id": pid, "value": value, "seq": self.seq, "origin": origin}
-        datagram = None
-        if good_number(value) or isinstance(value, bool):
-            datagram = osc_encode("/bpi/param", "isfis", node, pid, float(value), self.seq, origin)
-        for peer in list(self.agents.values()) + self.controllers:
-            if datagram is not None:
-                self.osc(peer, datagram)
-            if via == "control" or datagram is None:
+        # Agents get every parameter over the control link, authenticated both ways.
+        for peer in self.agents.values():
+            peer.conn.send(out)
+        numeric = good_number(value) or isinstance(value, bool)
+        for peer in self.controllers:
+            if numeric:
+                self.osc(peer, "/bpi/param", "isfis", node, pid, float(value), self.seq, origin)
+            if via == "control" or not numeric:
                 peer.conn.send(out)
         gesture = self.gestures.get((node, pid))
         if gesture is not None and gesture["origin"] == origin:
@@ -1016,9 +1096,8 @@ class Hub(Role):
 
     def relay_gesture(self, node, pid, state, origin, via):
         out = {"op": "gesture", "node": node, "id": pid, "state": state, "origin": origin}
-        datagram = osc_encode("/bpi/gesture", "isss", node, pid, state, origin)
         for controller in self.controllers:
-            self.osc(controller, datagram)
+            self.osc(controller, "/bpi/gesture", "isss", node, pid, state, origin)
             if via == "control":
                 controller.conn.send(out)
 
@@ -1239,17 +1318,18 @@ class Hub(Role):
 
     # Connections ---------------------------------------------------------------------------------------------
 
-    async def serve(self, conn, hello):
+    async def serve(self, conn, hello, token=None):
         role = hello.get("role")
         if role == "controller":
-            await self.serve_controller(conn, hello)
+            await self.serve_controller(conn, hello, token)
         elif role == "agent":
             await self.serve_agent(conn, hello)
         else:
             conn.send({"op": "error", "about": "hello", "reason": f"no role {role!r}: controller or agent"})
 
-    async def serve_controller(self, conn, hello):
+    async def serve_controller(self, conn, hello, token=None):
         peer = Peer(conn, hello, "controller")
+        peer.token = token
         self.controllers.append(peer)
         log(f"controller {peer.name} connected from {conn.address}"
             + (f" (osc port {peer.osc[1]})" if peer.osc else " (no osc_port: no OSC echoes)"))
@@ -1346,25 +1426,40 @@ class Hub(Role):
             self.bad.say(("agent-error", peer.name),
                          f"agent {peer.name}: error: {msg.get('about', '?')}: {msg.get('reason', '?')}")
 
+    def drop(self, address, why):
+        self.osc_dropped += 1
+        self.core.status_soon()
+        self.bad.say(("osc-drop", address[0]), f"knobs: dropped a datagram from {address[0]}: {why} "
+                                               f"({self.osc_dropped} dropped so far)")
+
     def datagram(self, data, address):
-        # OSC only from where an authenticated controller is connected.
-        if address[0] not in {c.conn.address for c in self.controllers}:
-            self.bad.say(("osc-who", address[0]), f"knobs: ignored a datagram from {address[0]}: no controller "
-                                                  "is connected from there")
-            return
+        """OSC, accepted only with the token of an authenticated controller connected from the
+        datagram's address (docs/protocol.md, "Authentication"); anything else is dropped and
+        counted, never answered."""
         try:
             path, args = osc_decode(data)
         except ValueError as e:
-            self.bad.say(("osc", address[0]), f"knobs: {e} from {address[0]}")
-            return
+            return self.drop(address, str(e))
         kinds = [type(a) for a in args]
-        if path == "/bpi/param" and kinds[:2] == [int, str] and len(args) == 5 and good_number(args[2]) \
-                and kinds[4] is str:
-            self.param({"node": args[0], "id": args[1], "value": float(args[2]), "seq": args[3], "origin": args[4]}, "osc")
-        elif path == "/bpi/gesture" and len(args) == 4 and kinds == [int, str, str, str]:
-            self.gesture({"node": args[0], "id": args[1], "state": args[2], "origin": args[3]}, "osc")
+        if path == "/bpi/param" and len(args) == 6 and kinds[:2] == [int, str] and good_number(args[2]) \
+                and kinds[3:] == [int, str, str]:
+            message = {"node": args[0], "id": args[1], "value": float(args[2]), "seq": args[3], "origin": args[4]}
+        elif path == "/bpi/gesture" and len(args) == 5 and kinds == [int, str, str, str, str]:
+            message = {"node": args[0], "id": args[1], "state": args[2], "origin": args[3]}
         else:
-            self.bad.say(("osc-what", path), f"knobs: ignored {path} with {len(args)} argument(s) from {address[0]}")
+            return self.drop(address, f"{path} with {len(args)} argument(s) is no /bpi/param ,isfiss or /bpi/gesture ,issss")
+        token = args[-1]
+        sender = None
+        for peer in self.controllers:
+            if peer.conn.address == address[0] and (self.core.secret is None or same_token(token, peer.token)):
+                sender = peer
+                break
+        if sender is None:
+            return self.drop(address, "no token of an authenticated controller connected from there")
+        if path == "/bpi/param":
+            self.param(message, "osc", sender)
+        else:
+            self.gesture(message, "osc", sender)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1377,9 +1472,11 @@ class Agent(Role):
         self.hub_name = None
         self.last_seq = {}
         self.once = Once()
+        self.osc_dropped = 0
 
     def status(self):
-        return {"hub": {"address": self.core.hub_address, "connected": self.conn is not None, "name": self.hub_name}}
+        return {"hub": {"address": self.core.hub_address, "connected": self.conn is not None, "name": self.hub_name},
+                "osc_dropped": self.osc_dropped}
 
     def report(self):
         """What this speaker's speakerd plays, to the hub (not in protocol 1's examples: an op
@@ -1425,19 +1522,12 @@ class Agent(Role):
         core.changed()
 
     def datagram(self, data, address):
-        # OSC only from the hub this agent is connected to.
-        if self.conn is None or address[0] != self.conn.address:
-            THROTTLED.say(("osc-who", address[0]), f"knobs: ignored a datagram from {address[0]}: not the hub")
-            return
-        try:
-            path, args = osc_decode(data)
-        except ValueError as e:
-            THROTTLED.say(("osc", address[0]), f"knobs: {e} from {address[0]}")
-            return
-        if path == "/bpi/param" and len(args) == 5 and isinstance(args[0], int) and isinstance(args[1], str) \
-                and good_number(args[2]) and isinstance(args[3], int):
-            self.param({"node": args[0], "id": args[1], "value": float(args[2]), "seq": args[3] & SEQ_MASK,
-                        "origin": args[4]}, "osc")
+        """An agent takes every parameter from its hub's control link: every datagram is dropped
+        and counted."""
+        self.osc_dropped += 1
+        self.core.status_soon()
+        THROTTLED.say(("osc-drop", address[0]), f"knobs: dropped a datagram from {address[0]}: an agent takes values "
+                                                f"from its hub's control link only ({self.osc_dropped} dropped so far)")
 
     def start_apply(self, conn, msg):
         """An apply from the hub: checked and sent to speakerd at once, before the messages after
@@ -1497,17 +1587,27 @@ class Agent(Role):
                 continue
             conn = Conn(reader, writer, PEER_WRITE_LIMIT)
             try:
-                # The hub says hello first, with the nonce this agent proves the secret with.
+                # The hub says hello first, with its nonce; this agent answers with its own nonce
+                # and proof, and believes nothing until the hub's welcome proves the secret too.
                 hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
                 if hello is None or hello.get("op") != "hello" or hello.get("role") != "hub":
                     raise ProtocolError(f"the hub said {json.dumps(hello)[:200]}, not its hello")
+                ns, hub_name, nc = hello.get("nonce"), hello.get("name"), secrets.token_hex(16)
                 mine = {"op": "hello", "role": "agent", "name": core.name, "revision": core.revision,
                         "time": core.rev_time, "origin": core.rev_origin, "protocol": PROTOCOL,
                         "layer": core.sd.layer, "speakerd": core.sd.version if core.sd.connected else None,
-                        "device_role": core.device_role, "osc_port": core.args.knob_port}
+                        "device_role": core.device_role, "nonce": nc}
                 if core.secret is not None:
-                    mine["auth"] = auth_of(core.secret, str(hello.get("nonce", "")), "agent", core.name)
+                    if not isinstance(ns, str) or not NONCE.fullmatch(ns) or not isinstance(hub_name, str):
+                        raise ProtocolError("the hub's hello has no nonce or name: not believing it")
+                    mine["auth"] = proof(core.secret, "client", ns, nc, "agent", core.name)
                 conn.send(mine)
+                welcome = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
+                if welcome is None or welcome.get("op") != "welcome":
+                    raise ProtocolError(f"the hub answered {json.dumps(welcome)[:200]}, not a welcome")
+                if core.secret is not None and not proof_holds(core.secret, "server", ns, nc, "hub", hub_name,
+                                                               welcome.get("auth")):
+                    raise ProtocolError(f"the hub at {host}:{port} did not prove the pair's secret: not believing it")
                 self.once.reset()
                 self.hub_name = hello.get("name")
                 self.last_seq.clear()    # a new hub session: its seq may have started again
@@ -1619,17 +1719,13 @@ class Monitor:
             conn.send({"op": "error", "about": "hello", "reason": f"{MAX_MONITOR_CLIENTS} monitor clients already"})
             conn.close()
             return
-        # The speaker says hello first, with a nonce; the client proves the pair's secret.
-        nonce = secrets.token_hex(16)
-        conn.send({"op": "hello", "role": "speaker", "name": self.core.name, "nonce": nonce, "protocol": PROTOCOL})
+        # The speaker says hello first; both sides prove the pair's secret (as on the control link).
         try:
-            hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
-        except (asyncio.TimeoutError, ProtocolError, ConnectionError):
-            conn.close()
-            return
-        if hello is None or hello.get("op") != "hello" or not authenticated(self.core.secret, nonce, hello):
-            THROTTLED.say(("monitor-auth", conn.address), f"monitor: refused {conn.address}: no hello with the pair's secret")
-            conn.send({"op": "error", "about": "hello", "reason": "the first line is a hello with the pair's secret"})
+            done = await server_handshake(self.core, conn, self.core.handshakes["monitor"], "speaker", {})
+        except Exception as e:
+            bad_message(f"monitor {conn.address}", {}, e)
+            done = None
+        if done is None:
             conn.close()
             return
         client = MonitorClient(conn)
@@ -1665,7 +1761,11 @@ class Monitor:
                            "reason": f"at most {MAX_SUBSCRIPTIONS} subscriptions per client"})
                 return
             rate = msg.get("rate_hz", 30)
-            rate = max(min(float(rate), MAX_MONITOR_RATE), 0.1) if good_number(rate) and rate > 0 else 30.0
+            if not good_number(rate) or not 0.1 <= rate <= MAX_MONITOR_RATE:
+                conn.send({"op": "error", "about": "subscribe", "stream": stream,
+                           "reason": f"rate_hz must be 0.1 to {MAX_MONITOR_RATE:g}"})
+                return
+            rate = float(rate)
             fresh = stream not in client.subs
             client.subs[stream] = rate
             if fresh:
@@ -1702,18 +1802,12 @@ async def control_connection(core, reader, writer):
             if len(hub.controllers) + len(hub.agents) >= MAX_CONTROL_PEERS:
                 conn.send({"op": "error", "about": "hello", "reason": f"{MAX_CONTROL_PEERS} connections already"})
                 return
-            nonce = secrets.token_hex(16)
-            conn.send({"op": "hello", "role": "hub", "name": core.name, "revision": core.revision, "seq": hub.seq,
-                       "nonce": nonce, "protocol": PROTOCOL})
-            hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
-            if hello is None or hello.get("op") != "hello":
-                conn.send({"op": "error", "about": "hello", "reason": "the first line is a hello"})
+            done = await server_handshake(core, conn, core.handshakes["control"], "hub",
+                                          {"revision": core.revision, "seq": hub.seq})
+            if done is None:
                 return
-            if not authenticated(core.secret, nonce, hello):
-                THROTTLED.say(("control-auth", conn.address), f"refused {conn.address}: no hello with the pair's secret")
-                conn.send({"op": "error", "about": "hello", "reason": "the hello does not prove the pair's secret"})
-                return
-            await hub.serve(conn, hello)
+            hello, token = done
+            await hub.serve(conn, hello, token)
         else:
             conn.send({"op": "error", "about": "hello", "reason": f"{core.name} is not the hub: the hub is {core.hub_address}"})
     except (asyncio.TimeoutError, ProtocolError, ConnectionError):

@@ -30,7 +30,7 @@ Pass when:
   another layer and revision is followed (ampd takes that layer's document and says so); a
   speakerd whose current layer is an older revision than ampd's gets ampd's;
 - monitoring: two subscribers of one stream make one subscription to speakerd at the higher rate
-  (100 Hz asked is 60), each gets values at its own rate (within 30 %), the rate falls back when
+  (60; 100, 0, -1 and 0.05 Hz are refused with an error, never clamped), each gets values at its own rate (within 30 %), the rate falls back when
   the faster one leaves and an unsubscribe goes to speakerd when the last one does; a stream that
   is not output/level or node/<uid>/mon_<id> is answered with an error;
 - persistence: while values change 25 times a second for 3 s, graph.json is replaced at most 4
@@ -43,10 +43,20 @@ Pass when:
   rejected; keys ampd does not know (a node's "ui") reach both speakerds and the state as they
   were; the hub goes on from its seq after a restart, says it in its hello, and the agent applies
   its values again;
-- the pair's secret: a controller or a monitor client whose hello does not prove it (HMAC of the
-  hub's nonce) gets an error and nothing else; OSC from an address with no authenticated controller
-  is ignored, and said; an agent that proves it replaces a connected one of its name, and without
-  a secret in ampd.json a second "right" is refused and the connected agent stays;
+- the pair's secret (docs/protocol.md, "Authentication"): a controller or a monitor client whose
+  hello does not prove it gets an error and nothing else; OSC is dropped and counted without a
+  token (protocol 1's `,isfis`), with a wrong one, with an authenticated controller's token from
+  another address, and with the token of a session that is over (4 dropped), and taken with the
+  controller's own; the controller's echoes carry its token; agents ignore OSC (even from the hub's
+  address, with a token: dropped and counted); an agent that proves the secret replaces a connected
+  one of its name, and without a secret in ampd.json the hub welcomes with no proof and a second
+  "right" is refused while the connected agent stays;
+- at most 16 connections per link in their handshake: the 17th, on the control and on the monitor
+  link, gets "16 connections in their handshake already", and a client gets in once they are gone;
+- an agent believes nothing from a hub that does not prove the secret: a fake hub whose welcome
+  has a wrong proof, a proof under another secret, or no welcome at all, then a value and an apply,
+  is refused ("did not prove the pair's secret", "not a welcome"), and the agent's speakerd gets
+  neither;
 - limits: a document with more than 64 nodes or 512 connections is rejected; a 400-digit number
   is answered with an error and the next value goes through; a stream that is not exactly
   output/level or node/<16 and up>/mon_<1 to 64 characters> is refused, the 33rd subscription of
@@ -75,7 +85,8 @@ import unittest
 from pathlib import Path
 
 from harness import (ADDRESS, KNOB_PORT, TWEETER_MUTED, Ampd, Controller, MonitorClient, StandInPair, StandInSpeakerd,
-                     ampd_auth, graph_document, lv2_uri, osc_encode, revision_document, state_dir)
+                     MonitorRefused, ampd_proof, check_welcome, client_hello, graph_document, lv2_uri, osc_encode,
+                     revision_document, state_dir)
 
 HEADLESS = lv2_uri("loudness_headless")
 PARAMS = {"mode": "Force 1", "s0_e0_gain": 0.0, "s0_e1_gain": 0.0}
@@ -142,17 +153,16 @@ class Protocol(unittest.TestCase):
                 self.assertEqual(params_seen(pair.sd[name], -7.25), [], f"a refused value reached {name}'s speakerd")
 
             # The agent orders by the hub's seq: older values and seq 0 do nothing.
-            # The agent takes OSC from its hub's address only: this socket stands on it.
-            agent = (ADDRESS["right"], KNOB_PORT)
+            # Agents ignore OSC: even from the hub's own address, with a token, a datagram is dropped.
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp.bind((ADDRESS["left"], 0))
-            for seq, value in ((1000, 11.0), (999, 12.0), (0, 13.0), (1001, 14.0)):
-                udp.sendto(osc_encode("/bpi/param", "isfis", 16, "s0_e0_gain", value, seq, "hub"), agent)
-                time.sleep(0.05)
+            udp.sendto(osc_encode("/bpi/param", "isfiss", 16, "s0_e0_gain", 11.0, 1000, "hub", a.token),
+                       (ADDRESS["right"], KNOB_PORT))
             udp.close()
-            pair.sd["right"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == 14.0, what="seq 1001")
-            seen = [e["value"] for e in pair.sd["right"].events("param", "in") if e.get("value") in (11.0, 12.0, 13.0, 14.0)]
-            self.assertEqual(seen, [11.0, 14.0], "the agent applied an older seq, or seq 0")
+            line = pair.ampd["right"].wait_for("knobs: dropped a datagram from 127.0.1.1")
+            print(f"\n  {line}")
+            self.assertEqual(params_seen(pair.sd["right"], 11.0), [], "the agent applied an OSC value")
+            pair.ampd["right"].wait_status(lambda st: st.get("osc_dropped") == 1, what="1 datagram dropped")
 
     def test_revisions(self):
         with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a, Controller("ctl-b") as b:
@@ -326,7 +336,14 @@ class Protocol(unittest.TestCase):
             with MonitorClient(ADDRESS["right"]) as slow, MonitorClient(ADDRESS["right"]) as fast:
                 slow.subscribe("output/level", 10)
                 sd.wait_event(lambda e: e.get("op") == "subscribe", what="a subscribe")
-                fast.subscribe("output/level", 100)
+                # rate_hz must be 0.1 to 60: outside is refused with an error, never clamped.
+                for rate in (100, 0, -1, 0.05):
+                    fast.subscribe("output/level", rate)
+                deadline = time.monotonic() + 5
+                while len(fast.errors) < 4 and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual([e["reason"] for e in fast.errors], ["rate_hz must be 0.1 to 60"] * 4, fast.errors)
+                fast.subscribe("output/level", 60)
                 sd.wait_event(lambda e: e.get("op") == "subscribe" and e["rate_hz"] == 60, what="the rate of 60 Hz")
                 fast.subscribe("node/16/mon_levelDb", 20)
                 start = time.monotonic()
@@ -431,44 +448,119 @@ class Protocol(unittest.TestCase):
 
     def test_the_pairs_secret(self):
         with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:
+            hub = pair.ampd["left"]
             # A controller and a monitor client that cannot prove the secret are refused.
             wrong = Controller("ctl-wrong", secret="not-the-pairs-secret-at-all", expect_state=False)
             error = wrong.wait(lambda m: m["op"] == "error", what="the refusal")
             self.assertEqual(error["about"], "hello")
-            self.assertFalse([m for m in wrong.messages if m["op"] == "state"])
+            time.sleep(0.2)
+            self.assertFalse([m for m in wrong.messages if m["op"] in ("welcome", "state")])
             wrong.close()
-            with MonitorClient(ADDRESS["left"], secret="not-the-pairs-secret-at-all") as meter:
-                deadline = time.monotonic() + 3
-                while not meter.errors and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                self.assertEqual([e["about"] for e in meter.errors], ["hello"])
-            # OSC only from where an authenticated controller is connected (ctl-a, 127.0.0.1).
-            stranger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            stranger.bind(("127.0.0.5", 0))
-            stranger.sendto(osc_encode("/bpi/param", "isfis", 16, "s0_e0_gain", 9.5, 0, "stranger"), (ADDRESS["left"], KNOB_PORT))
-            stranger.close()
-            a.osc_param(16, "s0_e0_gain", 2.5)
-            pair.sd["left"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == 2.5, what="ctl-a's value")
-            self.assertEqual(params_seen(pair.sd["left"], 9.5), [], "OSC from an unauthenticated address was applied")
-            pair.ampd["left"].wait_for("knobs: ignored a datagram from 127.0.0.5")
+            with self.assertRaises(MonitorRefused):
+                MonitorClient(ADDRESS["left"], secret="not-the-pairs-secret-at-all", timeout=3)
 
-            # A second agent called right, with the secret, replaces the first (a restart of its ampd).
+            # OSC needs the token of an authenticated controller connected from that address.
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            send = lambda tags, *args, source=udp: source.sendto(osc_encode("/bpi/param", tags, 16, "s0_e0_gain", *args),
+                                                                  (ADDRESS["left"], KNOB_PORT))
+            send("isfis", 9.25, 0, "no-token")                       # protocol 1's form, no token
+            send("isfiss", 9.5, 0, "wrong", "0" * 32)                # a token, not this session's
+            elsewhere = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            elsewhere.bind(("127.0.0.5", 0))
+            send("isfiss", 9.75, 0, "elsewhere", a.token, source=elsewhere)   # ctl-a's token, another address
+            elsewhere.close()
+            # A token from a session that is over (ctl-b, gone) is refused, also from its address.
+            b = Controller("ctl-b")
+            old = b.token
+            b.close()
+            hub.wait_for("controller ctl-b disconnected")
+            send("isfiss", 10.0, 0, "replay", old)
+            a.osc_param(16, "s0_e0_gain", 2.5)                       # ctl-a's own token: applied
+            pair.sd["left"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == 2.5, what="ctl-a's value")
+            udp.close()
+            for value in (9.25, 9.5, 9.75, 10.0):
+                self.assertEqual(params_seen(pair.sd["left"], value), [], f"the datagram with {value} was applied")
+            dropped = hub.wait_status(lambda st: st.get("osc_dropped", 0) >= 4, what="4 datagrams dropped")["osc_dropped"]
+            print(f"\n  {hub.lines_starting('knobs: dropped a datagram')[0]}\n  dropped: {dropped}; ctl-a's echoes "
+                  f"carry its token, it ignored {a.osc_ignored} datagram(s) without it", end="")
+            self.assertEqual(dropped, 4)
+            self.assertEqual(a.osc_ignored, 0)
+
+            # An agent called right that proves the secret replaces the first (a restart of its ampd).
             conn = socket.create_connection((ADDRESS["left"], 7450), timeout=5)
             f = conn.makefile("rb")
-            hub = json.loads(f.readline())
-            conn.sendall(json.dumps({"op": "hello", "role": "agent", "name": "right", "revision": 3, "protocol": 1,
-                                     "auth": ampd_auth(hub["nonce"], "agent", "right")}).encode() + b"\n")
-            pair.ampd["left"].wait_for("agent right: a new connection replaces the old one")
+            server = json.loads(f.readline())
+            hello, nc = client_hello(server, "agent", "right", revision=3)
+            conn.sendall(json.dumps(hello).encode() + b"\n")
+            self.assertTrue(check_welcome(server, json.loads(f.readline()), nc))
+            hub.wait_for("agent right: a new connection replaces the old one")
             f.close()
             conn.close()
+
+    def test_handshakes_are_capped(self):
+        with StandInPair(self.tmp, documents()) as pair:
+            for port, link in ((7450, "control"), (7452, "monitor")):
+                waiting = [socket.create_connection((ADDRESS["left"], port), timeout=5) for _ in range(16)]
+                for sock in waiting:
+                    sock.makefile("rb").readline()          # the server's hello; no answer
+                extra = socket.create_connection((ADDRESS["left"], port), timeout=5)
+                answer = json.loads(extra.makefile("rb").readline())
+                print(f"\n  {link}: the 17th connection in its handshake: {answer}", end="")
+                self.assertEqual((answer["op"], answer["reason"]), ("error", "16 connections in their handshake already"))
+                for sock in waiting + [extra]:
+                    sock.close()
+                time.sleep(0.3)
+                with (Controller("ctl-after") if link == "control" else MonitorClient(ADDRESS["left"])):
+                    pass                                   # once they are gone, a client gets in
+            self.assertTrue(pair.ampd["left"].running())
+
+    def test_a_hub_that_cannot_prove_the_secret_is_not_believed(self):
+        run = self.tmp / "run"
+        run.mkdir()
+        env = dict(os.environ, XDG_RUNTIME_DIR=str(run))
+        state = state_dir(self.tmp / "state", role="right", current=revision_document(DOCUMENT, 3), limits=TWEETER_MUTED)
+        listener = socket.create_server((ADDRESS["left"], 7450), reuse_port=False)
+        listener.settimeout(15)
+        orders = [{"op": "param", "node": 16, "id": "s0_e0_gain", "value": 8.5, "seq": 1, "origin": "fake"},
+                  {"op": "apply", "revision": 4, "document": dict(DOCUMENT, revision=4)}]
+        with StandInSpeakerd(env, state) as sd, Ampd(env, state, "right") as agent:
+            for welcome in ({"op": "welcome", "auth": "0" * 64},                   # a wrong proof
+                            {"op": "welcome", "auth": ampd_proof("server", "0" * 32, "1" * 32, "hub", "left",
+                                                                 "a-secret-it-does-not-have")},
+                            orders[0]):                                          # no welcome at all
+                conn, _ = listener.accept()
+                f = conn.makefile("rb")
+                conn.sendall(json.dumps({"op": "hello", "role": "hub", "name": "left", "revision": 9, "seq": 0,
+                                         "nonce": os.urandom(16).hex(), "protocol": 1}).encode() + b"\n")
+                json.loads(f.readline())                       # the agent's hello
+                for message in [welcome] + orders:
+                    try:
+                        conn.sendall(json.dumps(message).encode() + b"\n")
+                    except OSError:
+                        break
+                time.sleep(0.5)
+                f.close()
+                conn.close()
+            line = agent.wait_for("hub: ")
+            print(f"\n  {line}")
+            time.sleep(0.5)
+            self.assertFalse(agent.lines_starting("hub: connected"), agent.log())
+            self.assertTrue(agent.lines_starting("hub: the hub at 127.0.1.1:7450 did not prove the pair's secret"),
+                            agent.log())
+            self.assertEqual(sd.events("apply", "in"), [], "a fake hub applied a revision")
+            self.assertEqual(params_seen(sd, 8.5), [], "a fake hub set a value")
+            self.assertFalse(agent.status()["hub"]["connected"])
+        listener.close()
 
     def test_without_a_secret_an_agent_is_not_displaced(self):
         with StandInPair(self.tmp, documents(), secret=None) as pair:
             pair.ampd["left"].wait_for("*** no secret in ampd.json")
             conn = socket.create_connection((ADDRESS["left"], 7450), timeout=5)
             f = conn.makefile("rb")
-            json.loads(f.readline())
-            conn.sendall(b'{"op":"hello","role":"agent","name":"right","revision":3,"protocol":1}\n')
+            server = json.loads(f.readline())
+            hello, _ = client_hello(server, "agent", "right", secret=None, revision=3)
+            conn.sendall(json.dumps(hello).encode() + b"\n")
+            self.assertEqual(json.loads(f.readline()), {"op": "welcome", "auth": None})
             error = json.loads(f.readline())
             self.assertEqual(error["op"], "error")
             self.assertIn("an agent called right is connected", error["reason"])
@@ -576,10 +668,11 @@ class Protocol(unittest.TestCase):
             for line in (b'{"op": "nonsense", "x": 1}\n', b"not json\n"):
                 conn = socket.create_connection((ADDRESS["left"], 7450), timeout=5)
                 f = conn.makefile("rb")
-                hub = json.loads(f.readline())
-                self.assertEqual(hub["op"], "hello")
-                conn.sendall(json.dumps({"op": "hello", "role": "controller", "name": "bad", "protocol": 1,
-                                         "auth": ampd_auth(hub["nonce"], "controller", "bad")}).encode() + b"\n")
+                server = json.loads(f.readline())
+                self.assertEqual(server["op"], "hello")
+                hello, nc = client_hello(server, "controller", "bad")
+                conn.sendall(json.dumps(hello).encode() + b"\n")
+                self.assertTrue(check_welcome(server, json.loads(f.readline()), nc))
                 self.assertEqual(json.loads(f.readline())["op"], "state")
                 conn.sendall(line)
                 conn.settimeout(1.0)

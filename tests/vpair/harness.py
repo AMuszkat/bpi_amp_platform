@@ -1088,9 +1088,35 @@ def osc_decode(data):
 TEST_SECRET = "vpair-test-secret-not-a-real-one"
 
 
-def ampd_auth(nonce, role, name, secret=TEST_SECRET):
-    """What a peer answers a hello's nonce with (firmware/ampd/ampd.py, auth_of)."""
-    return _ampd_module().auth_of(secret, nonce, role, name)
+def ampd_proof(side, ns, nc, role, name, secret=TEST_SECRET):
+    """docs/protocol.md's proof (firmware/ampd/ampd.py, proof): side "client" or "server"."""
+    return _ampd_module().proof(secret, side, ns, nc, role, name)
+
+
+def ampd_token(ns, nc, secret=TEST_SECRET):
+    """The OSC token of a control connection with nonces `ns` (the server's) and `nc`."""
+    return _ampd_module().osc_token(secret, ns, nc)
+
+
+def client_hello(server_hello, role, name, secret=TEST_SECRET, **extra):
+    """A client's hello answering `server_hello` (docs/protocol.md, "Authentication"): a fresh
+    nonce and, with a secret, the client's proof. Returns (the hello, its nonce)."""
+    nc = os.urandom(16).hex()
+    hello = {"op": "hello", "role": role, "name": name, "protocol": 1, "nonce": nc, **extra}
+    if secret is not None:
+        hello["auth"] = ampd_proof("client", str(server_hello.get("nonce", "")), nc, role, name, secret)
+    return hello, nc
+
+
+def check_welcome(server_hello, welcome, nc, secret=TEST_SECRET):
+    """Whether `welcome` proves the secret for this handshake (always, without a secret)."""
+    if not isinstance(welcome, dict) or welcome.get("op") != "welcome":
+        return False
+    if secret is None:
+        return True
+    want = ampd_proof("server", str(server_hello.get("nonce", "")), nc, server_hello.get("role"),
+                      server_hello.get("name"), secret)
+    return welcome.get("auth") == want
 
 
 def ampd_config(state, name, hub, listen, hub_address=None, secret=TEST_SECRET):
@@ -1312,6 +1338,7 @@ class Controller:
         _ampd_module()      # its OSC encoder, loaded now: not in the time of a first send
         self.messages, self._changed = [], threading.Condition()
         self.params, self.gestures, self.closed = {}, {}, False
+        self.token, self.osc_ignored = "", 0
         self.udp = None
         if osc:
             self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1335,13 +1362,17 @@ class Controller:
             thread.start()
         # The hub says hello first, with a nonce; the controller proves the pair's secret with it.
         self.hub_hello = self.wait(lambda m: m["op"] == "hello", timeout, "the hub's hello")
-        hello = {"op": "hello", "role": "controller", "name": name, "protocol": 1}
-        if secret is not None:
-            hello["auth"] = ampd_auth(str(self.hub_hello.get("nonce", "")), "controller", name, secret)
-        if osc:
-            hello["osc_port"] = self.udp.getsockname()[1]
+        extra = {"osc_port": self.udp.getsockname()[1]} if osc else {}
+        hello, nc = client_hello(self.hub_hello, "controller", name, secret, **extra)
         self.send(hello)
-        self.state = self.wait(lambda m: m["op"] == "state", timeout, "the state") if expect_state else None
+        self.token = ampd_token(self.hub_hello["nonce"], nc, secret) if secret is not None else ""
+        if not expect_state:
+            self.state = None
+            return
+        welcome = self.wait(lambda m: m["op"] in ("welcome", "error"), timeout, "the hub's welcome")
+        if not check_welcome(self.hub_hello, welcome, nc, secret):
+            raise AssertionError(f"controller {name}: the hub did not prove the pair's secret: {welcome}")
+        self.state = self.wait(lambda m: m["op"] == "state", timeout, "the state")
 
     def _keep(self, obj, via):
         obj = dict(obj, via=via, arrived=time.monotonic())
@@ -1387,6 +1418,10 @@ class Controller:
             except OSError:
                 continue
             path, args = osc_decode(data)
+            # A controller ignores OSC without its own token.
+            if not args or args[-1] != self.token:
+                self.osc_ignored += 1
+                continue
             if path == "/bpi/param":
                 self._keep({"op": "param", "node": args[0], "id": args[1], "value": args[2], "seq": args[3],
                             "origin": args[4]}, "osc")
@@ -1403,11 +1438,13 @@ class Controller:
     def osc_param(self, node, pid, value):
         """A moving knob: OSC to the hub's knob port."""
         sock = self.udp or socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(osc_encode("/bpi/param", "isfis", node, pid, float(value), 0, self.name), (self.hub, self.knob_port))
+        sock.sendto(osc_encode("/bpi/param", "isfiss", node, pid, float(value), 0, self.name, self.token),
+                    (self.hub, self.knob_port))
 
     def gesture(self, node, pid, state, osc=False):
         if osc:
-            self.udp.sendto(osc_encode("/bpi/gesture", "isss", node, pid, state, self.name), (self.hub, self.knob_port))
+            self.udp.sendto(osc_encode("/bpi/gesture", "issss", node, pid, state, self.name, self.token),
+                            (self.hub, self.knob_port))
         else:
             self.send({"op": "gesture", "node": node, "id": pid, "state": state, "origin": self.name})
 
@@ -1485,6 +1522,10 @@ class Controller:
         return False
 
 
+class MonitorRefused(AssertionError):
+    """The speaker refused a monitor client's hello (its proof)."""
+
+
 class MonitorClient:
     """A monitor subscriber, as a plugin window (docs/protocol.md, "Monitoring"): the monitor link
     to one speaker's ampd. With `reconnect`, it connects again every 0.1 s when the link drops and
@@ -1509,11 +1550,15 @@ class MonitorClient:
                 sock.settimeout(5)
                 file = sock.makefile("rb")
                 hello = json.loads(file.readline())      # the speaker's, with its nonce
-                sock.settimeout(None)
-                mine = {"op": "hello", "role": "controller", "name": self.name, "protocol": 1}
-                if self.secret is not None:
-                    mine["auth"] = ampd_auth(str(hello.get("nonce", "")), "controller", self.name, self.secret)
+                mine, nc = client_hello(hello, "controller", self.name, self.secret)
                 sock.sendall(json.dumps(mine).encode() + b"\n")
+                answer = json.loads(file.readline())
+                if answer.get("op") == "error":
+                    sock.close()
+                    raise MonitorRefused(f"the speaker at {self.address} refused the hello: {answer.get('reason')}")
+                if not check_welcome(hello, answer, nc, self.secret):
+                    raise AssertionError(f"the speaker at {self.address} did not prove the pair's secret: {answer}")
+                sock.settimeout(None)
                 with self._lock:
                     self.sock, self._file = sock, file
                     self.connects += 1
@@ -1832,3 +1877,93 @@ class SpeakerPair:
 
     def __exit__(self, *exc):
         return self._stack.__exit__(*exc)
+
+
+class Profiler:
+    """pw-profiler on one speaker for a `with` block: what PipeWire itself recorded about each
+    cycle, to tell a capture an xrun broke from one a change broke. events() is
+    [(time.monotonic(), what)]: a follower's xrun count going up ("xrun in <node>") and a cycle
+    whose measured period is more than 1.5 times the estimated one ("a late cycle"). A row has no
+    clock of its own: its time is when the profiler attached plus the measured periods before
+    it, good to a few milliseconds over a minute.
+
+    The columns, from the plot scripts pw-profiler 0.3.65 writes: 1 the measured period (us),
+    2 the driver's end, 3 its delay, 4 the estimated period; then per follower 8 columns, its id
+    first and its xrun count last."""
+
+    def __init__(self, speaker):
+        self.speaker = speaker
+        self.tmp = Path(tempfile.mkdtemp(prefix="vpair-profiler-"))
+        self.attached, self.names, self.process = None, {}, None
+        self._lines = []
+
+    def __enter__(self):
+        # Line-buffered (it prints with stdio): the "logging driver" line says when it attached.
+        started = time.monotonic()
+        self.process = subprocess.Popen(["stdbuf", "-oL", "pw-profiler", "-o", str(self.tmp / "profiler.log")], cwd=self.tmp,
+                                        env=self.speaker.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 3
+        while self.attached is None and time.monotonic() < deadline and self.process.poll() is None:
+            time.sleep(0.01)
+        if self.process.poll() is not None:
+            raise AssertionError(f"pw-profiler stopped on {self.speaker.name}: " + " | ".join(self._lines[-5:]))
+        if self.attached is None:
+            # It did not say when it attached: its start, a fraction of a second early at most,
+            # well within the windows the events are matched to.
+            self.attached = started
+        return self
+
+    def _read(self):
+        for line in self.process.stdout:
+            self._lines.append(line.rstrip())
+            if line.startswith("logging driver") and self.attached is None:
+                self.attached = time.monotonic()
+            found = re.match(r'logging follower (\d+) \("(.*)"\)', line)
+            if found:
+                self.names[found.group(1)] = found.group(2)
+
+    def close(self):
+        if self.process is not None and self.process.poll() is None:
+            self.process.send_signal(signal.SIGINT)
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            self._thread.join(timeout=5)
+
+    def events(self, names=None):
+        """What it recorded, [(time, what)]; `names` limits the followers to those whose node
+        name starts with one of them."""
+        self.close()
+        out, t, last = [], self.attached or 0.0, {}
+        path = self.tmp / "profiler.log"
+        rows = path.read_text().splitlines() if path.exists() else []
+        for row in rows:
+            cols = row.split("\t")
+            try:
+                period, estimated = int(cols[0] or 0), int(cols[3] or 0)
+            except (ValueError, IndexError):
+                continue
+            t += (period or estimated) / 1e6
+            if estimated and period > 1.5 * estimated:
+                out.append((t, f"a late cycle ({period} us for {estimated})"))
+            for k in range(4, len(cols) - 7, 8):
+                ident, xruns = cols[k].strip(), cols[k + 7].strip()
+                if not ident or not xruns.isdigit():
+                    continue
+                name = self.names.get(ident, ident)
+                if names is not None and not name.startswith(tuple(names)):
+                    continue
+                if ident in last and int(xruns) > last[ident]:
+                    out.append((t, f"xrun in {name}"))
+                last[ident] = int(xruns)
+        return out
+
+    def __exit__(self, *exc):
+        self.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        return False

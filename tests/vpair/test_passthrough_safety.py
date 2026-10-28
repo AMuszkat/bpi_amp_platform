@@ -11,10 +11,12 @@ FL 250 Hz at -1 dBFS peak and FR 400 Hz at -7 dBFS peak, so the woofer shows whi
 speakerd chose. A second source drives the input above full scale, FL at +6 dBFS and FR at
 +3 dBFS peak (a float WAV), as a player with its volume above 100 % would.
 
-A capture that an xrun broke (a 50 Hz period of the woofer more than 1 dB from the others, as a
-machine loaded with other test runs sometimes does) is played again, up to three times, and said:
-the level is then measured on a whole capture. A speakerd that broke its own output would break
-every attempt, and the module fails.
+A capture that an xrun broke (a 50 Hz period of the woofer more than 1 dB quieter than the others,
+as a machine loaded with other test runs sometimes does) is played again, up to three times, and
+said: the level is then measured on a whole capture. An xrun only makes samples quieter, so every
+attempt is first checked for what it cannot do: a tweeter sample that is not 0, a woofer sample
+above the cap, a period more than 1 dB louder than the others each fail at once. A speakerd that
+broke its own output would break every attempt, and the module fails.
 
 Pass when, for role left, right and mono, each with every plugin removed and with no layer:
 
@@ -129,8 +131,11 @@ class PassthroughSafety(unittest.TestCase):
                 f"using layer passthrough: woofer = {channel} at -20 dB, tweeter muted"), sd.log())
             self.assertTrue(sd.lines_starting("playing: layer passthrough, "), sd.log())
             # A capture an xrun broke (a machine loaded with other test runs) is played again, up
-            # to three times: what is measured is speakerd, not the machine's load. A speakerd that
-            # broke its output itself would break every attempt, and fail.
+            # to three times: what is measured is speakerd, not the machine's load. An xrun only
+            # makes samples quieter (missing): so every attempt is first checked for what an xrun
+            # cannot do, a tweeter sample that is not 0, a woofer above the cap, or a period louder
+            # than the others, and fails on it; only a quieter period is played again. A speakerd
+            # that broke its output itself would break every attempt, and fail.
             for attempt in range(1, ATTEMPTS + 1):
                 captures = speaker.play_and_record_many(source["samples"], "speakerd", records)
                 capture = captures[0]
@@ -140,12 +145,21 @@ class PassthroughSafety(unittest.TestCase):
                 lag, skip = align(woofer, own), int(0.1 * RATE)
                 length = (len(own) - 2 * skip) // PERIOD * PERIOD
                 part, own_part = woofer[lag + skip:lag + skip + length], own[skip:skip + length]
+                loud, tweeter_peak = nonzero(tweeter)
+                self.assertEqual(loud, 0, f"attempt {attempt}: the tweeter is not digital silence: {loud} samples "
+                                          f"not 0, peak {tweeter_peak:.1f} dBFS ({role}, {case})")
+                self.assertLessEqual(peak_dbfs(woofer), CAP_DB + ROUNDING_DB,
+                                     f"attempt {attempt}: the woofer is above the cap: peak {peak_dbfs(woofer):.4f} "
+                                     f"dBFS ({role}, {case})")
                 blocks = block_levels(part, PERIOD / RATE)
-                worst = float(np.max(np.abs(blocks - np.median(blocks)))) if len(blocks) else 0.0
+                louder = float(np.max(blocks - np.median(blocks))) if len(blocks) else 0.0
+                self.assertLess(louder, 1.0, f"attempt {attempt}: a 50 Hz period of the woofer is {louder:.2f} dB "
+                                             f"louder than the others, which no xrun does ({role}, {case})")
+                worst = float(np.max(np.median(blocks) - blocks)) if len(blocks) else 0.0
                 if len(part) == length and worst < 1.0:
                     break
-                print(f"\n  attempt {attempt}: the capture was interrupted (a 50 Hz period {worst:.1f} dB from the "
-                      "others: an xrun?)" + (": playing it again" if attempt < ATTEMPTS else ""), end="")
+                print(f"\n  attempt {attempt}: the capture was interrupted (a 50 Hz period {worst:.1f} dB quieter than "
+                      "the others: an xrun?)" + (": playing it again" if attempt < ATTEMPTS else ""), end="")
         amplitudes = sine_amplitudes_dbfs(part, [freq for freq, _ in components])
         found = [(freq, amplitude, level) for (freq, level), amplitude in zip(components, amplitudes)]
         loud, tweeter_peak = nonzero(tweeter)
