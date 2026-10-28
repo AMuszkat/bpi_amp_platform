@@ -20,6 +20,8 @@ it re-prepares the running one in place, behind silence.
 ```
 speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--lv2-bundle PATH]...
 speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...
+speakerd --import-filtergraph FILE [--device DEVICE_JSON] [--prefer-headless] [--allow-unsafe-routing] [--lv2-bundle PATH]...
+speakerd --version
 ```
 
 | Option | |
@@ -30,12 +32,17 @@ speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--l
 | `--lv2-bundle PATH` | also load this LV2 bundle (repeatable). Plugins are otherwise found by URI in `~/.lv2`, `/usr/lib/lv2` and `/usr/local/lib/lv2`; JUCE ignores `$LV2_PATH` |
 | `--render IN.wav OUT.wav` | the offline render: no PipeWire (see below) |
 | `--block N` | the render's block size, default 1024 (the speaker's quantum). Render only: the live node runs at PipeWire's quantum, and `--block` without `--render` is a bad command line |
+| `--import-filtergraph FILE` | no PipeWire, no state directory: writes an AudioPluginHost session as a graph document to stdout (see [Importing an AudioPluginHost session](#importing-an-audiopluginhost-session)). It takes `--device`, `--prefer-headless`, `--allow-unsafe-routing` and `--lv2-bundle` only; those three are for it only |
+| `--device DEVICE_JSON` | with `--import-filtergraph`: the speaker's `device.json`, which says whether the session's output channel 0 (`playback_FL`) or 1 (`playback_FR`) is the woofer. Without it, `playback_FL` is |
+| `--prefer-headless` | with `--import-filtergraph`: a complete or control build's URI becomes its `_headless` sibling's, when that plugin is found (in the default paths or a `--lv2-bundle`) |
+| `--allow-unsafe-routing` | with `--import-filtergraph`: import the stream straight to the tweeter, or a control build, with a warning, instead of failing |
+| `--version` | prints `speakerd <version>` on stdout and exits 0 |
 
 | Exit status | |
 |---|---|
 | 0 | the live mode stopped by SIGINT, SIGTERM or SIGHUP, at any point, also while it waits for PipeWire (after fading out, if it played), or the render was written. The render does not catch signals: they end it the usual way, with no output file promised |
 | 1 | not used yet: kept for other failures |
-| 2 | bad command line, or a `--lv2-bundle` from which no plugin loaded |
+| 2 | bad command line, a `--lv2-bundle` from which no plugin loaded, or `--import-filtergraph` failed (the reason is on stderr, and nothing on stdout) |
 | 3 | another speakerd already runs on this PipeWire, the input sink or the filter node could not be started, the connection to PipeWire was lost (the daemon went away), the filter or the input sink failed, or the filter node went away (destroyed by PipeWire or with `pw-cli destroy`). An amplifier or a link that goes away is not a failure: speakerd links again when it is back |
 | 4 | the render could not read `IN.wav` or write `OUT.wav` |
 
@@ -64,6 +71,63 @@ tests/vpair/vpair.sh up
 tests/vpair/vpair.sh run left build/speakerd/speakerd_artefacts/Release/speakerd --state-dir DIR &
 tests/vpair/vpair.sh run left pw-play --target speakerd tone.wav
 ```
+
+### For the board (aarch64)
+
+`tools/build.sh <what> aarch64 [complete|control|headless|all]`
+cross-compiles in the development container into `build/aarch64/<what>/`, with the layout of
+the x86_64 build:
+
+```bash
+tools/build.sh speakerd aarch64      # build/aarch64/speakerd/speakerd_artefacts/Release/speakerd
+tools/build.sh loudness aarch64      # build/aarch64/loudness/<target>_artefacts/Release/LV2/<target>.lv2
+```
+
+It uses the native JUCE install (its `juceaide` runs on the build machine) with
+`dsp/juce_plugins/tools/toolchain-aarch64-linux.cmake`, the `:arm64` libraries of the image
+through pkg-config, and `qemu-aarch64-static` for the LV2 manifest helper JUCE runs after each
+plugin. A cross build never copies a bundle into a `~/.lv2`: its copy directories are pinned
+inside the build tree and it runs with a throwaway `HOME`, and the script fails if an aarch64
+binary is in the `~/.lv2` of the machine that builds. When cross-compiling, speakerd's
+`CMakeLists.txt` points pkg-config at the target's multiarch directory unless `PKG_CONFIG_LIBDIR`
+says otherwise, and stops if the libpipewire it finds is not the target's.
+
+What the aarch64 builds need on the board (Debian bookworm: glibc 2.36, libstdc++ of GCC 12),
+from `readelf -d` and their symbol versions:
+
+| Binary | `NEEDED` | Newest symbol versions | Packages |
+|---|---|---|---|
+| `speakerd` | `libpipewire-0.3.so.0`, `libstdc++.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libc.so.6` | `GLIBC_2.34`, `GLIBCXX_3.4.30`, `CXXABI_1.3.13` | `libpipewire-0.3-0`, `libstdc++6`, `libgcc-s1`, `libc6` |
+| the plugins: `loudness` (all three builds), `crossover`, `firConv` | `libfontconfig.so.1`, `libfreetype.so.6`, `libstdc++.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libc.so.6` | `GLIBC_2.35`, `GLIBCXX_3.4.30` (loudness) | `libfontconfig1`, `libfreetype6`, and the above |
+| `ampScope` | the same and `libasound.so.2` | | `libasound2` too |
+
+No X11, and no ALSA library but ampScope's. At run time libpipewire loads PipeWire's client
+modules and SPA plugins (`libpipewire-0.3-modules`, `libspa-0.2-modules`), which any board
+running PipeWire has.
+The plugins link fontconfig and freetype because every target links `juce_gui_basics`
+(`SpeakerPlugin.cmake`); the headless build never opens a display.
+
+**Same output on both.** Rendered with the aarch64 `speakerd` and `loudness_headless` under
+`qemu-aarch64-static`, the document of `test_speakerd_same_sound` differs from the x86_64 render
+by at most -75.2 dBFS (residual -89.3 dBFS RMS) and 0.0044 dB in gain, at 40 Hz. That is GCC's
+floating-point contraction: on aarch64 it fuses multiplies and adds (FMA) by default, and
+loudness's float shelving biquads near DC turn the different rounding into that much. Built
+with `-ffp-contract=off`, the aarch64 plugin matches the x86_64 render to -128.8 dBFS (98 % of
+the samples bit for bit, the gains equal to 1e-6 dB). speakerd's own path (copies, the fade,
+the limits, the caps) has no multiply-add to fuse.
+
+To run the aarch64 build in the container, under qemu (the image's multiarch libraries are
+found without `-L`), give it an empty `HOME`, so that lilv does not find the x86_64 bundles of
+`~/.lv2`:
+
+```bash
+HOME=$(mktemp -d) qemu-aarch64-static build/aarch64/speakerd/speakerd_artefacts/Release/speakerd \
+    --state-dir DIR --render IN.wav OUT.wav \
+    --lv2-bundle build/aarch64/loudness/loudness_headless_artefacts/Release/LV2/loudness_headless.lv2
+```
+
+The live mode would also need the `:arm64` PipeWire client modules (`libpipewire-0.3-modules`),
+which the image does not have.
 
 ## In PipeWire
 
@@ -179,20 +243,46 @@ why each layer before it failed. If none loads, it plays **passthrough**.
 {
   "version": 1,
   "role": "left",
-  "amplifier": { "node": "amplifier", "woofer": "playback_FL", "tweeter": "playback_FR" }
+  "amplifier": { "node": "amplifier", "woofer": "playback_FL", "tweeter": "playback_FR" },
+  "limits": { "gain_db": -20.0, "tweeter": "muted" }
 }
 ```
 
 | Key | |
 |---|---|
 | `role` | `"left"`, `"right"` or `"mono"`: which channel this speaker plays |
-| `amplifier` | the amplifier's PipeWire node: `{ "node": ..., "woofer": ..., "tweeter": ... }`, or just its name. The ports default to `playback_FL` (woofer) and `playback_FR` (tweeter) |
+| `amplifier` | the amplifier's PipeWire node: `{ "node": ..., "woofer": ..., "tweeter": ... }`, or just its name. The ports default to `playback_FL` (woofer) and `playback_FR` (tweeter); the two must differ |
+| `limits` | what a deploy caps (`docs/autonomous-development.md`, section 2): `{ "gain_db": <dB, at most 0>, "tweeter": "muted" or "on" }`, both keys. `gain_db` is a fixed gain on both amplifier outputs and their ceiling; -100 or less is silence. `tweeter` `"muted"` makes it exact zeros. **Without `limits`, the output is limited all the same, at the fail-safe: -20 dB, tweeter muted.** No limit at all is written out: `{ "gain_db": 0, "tweeter": "on" }` |
 | `version` | optional; 1 if present |
 
 The amplifier is `amplifier` on a virtual speaker and `bpi-alsa-playback-pcm` on a board.
-Unknown keys are ignored, so the file can grow (trim, delay, `partner-lost`). A missing or broken
-`device.json` is reported. speakerd then plays with the defaults: role `mono`, amplifier
-`bpi-alsa-playback-pcm`.
+**The hardware convention** the defaults and the fail-safe rely on: the amplifier's
+`playback_FL` drives the woofer and `playback_FR` the tweeter, unless `device.json` says
+otherwise. A board wired the other way must say so in `amplifier`, or a muted "tweeter" is its
+woofer.
+
+**The file fails closed.** A key speakerd does not know, at any level (`"Limits"`, `"limts"`, a
+`"trim"` before the speakerd that knows it), and a key given twice in one object (JUCE's JSON
+parser would keep the last) make the file invalid: a typo or a newer setting must never be
+heard as no limit. The file grows with the speakerd that reads it, through its version.
+
+**The limits** apply after the graph and the fade, to whatever the graph is, passthrough
+included: the woofer and the tweeter times the gain, then the tweeter zeros if muted, then NaN
+and infinity to 0 and every sample clamped at the ceiling, plus or minus the gain (at most
+1.0). The gain is a ceiling as well, so `"gain_db": -20` means no sample above -20 dBFS on
+either output, however loud the stream (above full scale included) or however much the graph
+boosts. They apply on top of passthrough's own -20 dB: passthrough with `"gain_db": -20` reaches
+the woofer at -40 dB. The render mode applies them too, since it reads the same `device.json`.
+They are constants for the life of the process (the Engine is made with them; there is no
+Engine without limits): the audio thread only reads them, and a change needs a restart.
+
+**A missing or invalid `device.json`** is reported (`device.json: FAILED: ...`), whatever is
+wrong in it: invalid JSON, an unknown or repeated key, an invalid `limits` (a `gain_db` above 0
+or not a number, a `tweeter` that is neither `"muted"` nor `"on"`, a key of it missing,
+`null`), the woofer and the tweeter on one port. speakerd then plays with the defaults, limited
+the way a deploy is: role `mono`, amplifier `bpi-alsa-playback-pcm`, output at -20 dB, tweeter
+muted. So a speaker that cannot read its device file, or whose file says nothing about limits,
+never drives its tweeter and plays its woofer at -20 dB at most.
 
 ## The graph document, version 1
 
@@ -249,7 +339,7 @@ amplifier 2 (the tweeter). 3 to 15 are reserved for nodes speakerd provides. Plu
 | `plugin.identifier` | `PluginDescription::fileOrIdentifier`: for LV2, the plugin URI. The URI names the build: `.../loudness_headless` on a speaker, `.../loudness` for the complete build |
 | `name` | optional, for messages; defaults to the URI's last segment |
 | `params` | optional: `{ "<parameter ID>": value }`. The values are in the plugin's own units, the ones its parameter reports: dB, Hz, ms, or a choice's index. A choice also takes its text (`"Force 1"`), a switch takes `true`/`false`. Values outside the range are clamped, with a warning |
-| `state` | optional: base64 (RFC 4648) of the plugin's own state, what its processor's `getStateInformation()` returns |
+| `state` | optional: base64 (RFC 4648, canonical, with its padding; whitespace is ignored) of the plugin's own state, what its processor's `getStateInformation()` returns; at most 16 MB. Base64 that does not encode back to itself fails the layer |
 | `bypassed` | optional, `true` or `false` |
 
 Anything else (for example the controller's canvas positions) is ignored.
@@ -280,7 +370,8 @@ Not in version 1: bus layouts (each plugin keeps its default), and the Mine pin.
 ## Passthrough
 
 The last layer, used when no other loads. The speaker's own channel goes to the woofer only, at
-**-20 dB**, and the tweeter gets digital silence. Left plays FL, right plays FR, and mono plays
+**-20 dB** (and the `limits` of `device.json` on top of that), and the tweeter gets digital
+silence. Left plays FL, right plays FR, and mono plays
 (FL + FR) / 2. The woofer is then clamped to +-0.1, and NaN or infinity becomes 0, so the
 woofer never sees more than -20 dBFS, even from a stream above full scale (a player's volume
 above 1, or a float WAV over 0 dBFS). No plugin is involved, so it works even with no LV2 plugin
@@ -308,8 +399,9 @@ build outputs: the reference a live capture is compared with.
 ## Real time
 
 - **The audio thread never blocks, allocates or makes a syscall of its own.** Per cycle it
-  copies the stream in, calls `AudioProcessorGraph::processBlock`, ramps the fade, caps the
-  output and copies the two amplifier channels out.
+  copies the stream in, calls `AudioProcessorGraph::processBlock`, ramps the fade, applies the
+  limits of `device.json` (a multiply and a clear, with constants fixed when the engine is
+  made), caps the output at the ceiling and copies the two amplifier channels out.
 - **Three locks JUCE takes on the audio thread, and why none of them waits.** (1) JUCE's graph
   takes each processor's callback lock around its `processBlock`; speakerd never takes those
   locks from another thread while the graph runs. (2) The graph hands its render sequence over
@@ -324,8 +416,9 @@ build outputs: the reference a live capture is compared with.
   applied on the audio thread, from the command queue, never on the message thread while the
   graph runs.**
 - **Absolute caps.** NaN and infinity in the stream become 0 before any plugin sees them (so
-  they cannot stick in a filter's state). After the graph and the fade, NaN and infinity become
-  0 and every sample is clamped to +-1.0, on both amplifier channels, whatever the graph did.
+  they cannot stick in a filter's state). After the graph, the fade and the limits' gain, NaN
+  and infinity become 0 and every sample is clamped to the ceiling: plus or minus the limits'
+  gain, at most 1.0, on both amplifier channels, whatever the graph did.
   The test reads the exponent bits, so it holds whatever the optimisation flags.
 - **The graph is handed over through one atomic, after a fade handshake.** The message thread
   takes the graph only after the output has faded out. It turns the fade-in request off, then
@@ -360,9 +453,10 @@ stable.
 
 | Line | When |
 |---|---|
-| `speakerd <version>, state dir <dir>` | always, first |
-| `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or broken |
+| `speakerd <version>, state dir <dir>` | always, first (not with `--import-filtergraph`). The version is 0.2.0 from the speakerd that knows `limits`; `speakerd --version` prints it too |
+| `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or invalid, its `limits` included; the defaults are limited (see device.json) |
 | `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
+| `device: limits: output at <gain> dB, tweeter <muted\|on>`, followed by ` (no limits in device.json: the fail-safe)` or ` (device.json not read: the fail-safe)` when they are the fail-safe | always, right after the line before. `<gain>` is printed as `%g` does: `-20`, `-6.5`, `0`. No limit at all reads `output at 0 dB, tweeter on` |
 | `lv2 bundle <path>: <URI>` | a `--lv2-bundle` loaded |
 | `--lv2-bundle <path>: not a directory`, `--lv2-bundle <path>: no LV2 plugin loaded from it: ...` | a `--lv2-bundle` that did not load; exit status 2 follows |
 | `cannot connect to PipeWire: <reason>: trying again every second`, `PipeWire did not answer: trying again every second`, `cannot start the PipeWire client loop: trying again every second` | PipeWire is not there (yet); said once, however long it takes |
@@ -394,9 +488,88 @@ stable.
 | `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after another speakerd was found or a sink or filter could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0). Nothing is logged after it; speakerd makes no new link once it has said it, and the output fades out through the links it has |
 | `render: <n> samples at <rate> Hz in blocks of <b>, layer <layer>, written to <path>` | the render is done |
 | `render: <reason>` | the render failed; exit status 4 follows |
+| `import: <file>: an AudioPluginHost session, <n> node(s), <m> connection(s)` | `--import-filtergraph`, first; then one line per node and per connection, as in the next rows, then the warnings |
+| `import: node <uid> (Audio Input) becomes node 1, the stream in: channel 0 = FL, 1 = FR`, `import: node <uid> (MIDI Input): nothing connected to it, left out` | how each internal node of the session was mapped |
+| `import: node <uid> (Audio Output) becomes node 2, the amplifier: session channel 0 (playback_FL) = <woofer\|tweeter>, 1 (playback_FR) = <tweeter\|woofer>, ` then `as --device says (woofer <port>, tweeter <port>)` or `assumed: no --device, and playback_FL is the woofer unless device.json says otherwise` | which of the session's output channels is the woofer |
+| `import: node <uid> (<name>), LV2 <URI>, becomes node <n>[, <URI'>_headless (--prefer-headless) \| , keeping <URI>: no <URI>_headless found], state: <k> bytes of the plugin's own`, or `..., state: empty, left out`, or `..., no STATE: the plugin starts from its defaults` | each plugin node |
+| `import: connection <src>:<ch> -> <dst>:<ch> becomes <src'>:<ch> (<FL\|FR>) -> <dst'>:<ch> (<woofer\|tweeter>)` | each connection, in the session's uids and then the document's |
+| `import: warning: <text>` | something the document does that is allowed but suspect: a plugin not connected, nothing reaching the amplifier; with `--allow-unsafe-routing`, the stream straight to the tweeter or a control build |
+| `import: a graph document, version 1, revision 1: <k> plugin node(s), <m> connection(s)` | the import worked; the document is on stdout, exit status 0 |
+| `import: FAILED: <reason>` | the import failed; exit status 2 follows, nothing is on stdout |
 
 `<layer>` is `current (graph.json), revision 3`, `last-known-good (graph.lkg.json), revision 2`,
 `factory (factory.json), revision 1` or `passthrough`.
+
+## Importing an AudioPluginHost session
+
+The tuning a board runs today is an AudioPluginHost session, a `.filtergraph` file.
+`speakerd --import-filtergraph FILE` turns it into a graph document, version 1, on stdout, which
+a state layer can hold, so that "the same sound as today" is a document speakerd plays. It
+says on stderr what it mapped (see Log lines) and exits 0, or says why not and exits 2. It
+reads the file as `PluginGraph::restoreFromXml` does
+(`extras/AudioPluginHost/Source/Plugins/PluginGraph.cpp` of the pinned JUCE):
+
+| In the session | In the document |
+|---|---|
+| the internal `Audio Input` node | the input node, uid 1: its channel 0 is FL, 1 is FR |
+| the internal `Audio Output` node | the output node, uid 2 (see below for which channel is the woofer) |
+| an LV2 node | a plugin node, uids from 16 in the session's order; `plugin.identifier` is its URI (the `file` attribute) |
+| its `STATE` | `state`: the plugin's own state. The host saved the hosted instance's LV2 state (lilv's Turtle, in JUCE's `MemoryBlock` base64), which keeps the plugin's own state under `<URI>:StateString`; that is unwrapped, the inverse of what speakerd does when it loads a state (`LV2State.h`). The URI it is read under is the session's, so it must be the URI the state was saved by |
+| `MIDI Input`, `MIDI Output` | left out, when nothing is connected to them (every new AudioPluginHost session has them) |
+| node positions, editor windows | nothing |
+
+**Which output channel is the woofer.** In AudioPluginHost, output channel `i` reached the
+amplifier's position `i` (0 = FL, port `playback_FL`; 1 = FR, `playback_FR`) through its "ALSA
+Playback". speakerd sends document channel 0 to `device.json`'s woofer port and 1 to its tweeter
+port. With `--device DEVICE_JSON`, session channel `i` becomes the document channel of
+whichever of the woofer and the tweeter that file puts on that port; it fails unless they are
+exactly `playback_FL` and `playback_FR`, in either order, and on a `device.json` speakerd would
+not read. Without `--device`, `playback_FL` is taken as the woofer (the hardware convention,
+see device.json), and the log says it was assumed.
+
+With `--prefer-headless`, a complete build's URI (one that ends neither in `_headless` nor in
+`_control`) or a control build's becomes its `_headless` sibling's, when that plugin is found in
+the default LV2 paths or a `--lv2-bundle`; the state stays the same, since all builds of a
+plugin share their state's format. Without it, the document names the builds the session names.
+
+**What is unsafe fails,** unless `--allow-unsafe-routing` (then it is a warning): the stream
+from Audio Input straight to the tweeter (after the mapping above), and a control build, which
+has no DSP and passes the stream through at full level (`--prefer-headless` replaces it by its
+headless build when that is found). A plugin between the stream and the tweeter is not
+checked: whether it is a crossover is not something the session says.
+
+The import also fails, exit 2, on: a file larger than 64 MB, not XML or not a `<FILTERGRAPH>`;
+a `<!DOCTYPE>`, `<!ENTITY>` or any other declaration (AudioPluginHost writes none, and JUCE's
+parser would read the files an entity names), or elements nested deeper than 32; an element
+other than `<FILTER>` and `<CONNECTION>`; a uid or channel attribute that is not digits only;
+another plugin format (VST3, LADSPA); an internal plugin other than the four above; ARA; a MIDI
+connection or a connection of a MIDI node; a channel the stream or the amplifier does not have;
+a connection to a node that is not in the session; a `STATE` that is not exactly JUCE's base64
+(its size prefix, digits only and at most 32 MB, must match its characters, and it must read
+back as itself) or not the LV2 state of a JUCE plugin saved under its URI, whose `StateString`
+is checked the same way (at most 16 MB); a disabled bus (speakerd enables every bus, so the
+channels would move); two connections that map to one (a session with two `Audio Output`
+nodes); and when the document cannot be written to stdout. It is parsed from the file's text,
+never from the file, so it reads no other file. Any other error ends it with exit 2 too. It
+warns, and goes on, when a plugin is not connected and when nothing reaches the amplifier. A
+node without `STATE`, or whose plugin state is empty, gets no `state`: the plugin starts from
+its defaults. The document is checked as a layer is (`GraphDocument::parse`) before it is
+written; whether its plugins load is checked when a speaker loads it.
+
+**The example.** `examples/loudness.filtergraph` is the session of the complete `loudness` build
+between the stream's FL and the woofer, with the parameter values of `examples/loudness.params.json`.
+`examples/make-loudness-filtergraph.sh` made it, with `examples/MakeFiltergraph.cpp` (the target
+`speakerd-make-filtergraph`, built only on request): it hosts the complete build through JUCE's
+LV2 hosting in a graph made the way AudioPluginHost makes a new document (Audio Input, MIDI Input,
+Audio Output, MIDI Output, uids 1 to 4, the plugin 5), sets the values while the graph runs, and
+writes the file the way `PluginGraph::createXml` and `saveDocument` do, CRLF line ends included.
+Imported and rendered, it gives exactly (bit for bit) what the same values given as `params`
+give, and so does its `--prefer-headless` import with `loudness_headless`.
+
+```bash
+speakerd --import-filtergraph dsp/juce_apps/speakerd/examples/loudness.filtergraph \
+         --device ~/.local/state/speakerd/device.json --prefer-headless > graph.json
+```
 
 ## Comparing a live capture with the render
 
@@ -421,4 +594,6 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `Samples.h` | the absolute caps: NaN and infinity to 0, clamping |
 | `PipeWireNode.*` | the input sink, the `pw_filter` node, and the links |
 | `Render.*` | the offline render |
-| `DeviceConfig.*` | `device.json` |
+| `DeviceConfig.*` | `device.json`, its `limits` included |
+| `FilterGraph.*` | `--import-filtergraph`: an AudioPluginHost session as a graph document |
+| `examples/` | an AudioPluginHost session, `loudness.filtergraph`, and how it was made |

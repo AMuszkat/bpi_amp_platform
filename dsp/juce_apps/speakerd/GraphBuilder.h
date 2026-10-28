@@ -23,6 +23,14 @@ namespace speakerd
         juce::StringArray warnings;
     };
 
+    /** Sets a hosted plugin's parameters from a document's values (`params` of a node: the
+        plugin's own units, by parameter ID), as a layer does. Fails on an unknown parameter ID or
+        a value the parameter cannot take; a value outside the range is clamped, with a warning.
+        A hosted LV2 plugin takes them in its next processBlock calls. Message thread, on a
+        plugin that is not running. */
+    juce::Result setParameters (juce::AudioProcessor&, const std::vector<std::pair<juce::String, juce::var>>& params,
+                                const juce::String& where, const juce::String& pluginName, juce::StringArray& warnings);
+
     /** Turns a graph document into a running AudioProcessorGraph, the way AudioPluginHost's
         PluginGraph::restoreFromXml does: the input node and the output node at their reserved
         uids, each plugin node at its own uid, then the connections. */

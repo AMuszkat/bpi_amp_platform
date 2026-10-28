@@ -5,6 +5,9 @@ complete, control and headless targets, checked by `dsp/juce_apps/plugin-check`.
 `speakerd` (`dsp/juce_apps/speakerd`) runs the headless builds inside PipeWire, from the first
 state layer that loads, with no controller, and sounds like the complete build; the
 `tests/vpair/test_speakerd_*` and `test_passthrough_safety` scenarios check it on every run.
+For the boards, `speakerd` and the plugins cross-compile for aarch64, `device.json` can cap the
+output and mute the tweeter, and `speakerd --import-filtergraph` turns a board's AudioPluginHost
+session into a graph document (end of section 2).
 The virtual pair used for testing is in `tests/vpair/`. Everything else is still a proposal.*
 
 A stereo set made of this platform is two complete boards, each running the same JUCE
@@ -331,10 +334,41 @@ parameters, so the DSP stays JUCE from end to end. It never touches the network.
   queue to the audio thread and is applied there, never on the message thread while the graph
   runs.
 - **Absolute caps.** NaN and infinity in the stream become 0 before any plugin sees them. What
-  leaves `speakerd` has NaN and infinity as 0 and is clamped to +-1.0, whatever the graph does;
-  passthrough is clamped to -20 dBFS.
+  leaves `speakerd` has NaN and infinity as 0 and is clamped to +-1.0, whatever the graph does,
+  or lower, to the ceiling of the device file's limits (below); passthrough is clamped to -20 dBFS.
 - **An offline render mode**, `speakerd --render IN.wav OUT.wav`, runs the same graph from the
   same layers in blocks of the live quantum: the reference a live capture is compared with.
+
+**What the step to the boards added.** Before step 3, so that `speakerd` can run on a real
+speaker in place of AudioPluginHost:
+
+- **An aarch64 build.** `tools/build.sh speakerd aarch64` and `tools/build.sh <plugin> aarch64`
+  cross-compile in the development container into `build/aarch64/`, with the native JUCE install
+  and the image's `:arm64` libraries, and never copy an aarch64 bundle into a `~/.lv2`. On the
+  board `speakerd` needs only libpipewire and the C and C++ runtimes, no X11. Rendered under
+  `qemu-aarch64-static`, it gives the x86_64 render's gains within 0.005 dB; the difference is
+  the fused multiply-adds GCC uses on aarch64, in the plugin's filters.
+- **Output limits in `device.json`, failing closed.** `"limits": { "gain_db": -20.0, "tweeter":
+  "muted" }` is a fixed gain of at most 0 dB on both amplifier outputs that is also their
+  ceiling (with -20, no sample above -20 dBFS, whatever the stream or the graph), and the tweeter
+  as exact zeros. It applies after the graph (passthrough included, so passthrough is then at
+  -40 dB), with constants the audio thread only reads. It is how a deploy caps the volume and
+  mutes the tweeter until the first smoke test passes ([autonomous-development.md](autonomous-development.md),
+  section 2). No limit at all is written out, `{ "gain_db": 0, "tweeter": "on" }`: **a
+  `device.json` without `limits` plays at the fail-safe, -20 dB with the tweeter muted**, and so
+  does one that is missing or invalid, where a key speakerd does not know (a misspelt `limits`)
+  or a key given twice is invalid.
+- **The board's current session, imported.** `speakerd --import-filtergraph FILE [--device
+  DEVICE_JSON] [--prefer-headless]` reads an AudioPluginHost `.filtergraph` the way
+  `PluginGraph::restoreFromXml` does and writes it as a graph document: Audio Input and Audio
+  Output become the reserved input and output nodes (the speaker's `device.json` says which of
+  the session's output channels is the woofer), each LV2 node a plugin node whose LV2 state is
+  unwrapped into the plugin's own, and with `--prefer-headless` a complete or control build
+  becomes its headless sibling. Anything that does not map (another format, MIDI, a channel the
+  amplifier does not have), and anything unsafe on a speaker (the stream straight to the
+  tweeter, a control build that passes it through), fails with the reason. Rendered, an imported
+  session gives exactly what the same settings given as parameter values give, so "the same
+  sound as today" is a document `speakerd` can play.
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it advertises the speaker over mDNS, receives
@@ -724,8 +758,9 @@ flowchart LR
   a full-range signal would reach the tweeter, so this mode sends the Mine pin to the woofer
   output only, mutes the tweeter and caps the level. Mine is FL on a left speaker, FR on a
   right one, and (FL + FR) / 2 on a mono one. It reaches the woofer 20 dB down and is clamped
-  there, so nothing in passthrough is louder than -20 dBFS, even a stream above full scale. It is loud in the logs, and should also show on the
-  identify LED or chime.
+  there, so nothing in passthrough is louder than -20 dBFS, even a stream above full scale; the
+  output limits of the device file apply on top (-40 dBFS with a deploy's -20 dB). It is loud in
+  the logs, and should also show on the identify LED or chime.
 
 A layer **loads** when it parses, every plugin in it is found and instantiated and takes its
 state (its state changes, when the document's state differs from it) and parameter values,
@@ -733,7 +768,11 @@ every connection is possible, and the graph has no loop. `speakerd` says on stde
 each layer before the one it uses failed.
 
 The device file is local and never comes from the hub. A speaker always knows whether it is
-left or right, even alone on a shelf.
+left or right, even alone on a shelf. It also carries the output limits a deploy sets (section
+2), and they fail closed: a device file that says nothing about limits plays at the fail-safe,
+its output at -20 dB at most and its tweeter muted, and a device file that is missing or invalid
+plays mono at the same fail-safe. Lifting the limits is written in the file, never implied by
+its absence.
 
 **Rule 2: nothing on the audio path waits for the network.** The boot order is fixed and
 local:
@@ -836,6 +875,7 @@ to the next one (`test_speakerd_state_layers`); with no loadable layer the tweet
 and the woofer never exceeds -20 dBFS, even for an input above full scale
 (`test_passthrough_safety`); and it plays whatever starts first and survives the amplifier
 going away (`test_speakerd_start_order`).
-Before `speakerd` runs on a board it still needs a persistent `speakerd` sink in the board's
-PipeWire configuration, a systemd unit that restarts it on an older layer after a crash, and an
-aarch64 build.
+`speakerd` now builds for the boards (aarch64), caps its output from `device.json` and imports
+the AudioPluginHost session a board plays today (section 2). Before it runs on a board it still
+needs a persistent `speakerd` sink in the board's PipeWire configuration and a systemd unit that
+restarts it on an older layer after a crash, both in `firmware/`.

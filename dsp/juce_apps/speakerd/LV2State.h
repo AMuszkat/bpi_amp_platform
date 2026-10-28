@@ -14,6 +14,19 @@ namespace speakerd::lv2state
         the plugin's own state under that key of the hosted build's state, and unwrapping means
         reading it back out: the same document state works whichever build is hosted. */
 
+    /** The largest plugin state speakerd takes, in its own format, and the largest LV2 state
+        text (which holds the plugin's own state as base64, and more). */
+    constexpr size_t maxStateBytes = 16 * 1024 * 1024;
+    constexpr size_t maxLV2StateBytes = 2 * maxStateBytes;
+
+    /** JUCE's own base64, what MemoryBlock::toBase64Encoding writes ("<size>.<payload>"), as
+        bytes: only when it is exactly that. The size is digits only and at most `maxBytes`, the
+        payload has exactly the characters that size needs, all from JUCE's alphabet, and
+        encoding the result again gives the same text. MemoryBlock::fromBase64Encoding alone
+        trusts the size (a negative or huge one allocates or throws) and skips what it cannot
+        read. */
+    juce::Result decodeJuceBase64 (const juce::String& text, size_t maxBytes, juce::MemoryBlock& out);
+
     /** Restores `pluginState` (the plugin's own format) into a hosted LV2 instance of a JUCE
         plugin. Must run on the message thread, while the instance is not processing.
 

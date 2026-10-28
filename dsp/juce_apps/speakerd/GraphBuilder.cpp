@@ -190,6 +190,31 @@ namespace speakerd
     }
 
     //==============================================================================
+    juce::Result setParameters (juce::AudioProcessor& instance, const std::vector<std::pair<juce::String, juce::var>>& params,
+                                const juce::String& where, const juce::String& pluginName, juce::StringArray& warnings)
+    {
+        std::map<juce::String, juce::AudioProcessorParameter*> byId;
+        for (auto* p : instance.getParameters())
+            if (auto* hosted = dynamic_cast<juce::HostedAudioProcessorParameter*> (p))
+                byId[bareId (hosted->getParameterID())] = p;
+
+        for (const auto& [id, value] : params)
+        {
+            const auto it = byId.find (id);
+
+            if (it == byId.end())
+                return juce::Result::fail (where + ": " + pluginName + " has no parameter \"" + id + "\"");
+
+            float normalised = 0.0f;
+            if (auto r = toNormalised (*it->second, value, normalised, warnings, where + ": " + id); r.failed())
+                return r;
+
+            it->second->setValueNotifyingHost (normalised);
+        }
+
+        return juce::Result::ok();
+    }
+
     juce::Result GraphBuilder::build (const GraphDocument& doc, double sampleRate, int maxBlock, BuiltGraph& out)
     {
         out = {};
@@ -282,26 +307,10 @@ namespace speakerd
                     return juce::Result::fail (where + ": state: " + r.getErrorMessage());
             }
 
-            std::map<juce::String, juce::AudioProcessorParameter*> byId;
-            for (auto* p : instance.getParameters())
-                if (auto* hosted = dynamic_cast<juce::HostedAudioProcessorParameter*> (p))
-                    byId[bareId (hosted->getParameterID())] = p;
-
-            for (const auto& [id, value] : node->params)
-            {
-                const auto it = byId.find (id);
-
-                if (it == byId.end())
-                    return juce::Result::fail (where + ": " + pluginName + " has no parameter \"" + id + "\"");
-
-                float normalised = 0.0f;
-                if (auto r = toNormalised (*it->second, value, normalised, out.warnings, where + ": " + id); r.failed())
-                    return r;
-
-                // A hosted LV2 plugin receives this on its atom port in its next processBlock;
-                // Engine::settle runs those blocks before anything is heard.
-                it->second->setValueNotifyingHost (normalised);
-            }
+            // A hosted LV2 plugin receives these on its atom port in its next processBlock;
+            // Engine::settle runs those blocks before anything is heard.
+            if (auto r = setParameters (instance, node->params, where, pluginName, out.warnings); r.failed())
+                return r;
 
             if (node->bypassed)
                 graphNode->setBypassed (true);

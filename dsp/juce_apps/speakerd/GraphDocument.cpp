@@ -1,5 +1,7 @@
 #include "GraphDocument.h"
 
+#include "LV2State.h"
+
 #include <limits>
 #include <set>
 
@@ -49,6 +51,26 @@ namespace speakerd
                 return fail (where, v.isVoid() ? "missing" : "must be a non-empty string");
 
             out = v.toString();
+            return Result::ok();
+        }
+
+        /** RFC 4648 base64, only when it is exactly what Base64::toBase64 writes, for at most
+            lv2state::maxStateBytes bytes. */
+        Result decodeBase64 (const String& text, juce::MemoryBlock& out)
+        {
+            if ((size_t) text.length() > (lv2state::maxStateBytes + 2) / 3 * 4)
+                return Result::fail ("more than " + String ((juce::int64) lv2state::maxStateBytes) + " bytes");
+
+            juce::MemoryOutputStream decoded;
+
+            if (! juce::Base64::convertFromBase64 (decoded, text))
+                return Result::fail ("is not valid base64 (RFC 4648)");
+
+            out = decoded.getMemoryBlock();
+
+            if (juce::Base64::toBase64 (out.getData(), out.getSize()) != text)
+                return Result::fail ("is not canonical base64 (RFC 4648, with its padding)");
+
             return Result::ok();
         }
 
@@ -109,12 +131,11 @@ namespace speakerd
                 if (! state.isString())
                     return fail (where + ".state", "must be a base64 string");
 
-                juce::MemoryOutputStream decoded;
+                juce::MemoryBlock decoded;
+                if (auto r = decodeBase64 (state.toString().removeCharacters (" \t\r\n"), decoded); r.failed())
+                    return fail (where + ".state", r.getErrorMessage());
 
-                if (! juce::Base64::convertFromBase64 (decoded, state.toString().removeCharacters (" \t\r\n")))
-                    return fail (where + ".state", "is not valid base64");
-
-                node.state = decoded.getMemoryBlock();
+                node.state = decoded;
             }
 
             if (const auto& bypassed = json["bypassed"]; ! bypassed.isVoid())

@@ -33,6 +33,40 @@ namespace speakerd::lv2state
         }
     }
 
+    juce::Result decodeJuceBase64 (const juce::String& text, size_t maxBytes, juce::MemoryBlock& out)
+    {
+        static constexpr const char* alphabet = ".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+";
+        out.reset();
+
+        const auto dot = text.indexOfChar ('.');
+        const auto prefix = text.substring (0, juce::jmax (0, dot));
+        const auto payload = text.substring (dot + 1);
+
+        if (dot <= 0 || prefix.length() > 10 || ! prefix.containsOnly ("0123456789"))
+            return juce::Result::fail ("not JUCE base64: it starts with \"<size>.\", digits only");
+
+        const auto size = (juce::uint64) prefix.getLargeIntValue();
+
+        if (size > maxBytes)
+            return juce::Result::fail ("not taken: " + juce::String ((juce::int64) size) + " bytes, more than "
+                                       + juce::String ((juce::int64) maxBytes));
+
+        if ((juce::uint64) payload.length() != (size * 8 + 5) / 6)
+            return juce::Result::fail ("not JUCE base64: " + juce::String (payload.length()) + " characters for "
+                                       + juce::String ((juce::int64) size) + " bytes");
+
+        if (! payload.containsOnly (alphabet))
+            return juce::Result::fail ("not JUCE base64: a character outside its alphabet");
+
+        if (! out.fromBase64Encoding (text) || out.getSize() != size || out.toBase64Encoding() != text)
+        {
+            out.reset();
+            return juce::Result::fail ("not JUCE base64: it does not read back as itself");
+        }
+
+        return juce::Result::ok();
+    }
+
     juce::Result wrap (const juce::String& lv2State, const juce::String& pluginUri,
                        const juce::MemoryBlock& pluginState, juce::String& wrapped)
     {
@@ -57,10 +91,8 @@ namespace speakerd::lv2state
         if (! range.has_value())
             return juce::Result::fail ("no <" + pluginUri + ":StateString> in the plugin's LV2 state");
 
-        pluginState.reset();
-
-        if (! pluginState.fromBase64Encoding (lv2State.substring (range->getStart(), range->getEnd())))
-            return juce::Result::fail ("the StateString of " + pluginUri + " is not JUCE base64");
+        if (auto r = decodeJuceBase64 (lv2State.substring (range->getStart(), range->getEnd()), maxStateBytes, pluginState); r.failed())
+            return juce::Result::fail ("the StateString of " + pluginUri + ": " + r.getErrorMessage());
 
         return juce::Result::ok();
     }
