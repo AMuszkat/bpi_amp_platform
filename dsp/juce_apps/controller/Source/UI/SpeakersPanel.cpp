@@ -104,7 +104,8 @@ namespace bpi
             g.drawText (juce::String (s.online ? "online" : "offline") + ", layer " + (s.layer.isEmpty() ? juce::String ("?") : s.layer),
                         box.removeFromTop (17), juce::Justification::centredLeft);
             g.drawText ("monitor: " + (s.address.isEmpty() ? juce::String ("no address")
-                                                            : s.address + (s.monitorConnected ? ", connected" : ", not connected")),
+                                       : s.monitorRefusal.isNotEmpty() ? s.address + ", refused: " + s.monitorRefusal
+                                                                       : s.address + (s.monitorConnected ? ", connected" : ", not connected")),
                         box.removeFromTop (17), juce::Justification::centredLeft);
 
             drawBar (g, box.removeFromTop (17), "woofer",  s.level[0], s.level[1]);

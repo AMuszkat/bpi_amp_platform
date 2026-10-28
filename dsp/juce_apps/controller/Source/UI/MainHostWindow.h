@@ -34,7 +34,7 @@ namespace bpi
         const ControlPluginType* getChosenType (int menuID) const;
 
         /** Asks for a hub address, and calls this with it. */
-        std::function<void (const juce::String&)> onConnectRequested;
+        std::function<void (const juce::String& host, const juce::String& secretFile)> onConnectRequested;
         std::function<void()> onQuitRequested;
 
         std::unique_ptr<GraphDocumentComponent> graphHolder;

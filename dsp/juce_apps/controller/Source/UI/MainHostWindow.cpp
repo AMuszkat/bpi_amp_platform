@@ -181,6 +181,9 @@ namespace bpi
                                                          "The hub is the left speaker's ampd. Its address, as a name or an IP:",
                                                          juce::MessageBoxIconType::QuestionIcon, this);
         hubDialog->addTextEditor ("hub", bridge.getOptions().hubHost, "Hub");
+        // A path, never the secret: the file holds it (mode 600), as on the speakers.
+        hubDialog->addTextEditor ("secretFile", settings != nullptr ? settings->getValue ("secretFile") : juce::String(),
+                                  "File with the pair's secret");
         hubDialog->addButton ("Connect", 1, juce::KeyPress (juce::KeyPress::returnKey));
         hubDialog->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
 
@@ -190,10 +193,11 @@ namespace bpi
                 return;
 
             const auto host = safe->hubDialog->getTextEditorContents ("hub").trim();
+            const auto secretFile = safe->hubDialog->getTextEditorContents ("secretFile").trim();
             safe->hubDialog.reset();
 
             if (result == 1 && host.isNotEmpty() && safe->onConnectRequested != nullptr)
-                safe->onConnectRequested (host);
+                safe->onConnectRequested (host, secretFile);
         }), false);
     }
 

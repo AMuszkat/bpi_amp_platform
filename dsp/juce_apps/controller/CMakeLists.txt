@@ -17,6 +17,7 @@ juce_add_gui_app(controller
 target_sources(controller
     PRIVATE
         Source/Main.cpp
+        Source/Bridge/Auth.cpp
         Source/Bridge/Bridge.cpp
         Source/Bridge/GraphDocument.cpp
         Source/Bridge/JsonLineLink.cpp
@@ -49,6 +50,7 @@ target_compile_definitions(controller
 target_link_libraries(controller
     PRIVATE
         juce::juce_audio_processors
+        juce::juce_cryptography
         juce::juce_gui_extra
         juce::juce_osc
     PUBLIC

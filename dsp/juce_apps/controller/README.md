@@ -21,13 +21,15 @@ It processes no audio and holds no DSP:
 ## Command line
 
 ```
-controller [--hub HOST] [--name NAME] [--speaker NAME=HOST]... [options]
-controller --hub HOST --script FILE [--gui] [--test-probe] [--trace]
+controller [--hub HOST] [--secret-file FILE] [--name NAME] [--speaker NAME=HOST]... [options]
+controller --hub HOST --secret-file FILE --script FILE [--gui] [--test-probe] [--trace]
+controller --self-test
 ```
 
 | Option | |
 |---|---|
 | `--hub HOST` | the hub: the left speaker's `ampd`. Also *Hub > Connect to a Hub...*, which saves it |
+| `--secret-file FILE` | the file holding the pair's secret (below). Also *Hub > Connect to a Hub...*, which saves the path |
 | `--name NAME` | this controller's `origin` (default `ctl-<computer name>`) |
 | `--speaker NAME=HOST` | where speaker NAME's monitor link listens. Repeatable. Without it, the hub's own speaker (the hub's `hello` name) is at the hub's address, and a speaker the hub lists with an `address` key is there |
 | `--osc-port PORT` | the UDP port the hub sends OSC echoes to (the hello's `osc_port`); default 0: any free port |
@@ -36,11 +38,23 @@ controller --hub HOST --script FILE [--gui] [--test-probe] [--trace]
 | `--script FILE` | the test mode (below) |
 | `--gui` | with `--script`: open the windows too |
 | `--test-probe` | add the test probe to the plugins (below) |
+| `--send-queue-limit BYTES` | what a link may hold for a peer that stopped reading before it drops the connection and reconnects (default 4 MiB) |
 | `--trace` | every line in and out, on stderr |
+| `--self-test` | checks the HMAC-SHA256 against RFC 4231 (cases 1, 2, 3 and 6) and exits 0 or 1 |
 | `--version`, `--help` | |
 
 **Settings.** `~/.config/BPI Controller.settings` (JUCE's `PropertiesFile`): `hub`, `name`,
-`speakers` (`left=HOST,right=HOST`) and the window position. The command line wins.
+`speakers` (`left=HOST,right=HOST`), `secretFile` (a path, never the secret) and the window
+position. The command line wins.
+
+**The pair's secret** (docs/protocol.md, "Authentication") is the one in the speakers'
+`ampd.json`: 16 to 256 printable characters without spaces. The controller reads it from a file,
+the whole file without its final line break; keep that file mode 600 (`chmod 600`: the
+controller warns when others may read it). The secret is never an argument (`--secret` is
+refused), never logged, printed or shown: only the proofs made with it leave the controller, and
+`--trace` hides those too. A secret file that is missing or malformed stops the controller at
+start (exit 2) or, from the Connect dialog, says why. Without a secret file it connects without a
+proof, which only a hub that has no secret yet accepts.
 
 ## The bridge
 
@@ -48,9 +62,16 @@ One object, `Source/Bridge/Bridge.cpp`, between the canvas and the speakers. It 
 docs/protocol.md asks of a controller:
 
 - **Connection.** It connects to the hub's control link, reconnecting every second while it
-  cannot, and sends `hello` (`role` controller, its `name`, `osc_port`, `protocol` 1). It
-  builds the canvas from the `state` that answers, every time it connects: the hub's document,
-  its parameter values, its speakers and who is dragging what.
+  cannot. The hub speaks first: its `hello` brings a `nonce`, and the controller answers with
+  its own `hello` (`role` controller, its `name`, `osc_port`, `protocol` 1, and `auth`: the
+  lowercase hex HMAC-SHA256, keyed with the secret's UTF-8 bytes, of `<nonce>:controller:<name>`;
+  HMAC per RFC 2104 over JUCE's SHA-256). It builds the canvas from the `state` that answers,
+  every time it connects: the hub's document, its parameter values, its speakers and who is
+  dragging what. A refusal (`{"op":"error","about":"hello"}`, a wrong or missing proof) is shown
+  in the status bar and `state`'s `refused`, and the link asks again only after 5 s.
+- **OSC from the authenticated address.** The hub takes OSC only from the address of an
+  authenticated control connection, so the OSC socket is bound to that connection's own local
+  address, rebound at every connection.
 - **Parameters.** It listens to every parameter of every control build. While a gesture is
   active (an editor's slider is held), a change goes over OSC, `/bpi/param ,isfis`, at most 50
   a second per parameter (later values wait for the next 20 ms slot, the newest wins). At the
@@ -75,10 +96,18 @@ docs/protocol.md asks of a controller:
   an edit made while one is waiting is undone with a note. A `graph` message from the hub with
   a newer revision (another controller's edit) is applied to the canvas; nodes that stay keep
   their open windows.
+- **Never waiting for a peer.** The control and monitor links do all their socket work on their
+  own threads: `send()` only queues the line and wakes the link, so the message thread (the UI,
+  the knobs) never blocks on a hub that is slow, stalled or stopped. The kernel's send buffer
+  is bounded (64 KiB), and the queue too: a peer that has not read for more than
+  `--send-queue-limit` bytes is dropped, and the link connects again, starting from the hub's
+  `state`. Lines from an earlier connection are never sent on a new one.
 - **Placeholders.** A node whose plugin has no control build in this controller is shown as
   a placeholder (orange frame) with the pins its connections use: it is never dropped from
   a proposal.
-- **Monitoring.** It connects to every speaker's monitor link. A plugin window that is open
+- **Monitoring.** It connects to every speaker's monitor link, answers the speaker's `hello`
+  with its proof (the same `<nonce>:controller:<name>`) before any `subscribe`, and shows a
+  refusal in the speakers panel. A plugin window that is open
   subscribes to its node's `mon_` streams (`node/<uid>/<mon_id>`, any parameter whose ID starts
   with `mon_`) on one speaker, chosen by the L / R buttons at the top of the window (the left
   speaker first); closing the last window of a node, or switching speaker, unsubscribes. The
@@ -126,9 +155,12 @@ timeout (in seconds, the last argument where shown; default 5) passes.
 | `expect-speaker NAME online/offline [s]` | |
 | `main-window X Y W H` | places the main window (`--gui`) |
 | `screenshot FILE` | every window, as JUCE paints it, into one PNG (`--gui`) |
+| `sweep UID SECONDS` | sets every parameter of a node on every tick, without a gesture (a preset morph): as much traffic as the control link takes, 50 a second per parameter |
 | `sleep MS`, `print TEXT` | |
 
-Lines starting with `#` are comments. Each command prints, for example:
+Lines starting with `#` are comments. Every line carries `max_tick_ms`, the longest gap between two
+ticks of the test mode's timer during that step: the message thread's pulse (10 ms when all is
+well). Each command prints, for example:
 
 ```json
 {"step":4,"cmd":"wait-echo","line":"wait-echo 16 s0_e0_gain 4.5","ok":true,"ms":3,"value":4.5,"seq":1001,"origin":"ctl-test","link":"control","echoes":2}
@@ -137,7 +169,9 @@ Lines starting with `#` are comments. Each command prints, for example:
 {"result":"fail","steps":9,"failed":1}
 ```
 
-`state` prints `{"state": {...}}` with `connected`, `synced`, `hub`, `revision`, `seq`, `pending`
+`state` prints `{"state": {...}}` with `connected`, `connections_made` (control link connections
+so far), `queued_bytes` (waiting to be written to the hub), `refused` (the hub's reason, if it
+refused this controller since the last state), `synced`, `hub`, `revision`, `seq`, `pending`
 (the revision waiting for an answer, or null), `outcome` (`applied N` or `rejected N: reason`),
 `status`, `nodes` (uid, kind: `input`, `output`, `control` or `placeholder`; for plugins name,
 identifier, bypassed, `params` and `monitors` in the plugin's units, `monitor_speaker`),
@@ -168,7 +202,10 @@ path before a real plugin publishes a monitor. A hub must know its identifier to
 
 `tests/fake_hub.py` is a small hub for these tests (Python, standard library only): the control
 link, the knobs link and both speakers' monitor links, on 127.0.3.1 (the hub, left) and
-127.0.3.2 (right). It stamps `seq`, echoes, relays gestures, applies or rejects proposals
+127.0.3.2 (right). It authenticates as docs/protocol.md says, with the tests' secret
+(`fake_hub.SECRET`, or `--secret-file`): it speaks first with a nonce, checks the proof of each
+hello with Python's `hmac`, refuses a wrong one, and takes OSC only from an authenticated
+controller's address. It stamps `seq`, echoes, relays gestures, applies or rejects proposals
 (stale base, an unknown plugin, or a reason a test sets), and produces monitor values at the
 rate asked for. Run alone (`python3 fake_hub.py --probe --trace`) it serves a document until
 interrupted.
@@ -185,8 +222,13 @@ gesture's end over the control link (and late echoes of its own ignored); anothe
 echoes applied; proposals applied (add, connect, bypass, disconnect: revisions 8 to 11, the new
 node with all 35 loudness parameters and the headless URI); a rejection and a stale base undone;
 another controller's revision with a placeholder kept untouched in the next proposal; monitor
-subscriptions moving between speakers and the output levels; no edit without a hub; and a
-reconnect that takes the new hub's state and pushes nothing. Each test prints its numbers.
+subscriptions moving between speakers and the output levels; no edit without a hub; a
+reconnect that takes the new hub's state and pushes nothing; a hub that stops reading during a
+3 s sweep (its receive buffer 4 KiB), with the message thread ticking on and the backed-up lines
+going out in order once it reads again; and one that never reads again, dropped past a 64 KiB
+queue and reconnected; a wrong secret refused, shown, and retried every 5 s (2 attempts in 7 s),
+with neither secret anywhere in the output; and the HMAC against RFC 4231, a malformed secret file
+and a secret on the command line refused. Each test prints its numbers.
 
 The screenshot run opens the loudness control editor and the test probe beside the canvas and
 writes `build/controller-check/controller-screen.png` (the X screen) and `controller-juce.png`

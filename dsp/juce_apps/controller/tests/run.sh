@@ -55,7 +55,11 @@ EOF
 
 export HOME="$OUT/home"   # its own settings file, never the user's
 mkdir -p "$HOME"
+# The tests' pair secret (fake_hub.SECRET), in a file of mode 600 as the controller wants it.
+python3 -c "import sys; sys.path.insert(0, '$HERE'); import fake_hub; print(fake_hub.SECRET)" > "$OUT/secret"
+chmod 600 "$OUT/secret"
 "$CONTROLLER" --hub 127.0.3.1 --name ctl-screenshot --speaker right=127.0.3.2 --test-probe --gui \
+    --secret-file "$OUT/secret" \
     --script "$OUT/screenshot.script" > "$OUT/screenshot.jsonl" &
 ctl=$!
 for _ in $(seq 1 100); do grep -q '"text":"capture"' "$OUT/screenshot.jsonl" 2> /dev/null && break; sleep 0.1; done

@@ -66,5 +66,8 @@ namespace bpi
         juce::uint32 lastAdded = 0;
         juce::var waitDetail;
         double startedMs = 0.0;
+        double lastTickMs = 0.0;           // the message thread's pulse: the longest gap between
+        double maxTickGapMs = 0.0;         // two timer ticks during a step is in its output line
+        int sweepTicks = 0, sweepValues = 0;
     };
 }
