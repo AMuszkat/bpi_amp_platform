@@ -42,7 +42,7 @@ controller --self-test
 | `--trace` | every line in and out, on stderr |
 | `--hub-name NAME` | the hub's name to expect (also the setting `hubName`); without it, the name the hub proves is accepted and shown |
 | `--insecure` | believe a hub (and its speakers) that has no secret yet and so proves nothing (`"auth": null`): only for a pair whose installer has not run. The status bar then starts with INSECURE, in red |
-| `--self-test` | checks the HMAC-SHA256 against RFC 4231 (cases 1, 2, 3 and 6) and exits 0 or 1 |
+| `--self-test` | checks the HMAC-SHA256 against RFC 4231 (cases 1, 2, 3 and 6) and the protocol's known-answer vector (client proof, server proof, K, OSC token; the inputs of `tests/vpair/auth_vector.json`), prints them, and exits 0 or 1 |
 | `--version`, `--help` | |
 
 **Settings.** `~/.config/BPI Controller.settings` (JUCE's `PropertiesFile`): `hub`, `name`,

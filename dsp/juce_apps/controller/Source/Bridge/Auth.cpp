@@ -78,10 +78,14 @@ namespace bpi::auth
         return hmacHex (secret, "server:" + serverNonce + ":" + clientNonce + ":" + role + ":" + name);
     }
 
+    juce::String sessionKey (const juce::String& secret, const juce::String& serverNonce, const juce::String& clientNonce)
+    {
+        return hmacHex (secret, "session:" + serverNonce + ":" + clientNonce);
+    }
+
     juce::String oscToken (const juce::String& secret, const juce::String& serverNonce, const juce::String& clientNonce)
     {
-        const auto sessionKey = hmacHex (secret, "session:" + serverNonce + ":" + clientNonce);
-        return hmacHex (sessionKey, "osc").substring (0, 32);
+        return hmacHex (sessionKey (secret, serverNonce, clientNonce), "osc").substring (0, 32);
     }
 
     juce::String randomNonce()
@@ -201,6 +205,33 @@ namespace bpi::auth
             const auto pass = got == c.expected;
             ok = ok && pass;
             report.add ("RFC 4231 case " + juce::String (c.number) + ": " + (pass ? juce::String ("ok") : "got " + got + ", want " + c.expected));
+        }
+
+        // The protocol's known-answer vector (computed with Python's hmac and hashlib).
+        const juce::String secret ("0123456789abcdef-pair-secret");
+        const juce::String ns ("00112233445566778899aabbccddeeff"), nc ("ffeeddccbbaa99887766554433221100");
+
+        const std::pair<const char*, juce::String> vector[] =
+        {
+            { "client_proof", clientProof (secret, ns, nc, "controller", "ctl-test") },
+            { "server_proof", serverProof (secret, ns, nc, "hub", "left") },
+            { "session_key",  sessionKey (secret, ns, nc) },
+            { "osc_token",    oscToken (secret, ns, nc) },
+        };
+
+        const char* const expected[] =
+        {
+            "0e82cbf2d55bbe8c34cae30db176a88e6a3f9227a6322140df7f2a3142e8e22a",
+            "e067654372eb4ce9d2d86af15cf1fcaa9a311476d00e0b4645961852884cffb4",
+            "9bd062cf4dbaf55e3e6efb6e07e908ce9bccc3ccbb271158ee5a48cb867d638a",
+            "390b2272219a58e77b6ad16b88cd17ac",
+        };
+
+        for (size_t i = 0; i < 4; ++i)
+        {
+            const auto pass = vector[i].second == expected[i];
+            ok = ok && pass;
+            report.add ("vector " + juce::String (vector[i].first) + ": " + vector[i].second + (pass ? " ok" : juce::String (" want ") + expected[i]));
         }
 
         return ok;

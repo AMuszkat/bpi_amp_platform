@@ -29,6 +29,7 @@ namespace bpi::auth
         token: the first 32 hex characters of HMAC-SHA256 keyed with K (the UTF-8 bytes of its hex)
         over "osc". */
     juce::String oscToken (const juce::String& secret, const juce::String& serverNonce, const juce::String& clientNonce);
+    juce::String sessionKey (const juce::String& secret, const juce::String& serverNonce, const juce::String& clientNonce);
 
     /** 32 lowercase hex characters from the system's cryptographic source (getrandom, else
         /dev/urandom; arc4random on Apple systems); empty if none answers. */
@@ -45,7 +46,9 @@ namespace bpi::auth
         content. Warns (in `warning`) when others than the owner may read the file. */
     juce::Result readSecretFile (const juce::File&, juce::String& secret, juce::String& warning);
 
-    /** The RFC 4231 test cases 1, 2, 3 and 6 (a key longer than a block), as "case N: ok" or
-        what differs; false when one fails. */
+    /** The RFC 4231 test cases 1, 2, 3 and 6 (a key longer than a block), and the protocol's
+        known-answer vector (client proof, server proof, K, OSC token; the same inputs as
+        tests/vpair/auth_vector.json), as "case N: ok" / "vector <what>: <hex> ok" or what
+        differs; false when one fails. */
     bool selfTest (juce::StringArray& report);
 }
