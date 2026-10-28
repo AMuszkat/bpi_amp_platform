@@ -45,7 +45,7 @@ namespace speakerd
             if (uid < GraphDocument::firstPluginNode)
                 continue;
 
-            auto* processor = node->getProcessor();
+            auto* processor = &hostedProcessor (*node->getProcessor());
             const auto name = processor->getName();
             t.nodes[uid] = name;
 
@@ -66,7 +66,7 @@ namespace speakerd
 
     RunningGraph Control::swapIn (BuiltGraph&& built, Tables&& next, double sampleRate, int maxBlock, int settleBlock,
                                   juce::int64 newRevision, const juce::String& newLayer, const juce::String& newLayerFile,
-                                  size_t replayFrom)
+                                  juce::uint64 replayFrom)
     {
         auto ownedInbox = std::make_unique<ParameterInbox> (next.slots);
         auto* newInbox = ownedInbox.get();
@@ -74,9 +74,16 @@ namespace speakerd
         // Settled beside the running graph, then swapped in under the fade. From here the audio
         // thread runs the new graph and reads the new inbox; values posted to the old one in
         // between are replayed below.
-        auto old = engine.install ({ std::move (built.graph), std::move (ownedInbox) }, sampleRate, maxBlock, settleBlock);
+        std::vector<std::pair<juce::uint32, juce::String>> names;
+        for (auto* node : built.timedNodes)
+            names.emplace_back (node->getUid(), node->getInstance().getName());
+
+        auto old = engine.install ({ std::move (built.graph), std::move (ownedInbox), std::move (built.timedNodes) },
+                                   sampleRate, maxBlock, settleBlock);
 
         const std::lock_guard<std::mutex> guard (lock);
+        timedSerial = engine.getGraphSerial();
+        timedNames = std::move (names);
         tables = std::move (next);
         inbox = newInbox;
         revision = newRevision;
@@ -85,16 +92,15 @@ namespace speakerd
 
         // The parameters that arrived after the apply that built this graph are newer than its
         // document: they went to the old graph, and go to this one too, where it has them.
-        for (auto i = replayFrom; i < sinceApplyBase + sinceApply.size(); ++i)
+        for (const auto& [key, r] : sinceApply)
         {
-            if (i < sinceApplyBase)
+            if (r.arrival < replayFrom)
                 continue;
 
-            const auto& r = sinceApply[i - sinceApplyBase];
             int slot = 0;
             float normalised = 0.0f;
 
-            if (resolve (tables, r.node, r.id, r.value, slot, normalised).wasOk())
+            if (resolve (tables, key.first, key.second, r.value, slot, normalised).wasOk())
                 inbox->post (slot, normalised);
         }
 
@@ -106,7 +112,7 @@ namespace speakerd
         auto t = describeGraph (*loaded.built.graph);
         const auto rev = juce::jmax ((juce::int64) 0, loaded.revision);
         auto old = swapIn (std::move (loaded.built), std::move (t), sampleRate, maxBlock, settleBlock,
-                           rev, loaded.name, loaded.fileName, std::numeric_limits<size_t>::max());
+                           rev, loaded.name, loaded.fileName, std::numeric_limits<juce::uint64>::max());
         old = {};
     }
 
@@ -131,6 +137,17 @@ namespace speakerd
                          { "revision", revision },
                          { "layer", layer },
                          { "protocol", protocolVersion } });
+    }
+
+    bool Control::timedNodes (juce::uint32 serial, std::vector<std::pair<juce::uint32, juce::String>>& out) const
+    {
+        const std::lock_guard<std::mutex> guard (lock);
+
+        if (serial != timedSerial)
+            return false;
+
+        out = timedNames;
+        return true;
     }
 
     bool Control::readMonitor (juce::uint32 node, const juce::String& id, double& value) const
@@ -194,6 +211,12 @@ namespace speakerd
                 const std::lock_guard<std::mutex> guard (lock);
                 status = helloObject ("status");
             }
+
+            // Not under this lock: the monitor thread takes its own, then this one.
+            if (monitor != nullptr)
+                if (auto* o = status.getDynamicObject())
+                    o->setProperty ("timing", monitor->timingStatus());
+
             answer (connection, status);
         }
         else if (op == "subscribe")
@@ -295,7 +318,7 @@ namespace speakerd
                     inbox->post (slot, normalised);
 
                 if (building || ! waiting.empty())
-                    sinceApply.push_back ({ node, id, value });
+                    sinceApply[{ node, id }] = { value, arrivals++ };
             }
         }
 
@@ -332,7 +355,7 @@ namespace speakerd
             ahead = waiting.size();
 
             if ((int) ahead < maxWaitingApplies)
-                waiting.push_back ({ connection, rev, document, sinceApplyBase + sinceApply.size() });
+                waiting.push_back ({ connection, rev, document, arrivals });
         }
 
         if ((int) ahead >= maxWaitingApplies)
@@ -367,8 +390,9 @@ namespace speakerd
         if (! rateVar.isVoid())
         {
             if (! (rateVar.isInt() || rateVar.isInt64() || rateVar.isDouble()) || ! std::isfinite ((double) rateVar)
-                || (double) rateVar < Monitor::minRateHz)
-                return refuse ("rate_hz must be a number, at least " + juce::String (Monitor::minRateHz));
+                || (double) rateVar < Monitor::minRateHz || (double) rateVar > Monitor::maxRateHz)
+                return refuse ("rate_hz must be a number from " + juce::String (Monitor::minRateHz) + " to "
+                               + juce::String (Monitor::maxRateHz));
 
             rate = (double) rateVar;
         }
@@ -402,10 +426,17 @@ namespace speakerd
         waiting.pop_front();
 
         // Keep only the parameters a waiting apply will replay.
-        const auto keepFrom = waiting.empty() ? sinceApplyBase + sinceApply.size() : waiting.front().replayFrom;
-        const auto drop = juce::jmin (sinceApply.size(), keepFrom - juce::jmin (keepFrom, sinceApplyBase));
-        sinceApply.erase (sinceApply.begin(), sinceApply.begin() + (std::ptrdiff_t) drop);
-        sinceApplyBase += drop;
+        if (waiting.empty())
+        {
+            sinceApply.clear();
+        }
+        else
+        {
+            const auto keepFrom = waiting.front().replayFrom;
+
+            for (auto it = sinceApply.begin(); it != sinceApply.end();)
+                it = it->second.arrival < keepFrom ? sinceApply.erase (it) : std::next (it);
+        }
     }
 
     void Control::apply (const Waiting& job)

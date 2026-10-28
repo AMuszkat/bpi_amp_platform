@@ -74,11 +74,30 @@ namespace speakerd
         int samples = 0;
     };
 
+    class TimedNode;
+
     /** A graph and the inbox of its parameters: what Engine::install swaps in, and hands back. */
     struct RunningGraph
     {
         std::unique_ptr<juce::AudioProcessorGraph> graph;
         std::unique_ptr<ParameterInbox> inbox;    // may be null (the render)
+        std::vector<TimedNode*> timedNodes;       // its plugin nodes, owned by the graph, for the timing
+    };
+
+    /** What one audio cycle cost, as the audio thread measured it (Engine::process): nanoseconds,
+        and the cycle's budget, its length in time (quantum / rate). */
+    struct TimingRecord
+    {
+        static constexpr int maxNodes = 64;        // GraphDocument::maxPluginNodes
+
+        juce::uint32 graphSerial = 0;              // which graph ran (Engine::getGraphSerial)
+        juce::uint32 budgetNs = 0;
+        juce::uint32 cycleNs = 0;                  // all of Engine::process
+        juce::uint32 graphNs = 0;                  // AudioProcessorGraph::processBlock, all blocks of the cycle
+        bool graphRan = false;                     // false: the message thread held the graph, or none
+        bool positionJump = false;                 // the driver's position did not follow on
+        juce::uint16 numNodes = 0;
+        std::array<juce::uint32, maxNodes> nodeNs; // per plugin node, in RunningGraph::timedNodes order
     };
 
     /*  The running graph, and the one place the audio thread enters it.
@@ -105,8 +124,9 @@ namespace speakerd
         and infinity become 0, the rest is clamped to the ceiling, +-the limits' gain, at most
         +-1.0) and copies them out. While somebody watches the output level (setLevelWanted), it
         also measures the peak and the sum of the squares of what it copied out, and pushes them
-        into a lock-free ring for the monitor thread. No allocation, no lock of its own, no
-        syscall.
+        into a lock-free ring for the monitor thread. Every cycle it records what it cost (the
+        cycle, the graph, each plugin node: TimedNode) into another (TimingRecord). No
+        allocation, no lock of its own, no syscall (the clock is the vDSO's).
 
         The locks JUCE takes on the audio thread, and why none of them waits:
         - the graph takes each processor's callback lock around its processBlock; speakerd never
@@ -173,6 +193,10 @@ namespace speakerd
             of a second at 32 samples. */
         static constexpr int levelRingSize = 1024;
 
+        /** The cycles the timing ring holds: 10 s at the speaker's quantum, a third of a second at
+            32 samples; the monitor thread drains it every 50 ms. */
+        static constexpr int timingRingSize = 512;
+
         /** `limits` are constants for the engine's life (see OutputLimits); `role` says what the
             Mine channel is. */
         Engine (OutputLimits limits, Role role);
@@ -189,6 +213,10 @@ namespace speakerd
             Returns the old graph and its inbox, which the audio thread no longer knows: the caller
             deletes them, on the message thread, once nobody else refers to them. */
         RunningGraph install (RunningGraph next, double sampleRate, int maxBlock, int settleBlock, bool fadeIn = true);
+
+        /** The serial number of the running graph, one more at every install: what a
+            TimingRecord's graphSerial refers to. */
+        juce::uint32 getGraphSerial() const noexcept   { return graphSerialForReaders.load(); }
 
         /** What service() did. */
         struct Serviced
@@ -235,6 +263,22 @@ namespace speakerd
 
         /** One consumer at a time: calls `fn (const LevelRecord&)` for every cycle measured since
             the last call, oldest first, and returns how many. */
+        /** One consumer at a time: calls `fn (const TimingRecord&)` for every cycle since the last
+            call, oldest first, and returns how many. Every cycle is recorded, watched or not. */
+        template <typename Fn>
+        int drainTiming (Fn&& fn)
+        {
+            const auto scope = timingFifo.read (timingFifo.getNumReady());
+
+            for (int i = 0; i < scope.blockSize1; ++i)  fn (timingRing[(size_t) (scope.startIndex1 + i)]);
+            for (int i = 0; i < scope.blockSize2; ++i)  fn (timingRing[(size_t) (scope.startIndex2 + i)]);
+
+            return scope.blockSize1 + scope.blockSize2;
+        }
+
+        /** Cycles whose record did not fit in the timing ring (the monitor thread was behind). */
+        juce::uint64 getTimingDropped() const noexcept  { return timingDropped.load (std::memory_order_relaxed); }
+
         template <typename Fn>
         int drainLevels (Fn&& fn)
         {
@@ -251,8 +295,12 @@ namespace speakerd
 
         /** One cycle. `in` holds FL and FR, `out` the woofer and the tweeter; any of the four may
             be null (silence in, nothing out). `cycleRate` is the rate PipeWire runs at (0 if
-            unknown). Never blocks, allocates or makes a syscall. */
-        void process (const float* const* in, float* const* out, int numSamples, double cycleRate) noexcept;
+            unknown), `position` the driver's position in samples (-1 if unknown): a cycle whose
+            position does not follow on from the last one's is counted as a position jump. Never
+            blocks, allocates or makes a syscall: the timing reads the monotonic clock, which is
+            the vDSO's. */
+        void process (const float* const* in, float* const* out, int numSamples, double cycleRate,
+                      juce::int64 position = -1) noexcept;
 
     private:
         void processCycle (const float* const* in, float* const* out, int numSamples, double cycleRate) noexcept;
@@ -283,6 +331,8 @@ namespace speakerd
         // written by the message thread while it holds it, so that thread may read them anytime.
         std::unique_ptr<juce::AudioProcessorGraph> graph;
         std::unique_ptr<ParameterInbox> inbox;
+        std::vector<TimedNode*> timedNodes;
+        juce::uint32 graphSerial = 0;
         juce::AudioBuffer<float> io;            // graphChannels x (2 * maxBlock): room for a padded cycle
         juce::MidiBuffer midi;
         double preparedRate = 0.0;
@@ -293,6 +343,11 @@ namespace speakerd
         // The audio thread's alone, whoever holds the graph: was the gate open in the last cycle?
         bool gateWasOpen = true;
 
+        // The audio thread's alone: this cycle's timing (filled while it holds the graph), and
+        // the last cycle's position.
+        TimingRecord cycleTiming;
+        juce::int64 lastPosition = -1, lastDuration = 0;
+
         // Between the threads.
         std::atomic<bool> fadeInRequested { true }, audible { false }, outputGateOpen { true };
         std::atomic<juce::uint32> parkSerial { 0 }, fadedSerial { 0 };
@@ -302,6 +357,12 @@ namespace speakerd
         std::atomic<int> lastBlockForReaders { 0 }, primedBlockForReaders { 0 }, quantumChanges { 0 }, gateOpenings { 0 };
         std::atomic<double> preparedRateForReaders { 0.0 };
         std::atomic<int> maxBlockForReaders { 0 };
+        std::atomic<juce::uint32> graphSerialForReaders { 0 };
+
+        // The timing: the audio thread writes a record per cycle, the monitor thread reads them.
+        juce::AbstractFifo timingFifo { timingRingSize };
+        std::unique_ptr<TimingRecord[]> timingRing { new TimingRecord[(size_t) timingRingSize] };
+        std::atomic<juce::uint64> timingDropped { 0 };
 
         // The output level: the audio thread writes, the monitor thread reads.
         std::atomic<bool> levelWanted { false };

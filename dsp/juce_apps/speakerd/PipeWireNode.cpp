@@ -308,7 +308,9 @@ namespace speakerd
                 out[c] = static_cast<float*> (pw_filter_get_dsp_buffer (self.outputs[c], n));
             }
 
-            self.engine.process (in, out, (int) n, rate);
+            // The driver's position: a cycle that does not follow on from the last one is a
+            // position jump in the timing (a skipped cycle, or another driver).
+            self.engine.process (in, out, (int) n, rate, (juce::int64) position->clock.position);
         }
 
         static void onLinkError (void* data, int, int res, const char* message)

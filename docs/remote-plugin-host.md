@@ -654,6 +654,16 @@ plugin. `loudness` notifies them from inside its audio cycle when a value moved,
 the value at the end of that cycle. Checked in the pinned JUCE (`juce_audio_plugin_client_LV2.cpp`,
 `ParameterStorage`) and on the virtual pair with a throwaway plugin.
 
+**Timing, built for the first board deploy.** `speakerd` measures every audio cycle: the time
+in each plugin node (each is a thin wrapper around the hosted instance that times its
+`processBlock`), in the whole graph and in the whole cycle, as fractions of the cycle's length,
+and counts the late cycles (processing longer than the cycle) and the position jumps (a cycle
+whose driver position does not follow on: an xrun or another driver, the only sign of an xrun
+PipeWire 0.3.65 gives a filter). The audio thread only reads the monotonic clock (the vDSO's,
+45 ns on x86_64) and writes a lock-free ring, under 1 us per cycle with eight nodes; the
+monitor thread turns that into the `speakerd/timing` stream, the `timing` of `status` (the last
+minute) and a log summary once a minute, so the journal has the numbers without a controller.
+
 **What a plugin declares.** A plugin's monitors are parameters whose IDs start with `mon_`
 ([protocol.md](protocol.md), "How a plugin publishes a monitor"), in all three builds,
 declared after its other parameters, not automatable, of category output meter. `loudness`
@@ -692,7 +702,7 @@ version hash, so a GUI can never wait for a stream the speaker does not produce.
   the output node, for a level bar in the controller;
 - the amplifier telemetry the driver publishes through its ALSA controls: supply voltage,
   temperature, fault flags;
-- the time each node takes and the xrun count.
+- the time each node takes and the xrun count: built, as `speakerd/timing` (below).
 
 **Same resolution as the complete build.** The native `ampScope` draws each pixel column as
 the min/max envelope of the samples in it. The speaker computes that same envelope from the

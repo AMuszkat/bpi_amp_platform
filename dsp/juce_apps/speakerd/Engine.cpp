@@ -1,6 +1,7 @@
 #include "Engine.h"
 
 #include "Samples.h"
+#include "TimedNode.h"
 
 #include <cmath>
 
@@ -167,6 +168,10 @@ namespace speakerd
 
     void Engine::unpark (bool fadeIn)
     {
+        // Whatever ran on the message thread (settling, priming) is not an audio cycle's time.
+        for (auto* node : timedNodes)
+            node->takeCycleNs();
+
         fadePosition = fadeIn ? 0 : fadeLength;
         fadeInRequested.store (true, std::memory_order_relaxed);
         owner.store (nobody, std::memory_order_release);
@@ -225,9 +230,16 @@ namespace speakerd
 
         park();    // a fade-out, if something is playing
 
-        RunningGraph old { std::move (graph), std::move (inbox) };
+        RunningGraph old { std::move (graph), std::move (inbox), std::move (timedNodes) };
         graph = std::move (next.graph);
         inbox = std::move (next.inbox);
+        timedNodes = std::move (next.timedNodes);
+        jassert ((int) timedNodes.size() <= TimingRecord::maxNodes);
+
+        if ((int) timedNodes.size() > TimingRecord::maxNodes)
+            timedNodes.resize ((size_t) TimingRecord::maxNodes);
+
+        graphSerialForReaders.store (++graphSerial);
         io = std::move (newIo);
         maxBlock = newMaxBlock;
         maxBlockForReaders.store (newMaxBlock);
@@ -328,12 +340,53 @@ namespace speakerd
     }
 
     //==============================================================================
-    void Engine::process (const float* const* in, float* const* out, int numSamples, double cycleRate) noexcept
+    void Engine::process (const float* const* in, float* const* out, int numSamples, double cycleRate,
+                          juce::int64 position) noexcept
     {
+        const auto start = nowNs();
+
+        cycleTiming.graphRan = false;
+        cycleTiming.graphNs = 0;
+        cycleTiming.numNodes = 0;
+
         processCycle (in, out, numSamples, cycleRate);
 
         if (levelWanted.load (std::memory_order_acquire))
             measureLevel (out, numSamples);
+
+        // The timing of this cycle (README, Timing): its budget is its length in time.
+        const auto rate = cycleRate > 0.0 ? cycleRate : getSampleRate();
+
+        if (numSamples > 0 && rate > 0.0)
+        {
+            cycleTiming.positionJump = position >= 0 && lastPosition >= 0 && position != lastPosition + lastDuration;
+            lastPosition = position;
+            lastDuration = numSamples;
+
+            cycleTiming.budgetNs = (juce::uint32) juce::jmin (4.0e9, 1.0e9 * numSamples / rate);
+            cycleTiming.cycleNs = (juce::uint32) juce::jlimit ((juce::int64) 0, (juce::int64) 0xffffffff, nowNs() - start);
+
+            const auto scope = timingFifo.write (1);
+            auto* slot = scope.blockSize1 > 0 ? &timingRing[(size_t) scope.startIndex1]
+                       : scope.blockSize2 > 0 ? &timingRing[(size_t) scope.startIndex2] : nullptr;
+
+            if (slot != nullptr)
+            {
+                // Only what this cycle filled: the node times that are not used are not copied.
+                slot->graphSerial = cycleTiming.graphSerial;
+                slot->budgetNs = cycleTiming.budgetNs;
+                slot->cycleNs = cycleTiming.cycleNs;
+                slot->graphNs = cycleTiming.graphNs;
+                slot->graphRan = cycleTiming.graphRan;
+                slot->positionJump = cycleTiming.positionJump;
+                slot->numNodes = cycleTiming.numNodes;
+                std::copy (cycleTiming.nodeNs.begin(), cycleTiming.nodeNs.begin() + cycleTiming.numNodes, slot->nodeNs.begin());
+            }
+            else
+            {
+                timingDropped.fetch_add (1, std::memory_order_relaxed);
+            }
+        }
     }
 
     void Engine::measureLevel (float* const* out, int numSamples) noexcept
@@ -511,12 +564,23 @@ namespace speakerd
             }
         }
 
+        const auto graphStart = nowNs();
+
         for (int b = 0; b < blocks; ++b)
         {
             juce::AudioBuffer<float> chunk (io.getArrayOfWritePointers(), graphChannels, b * block, block);
             graph->processBlock (chunk, midi);
             midi.clear();
         }
+
+        // The timing, while this thread holds the graph and its nodes.
+        cycleTiming.graphNs = (juce::uint32) juce::jlimit ((juce::int64) 0, (juce::int64) 0xffffffff, nowNs() - graphStart);
+        cycleTiming.graphRan = true;
+        cycleTiming.graphSerial = graphSerial;
+        cycleTiming.numNodes = (juce::uint16) timedNodes.size();
+
+        for (size_t i = 0; i < timedNodes.size(); ++i)
+            cycleTiming.nodeNs[i] = (juce::uint32) juce::jlimit ((juce::int64) 0, (juce::int64) 0xffffffff, timedNodes[i]->takeCycleNs());
 
         auto* woofer  = io.getWritePointer (0);
         auto* tweeter = io.getWritePointer (1);

@@ -87,15 +87,22 @@ namespace speakerd
             juce::uint64 connection = 0;
             juce::int64 revision = 0;
             juce::var document;
-            size_t replayFrom = 0;          // the params that arrived after this apply
+            juce::uint64 replayFrom = 0;    // the params that arrived after this apply
         };
 
+        /** The newest value of a parameter that arrived while revisions wait, and when. */
         struct Received
         {
-            juce::uint32 node;
-            juce::String id;
             juce::var value;
+            juce::uint64 arrival = 0;
         };
+
+    public:
+        /** The plugin nodes of graph `serial` (Engine::getGraphSerial), in the order of its
+            TimingRecords: uid and name. False when `serial` is not the running graph's. */
+        bool timedNodes (juce::uint32 serial, std::vector<std::pair<juce::uint32, juce::String>>& out) const;
+
+    private:
 
         static Tables describeGraph (juce::AudioProcessorGraph&);
 
@@ -103,7 +110,7 @@ namespace speakerd
             the apply that built it; returns the old graph, which nobody refers to any more. */
         RunningGraph swapIn (BuiltGraph&&, Tables&&, double sampleRate, int maxBlock, int settleBlock,
                              juce::int64 revision, const juce::String& layer, const juce::String& layerFile,
-                             size_t replayFrom);
+                             juce::uint64 replayFrom);
 
         void apply (const Waiting&);
         void finishApply();
@@ -134,8 +141,14 @@ namespace speakerd
         std::map<Key, juce::uint32> lastSeq;             // per parameter, since the client connected
         std::deque<Waiting> waiting;
         bool building = false;
-        std::vector<Received> sinceApply;                // params since the oldest waiting apply arrived
-        size_t sinceApplyBase = 0;                       // the index of sinceApply[0], counted from the start
+        // The parameters that arrived since the oldest waiting apply, newest value per parameter:
+        // at most one entry per parameter, however many arrive while a revision builds.
+        std::map<Key, Received> sinceApply;
+        juce::uint64 arrivals = 0;                       // params counted since speakerd started
+
+        // The running graph's plugin nodes, for the timing.
+        juce::uint32 timedSerial = 0;
+        std::vector<std::pair<juce::uint32, juce::String>> timedNames;
 
         JUCE_DECLARE_NON_COPYABLE (Control)
     };

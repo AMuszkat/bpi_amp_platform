@@ -2,6 +2,7 @@
 
 #include "LV2State.h"
 #include "Samples.h"
+#include "TimedNode.h"
 
 #include <cmath>
 #include <map>
@@ -273,7 +274,9 @@ namespace speakerd
 
             instance->enableAllBuses();
 
-            if (graph->addNode (std::move (instance), NodeID { node.uid }, deferred) == nullptr)
+            // Wrapped, so that its processing time is measured (TimedNode.h); with its buses as
+            // they are now.
+            if (graph->addNode (std::make_unique<TimedNode> (std::move (instance), node.uid), NodeID { node.uid }, deferred) == nullptr)
                 return juce::Result::fail (where + ": uid " + juce::String (node.uid) + " is taken");
 
             loaded.emplace_back (&node, found.getFirst()->name);
@@ -316,7 +319,7 @@ namespace speakerd
         {
             const auto where = node->describe();
             auto* graphNode = graph->getNodeForId (NodeID { node->uid });
-            auto& instance = *graphNode->getProcessor();
+            auto& instance = hostedProcessor (*graphNode->getProcessor());
 
             if (node->state.has_value())
             {
@@ -337,6 +340,10 @@ namespace speakerd
             if (node->bypassed)
                 graphNode->setBypassed (true);
         }
+
+        for (auto* graphNode : graph->getNodes())
+            if (auto* timed = dynamic_cast<TimedNode*> (graphNode->getProcessor()))
+                out.timedNodes.push_back (timed);
 
         out.graph = std::move (graph);
         return juce::Result::ok();
