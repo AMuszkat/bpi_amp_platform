@@ -8,6 +8,7 @@
 //              [--allow-unsafe-routing] [--lv2-bundle PATH]...
 //     speakerd --version
 
+#include "BuildInfo.h"    // SPEAKERD_COMMIT, written at every build (BuildInfo.cmake)
 #include "DeviceConfig.h"
 #include "Engine.h"
 #include "FilterGraph.h"
@@ -36,6 +37,13 @@ namespace
         exitPipeWire = 3,   // the input sink or the filter could not be started, or PipeWire was lost
         exitRender   = 4    // the render could not read IN.wav or write OUT.wav
     };
+
+    /** "0.2.1 (abc123def456)": the version, and the commit it was built from ("-dirty" when the
+        tree had changes). An installer reads the version as the first number after "speakerd ". */
+    juce::String versionText()
+    {
+        return juce::String (SPEAKERD_VERSION) + " (" + SPEAKERD_COMMIT + ")";
+    }
 
     constexpr int defaultBlock = 1024;          // the speaker's quantum
     constexpr int defaultQuantumLimit = 8192;   // PipeWire's default.clock.quantum-limit
@@ -115,7 +123,7 @@ namespace
             }
             else if (arg == "--version")
             {
-                std::cout << "speakerd " << SPEAKERD_VERSION << std::endl;
+                std::cout << "speakerd " << versionText() << std::endl;
                 std::exit (std::cout.good() ? exitOk : exitFailure);
             }
             else if (arg == "--state-dir" && hasValues (1))
@@ -563,7 +571,7 @@ int main (int argc, char* argv[])
         return loadBundles (formats, options.bundles) ? runImport (options, formats) : exitUsage;
     }
 
-    log (juce::String ("speakerd ") + SPEAKERD_VERSION + ", state dir " + options.stateDir.getFullPathName());
+    log ("speakerd " + versionText() + ", state dir " + options.stateDir.getFullPathName());
 
     const auto device = loadDevice (options.stateDir);
 

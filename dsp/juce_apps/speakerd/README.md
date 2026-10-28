@@ -36,7 +36,7 @@ speakerd --version
 | `--device DEVICE_JSON` | with `--import-filtergraph`: the speaker's `device.json`, which says whether the session's output channel 0 (`playback_FL`) or 1 (`playback_FR`) is the woofer. Without it, `playback_FL` is |
 | `--prefer-headless` | with `--import-filtergraph`: a complete or control build's URI becomes its `_headless` sibling's, when that plugin is found (in the default paths or a `--lv2-bundle`) |
 | `--allow-unsafe-routing` | with `--import-filtergraph`: import the stream straight to the tweeter, or a control build, with a warning, instead of failing |
-| `--version` | prints `speakerd <version>` on stdout and exits 0 |
+| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.2.1 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
 
 | Exit status | |
 |---|---|
@@ -472,7 +472,7 @@ stable.
 
 | Line | When |
 |---|---|
-| `speakerd <version>, state dir <dir>` | always, first (not with `--import-filtergraph`). The version is 0.2.0 from the speakerd that knows `limits`; `speakerd --version` prints it too |
+| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf` |
 | `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or invalid, its `limits` included; the defaults are limited (see device.json) |
 | `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
 | `device: limits: output at <gain> dB, tweeter <muted\|on>`, followed by ` (no limits in device.json: the fail-safe)` or ` (device.json not read: the fail-safe)` when they are the fail-safe | always, right after the line before. `<gain>` is printed as `%g` does: `-20`, `-6.5`, `0`. No limit at all reads `output at 0 dB, tweeter on` |
@@ -615,5 +615,6 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `PipeWireNode.*` | the input sink, the `pw_filter` node, and the links |
 | `Render.*` | the offline render |
 | `DeviceConfig.*` | `device.json`, its `limits` included |
+| `BuildInfo.cmake` | writes `BuildInfo.h` at every build: the commit speakerd is built from |
 | `FilterGraph.*` | `--import-filtergraph`: an AudioPluginHost session as a graph document |
 | `examples/` | an AudioPluginHost session, `loudness.filtergraph`, and how it was made |

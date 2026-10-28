@@ -5,7 +5,8 @@
 cmake_minimum_required(VERSION 3.22)
 
 # 0.2.0: device.json's "limits" (a missing one is the fail-safe), --import-filtergraph.
-project(SPEAKERD VERSION 0.2.0)
+# 0.2.1: its own sink at priority.driver 0 and said loudly, client-rt.conf, the commit in --version.
+project(SPEAKERD VERSION 0.2.1)
 
 # A cross build (tools/build.sh speakerd aarch64) links the target's libpipewire, never this
 # machine's, and checks that it does (below) by the target's multiarch triplet.
@@ -49,6 +50,19 @@ target_sources(speakerd
         PipeWireNode.cpp
         Render.cpp
         StateLayers.cpp)
+
+# The commit speakerd is built from (BuildInfo.h, SPEAKERD_COMMIT), for --version and the first
+# log line. Written at every build, not at configure, so that it follows HEAD and the tree's
+# changes; rewritten only when it changes, so it recompiles Main.cpp only then.
+set(SPEAKERD_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_target(speakerd-build-info
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DOUTPUT=${SPEAKERD_GENERATED}/BuildInfo.h" -P "${CMAKE_CURRENT_SOURCE_DIR}/BuildInfo.cmake"
+    BYPRODUCTS "${SPEAKERD_GENERATED}/BuildInfo.h"
+    COMMENT "speakerd: the commit it is built from"
+    VERBATIM)
+add_dependencies(speakerd speakerd-build-info)
+target_include_directories(speakerd PRIVATE "${SPEAKERD_GENERATED}")
 
 target_compile_definitions(speakerd
     PRIVATE
