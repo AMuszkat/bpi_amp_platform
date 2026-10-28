@@ -6,7 +6,8 @@ Instead of one fixed shelf, each of **four settings** has its own detector thres
 low-shelf EQs (gain / frequency / Q each). The setting whose threshold the input level falls
 into is the one applied. Mono in, mono out.
 
-No generated header: everything is a live, automatable parameter (35 of them).
+No generated header: everything is a live, automatable parameter (35 of them), plus two
+read-only monitors (below).
 
 ```bash
 ../tools/build-podman.sh loudness
@@ -47,9 +48,34 @@ Q 0.7) are preset.
   biquad splatters about 30 dB less than a TPT shelving SVF. See
   [modulated-filter-topology.md](../../docs/juce-knowledge/dsp/modulated-filter-topology.md).
 
+## Monitors
+
+The detector's level and the active setting are also published as two read-only parameters,
+so that the speaker host can read them and the controller can show them
+([docs/protocol.md](../../../docs/protocol.md), "How a plugin publishes a monitor"):
+
+| ID | Range | Getter |
+|---|---|---|
+| `mon_levelDb` | -120 to 0 dBFS | `getLevelDb()` |
+| `mon_activeSetting` | 0 to 3 (the setting's index) | `getActiveSetting()` |
+
+They are in every build, declared after the other parameters, not automatable, of category
+output meter, and never in the saved state: they are added with `addParameter()`, not through
+the APVTS, and `setStateInformation()` drops any `mon_` entry a state brings. The complete and
+headless builds write them from the audio thread about 60 times a second with a plain
+`setValue()`, and a notifier thread tells the host (see `Monitors.h` for why JUCE's LV2 wrapper
+needs that). In the control build nothing measures: the getters read the two parameters, so
+the editor shows whatever value they are given. With the 35 parameters, the host-side bypass
+JUCE's LV2 hosting adds and the two monitors, an LV2 host sees 38 parameters.
+
 ## Implementation notes
 
-- `PluginProcessor.*`: detector, setting selection, glide, biquads.
+- `PluginProcessor.*`: parameters, state and the getters (every build). `LoudnessDsp.cpp`:
+  detector, setting selection, glide, biquads, and writing the monitors (not in the control
+  build).
+- `Monitors.h`: the monitor helpers (declaring, writing, removing from a state, the notifier).
+- `plugin-check.monitors.h`: which getter reads which monitor, for plugin-check's in-process
+  check; not compiled into the plugin.
 - `MorphPad.*`: the pad. Its static half (grid, ghost curves) is cached in an opaque
   `Image::RGB` drawn with a translation-only transform, because an ARGB or scaled image is
   resampled per pixel. That's the difference between about 9 ms and about 20 ms a frame at

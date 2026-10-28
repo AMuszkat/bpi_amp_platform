@@ -58,6 +58,11 @@ void LoudnessProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         qSmoothed[(size_t) b].setCurrentAndTargetValue (qParam[(size_t) currentSetting][(size_t) b]->load());
     }
 
+    // The monitors are written at most about 60 times a second, counted in samples, and the
+    // first block writes them.
+    samplesPerMonitorWrite   = juce::jmax (1, juce::roundToInt (currentSampleRate / 60.0));
+    samplesUntilMonitorWrite = 0;
+
     reset();
 }
 
@@ -230,4 +235,20 @@ void LoudnessProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 f.process (context);
         }
     }
+
+    writeMonitors (numSamples);
+}
+
+void LoudnessProcessor::writeMonitors (int numSamples) noexcept
+{
+    // Audio thread. A plain store into each monitor parameter (Monitors.h): no notification,
+    // no allocation, no lock. The notifier tells the host.
+    samplesUntilMonitorWrite -= numSamples;
+
+    if (samplesUntilMonitorWrite > 0)
+        return;
+
+    samplesUntilMonitorWrite = samplesPerMonitorWrite;
+    monitors::write (*monitorLevelDb, levelDb.load (std::memory_order_relaxed));
+    monitors::write (*monitorActiveSetting, (float) activeSetting.load (std::memory_order_relaxed));
 }

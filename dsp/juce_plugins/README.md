@@ -166,6 +166,15 @@ the headless build's `hasEditor()` returns false. `tools/build-podman.sh` keeps 
 complete target only. [`../juce_apps/plugin-check`](../juce_apps/plugin-check/README.md)
 checks that the three builds fit together. So far `loudness` is split this way.
 
+**Monitors.** What a plugin's editor shows live (a level, the active setting) reaches the
+controller as read-only parameters whose IDs start with `mon_`
+([`../../docs/protocol.md`](../../docs/protocol.md)): in every build, declared last with
+`addParameter()` (not through the APVTS, so no saved state carries them), not automatable, of
+category output meter. The complete and headless builds write them from the audio thread with
+`setValue()` and run a notifier thread so that JUCE's LV2 wrapper reports them to the host; in
+the control build the plugin's getters read them. `loudness/Monitors.h` has the helpers, and
+`<plugin>/plugin-check.monitors.h` names the getters for plugin-check.
+
 ## JUCE
 
 `JUCE/` is pinned to the commit these plugins compile against. When you need to know what

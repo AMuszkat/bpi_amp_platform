@@ -581,23 +581,28 @@ sequenceDiagram
     A->>S: stop producing
 ```
 
-**What a plugin declares.** Next to its parameter layout, in the header all three targets
-share, a plugin lists its monitors:
+**What a plugin declares.** A plugin's monitors are parameters whose IDs start with `mon_`
+([protocol.md](protocol.md), "How a plugin publishes a monitor"), in all three builds,
+declared after its other parameters, not automatable, of category output meter. `loudness`
+declares two, in `PluginProcessor.cpp`, which every build compiles:
 
-```cpp
-// Params.hpp, compiled into complete, control and headless
-inline MonitorLayout createMonitorLayout()
-{
-    MonitorLayout m;
-    m.value ("levelDb",       "dBFS", -120.0f, 0.0f);   // the detector meter
-    m.value ("activeSetting", "",        0.0f, 3.0f);
-    return m;
-}
+```text
+// added with addParameter() after the APVTS, never through it: no saved state carries them
+mon_levelDb        AudioParameterFloat  -120 to 0 dBFS   // read by getLevelDb()
+mon_activeSetting  AudioParameterInt    0 to 3           // read by getActiveSetting()
 ```
 
-The headless build publishes these from the atomics it already writes. The proxy processor
-exposes the same getters, such as `getLevelDb()`, and the bridge fills them from the stream.
-The editor code does not change. Frame streams use a shared view-model class that turns a
+The complete and headless builds write them from the audio thread's atomics about 60 times a
+second with a plain `setValue()`. JUCE's LV2 wrapper reports to the host only the parameters
+it was told about through its `AudioProcessorListener`, which `setValue()` does not do, so a
+low-priority notifier thread in the plugin (`Monitors.h`) tells the listeners when a value
+moved, and the wrapper sends a `patch:Set` after the next cycle: that is the value `speakerd`
+reads from its hosted parameter. The control build's getters read the same parameters, which
+the controller fills from the stream, so the editor code does not change. `plugin-check`
+proves each step: the hosted headless build publishes what the complete build's getter reads,
+no saved state carries a monitor, and setting one moves the control build's getter.
+
+Frame streams use a shared view-model class that turns a
 ring buffer into a frame (trigger search, window selection, one min/max pair per pixel
 column, the measurements). The complete build runs it locally; the headless build runs it on
 the speaker and the control build draws what it receives. The monitor layout is part of the

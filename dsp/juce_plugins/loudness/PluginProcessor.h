@@ -3,6 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
+#include "Monitors.h"
+
 #include <array>
 #include <atomic>
 
@@ -33,6 +35,10 @@ namespace LoudnessIDs
     static constexpr const char* glide      = "glide";
     static constexpr const char* detector   = "det";
     static constexpr const char* bypass     = "bypass";
+
+    // Monitors (Monitors.h): read-only, declared after everything above, never saved.
+    static constexpr const char* monLevelDb       = "mon_levelDb";        // dBFS, -120 to 0
+    static constexpr const char* monActiveSetting = "mon_activeSetting";  // 0 to 3
 }
 
 //==============================================================================
@@ -75,6 +81,7 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
    #endif
 
+    using juce::AudioProcessor::processBlock;          // keep the double overload visible
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     //==============================================================================
@@ -99,11 +106,28 @@ public:
     //==============================================================================
     juce::AudioProcessorValueTreeState& getState() noexcept { return apvts; }
 
-    /** Detected input level in dBFS, for the meter. */
-    float getLevelDb() const noexcept { return levelDb.load (std::memory_order_relaxed); }
+    /** Detected input level in dBFS, for the meter. In the control build, which measures
+        nothing, it is the mon_levelDb monitor: whatever the controller filled in from the
+        speaker. */
+    float getLevelDb() const noexcept
+    {
+       #if SPEAKER_CONTROL
+        return monitorLevelDb->get();
+       #else
+        return levelDb.load (std::memory_order_relaxed);
+       #endif
+    }
 
-    /** Which of the four settings is currently applied (0-based). */
-    int getActiveSetting() const noexcept { return activeSetting.load (std::memory_order_relaxed); }
+    /** Which of the four settings is currently applied (0-based). In the control build, the
+        mon_activeSetting monitor. */
+    int getActiveSetting() const noexcept
+    {
+       #if SPEAKER_CONTROL
+        return monitorActiveSetting->get();
+       #else
+        return activeSetting.load (std::memory_order_relaxed);
+       #endif
+    }
 
     /** The EQ parameters actually in force right now -- mid-glide these sit between
         two settings, which is what the editor's "Live" curve draws.
@@ -137,6 +161,8 @@ public:
 private:
     //==============================================================================
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    void addMonitors();
+    void writeMonitors (int numSamples) noexcept;
     int chooseSetting (float detectedDb) noexcept;
     void updateGlideTargets (int setting) noexcept;
     void refreshDetectorSettings() noexcept;
@@ -180,6 +206,14 @@ private:
     std::atomic<float> levelDb { -120.0f };
     std::atomic<int> activeSetting { 0 };
     std::array<std::atomic<float>, LoudnessIDs::numBands> liveGain { }, liveFreq { }, liveQ { };
+
+    // The monitors, owned by the AudioProcessor like every parameter (not by the APVTS, so
+    // they stay out of the saved state). The audio thread writes them from the atomics above
+    // about 60 times a second; the notifier reports them to the host (Monitors.h).
+    juce::AudioParameterFloat* monitorLevelDb = nullptr;
+    juce::AudioParameterInt* monitorActiveSetting = nullptr;
+    std::unique_ptr<monitors::Notifier> monitorNotifier;
+    int samplesPerMonitorWrite = 800, samplesUntilMonitorWrite = 0;   // audio thread only
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LoudnessProcessor)
 };

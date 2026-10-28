@@ -25,8 +25,7 @@ PluginProcessor::PluginProcessor()
 #endif
 ,apvts(*this, nullptr, "PARAMETERS", create_param_layout())
 {
-    apvts.addParameterListener("gain",this);
-    apvts.addParameterListener("freq",this);
+    gainParam = apvts.getRawParameterValue ("gain");
 
     createLogFrequencyVector(frequencies, 1000, 1.0, 20000.0);
     magnitudes.resize (frequencies.size());
@@ -97,34 +96,35 @@ int PluginProcessor::getCurrentProgram()
     return 0;
 }
 
-void PluginProcessor::setCurrentProgram (int index)
+void PluginProcessor::setCurrentProgram (int)
 {
 }
 
-const juce::String PluginProcessor::getProgramName (int index)
+const juce::String PluginProcessor::getProgramName (int)
 {
     return {};
 }
 
-void PluginProcessor::changeProgramName (int index, const juce::String& newName)
+void PluginProcessor::changeProgramName (int, const juce::String&)
 {
 }
 
 //==============================================================================
-void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
+    // A host may prepare before it has an audio device (JUCE's LV2 wrapper instantiates with a
+    // block size of 0); a later block of any size is still handled, in chunks.
+    const int preparedBlock = samplesPerBlock > 0 ? samplesPerBlock : 512;
+
     juce::dsp::ProcessSpec spec;
-    spec.sampleRate = sampleRate;
-    spec.maximumBlockSize = samplesPerBlock;
+    spec.sampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
+    spec.maximumBlockSize = (juce::uint32) preparedBlock;
     // Process internally as mono; we'll route to two outputs later
     spec.numChannels = 1;
-    this->sampleRate = sampleRate;
-    
-    // Allocate temporary mono buffers for LP/HP outputs
-    lpBuffer.setSize(1, samplesPerBlock);
-    hpBuffer.setSize(1, samplesPerBlock);
+
+    // Allocate temporary mono buffers for LP/HP outputs: here, never in processBlock.
+    lpBuffer.setSize(1, preparedBlock);
+    hpBuffer.setSize(1, preparedBlock);
 
     // Prepare LP chain
     lpChain.prepare(spec);
@@ -146,6 +146,9 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         hpFilter.coefficients = Coeffs::Ptr(new Coeffs(hp, (int)(sizeof(hp)/sizeof(hp[0])))); // FIR::Filter<>::CoefficientsPtr
     }
 
+    // The gain parameter is applied again at the next block, whatever it is now.
+    appliedGainDb = std::numeric_limits<float>::quiet_NaN();
+
     reset();
 }
 
@@ -161,29 +164,6 @@ void PluginProcessor::releaseResources()
     // spare memory, etc.
 }
 
-// void PluginProcessor::valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&)
-// {
-//     requiresUpdate.store (true);
-//     DBG("prop changed");
-// }
-
-void PluginProcessor::parameterChanged (const juce::String &parameterID, float newValue)
-{
-    if (parameterID == "gain")
-    {
-        DBG("gain changes");
-    lpChain.get<lpGainIndex>().setGainDecibels(newValue);
-    hpChain.get<hpGainIndex>().setGainDecibels(newValue);
-    }
-    // if (parameterID == "freq")
-    // {
-    //     DBG("freq changes");
-    //     auto& iirfilter = processorChain.get<1>();
-    //     *iirfilter.state = juce::dsp::IIR::ArrayCoefficients<float>::makeHighPass  (getSampleRate(), newValue);
-    // }
-
-    updatePlot();
-}
 
 #ifndef JucePlugin_PreferredChannelConfigurations
 bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -207,50 +187,62 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 }
 #endif
 
-void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
-    
-    // if (requiresUpdate.load())
-    //     update();
 
-    const int inChs  = getTotalNumInputChannels();
-    const int outChs = getTotalNumOutputChannels();
+    // Audio thread: nothing here allocates, locks or makes a syscall.
+    const float gainDb = gainParam->load (std::memory_order_relaxed);
 
-    // Ensure temp buffers sized
-    lpBuffer.setSize(1, buffer.getNumSamples(), false, false, true);
-    hpBuffer.setSize(1, buffer.getNumSamples(), false, false, true);
+    if (! juce::exactlyEqual (gainDb, appliedGainDb))
+    {
+        lpChain.get<lpGainIndex>().setGainDecibels (gainDb);
+        hpChain.get<hpGainIndex>().setGainDecibels (gainDb);
+        appliedGainDb = gainDb;
+    }
+
+    const int numSamples = buffer.getNumSamples();
+
+    if (buffer.getNumChannels() == 0 || lpBuffer.getNumSamples() == 0)
+    {
+        buffer.clear();
+        return;
+    }
+
+    // A block larger than the one prepared is processed in prepared-size chunks.
+    const int chunk = lpBuffer.getNumSamples();
+
+    for (int start = 0; start < numSamples; start += chunk)
+        processChunk (buffer, start, juce::jmin (chunk, numSamples - start));
+
+    // Clear any remaining output channels beyond the first two
+    for (int ch = 2; ch < getTotalNumOutputChannels(); ++ch)
+        buffer.clear (ch, 0, numSamples);
+}
+
+void PluginProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start, int numSamples) noexcept
+{
+    const auto n = (size_t) numSamples;
 
     // Copy mono input (channel 0) to both temp buffers' single channel
-    const float* inData = buffer.getReadPointer(0);
-    lpBuffer.copyFrom(0, 0, inData, buffer.getNumSamples());
-    hpBuffer.copyFrom(0, 0, inData, buffer.getNumSamples());
+    const float* inData = buffer.getReadPointer (0, start);
+    lpBuffer.copyFrom (0, 0, inData, numSamples);
+    hpBuffer.copyFrom (0, 0, inData, numSamples);
 
-    // Process LP
-    auto lpBlock = juce::dsp::AudioBlock<float>(lpBuffer).getSubsetChannelBlock(0, (size_t) 1);
-    lpChain.process(juce::dsp::ProcessContextReplacing<float>(lpBlock));
-    // Process HP
-    auto hpBlock = juce::dsp::AudioBlock<float>(hpBuffer).getSubsetChannelBlock(0, (size_t) 1);
-    hpChain.process(juce::dsp::ProcessContextReplacing<float>(hpBlock));
+    // Process LP and HP over the first numSamples of their buffers
+    auto lpBlock = juce::dsp::AudioBlock<float> (lpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
+    lpChain.process (juce::dsp::ProcessContextReplacing<float> (lpBlock));
+    auto hpBlock = juce::dsp::AudioBlock<float> (hpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
+    hpChain.process (juce::dsp::ProcessContextReplacing<float> (hpBlock));
 
     // Route: output channel 0 = LP, output channel 1 = HP.
-    // If multiple input channels, average them into each output.
-    const int N = buffer.getNumSamples();
+    const int outChs = getTotalNumOutputChannels();
+
     if (outChs >= 1)
-    {
-        float* outLP = buffer.getWritePointer(0);
-        const float* lpData = lpBuffer.getReadPointer(0);
-        std::memcpy(outLP, lpData, sizeof(float) * (size_t) N);
-    }
-    if (outChs >= 2)
-    {
-        float* outHP = buffer.getWritePointer(1);
-        const float* hpData = hpBuffer.getReadPointer(0);
-        std::memcpy(outHP, hpData, sizeof(float) * (size_t) N);
-    }
-    // Clear any remaining output channels beyond the first two
-    for (int ch = 2; ch < outChs; ++ch)
-        buffer.clear(ch, 0, N);
+        std::memcpy (buffer.getWritePointer (0, start), lpBuffer.getReadPointer (0), sizeof (float) * n);
+
+    if (outChs >= 2 && buffer.getNumChannels() >= 2)
+        std::memcpy (buffer.getWritePointer (1, start), hpBuffer.getReadPointer (0), sizeof (float) * n);
 }
 
 //==============================================================================
@@ -267,12 +259,18 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 //==============================================================================
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    copyXmlToBinary (*apvts.copyState().createXml(), destData);
+    if (auto xml = apvts.copyState().createXml())
+        copyXmlToBinary (*xml, destData);
 }
 
 void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    apvts.replaceState (juce::ValueTree::fromXml (*getXmlFromBinary (data, sizeInBytes)));
+    // A state that is not ours, or not a state at all, is ignored: getXmlFromBinary() returns
+    // nullptr for it, and dereferencing that crashed the host.
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+
+    if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
+        apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
 //==============================================================================
@@ -280,14 +278,6 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new PluginProcessor();
-}
-
-void PluginProcessor::updatePlot()
-{
-    // To compute magnitude response for current FIR filters, you could use:
-    // processorChain.get<firLpFiltIndex>().state->getMagnitudeForFrequencyArray(...)
-    // and similarly for hp. Combine or display individually as needed.
- sendChangeMessage();
 }
 
 void PluginProcessor::createFrequencyPlot(juce::Path& p, const std::vector<double>& freqs,  const std::vector<double>& mags, const juce::Rectangle<int>& bounds)
@@ -321,7 +311,7 @@ const std::vector<double>& PluginProcessor::getFrequencies ()
 void PluginProcessor::createLogFrequencyVector(std::vector<double>& frequencyVector, int numPoints, double minFreq, double maxFreq)
 {
     frequencyVector.clear(); // Clear any existing content
-    frequencyVector.reserve(numPoints);
+    frequencyVector.reserve((size_t) numPoints);
 
     // Calculate the logarithmic spacing between frequencies
     float logMinFreq = std::log(minFreq);
