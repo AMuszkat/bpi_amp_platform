@@ -318,11 +318,15 @@ neither a fake hub nor a forged datagram is believed.
   3. The server checks it and answers `{"op":"welcome","auth":"<server proof>"}` before
      anything else (before `state` on the control link, before any `value` on the monitor
      link).
-  4. The client checks the server's proof before it believes or applies anything; until then it
+  4. The client checks the server's proof before it believes or applies anything, and that the
+     server's `name` is the one it expected (on the monitor link, the speaker's name in the
+     hub's `state`); until then it
      sends nothing but its `hello`. An agent never applies a revision, a parameter or an `apply`
      from a hub that has not proved itself.
 - **A session key** per control connection, `K = HMAC("session:<Ns>:<Nc>")` (hex), gives the
-  **OSC token** `T = first 32 hex characters of HMAC-SHA256(K, "osc")`.
+  **OSC token** `T = first 32 hex characters of HMAC-SHA256(K, "osc")`, keyed with the UTF-8
+  bytes of K's hex string. With no secret configured the token is the empty string, accepted
+  only by a controller run with `--insecure`.
 - **OSC carries the token.** `/bpi/param` is `,isfiss` (node, id, value, seq, origin, token) and
   `/bpi/gesture` is `,issss` (node, id, state, origin, token). The hub accepts a datagram only
   with the token of an authenticated controller connection from that datagram's source
