@@ -23,17 +23,18 @@ Pass when:
   null sink never clocks the amplifier, whether the amplifier has priority 1000 or none;
 - speakerd says `device: limits: output at -20 dB, tweeter muted`, every sample of the tweeter
   capture is 0, and the woofer's gain for a 100 Hz tone is the complete build's offline render
-  of the same document (no limits) minus 20 dB, within 0.05 dB. This needs the limits of
-  speakerd's device.json, which came after commit 2cb3278: against a speakerd without them,
-  this fails, and says so;
+  of the same document (no limits) minus 20 dB, within 0.05 dB;
 - speakerd loads loudness_headless from the current version's lv2/ folder, although the copy
   in the home's own ~/.lv2 has the same URI; the same command with HOME set to that home stops
   with status 2 (the copy would shadow it); after a rollback, the next start loads it from the
   previous version's folder; speakerd's HOME is still empty after it ran;
 - firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it is
   capped, it is linked from the sink to the amplifier and nothing else feeds the amplifier, no
-  AudioPluginHost runs, the amplifier drives, and no restart or xrun in 3 s. Its "capped" check
-  needs the same limits, so against 2cb3278's speakerd it fails on that check alone.
+  AudioPluginHost runs, the amplifier drives, and no restart or xrun in 3 s.
+
+The installer installs only a speakerd that enforces device.json's limits (SPEAKERD_MIN_VERSION
+in firmware/speakerd-setup.sh), which came after commit 2cb3278: against an older one the
+install in setUpClass refuses, and every test here fails, saying why.
 
     python3 -m unittest -v tests.vpair.test_speakerd_installed
 """

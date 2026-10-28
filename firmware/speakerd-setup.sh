@@ -36,6 +36,10 @@ HELPER="$FIRMWARE_DIR/speakerd/setup-helper.py"
 
 CAP_GAIN_DB=-20.0
 CAP_TWEETER=muted
+# The oldest speakerd that may play on a board: the first that enforces device.json's limits
+# (and fails closed without them) and says its version (--version). An older one would ignore
+# the cap, so install and rollback refuse it. Confirm against dsp/juce_apps/speakerd/README.md.
+SPEAKERD_MIN_VERSION=0.2.0
 RC_LOCAL=/etc/rc.local   # private-ok: a file on the board, not a host name
 
 # ----------------------------------------------------------------------------
@@ -85,7 +89,9 @@ Actions:
               sink, linked to the amplifier, driven by it, with no restart or xrun for a while
   sink        install only the persistent speakerd sink (setup.sh's PipeWire component)
   check       what install would refuse, without changing anything
-  limits      change device.json's limits (the cap), then restart speakerd
+  limits      change device.json's limits (the cap), then restart speakerd. No limit at all is
+              --gain-db 0 --tweeter-limit on (written explicitly: without limits speakerd
+              plays capped)
   bundle      assemble a bundle from the build tree (development machine; builds nothing)
 
 Options:
@@ -305,6 +311,26 @@ point() {
 
 link_target() { if [ -L "$1" ]; then basename "$(readlink "$1")"; fi; }
 
+# The version a speakerd binary says (speakerd --version), or nothing when it cannot say: a
+# speakerd from before --version, which also predates the limits.
+speakerd_version() {   # $1 = the binary
+    local out empty
+    empty="$(mktemp -d)"
+    out="$(HOME="$empty" timeout 10 "$1" --version 2> /dev/null)" || out=""
+    rmdir "$empty" 2> /dev/null || true
+    sed -n -E 's/^[^0-9]*([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p' <<< "$out" | head -n 1
+}
+
+# Whether version $1 is $2 or newer.
+version_at_least() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]; }
+
+# Refuses a speakerd older than SPEAKERD_MIN_VERSION. $1 = its version (may be empty), $2 = what.
+require_speakerd_version() {
+    if [ -z "$1" ] || ! version_at_least "$1" "$SPEAKERD_MIN_VERSION"; then
+        die "$2 is ${1:-too old to say its version (no --version)}: a board needs speakerd $SPEAKERD_MIN_VERSION or newer, the first that enforces device.json's limits. An older one would ignore the cap."
+    fi
+}
+
 # The AudioPluginHost processes that run (any user), by command name.
 plugin_host_pids() {
     local f comm pid stat pids=()
@@ -400,6 +426,9 @@ check_bundle() {
     hash="$(contents_hash "$BUNDLE")"
     [ "${BUNDLE_ID##*-}" = "$hash" ] || die "the bundle's contents do not match its VERSION (hash $hash, id $BUNDLE_ID): copied incompletely?"
     check_libraries
+    BUNDLE_SPEAKERD_VERSION="$(speakerd_version "$BUNDLE/bin/speakerd")"
+    require_speakerd_version "$BUNDLE_SPEAKERD_VERSION" "the bundle's speakerd"
+    ok "speakerd $BUNDLE_SPEAKERD_VERSION (at least $SPEAKERD_MIN_VERSION)"
 }
 
 # Every shared library speakerd and the plugins need is on this machine. speakerd needs
@@ -502,6 +531,31 @@ restart_pipewire() {
     fi
 }
 
+# After a (re)start under systemd: waits for speakerd to say what device.json gave it, and
+# fails loudly when that is not the limits device.json names (broken file, fail-safe limits).
+check_started() {   # $1 = epoch seconds of the restart
+    [ "$NO_SYSTEMD" -eq 0 ] || return 0
+    local log="" line
+    for _ in $(seq 1 30); do
+        log="$(journalctl --user -u speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
+        grep -qE '^speakerd: device(: limits|: no limits|\.json: FAILED)' <<< "$log" && break
+        sleep 0.5
+    done
+    if line="$(grep -m1 '^speakerd: device.json: FAILED' <<< "$log")"; then
+        loud "speakerd could not read device.json and plays with its fail-safe defaults:" "${line#speakerd: }"
+        exit 1
+    fi
+    if line="$(grep -m1 -E '^speakerd: device(: limits|: no limits)' <<< "$log")"; then
+        if grep -qiE 'fail.?safe|no limits' <<< "$line"; then
+            loud "speakerd plays with its fail-safe limits, not device.json's:" "${line#speakerd: }"
+            exit 1
+        fi
+        ok "${line#speakerd: }"
+    else
+        warn "speakerd has not said what limits it enforces within 15 s: journalctl --user -u speakerd -b"
+    fi
+}
+
 # ----------------------------------------------------------------------------
 # install
 # ----------------------------------------------------------------------------
@@ -519,6 +573,7 @@ install_version() {
     chmod 755 "$tmpdst/bin/speakerd" "$tmpdst/bin/speakerd-run"
     if [ -d "$BUNDLE/lv2" ]; then cp -a "$BUNDLE/lv2" "$tmpdst/lv2"; else mkdir -p "$tmpdst/lv2"; fi
     cp -p "$BUNDLE/VERSION" "$tmpdst/VERSION"
+    echo "speakerd_version=$BUNDLE_SPEAKERD_VERSION" >> "$tmpdst/VERSION"
     # This installer, so that status, rollback and uninstall work on the board without a bundle.
     cp -p "$FIRMWARE_DIR"/{setup.sh,install-lib.sh,speakerd-setup.sh,snapcast-setup.sh} "$tmpdst/setup/"
     cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py} "$tmpdst/setup/speakerd/"
@@ -541,7 +596,9 @@ install_factory() {   # sets FACTORY_CHANGED
         for b in "$(dirname "$(dirname "$binary")")"/lv2/*.lv2; do [ -d "$b" ] && bundles+=(--lv2-bundle "$b"); done
         info "Converting $IMPORT_FILTERGRAPH into a graph document (speakerd --import-filtergraph)"
         mkdir -p "$LIB/home"
-        if ! HOME="$LIB/home" "$binary" --import-filtergraph "$IMPORT_FILTERGRAPH" --prefer-headless "${bundles[@]}" > "$doc" 2> "$doc.err"; then
+        local device=()
+        [ ! -f "$STATE/device.json" ] || device=(--device "$STATE/device.json")
+        if ! HOME="$LIB/home" "$binary" --import-filtergraph "$IMPORT_FILTERGRAPH" --prefer-headless "${device[@]}" "${bundles[@]}" > "$doc" 2> "$doc.err"; then
             sed 's/^/    /' "$doc.err" >&2
             rm -f "$doc" "$doc.err"
             die "speakerd could not convert $IMPORT_FILTERGRAPH (a speakerd without --import-filtergraph says 'bad command line')"
@@ -574,6 +631,19 @@ install_factory() {   # sets FACTORY_CHANGED
         ok "Wrote $STATE/factory.json: $summary"
     fi
     [ "$doc" = "$FACTORY" ] || rm -f "$doc"
+}
+
+# An existing device.json speakerd would reject (a key it does not know, a key twice) is
+# refused: it would play with its fail-safe defaults. A broken one is rewritten only with --role.
+check_device_json() {
+    [ -f "$STATE/device.json" ] || return 0
+    local why
+    why="$(helper device "$STATE/device.json" --check 2>&1)" && return 0
+    # A file that is not JSON at all is rewritten with --role (and kept as device.json.broken);
+    # keys speakerd would reject are a person's to fix.
+    if [ -n "$ROLE" ] && ! grep -q 'key(s)' <<< "$why"; then warn "$why"; return 0; fi
+    printf '%s\n' "$why" >&2
+    die "fix $STATE/device.json first"
 }
 
 write_device() {   # sets DEVICE_CHANGED
@@ -615,6 +685,7 @@ do_install() {
     info "Installing speakerd $BUNDLE_ID for $AUDIO_USER (home $H)"
     command -v python3 > /dev/null || die "python3 is needed (for JSON)"
     check_plugin_host
+    check_device_json
     if [ ! -f "$STATE/device.json" ] && [ -z "$ROLE" ]; then
         die "first install: --role left|right|mono is required (which channel this speaker plays)"
     fi
@@ -625,8 +696,9 @@ do_install() {
     install_version
     if ! dry; then mkdir -p "$LIB/home" "$STATE"; fi
     [ ! -e "$LIB/home/.lv2" ] || loud "$LIB/home/.lv2 exists: it may shadow the bundles. Remove it."
-    install_factory
+    # device.json first: the import maps the session's outputs by its ports.
     write_device
+    install_factory
     local unit_changed=0
     if install_file "$UNIT_SOURCE" "$UNIT"; then unit_changed=1; fi
 
@@ -649,7 +721,9 @@ do_install() {
         info "Not (re)starting speakerd (--no-restart)"
     elif [ "$old" != "$BUNDLE_ID" ] || [ "$DEVICE_CHANGED$FACTORY_CHANGED$unit_changed$DROPIN_CHANGED" != 0000 ] \
          || ! { [ "$NO_SYSTEMD" -eq 1 ] || systemctl --user is-active --quiet speakerd.service; }; then
-        if sc restart speakerd.service; then ok "speakerd (re)started"; else warn "could not start speakerd: journalctl --user -u speakerd"; fi
+        local restarted; restarted="$(date +%s)"
+        if sc restart speakerd.service; then ok "speakerd (re)started"; check_started "$restarted"
+        else warn "could not start speakerd: journalctl --user -u speakerd"; fi
     else
         ok "Nothing changed: speakerd keeps running"
     fi
@@ -680,7 +754,8 @@ do_status() {
             id="$(basename "$id")"
             [ -f "$LIB/$id/VERSION" ] || continue
             mark=""; [ "$id" = "$previous" ] && mark=previous; [ "$id" = "$current" ] && mark=current
-            printf '    %-9s %s  (commit %s, dirty %s, bundled %s)\n' "$mark" "$id" \
+            printf '    %-9s %s  (speakerd %s, commit %s, dirty %s, bundled %s)\n' "$mark" "$id" \
+                "$(version_value "$LIB/$id/VERSION" speakerd_version)" \
                 "$(version_value "$LIB/$id/VERSION" commit | cut -c1-12)" "$(version_value "$LIB/$id/VERSION" dirty)" \
                 "$(version_value "$LIB/$id/VERSION" bundled)"
         done
@@ -729,11 +804,18 @@ do_rollback() {
     local current previous
     current="$(link_target "$LIB/current")"; previous="$(link_target "$LIB/previous")"
     [ -n "$previous" ] && [ -d "$LIB/$previous" ] || die "no previous version to roll back to (current: ${current:-none})"
+    local version
+    version="$(version_value "$LIB/$previous/VERSION" speakerd_version)"
+    [ -n "$version" ] || version="$(speakerd_version "$LIB/$previous/bin/speakerd")"
+    require_speakerd_version "$version" "the previous version's speakerd ($previous)"
     if dry; then info "(dry-run) would make $previous current and $current previous"; return 0; fi
     point "$LIB/current" "$previous"
     point "$LIB/previous" "$current"
     ok "current -> $previous (previous -> $current; rollback again to go back)"
-    if [ "$NO_RESTART" -eq 0 ]; then sc restart speakerd.service && ok "speakerd restarted"; fi
+    if [ "$NO_RESTART" -eq 0 ]; then
+        local restarted; restarted="$(date +%s)"
+        sc restart speakerd.service && ok "speakerd restarted" && check_started "$restarted"
+    fi
 }
 
 do_uninstall() {
@@ -788,7 +870,10 @@ do_limits() {
     eval "$out"
     : "$role$amplifier$woofer$note"
     ok "device.json limits: $limits"
-    if [ "$changed" = yes ] && [ "$NO_RESTART" -eq 0 ]; then sc restart speakerd.service && ok "speakerd restarted with them"; fi
+    if [ "$changed" = yes ] && [ "$NO_RESTART" -eq 0 ]; then
+        local restarted; restarted="$(date +%s)"
+        sc restart speakerd.service && ok "speakerd restarted with them" && check_started "$restarted"
+    fi
 }
 
 do_check() {
@@ -798,6 +883,7 @@ do_check() {
     DRY_RUN=1
     check_plugin_host
     DRY_RUN="$dry_run"
+    check_device_json
     if [ ! -f "$STATE/device.json" ] && [ -z "$ROLE" ]; then
         die "first install: --role left|right|mono is required"
     fi
@@ -868,8 +954,10 @@ do_smoke() {
     if line="$(grep -m1 '^speakerd: device: limits: ' <<< "$since")"; then
         gain="$(sed -n -E 's/.*output at (-?[0-9.]+) dB.*/\1/p' <<< "$line")"
         tweeter_on="$(sed -n -E 's/.*tweeter (muted|on).*/\1/p' <<< "$line")"
-        if [ -z "$want_gain" ]; then
-            failed "device.json has no limits, so nothing caps the output (speakerd says: ${line#speakerd: device: })"
+        if grep -qiE 'fail.?safe' <<< "$line"; then
+            failed "speakerd plays with its fail-safe limits, not device.json's: ${line#speakerd: }"
+        elif [ -z "$want_gain" ]; then
+            failed "device.json has no limits (speakerd then plays with its fail-safe ones; say them explicitly): ${line#speakerd: }"
         elif [ -z "$gain" ] || ! awk -v a="$gain" -v b="$want_gain" 'BEGIN { exit !(a - b < 0.001 && b - a < 0.001) }' || [ "$tweeter_on" != "$want_tweeter" ]; then
             failed "speakerd says '${line#speakerd: }'; device.json says output at $want_gain dB, tweeter $want_tweeter"
         elif [ "$tweeter_on" = muted ] && awk -v g="$gain" -v c="$CAP_GAIN_DB" 'BEGIN { exit !(g <= c) }'; then

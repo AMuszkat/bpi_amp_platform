@@ -18,7 +18,9 @@ Pass when:
 - the real speakerd, started by the unit on the left virtual speaker, starts on current; killed
   by SIGSEGV, it is recorded as a crash, systemd would restart it, and the next start says
   `starting at layer last-known-good (--from)`; stopped by SIGTERM it exits 0, is recorded as
-  clean, is not restarted, and the next start is on current again;
+  clean, is not restarted, and the next start is on current again. The installer installs only
+  a speakerd that enforces device.json's limits (SPEAKERD_MIN_VERSION), so against an older
+  one (2cb3278's) this part fails at the install, and says why;
 - with a stand-in speakerd that dies as it is told, the starts go: current, then after each of
   six crashes last-known-good, last-known-good, factory (three crashes within 60 s), factory,
   factory, passthrough (three crashes on factory); exit 3 (PipeWire) restarts on the same
@@ -36,6 +38,7 @@ Pass when:
 """
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -44,9 +47,17 @@ import time
 import unittest
 from pathlib import Path
 
-from harness import Pair, UserUnit, built, firmware, stub_speakerd
+from harness import FIRMWARE, Pair, UserUnit, built, firmware, stub_speakerd
 
 LAYER_LINE = "speakerd: stub:"
+MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
+PAIR = None
+
+
+def setUpModule():
+    global PAIR
+    PAIR = Pair().__enter__()
+    unittest.addModuleCleanup(PAIR.__exit__, None, None, None)
 
 
 def from_layer(line):
@@ -54,24 +65,18 @@ def from_layer(line):
     return words[words.index("--from") + 1]
 
 
-class CrashRestart(unittest.TestCase):
+class Supervision(unittest.TestCase):
+    """The unit and its wrapper, with the stand-in speakerd."""
+
     @classmethod
     def setUpClass(cls):
-        built("speakerd")
         headless = built("loudness", "headless")
         cls.tmp = Path(tempfile.mkdtemp(prefix="vpair-crash-"))
         cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
-        no_pipewire = {"XDG_RUNTIME_DIR": str(cls.tmp / "no-pipewire")}
+        no_pipewire = {"XDG_RUNTIME_DIR": str(cls.tmp / "no-pipewire"), "STUB_VERSION": MIN_VERSION}
         (cls.tmp / "no-pipewire").mkdir()
 
-        # The real speakerd, installed as on a board.
-        real = cls.tmp / "bundle-real"
-        firmware("speakerd-setup.sh", "bundle", "--arch", "native", "--out", real, "--plugin", "loudness:headless")
-        cls.real_home = cls.tmp / "real-home"
-        firmware("speakerd-setup.sh", "install", "--bundle", real, "--home", cls.real_home, "--no-systemd",
-                 "--role", "left", "--amplifier", "amplifier", env=no_pipewire)
-
-        # The stand-in, installed the same way.
+        # The stand-in, installed as on a board.
         root = cls.tmp / "stub-build"
         (root / "speakerd/speakerd_artefacts/Release").mkdir(parents=True)
         shutil.copy(stub_speakerd(), root / "speakerd/speakerd_artefacts/Release/speakerd")
@@ -86,15 +91,12 @@ class CrashRestart(unittest.TestCase):
         cls.stub_dir = cls.tmp / "stub"
         cls.stub_dir.mkdir()
 
-        cls.pair = Pair().__enter__()
-        cls.addClassCleanup(cls.pair.__exit__, None, None, None)
-
     def unit(self, home):
-        return UserUnit(home / ".config/systemd/user/speakerd.service", home, self.pair["left"],
+        return UserUnit(home / ".config/systemd/user/speakerd.service", home, PAIR["left"],
                         env={"STUB_DIR": str(self.stub_dir), "SPEAKERD_BACKOFF": "0.5"})
 
     def history(self):
-        return Path(self.pair["left"].env["XDG_RUNTIME_DIR"]) / "speakerd" / "history"
+        return Path(PAIR["left"].env["XDG_RUNTIME_DIR"]) / "speakerd" / "history"
 
     def setUp(self):
         self.history().unlink(missing_ok=True)
@@ -113,45 +115,15 @@ class CrashRestart(unittest.TestCase):
     # ---------------------------------------------------------------------------------------
 
     def test_the_unit(self):
-        unit = self.unit(self.real_home)
-        text = (self.real_home / ".config/systemd/user/speakerd.service").read_text()
+        unit = self.unit(self.stub_home)
+        text = (self.stub_home / ".config/systemd/user/speakerd.service").read_text()
         self.assertRegex(text, r"(?m)^After=.*\bpipewire\.service\b")
         self.assertNotRegex(text, r"(?m)^(After|Wants|Requires|BindsTo)=.*network")
         self.assertEqual(unit.service["Restart"], ["on-failure"])
         self.assertEqual(unit.service["RestartSec"], ["1"])
         self.assertIn("2", unit.service["RestartPreventExitStatus"][0].split())
         self.assertRegex(text, r"(?m)^StartLimitIntervalSec=0$")
-        self.assertEqual(unit.environment()["HOME"], str(self.real_home / ".local/lib/speakerd/home"))
-
-    def test_the_real_speakerd_after_a_segfault(self):
-        unit = self.unit(self.real_home)
-        run = unit.start()
-        run.wait_for("speakerd: using layer ")
-        self.assertIn("from layer current", run.wait_for("speakerd-run: starting speakerd"))
-        run.signal(signal.SIGSEGV)
-        crashed = run.finish()
-        print(f"\n  SIGSEGV: {crashed['SERVICE_RESULT']}/{crashed['EXIT_CODE']}/{crashed['EXIT_STATUS']}; "
-              f"{crashed['stop_post'].strip()}")
-        self.assertEqual(crashed["EXIT_STATUS"], "SEGV")
-        self.assertIn("speakerd ended: crash", crashed["stop_post"])
-        self.assertTrue(unit.would_restart(crashed))
-
-        run = unit.start()
-        line = run.wait_for("speakerd: starting at layer ")
-        self.assertEqual(line, "speakerd: starting at layer last-known-good (--from)", run.log())
-        run.wait_for("speakerd: using layer ")
-        run.signal(signal.SIGTERM)
-        stopped = run.finish()
-        self.assertEqual((stopped["EXIT_CODE"], stopped["EXIT_STATUS"]), ("exited", "0"), run.log())
-        self.assertIn("speakerd ended: clean", stopped["stop_post"])
-        self.assertFalse(unit.would_restart(stopped))
-
-        run = unit.start()
-        self.assertIn("from layer current", run.wait_for("speakerd-run: starting speakerd"))
-        run.wait_for("speakerd: using layer ")
-        self.assertNotIn("starting at layer", run.log())
-        run.signal(signal.SIGTERM)
-        run.finish()
+        self.assertEqual(unit.environment()["HOME"], str(self.stub_home / ".local/lib/speakerd/home"))
 
     def test_the_layers_after_crashes(self):
         unit = self.unit(self.stub_home)
@@ -230,6 +202,56 @@ class CrashRestart(unittest.TestCase):
         gone = time.monotonic()
         run.wait_for(LAYER_LINE, timeout=10)
         print(f"\n  {said}\n  started {time.monotonic() - gone:.1f} s after it had gone")
+        run.signal(signal.SIGTERM)
+        run.finish()
+
+
+class RealSpeakerd(unittest.TestCase):
+    """The unit and its wrapper with the real speakerd, installed as on a board."""
+
+    @classmethod
+    def setUpClass(cls):
+        built("speakerd")
+        built("loudness", "headless")
+        cls.tmp = Path(tempfile.mkdtemp(prefix="vpair-crash-real-"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
+        (cls.tmp / "no-pipewire").mkdir()
+        real = cls.tmp / "bundle-real"
+        firmware("speakerd-setup.sh", "bundle", "--arch", "native", "--out", real, "--plugin", "loudness:headless")
+        cls.real_home = cls.tmp / "real-home"
+        firmware("speakerd-setup.sh", "install", "--bundle", real, "--home", cls.real_home, "--no-systemd",
+                 "--role", "left", "--amplifier", "amplifier", env={"XDG_RUNTIME_DIR": str(cls.tmp / "no-pipewire")})
+
+    def setUp(self):
+        (Path(PAIR["left"].env["XDG_RUNTIME_DIR"]) / "speakerd" / "history").unlink(missing_ok=True)
+
+    def test_the_real_speakerd_after_a_segfault(self):
+        unit = UserUnit(self.real_home / ".config/systemd/user/speakerd.service", self.real_home, PAIR["left"])
+        run = unit.start()
+        run.wait_for("speakerd: using layer ")
+        self.assertIn("from layer current", run.wait_for("speakerd-run: starting speakerd"))
+        run.signal(signal.SIGSEGV)
+        crashed = run.finish()
+        print(f"\n  SIGSEGV: {crashed['SERVICE_RESULT']}/{crashed['EXIT_CODE']}/{crashed['EXIT_STATUS']}; "
+              f"{crashed['stop_post'].strip()}")
+        self.assertEqual(crashed["EXIT_STATUS"], "SEGV")
+        self.assertIn("speakerd ended: crash", crashed["stop_post"])
+        self.assertTrue(unit.would_restart(crashed))
+
+        run = unit.start()
+        line = run.wait_for("speakerd: starting at layer ")
+        self.assertEqual(line, "speakerd: starting at layer last-known-good (--from)", run.log())
+        run.wait_for("speakerd: using layer ")
+        run.signal(signal.SIGTERM)
+        stopped = run.finish()
+        self.assertEqual((stopped["EXIT_CODE"], stopped["EXIT_STATUS"]), ("exited", "0"), run.log())
+        self.assertIn("speakerd ended: clean", stopped["stop_post"])
+        self.assertFalse(unit.would_restart(stopped))
+
+        run = unit.start()
+        self.assertIn("from layer current", run.wait_for("speakerd-run: starting speakerd"))
+        run.wait_for("speakerd: using layer ")
+        self.assertNotIn("starting at layer", run.log())
         run.signal(signal.SIGTERM)
         run.finish()
 

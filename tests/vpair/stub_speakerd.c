@@ -2,9 +2,12 @@
  * speakerd-run (tests/vpair/README.md). It is an ELF program like the real one, because the
  * installer checks that the binary is built for the machine, and it does what it is told:
  *
+ *   speakerd --version
+ *       prints "speakerd $STUB_VERSION"; without STUB_VERSION it says "bad command line" and
+ *       exits 2, as a speakerd from before --version (and before the limits) does
  *   speakerd --import-filtergraph FILE ...
- *       prints the file $STUB_IMPORT and exits 0; exits 2 (as speakerd does on a failure) when
- *       STUB_IMPORT is unset or FILE does not exist
+ *       appends its arguments to $STUB_DIR/calls, prints the file $STUB_IMPORT and exits 0;
+ *       exits 2 (as speakerd does on a failure) when STUB_IMPORT is unset or FILE does not exist
  *   speakerd anything else
  *       prints "speakerd: stub:" and its arguments, appends them as one line to
  *       $STUB_DIR/calls, then does what the first word of $STUB_DIR/fate says:
@@ -19,8 +22,26 @@
 #include <string.h>
 #include <unistd.h>
 
+static void record (int argc, char** argv, const char* prefix)
+{
+    const char* dir = getenv ("STUB_DIR");
+    if (dir == NULL)
+        return;
+    char path[4096];
+    snprintf (path, sizeof path, "%s/calls", dir);
+    FILE* calls = fopen (path, "a");
+    if (calls == NULL)
+        return;
+    fputs (prefix, calls);
+    for (int i = 1; i < argc; ++i)
+        fprintf (calls, "%s%s", i > 1 ? " " : "", argv[i]);
+    fprintf (calls, "\n");
+    fclose (calls);
+}
+
 static int import_filtergraph (int argc, char** argv, int at)
 {
+    record (argc, argv, "import: ");
     const char* out = getenv ("STUB_IMPORT");
     if (out == NULL || at + 1 >= argc || access (argv[at + 1], R_OK) != 0)
     {
@@ -41,8 +62,21 @@ static int import_filtergraph (int argc, char** argv, int at)
 int main (int argc, char** argv)
 {
     for (int i = 1; i < argc; ++i)
+    {
         if (strcmp (argv[i], "--import-filtergraph") == 0)
             return import_filtergraph (argc, argv, i);
+        if (strcmp (argv[i], "--version") == 0)
+        {
+            const char* version = getenv ("STUB_VERSION");
+            if (version == NULL)
+            {
+                fprintf (stderr, "speakerd: --version: bad command line\n");
+                return 2;
+            }
+            printf ("speakerd %s\n", version);
+            return 0;
+        }
+    }
 
     printf ("speakerd: stub:");
     for (int i = 1; i < argc; ++i)
@@ -51,19 +85,11 @@ int main (int argc, char** argv)
     fflush (stdout);
 
     char fate[64] = "run";
+    record (argc, argv, "");
     const char* dir = getenv ("STUB_DIR");
     if (dir != NULL)
     {
         char path[4096];
-        snprintf (path, sizeof path, "%s/calls", dir);
-        FILE* calls = fopen (path, "a");
-        if (calls != NULL)
-        {
-            for (int i = 1; i < argc; ++i)
-                fprintf (calls, "%s%s", i > 1 ? " " : "", argv[i]);
-            fprintf (calls, "\n");
-            fclose (calls);
-        }
         snprintf (path, sizeof path, "%s/fate", dir);
         FILE* f = fopen (path, "r");
         if (f != NULL)

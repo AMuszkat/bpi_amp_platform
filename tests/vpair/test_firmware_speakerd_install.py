@@ -4,25 +4,31 @@ unsafe.
 
 firmware/speakerd-setup.sh runs here as it runs on a board, with two test hooks: --home (a
 fresh folder stands for the audio user's home) and --no-systemd (the container has no systemd:
-the systemctl calls are only printed). The bundle is made by the installer's own bundle step,
-from the x86_64 builds. Nothing here reaches a board.
+the systemctl calls are only printed). The bundles are made by the installer's own bundle step.
+What is under test is the installer, so their speakerd is the stand-in of stub_speakerd.c,
+which says the version STUB_VERSION gives it (the installer's minimum, SPEAKERD_MIN_VERSION,
+unless a test says otherwise), next to the real loudness_headless build. Nothing here reaches
+a board.
 
 Pass when:
 
 - the bundle holds bin/speakerd, lv2/loudness_headless.lv2 and a VERSION whose id is the
   commit, "-dirty" if the tree is, and the hash of its contents;
+- a speakerd that cannot say its version (as before --version) or is older than the minimum is
+  refused by install, which installs nothing, and by rollback;
 - a first install without --role is refused, and installs nothing;
 - the first install lays out, in the home: .local/lib/speakerd/<id>/ with bin/speakerd,
-  bin/speakerd-run, lv2/loudness_headless.lv2, VERSION and setup/ (the installer); current ->
-  <id>; an empty home/ (speakerd's HOME); .local/state/speakerd/device.json exactly
-  {version 1, role left, amplifier {node, woofer playback_FL, tweeter playback_FR}, limits
-  {gain_db -20.0, tweeter muted}}; factory.json, the document given; the unit and the
-  PipeWire drop-in, byte for byte the tracked firmware/ files; and graph.json and
-  graph.lkg.json, there before, unchanged byte for byte; and it says every library speakerd and
-  its plugins need is there;
+  bin/speakerd-run, lv2/loudness_headless.lv2, VERSION (with the speakerd version) and setup/
+  (the installer); current -> <id>; an empty home/ (speakerd's HOME);
+  .local/state/speakerd/device.json exactly {version 1, role left, amplifier {node, woofer
+  playback_FL, tweeter playback_FR}, limits {gain_db -20.0, tweeter muted}}; factory.json, the
+  document given; the unit and the PipeWire drop-in, byte for byte the tracked firmware/ files;
+  and graph.json and graph.lkg.json, there before, unchanged byte for byte; and it says every
+  library speakerd and its plugins need is there;
 - installing the same bundle again adds no version and changes nothing, but a device.json whose
-  limits a person lifted (0 dB, tweeter on) is capped again, keeping its role, amplifier and
-  an extra key; --role right changes the role alone;
+  limits a person lifted (0 dB, tweeter on) is capped again, keeping its role and amplifier;
+  --role right changes the role alone; a device.json with a key speakerd does not know, or a
+  key twice, is refused (speakerd would reject it and play its fail-safe defaults);
 - a second, different bundle becomes current, the first previous; rollback swaps them, and
   rollback again swaps them back; with --keep 2 a third version removes the oldest, never
   current or previous;
@@ -31,12 +37,14 @@ Pass when:
   start one again is named;
 - a factory graph that sends the stream to the tweeter without a crossover is refused, and is
   accepted with --allow-tweeter-without-crossover;
-- --import-filtergraph writes speakerd's conversion as factory.json (a stand-in speakerd here:
-  2cb3278's has no import), and a conversion that fails (exit 2) is refused;
+- --import-filtergraph writes speakerd's conversion as factory.json, having given speakerd
+  the board's device.json (--device), and a conversion that fails (exit 2) is refused;
 - the amplifier is found in a pw-dump: the one ALSA sink; with several, bpi-alsa-playback-pcm
   or alsa-playback-pcm; none or an ambiguous set is refused, naming the sinks; on a virtual
   speaker (whose amplifier is a null sink) install refuses without --amplifier, and with
   --amplifier amplifier reads its ports playback_FL and playback_FR;
+- smoke reports, each as a failure: a `device.json: FAILED` line, fail-safe limits, `device: no
+  limits`, and no limits line at all;
 - snapcast-setup.sh --route speakerd refuses while no PipeWire config defines the speakerd
   sink, and after `speakerd-setup.sh sink` routes snapclient (and shairport-sync and an
   AudioPluginHost) into "speakerd"; uninstall routes snapclient back to Ap.cap first, removes
@@ -51,6 +59,7 @@ Pass when:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -62,6 +71,7 @@ from harness import FIRMWARE, Pair, built, firmware, graph_document, lv2_uri, st
 
 DOCUMENT = graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1", "s0_e0_gain": 12.0})
 CAPPED = {"gain_db": -20.0, "tweeter": "muted"}
+MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
 
 
 def tree(root):
@@ -78,49 +88,55 @@ def tree(root):
     return out
 
 
-def version_id(bundle):
-    return dict(line.split("=", 1) for line in (bundle / "VERSION").read_text().splitlines())["id"]
+def version_file(path):
+    return dict(line.split("=", 1) for line in Path(path).read_text().splitlines())
 
 
 def stub_build_root(root):
-    """A build tree with the stand-in speakerd and the real loudness_headless build, for the
-    bundle step (BUILD_ROOT)."""
+    """A build tree with the stand-in speakerd and the real loudness builds, for the bundle step
+    (BUILD_ROOT)."""
     (root / "speakerd/speakerd_artefacts/Release").mkdir(parents=True, exist_ok=True)
     shutil.copy(stub_speakerd(), root / "speakerd/speakerd_artefacts/Release/speakerd")
     (root / "loudness").mkdir(exist_ok=True)
-    if not (root / "loudness/loudness_headless_artefacts").exists():
-        os.symlink(built("loudness", "headless").parents[2], root / "loudness/loudness_headless_artefacts")
+    for kind in ("headless", "complete"):
+        target = "loudness" if kind == "complete" else f"loudness_{kind}"
+        link = root / f"loudness/{target}_artefacts"
+        if not link.exists():
+            os.symlink(built("loudness", kind).parents[2], link)
     return root
 
 
 class Install(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        built("speakerd")
         built("loudness", "headless")
         built("loudness", "complete")
         cls.tmp = Path(tempfile.mkdtemp(prefix="vpair-install-"))
         cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         # No PipeWire here unless a test brings one up: pw-dump fails at once.
-        cls.env = {"XDG_RUNTIME_DIR": str(cls.tmp / "no-pipewire")}
         (cls.tmp / "no-pipewire").mkdir()
+        (cls.tmp / "stub").mkdir()
+        cls.env = {"XDG_RUNTIME_DIR": str(cls.tmp / "no-pipewire"), "STUB_VERSION": MIN_VERSION,
+                   "STUB_DIR": str(cls.tmp / "stub")}
+        cls.root = stub_build_root(cls.tmp / "build")
         cls.bundle = cls.make_bundle("one", ["loudness:headless"])
         cls.bundle2 = cls.make_bundle("two", ["loudness:headless", "loudness:complete"])
+        cls.bundle3 = cls.make_bundle("three", ["loudness:complete"])
         cls.factory = cls.tmp / "factory.json"
         cls.factory.write_text(json.dumps(DOCUMENT, indent=2))
 
     @classmethod
-    def make_bundle(cls, name, plugins, build_root=None):
+    def make_bundle(cls, name, plugins):
         out = cls.tmp / f"bundle-{name}"
         args = ["bundle", "--arch", "native", "--out", out]
         for plugin in plugins:
             args += ["--plugin", plugin]
-        firmware("speakerd-setup.sh", *args, env={"BUILD_ROOT": str(build_root)} if build_root else None)
+        firmware("speakerd-setup.sh", *args, env={"BUILD_ROOT": str(cls.root)})
         return out
 
-    def install(self, home, *args, bundle=None, check=True):
+    def install(self, home, *args, bundle=None, check=True, env=None):
         return firmware("speakerd-setup.sh", "install", "--bundle", bundle or self.bundle, "--home", home,
-                        "--no-systemd", "--amplifier", "amplifier", *args, env=self.env, check=check)
+                        "--no-systemd", "--amplifier", "amplifier", *args, env=env or self.env, check=check)
 
     def fresh_home(self, name):
         path = self.tmp / name
@@ -135,7 +151,7 @@ class Install(unittest.TestCase):
                      "firmware/speakerd-setup.sh", "firmware/speakerd/speakerd-run",
                      "firmware/pipewire/pipewire.conf.d/60-speakerd-sink.conf"):
             self.assertIn(want, files)
-        version = dict(line.split("=", 1) for line in (self.bundle / "VERSION").read_text().splitlines())
+        version = version_file(self.bundle / "VERSION")
         commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=FIRMWARE, capture_output=True,
                                 text=True).stdout.strip()
         dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=FIRMWARE, capture_output=True,
@@ -144,7 +160,31 @@ class Install(unittest.TestCase):
         self.assertEqual(version["commit"], commit)
         self.assertEqual(version["dirty"], "yes" if dirty else "no")
         self.assertRegex(version["id"], rf"^{commit[:12]}{'-dirty' if dirty else ''}-[0-9a-f]{{8}}$")
-        self.assertNotEqual(version_id(self.bundle), version_id(self.bundle2))
+        self.assertNotEqual(version_file(self.bundle / "VERSION")["id"], version_file(self.bundle2 / "VERSION")["id"])
+
+    def test_refuses_a_speakerd_that_ignores_the_limits(self):
+        home = self.fresh_home("old-speakerd")
+        older = "0.0.1"
+        for env, said in ((dict(self.env, STUB_VERSION=older), f"is {older}"),
+                          ({k: v for k, v in self.env.items() if k != "STUB_VERSION"}, "too old to say its version")):
+            result = self.install(home, "--role", "left", env=env, check=False)
+            print(f"\n  {said}: status {result.returncode}")
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn(said, result.stdout)
+            self.assertIn(f"needs speakerd {MIN_VERSION} or newer", result.stdout)
+            self.assertFalse((home / ".local/lib/speakerd").exists(), result.stdout)
+
+        # Rollback to a version whose speakerd is older: refused too.
+        self.install(home, "--role", "left")
+        self.install(home, bundle=self.bundle2)
+        lib = home / ".local/lib/speakerd"
+        previous = os.readlink(lib / "previous")
+        version = lib / previous / "VERSION"
+        version.write_text(re.sub(r"(?m)^speakerd_version=.*$", f"speakerd_version={older}", version.read_text()))
+        refused = firmware("speakerd-setup.sh", "rollback", "--home", home, "--no-systemd", env=self.env, check=False)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn(f"is {older}", refused.stdout)
+        self.assertEqual(os.readlink(lib / "previous"), previous)
 
     def test_the_first_install_needs_a_role(self):
         home = self.fresh_home("no-role")
@@ -162,7 +202,7 @@ class Install(unittest.TestCase):
         result = self.install(home, "--role", "left", "--factory", self.factory,
                               "--allow-tweeter-without-crossover")
         self.assertIn("Every library speakerd and its plugins need is here", result.stdout)
-        vid = version_id(self.bundle)
+        vid = version_file(self.bundle / "VERSION")["id"]
         files = tree(home)
         for want in (f".local/lib/speakerd/{vid}/bin/speakerd", f".local/lib/speakerd/{vid}/bin/speakerd-run",
                      f".local/lib/speakerd/{vid}/lv2/loudness_headless.lv2/", f".local/lib/speakerd/{vid}/VERSION",
@@ -172,6 +212,7 @@ class Install(unittest.TestCase):
                      ".config/systemd/user/speakerd.service",
                      ".config/pipewire/pipewire.conf.d/60-speakerd-sink.conf"):
             self.assertIn(want, files, "\n".join(sorted(files)))
+        self.assertEqual(version_file(home / f".local/lib/speakerd/{vid}/VERSION")["speakerd_version"], MIN_VERSION)
         self.assertEqual(list((home / ".local/lib/speakerd/home").iterdir()), [])
         self.assertEqual(json.loads((state / "device.json").read_text()),
                          {"version": 1, "role": "left",
@@ -191,7 +232,6 @@ class Install(unittest.TestCase):
         device_json = home / ".local/state/speakerd/device.json"
         device = json.loads(device_json.read_text())
         device["limits"] = {"gain_db": 0.0, "tweeter": "on"}
-        device["trim"] = 1.5
         device["amplifier"]["tweeter"] = "playback_FL"
         device["amplifier"]["woofer"] = "playback_FR"
         device_json.write_text(json.dumps(device))
@@ -202,18 +242,28 @@ class Install(unittest.TestCase):
         self.assertEqual(tree(home / ".local/lib/speakerd"), before)
         again = json.loads(device_json.read_text())
         self.assertEqual(again["limits"], CAPPED)
-        self.assertEqual((again["role"], again["trim"], again["amplifier"]),
-                         ("left", 1.5, {"node": "amplifier", "woofer": "playback_FR", "tweeter": "playback_FL"}))
+        self.assertEqual((again["role"], again["amplifier"]),
+                         ("left", {"node": "amplifier", "woofer": "playback_FR", "tweeter": "playback_FL"}))
 
         firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home, "--no-systemd",
                  "--role", "right", env=self.env)
         right = json.loads(device_json.read_text())
         self.assertEqual(right, dict(again, role="right"))
 
+        for text, said in ((json.dumps(dict(right, trim=1.5)), "trim"),
+                           (json.dumps(dict(right, amplifier=dict(right["amplifier"], gain=1))), "amplifier.gain"),
+                           ('{"version": 1, "role": "left", "role": "right"}', "role appear twice")):
+            device_json.write_text(text)
+            refused = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home,
+                               "--no-systemd", env=self.env, check=False)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn(said, refused.stdout)
+            self.assertEqual(device_json.read_text(), text, "a refused device.json was changed")
+
     def test_versions_rollback_and_pruning(self):
         home = self.fresh_home("versions")
         lib = home / ".local/lib/speakerd"
-        one, two = version_id(self.bundle), version_id(self.bundle2)
+        one, two, three = (version_file(b / "VERSION")["id"] for b in (self.bundle, self.bundle2, self.bundle3))
 
         def link(name):
             return os.readlink(lib / name) if (lib / name).is_symlink() else None
@@ -226,13 +276,11 @@ class Install(unittest.TestCase):
         firmware("speakerd-setup.sh", "rollback", "--home", home, "--no-systemd", env=self.env)
         self.assertEqual((link("current"), link("previous")), (two, one))
         status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
-        self.assertRegex(status, rf"current +{two}")
+        self.assertRegex(status, rf"current +{two} +\(speakerd {re.escape(MIN_VERSION)},")
         self.assertRegex(status, rf"previous +{one}")
 
         # A third version with --keep 2: the oldest goes, current and previous stay.
-        three_bundle = self.make_bundle("three", ["loudness:headless"], build_root=stub_build_root(self.tmp / "b3"))
-        three = version_id(three_bundle)
-        self.install(home, "--keep", "2", bundle=three_bundle)
+        self.install(home, "--keep", "2", bundle=self.bundle3)
         self.assertEqual((link("current"), link("previous")), (three, two))
         self.assertFalse((lib / one).exists(), "\n".join(sorted(tree(lib))))
         self.assertTrue((lib / two).is_dir())
@@ -279,23 +327,32 @@ class Install(unittest.TestCase):
         safe = self.tmp / "crossover.json"
         safe.write_text(json.dumps(crossover))
         self.install(home, "--role", "left", "--factory", safe)
+        bypassed = json.loads(json.dumps(crossover))
+        bypassed["nodes"][1]["bypassed"] = True
+        unsafe = self.tmp / "bypassed.json"
+        unsafe.write_text(json.dumps(bypassed))
+        refused = self.install(home, "--factory", unsafe, check=False)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
         self.install(home, "--factory", self.factory, "--allow-tweeter-without-crossover")
         self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), DOCUMENT)
 
     def test_import_filtergraph(self):
-        bundle = self.make_bundle("import", ["loudness:headless"], build_root=stub_build_root(self.tmp / "bi"))
         session = self.tmp / "session.filtergraph"
         session.write_text("<FILTERGRAPH/>\n")
         converted = self.tmp / "converted.json"
         converted.write_text(json.dumps(DOCUMENT))
         home = self.fresh_home("import")
+        (self.tmp / "stub/calls").unlink(missing_ok=True)
         env = dict(self.env, STUB_IMPORT=str(converted))
-        result = firmware("speakerd-setup.sh", "install", "--bundle", bundle, "--home", home, "--no-systemd",
+        result = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home, "--no-systemd",
                           "--amplifier", "amplifier", "--role", "left", "--import-filtergraph", session,
                           "--allow-tweeter-without-crossover", env=env)
         self.assertIn("Converting", result.stdout)
         self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), DOCUMENT)
-        failed = firmware("speakerd-setup.sh", "install", "--bundle", bundle, "--home", home, "--no-systemd",
+        calls = (self.tmp / "stub/calls").read_text()
+        self.assertIn(f"--import-filtergraph {session} --prefer-headless --device "
+                      f"{home / '.local/state/speakerd/device.json'}", calls)
+        failed = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home, "--no-systemd",
                           "--import-filtergraph", session, env=self.env, check=False)
         self.assertNotEqual(failed.returncode, 0, failed.stdout)
         self.assertIn("speakerd: import: FAILED", failed.stdout)
@@ -333,7 +390,7 @@ class Install(unittest.TestCase):
         self.assertIn("found no ALSA Audio/Sink", none.stderr)
 
         with Pair() as pair:
-            env = {"XDG_RUNTIME_DIR": pair["left"].env["XDG_RUNTIME_DIR"]}
+            env = dict(self.env, XDG_RUNTIME_DIR=pair["left"].env["XDG_RUNTIME_DIR"])
             home = self.fresh_home("live")
             refused = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home,
                                "--no-systemd", "--role", "left", env=env, check=False)
@@ -343,6 +400,26 @@ class Install(unittest.TestCase):
                              "--no-systemd", "--role", "left", "--amplifier", "amplifier", env=env)
             self.assertIn("ports playback_FL playback_FR", found.stdout)
             self.assertIn("woofer = amplifier:playback_FL, tweeter = amplifier:playback_FR", found.stdout)
+
+    def test_smoke_reports_what_is_not_capped(self):
+        home = self.fresh_home("smoke")
+        self.install(home, "--role", "left")
+        start = "speakerd-run: starting speakerd x from layer current (test)"
+        cases = {
+            "fail-safe": ([start, "speakerd: device.json: FAILED: limits: no such key; using the defaults",
+                           "speakerd: device: limits: output at -20 dB, tweeter muted (fail-safe)"],
+                          ["FAIL device.json: FAILED", "FAIL speakerd plays with its fail-safe limits"]),
+            "no limits": ([start, "speakerd: device: no limits"], ["FAIL speakerd plays with no limits"]),
+            "silent": ([start], ["FAIL speakerd did not say which limits it enforces"]),
+        }
+        for name, (lines, fails) in cases.items():
+            log = self.tmp / f"smoke-{name}.log"
+            log.write_text("\n".join(lines) + "\n")
+            result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                              "--window", "0", env=self.env, check=False)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            for fail in fails:
+                self.assertIn(fail, result.stdout, name)
 
     def test_routing_and_uninstall(self):
         home = self.fresh_home("routing")

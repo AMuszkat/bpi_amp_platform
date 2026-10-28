@@ -576,15 +576,29 @@ def with_plugin(document, plugin_uri):
     return copy
 
 
-def state_dir(path, role="left", amplifier="amplifier", current=None, lkg=None, factory=None):
+NO_LIMITS = {"gain_db": 0, "tweeter": "on"}
+
+
+def state_dir(path, role="left", amplifier="amplifier", current=None, lkg=None, factory=None,
+              limits=NO_LIMITS, device=None):
     """Fills `path` as speakerd's state directory and returns it: device.json, and the state
     layers graph.json (`current`), graph.lkg.json (`lkg`) and factory.json (`factory`). A
     layer is a document (dict, written as JSON), text (written as it is, for a broken file),
-    or None (no file)."""
+    or None (no file).
+
+    device.json says its `limits` explicitly, by default none (0 dB, tweeter on): a device.json
+    without them plays capped (speakerd fails closed). `limits=None` leaves them out. `device`
+    replaces the whole file: a dict, text (written as it is), or False for no file."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    (path / "device.json").write_text(json.dumps(
-        {"version": 1, "role": role, "amplifier": {"node": amplifier}}, indent=2))
+    if device is None:
+        device = {"version": 1, "role": role, "amplifier": {"node": amplifier}}
+        if limits is not None:
+            device["limits"] = limits
+    if device is False:
+        (path / "device.json").unlink(missing_ok=True)
+    else:
+        (path / "device.json").write_text(device if isinstance(device, str) else json.dumps(device, indent=2))
     for name, layer in (("graph.json", current), ("graph.lkg.json", lkg),
                         ("factory.json", factory)):
         if layer is None:

@@ -5,7 +5,7 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
     setup-helper.py amp DUMP [--node NAME]        the amplifier: an ALSA Audio/Sink in a pw-dump
     setup-helper.py node DUMP NAME                one node of a pw-dump: id, process, priority.driver
     setup-helper.py device FILE [--role R] [--amplifier NODE] [--woofer PORT] [--tweeter PORT]
-                                [--gain-db G --tweeter-limit muted|on] [--show]
+                                [--gain-db G --tweeter-limit muted|on] [--show | --check]
     setup-helper.py graph FILE [--allow-tweeter-without-crossover]
     setup-helper.py write FILE                     stdin to FILE, atomically
     setup-helper.py drivers PROFILER_OUTPUT DUMP   which node drives which, from pw-profiler
@@ -21,6 +21,11 @@ import sys
 import tempfile
 
 ROLES = ("left", "right", "mono")
+# The keys speakerd knows. It rejects a device.json with any other key, or a key twice, and
+# then plays with its fail-safe defaults (mono, bpi-alsa-playback-pcm, -20 dB, tweeter muted).
+DEVICE_KEYS = {"version", "role", "amplifier", "limits"}
+AMPLIFIER_KEYS = {"node", "woofer", "tweeter"}
+LIMITS_KEYS = {"gain_db", "tweeter"}
 TWEETER_LIMITS = ("muted", "on")
 # The amplifier's node name in the repository's pipewire.conf, and on the boards (the name
 # snapcast-setup.sh's client-rt.conf and speakerd's default use).
@@ -176,24 +181,51 @@ def cmd_drivers(args):
 # ---------------------------------------------------------------------------------------------
 # device.json (dsp/juce_apps/speakerd/README.md)
 
+def no_duplicates(pairs):
+    keys = [k for k, _ in pairs]
+    twice = sorted({k for k in keys if keys.count(k) > 1})
+    if twice:
+        raise ValueError(f"the key(s) {', '.join(twice)} appear twice")
+    return dict(pairs)
+
+
+def unknown_keys(device):
+    """The keys of a device.json that speakerd does not know, as "path" strings."""
+    out = [k for k in device if k not in DEVICE_KEYS]
+    if isinstance(device.get("amplifier"), dict):
+        out += [f"amplifier.{k}" for k in device["amplifier"] if k not in AMPLIFIER_KEYS]
+    if isinstance(device.get("limits"), dict):
+        out += [f"limits.{k}" for k in device["limits"] if k not in LIMITS_KEYS]
+    return out
+
+
 def cmd_device(args):
     path, opts = args[0], parse_options(args[1:], ("--role", "--amplifier", "--woofer", "--tweeter",
-                                                   "--gain-db", "--tweeter-limit"), ("--show",))
+                                                   "--gain-db", "--tweeter-limit"), ("--show", "--check"))
     device = {}
     if os.path.exists(path):
         try:
             with open(path) as f:
-                device = json.load(f)
+                device = json.load(f, object_pairs_hook=no_duplicates)
             if not isinstance(device, dict):
                 raise ValueError("not a JSON object")
         except (OSError, ValueError) as e:
+            if "--show" in opts or "--check" in opts:
+                fail(f"{path} is broken: {e}")
             if "--role" not in opts:
-                fail(f"{path} is broken ({e}): give --role to write a new one")
+                fail(f"{path} is broken ({e}), and speakerd would play with its fail-safe defaults: "
+                     "give --role to write a new one")
             os.replace(path, path + ".broken")
-            print(f"note=kept the broken {path} as {path}.broken")
+            print(f"note={quote(f'kept the broken {path} as {path}.broken')}")
             device = {}
     if "--show" in opts:
         print(json.dumps(device, indent=2))
+        return
+    unknown = unknown_keys(device)
+    if unknown:
+        fail(f"{path} has key(s) speakerd does not know: {', '.join(unknown)}. speakerd would reject the "
+             "file and play with its fail-safe defaults: remove them by hand")
+    if "--check" in opts:
         return
 
     role = opts.get("--role", device.get("role"))
@@ -217,8 +249,7 @@ def cmd_device(args):
     if amplifier["woofer"] == amplifier["tweeter"]:
         fail(f"the woofer and the tweeter are the same port, {amplifier['woofer']}")
     device["amplifier"] = {"node": amplifier["node"], "woofer": amplifier["woofer"],
-                           "tweeter": amplifier["tweeter"],
-                           **{k: v for k, v in amplifier.items() if k not in ("node", "woofer", "tweeter")}}
+                           "tweeter": amplifier["tweeter"]}
 
     if ("--gain-db" in opts) != ("--tweeter-limit" in opts):
         fail("--gain-db and --tweeter-limit go together")
