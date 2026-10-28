@@ -316,7 +316,8 @@ link_target() { if [ -L "$1" ]; then basename "$(readlink "$1")"; fi; }
 speakerd_version() {   # $1 = the binary
     local out empty
     empty="$(mktemp -d)"
-    out="$(HOME="$empty" timeout 10 "$1" --version 2> /dev/null)" || out=""
+    # Either stream: only a speakerd that exits 0 has a version to say.
+    out="$(HOME="$empty" timeout 10 "$1" --version 2>&1)" || out=""
     rmdir "$empty" 2> /dev/null || true
     sed -n -E 's/^[^0-9]*([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p' <<< "$out" | head -n 1
 }
