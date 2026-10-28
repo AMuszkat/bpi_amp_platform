@@ -4,8 +4,8 @@ instructions alone cannot:
 
 - no push to main or master, no force push;
 - no private data in a commit (the staged additions are scanned);
-- nothing reaches a board (ssh, scp, rsync, the deploy targets of the build scripts, the
-  installers' remote mode, the /board skill's tools/board.sh) while a lab lock
+- nothing reaches a board (ssh, scp, rsync, the deploy targets of the build scripts, any make
+  on the firmware, the installers' remote mode, the /board skill's tools/board.sh) while a lab lock
   (.claude/lab.lock, in the checkout the command runs in or in the main checkout) exists, or
   without a green test status for the exact commit being deployed (tests/.status/<commit>.json,
   written by /test, both rungs run on a clean tree), with a clean tree now. The checkout is the
@@ -46,6 +46,9 @@ BOARD_READ = re.compile(r"\btools/board\.sh\s+(status|journal)\b")
 PERSON_ONLY = re.compile(r"--person-present\b")
 # The deploy override is a person's too (tools/board.sh reads it from their shell).
 OVERRIDE = re.compile(r"\bBPI_DEPLOY_OVERRIDE\b")
+# make on the firmware: its targets copy kernels, modules and device trees to a board and
+# change its /boot, so every make there is deploy-class, whatever the target.
+MAKE = re.compile(r"(^|[\s;&|(])make\b")
 
 
 def refuse(msg):
@@ -117,10 +120,24 @@ def check_deploy(tree, command):
     return 0
 
 
+def touches_firmware_make(command, cwd):
+    if not MAKE.search(command):
+        return False
+    return "firmware" in command or "/firmware" in (cwd or "")
+
+
 def main():
-    data = json.load(sys.stdin)
-    command = data.get("tool_input", {}).get("command", "")
-    tree = checkout_of(data.get("cwd"))
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw)
+        command = data.get("tool_input", {}).get("command", "")
+        cwd = data.get("cwd")
+        tree = checkout_of(cwd)
+    except Exception as e:  # cannot even read the command: block anything that looks guarded
+        if any(p.search(raw) for p in (DEPLOY, PERSON_ONLY, OVERRIDE, COMMIT, MAKE)):
+            return refuse(f"the pre-bash hook could not read the command ({type(e).__name__}); "
+                          "blocking it.")
+        return 0
 
     if PUSH_MAIN.search(command) or PUSH_REFSPEC_MAIN.search(command):
         return refuse("pushing to main or master is not allowed: push a branch and open a pull request.")
@@ -137,7 +154,7 @@ def main():
             rc = check_commit(tree, command)
             if rc:
                 return rc
-        if DEPLOY.search(command):
+        if DEPLOY.search(command) or touches_firmware_make(command, cwd):
             return check_deploy(tree, command)
     except Exception as e:  # a guarded path fails closed
         return refuse(f"the pre-bash hook failed on a guarded command ({type(e).__name__}: {e}); "
