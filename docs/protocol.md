@@ -207,3 +207,39 @@ from the hub, never by `ampd`:
 ```
 
 Discovery over mDNS replaces `hub_address` later; until then it is written at install.
+
+## Clarifications (from the first implementations)
+
+These settle what version 1 left open; every implementation follows them.
+
+1. **Speaker addresses.** Each entry of `state.speakers` carries `"address"`: the host the
+   speaker's monitor link is reached at (the hub fills it from its configuration and from
+   the agent's connection). A controller may override it with its own settings.
+2. **Speaker status.** The hub sends `state` again, whole, to every controller whenever a
+   speaker comes online, goes offline or changes layer, and after it adopts a revision. A
+   controller treats any `state` as a full refresh.
+3. **Gestures in `state`.** `"gestures":[{"node":16,"id":"s0_e0_gain","origin":"ctl-mac"}]`:
+   the parameters being dragged now and by whom.
+4. **Outcome order.** The proposer gets `applied` (or `rejected`) first; then the hub sends
+   the `graph` message to every controller, the proposer included.
+5. **Unknown keys in documents** (the controller's canvas positions, `"ui":{"x":..,"y":..}`
+   on a node) are kept by the hub and agents as they are and passed on; `speakerd` ignores
+   them.
+6. **seq after a hub restart.** The hub persists its seq with its state and continues from it.
+   Should it ever restart from a lower seq, its `hello` and `state` carry it, and every
+   receiver resets its per-parameter tracking when it gets a hub `hello` or a `state`. seq is
+   compared wrap-safe (as a signed 32-bit difference), since OSC carries it as `i`.
+7. **Own echoes.** A controller ignores echoes of its own origin while its gesture on that
+   parameter is active and until the control-link echo of its last value arrives (at most
+   2 s), so a late OSC echo cannot pull the knob back.
+8. **Gestures** go over the control link (a lost UDP `end` would hold a parameter "dragged"
+   for 5 s); OSC `/bpi/gesture` stays accepted.
+9. **Duplicate echoes.** A change that came over the control link is echoed on both OSC and the
+   control link with the same seq; receivers drop the second by seq.
+10. **Choice text.** The hub relays a value as it got it. A value given as text goes out over
+    the control link only (OSC cannot carry it); receivers convert it as in a document.
+11. **Waiting for an outcome.** A controller gives up on a proposal after 15 s (the hub's 10 s
+    plus a margin) and undoes it.
+12. **The document's own revision.** A proposal's `document.revision` equals its `revision`.
+13. **Rate.** A controller sends at most 50 changes a second per parameter on either link.
+14. **Monitor values** are in the plugin's units (dBFS for `mon_levelDb`), never normalised.
