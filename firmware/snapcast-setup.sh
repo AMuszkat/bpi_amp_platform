@@ -14,10 +14,13 @@
 #                       server streams it. The host always uses PipeWire.
 #   target (client)   : a board running `snapclient` with its NATIVE PipeWire
 #                       player (--player pipewire), so it appears as a node
-#                       ("Snapcast") in the board's PipeWire graph. You wire
-#                       that node to a playback device yourself. If the board's
-#                       packaged snapclient is too old for --player pipewire
-#                       (e.g. 0.26.0), a newer release is installed automatically.
+#                       ("Snapcast") in the board's PipeWire graph. Its
+#                       client-rt.conf routes that node (--route): into the
+#                       speakerd sink (speakerd, the remote plugin host), or into
+#                       Ap.cap for an AudioPluginHost (plugin-host, the default).
+#                       If the board's packaged snapclient is too old for
+#                       --player pipewire (e.g. 0.26.0), a newer release is
+#                       installed automatically.
 #
 # Both server and client run as systemd *user* services so they share the
 # session's PipeWire instance (that is what the native sources/players need;
@@ -30,6 +33,8 @@
 #   ./snapcast-setup.sh --mode target         [options]   # configure THIS machine as a client (--server-ip required)
 #   ./snapcast-setup.sh --mode target-remote  [options]   # ssh to a board, configure a client there
 #   ./snapcast-setup.sh --mode both           [options]   # server here + ssh to board for a client
+#   ./snapcast-setup.sh --mode target --routing-only --route speakerd|plugin-host
+#                                                         # only re-route snapclient on this board
 #
 # Run `./snapcast-setup.sh --help` for the full option list.
 
@@ -64,6 +69,9 @@ OPEN_FIREWALL=0
 DO_RESTART=1
 HOST_QUANTUM=1                           # host: write ~/.config/pipewire/pipewire.conf.d/10-quantum.conf
 TARGET_CLIENT_RT=1                        # target: deploy ~/.config/pipewire/client-rt.conf (auto-routing rules) + point snapclient at it
+ROUTE="plugin-host"                      # target: where client-rt.conf sends snapclient: speakerd | plugin-host
+ROUTING_ONLY=0                           # target: only rewrite client-rt.conf and restart snapclient
+CLIENT_HOME_OVERRIDE=""                  # target: write into this folder as the user's home (tests: no root, no services)
 DRY_RUN=0
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -106,6 +114,17 @@ Options:
                               (~/.config/pipewire/pipewire.conf.d/10-quantum.conf).
   --no-client-rt              Target only: do NOT deploy the client-rt.conf auto-routing config
                               (~/.config/pipewire/client-rt.conf + snapclient PIPEWIRE_CONFIG_NAME).
+  --route <speakerd|plugin-host>
+                              Target only: where client-rt.conf sends snapclient (default: $ROUTE).
+                                speakerd    - into the speakerd sink: speakerd, the remote plugin host,
+                                              plays it. Refused unless the board's PipeWire config defines
+                                              that sink (firmware/speakerd-setup.sh sink): a missing target
+                                              sends snapclient to the amplifier, full range.
+                                plugin-host - into Ap.cap, for an AudioPluginHost (its output to the amp).
+  --routing-only              Target only: just rewrite client-rt.conf for --route and restart snapclient
+                              (no install, no --server-ip needed).
+  --client-home <dir>         Target only, for tests: write into <dir> as if it were the user's home
+                              (no root, no chown, no services).
   --no-install                Skip dependency installation.
   --open-firewall             Open server TCP ports ($STREAM_PORT,$CONTROL_PORT,$HTTP_PORT) with ufw.
   --no-restart                Do not (re)start services after writing config.
@@ -123,6 +142,9 @@ Examples:
 
   # Client configured locally on a board (you supply the server's IP):
   sudo ./snapcast-setup.sh --mode target --server-ip 192.0.2.10
+
+  # Only re-route an installed client into speakerd (the speakerd sink must be configured):
+  ./snapcast-setup.sh --mode target --routing-only --route speakerd
 EOF
 }
 
@@ -148,6 +170,9 @@ while [ $# -gt 0 ]; do
         --no-restart)      DO_RESTART=0; shift ;;
         --no-quantum)      HOST_QUANTUM=0; shift ;;
         --no-client-rt)    TARGET_CLIENT_RT=0; shift ;;
+        --route)           ROUTE="${2:?}"; shift 2 ;;
+        --routing-only)    ROUTING_ONLY=1; shift ;;
+        --client-home)     CLIENT_HOME_OVERRIDE="${2:?}"; shift 2 ;;
         --dry-run)         DRY_RUN=1; shift ;;
         -h|-help|--help)   usage; exit 0 ;;
         *)                 die "Unknown option: $1 (try --help)" ;;
@@ -156,6 +181,7 @@ done
 
 [ -n "$MODE" ] || { usage; die "--mode is required"; }
 case "$MODE" in host|target|target-remote|both) ;; *) die "--mode must be host, target, target-remote or both" ;; esac
+case "$ROUTE" in speakerd|plugin-host) ;; *) die "--route must be speakerd or plugin-host" ;; esac
 
 
 # ----------------------------------------------------------------------------
@@ -185,6 +211,11 @@ detect_host_ip() {
 # --- Board PipeWire session helpers (snapclient runs as a systemd *user* service) ---
 CLIENT_UID=""; CLIENT_HOME=""
 resolve_client_user() {
+    if [ -n "$CLIENT_HOME_OVERRIDE" ]; then
+        mkdir -p "$CLIENT_HOME_OVERRIDE"
+        CLIENT_USER="$(id -un)"; CLIENT_UID="$(id -u)"; CLIENT_HOME="$(cd "$CLIENT_HOME_OVERRIDE" && pwd)"
+        return 0
+    fi
     if [ -z "$CLIENT_USER" ]; then
         if [ "$(id -u)" -ne 0 ]; then CLIENT_USER="$(id -un)"
         elif [ -n "${SUDO_USER:-}" ]; then CLIENT_USER="$SUDO_USER"
@@ -208,6 +239,10 @@ write_user_file() {  # $1 = path relative to CLIENT_HOME   $2 = content
     local rel="$1" content="$2" path="$CLIENT_HOME/$1"
     if [ "$DRY_RUN" -eq 1 ]; then
         info "(dry-run) would write $path (owner $CLIENT_USER):"; printf '%s\n' "$content" | sed 's/^/    /'; return 0
+    fi
+    # Into the test's folder, or into our own home: no root needed.
+    if [ -n "$CLIENT_HOME_OVERRIDE" ] || { [ "$(id -u)" -ne 0 ] && [ "$(id -un)" = "$CLIENT_USER" ]; }; then
+        mkdir -p "$(dirname "$path")"; printf '%s\n' "$content" > "$path"; ok "Wrote $path"; return 0
     fi
     run_root mkdir -p "$(dirname "$path")"
     printf '%s\n' "$content" | run_root tee "$path" >/dev/null
@@ -350,11 +385,17 @@ snapclient_exec() {
 # Target client-rt.conf. snapclient (native pipewire player) loads client.conf by
 # default, so routing rules placed only in client-rt.conf never reach it -- we
 # point it here with PIPEWIRE_CONFIG_NAME=client-rt.conf (see snapclient_unit).
-# The stream.rules auto-connect nodes as they appear:
+# The stream.rules auto-connect nodes as they appear. --route plugin-host:
 #   Snapclient                    -> Ap.cap  (persistent loopback; see note below)
 #   AudioPluginHost "ALSA Playback" -> the amp sink (bpi-alsa-playback-pcm)
 #   AudioPluginHost "ALSA Capture"  <- AirPlay playout (Ap.play)
 #   shairport-sync "ALSA Playback"  -> AirPlay capture (Ap.cap)
+# --route speakerd: the same players go into the speakerd sink, which the board's
+# PipeWire config defines (persistent, like Ap.cap), and speakerd plays it to the amp:
+#   Snapclient                      -> speakerd
+#   shairport-sync "ALSA Playback"  -> speakerd
+#   AudioPluginHost "ALSA Playback" -> speakerd  (never straight into the amp while
+#                                                 speakerd plays it: two plugin hosts)
 # Adjust the target.object values to match your own graph's node names.
 #
 # KEY: snapclient must target a PERSISTENT node. Ap.cap/Ap.play are created by a
@@ -365,6 +406,7 @@ snapclient_exec() {
 # shairport feeds) links at boot and reaches the plugin host via Ap.play ->
 # AudioPluginHost input, exactly like AirPlay.
 target_client_rt_conf() {
+    if [ "$ROUTE" = speakerd ]; then target_client_rt_conf_speakerd; return; fi
     cat <<'CLIENTRT'
 # Real-time Client config file for PipeWire (managed by snapcast-setup.sh) #
 #
@@ -430,6 +472,125 @@ stream.rules = [
     }
 ]
 CLIENTRT
+}
+
+# --route speakerd: every player plays into the speakerd sink (firmware/CLAUDE.md,
+# "speakerd on a board"). Like Ap.cap it exists from boot, defined by the board's
+# PipeWire config (pipewire.conf.d/60-speakerd-sink.conf), so snapclient links to it at
+# boot and between speakerd's restarts, never to the amplifier.
+target_client_rt_conf_speakerd() {
+    cat <<'CLIENTRT'
+# Real-time Client config file for PipeWire (managed by snapcast-setup.sh --route speakerd) #
+#
+# snapclient is pointed at this file via PIPEWIRE_CONFIG_NAME=client-rt.conf.
+# Drop-in overrides go in ~/.config/pipewire/client-rt.conf.d/.
+
+context.properties = {
+    log.level = 3
+}
+
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.*       = support/libspa-support
+}
+
+context.modules = [
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-client-device }
+    { name = libpipewire-module-adapter }
+    { name = libpipewire-module-metadata }
+    { name = libpipewire-module-session-manager }
+]
+
+# Auto-routing rules: every player plays into the speakerd sink, and speakerd (the
+# remote plugin host) plays to the amplifier.
+stream.rules = [
+    {   matches = [
+            { application.name = "Snapclient" } ]
+        actions = {
+            update-props = {
+                # The speakerd sink is persistent (the board's PipeWire config):
+                # snapclient links to it at boot, never to the amplifier.
+                target.object = "speakerd"
+            }
+        }
+    }
+    {   matches = [
+            { application.name = "PipeWire ALSA [shairport-sync]",
+              node.name        = "ALSA Playback" } ]
+        actions = {
+            update-props = {
+                target.object = "speakerd"
+            }
+        }
+    }
+    {   matches = [
+            { application.name = "PipeWire ALSA [AudioPluginHost]",
+              node.name        = "ALSA Playback" } ]
+        actions = {
+            update-props = {
+                # Never straight into the amplifier: speakerd plays it already.
+                target.object = "speakerd"
+            }
+        }
+    }
+]
+CLIENTRT
+}
+
+# --route speakerd is only safe when the speakerd sink is in the board's PipeWire
+# configuration: a target that does not exist sends snapclient to the default sink, the
+# amplifier, full range and at full level. A sink speakerd made itself is not enough: it
+# lingers only until PipeWire restarts.
+speakerd_sink_configured() {
+    local f
+    for f in "$CLIENT_HOME/.config/pipewire/pipewire.conf" "$CLIENT_HOME"/.config/pipewire/pipewire.conf.d/*.conf \
+             /etc/pipewire/pipewire.conf /etc/pipewire/pipewire.conf.d/*.conf; do
+        if [ -f "$f" ] && grep -Eq '^[[:space:]]*node\.name[[:space:]]*=[[:space:]]*"?speakerd"?[[:space:]]*(#.*)?$' "$f"; then
+            echo "$f"; return 0
+        fi
+    done
+    return 1
+}
+
+check_route_target() {
+    [ "$ROUTE" = speakerd ] || return 0
+    local where
+    if where="$(speakerd_sink_configured)"; then
+        ok "The speakerd sink is defined in $where"
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        warn "(dry-run) no PipeWire config defines the speakerd sink yet: --route speakerd would be refused now"
+    else
+        die "--route speakerd: no PipeWire config of $CLIENT_USER defines the speakerd sink, so snapclient would fall back to the amplifier (full range, tweeter included). Install it first: firmware/speakerd-setup.sh sink (or firmware/setup.sh)."
+    fi
+}
+
+route_target() { if [ "$ROUTE" = speakerd ]; then echo speakerd; else echo Ap.cap; fi; }
+
+# --routing-only: rewrite client-rt.conf for --route and restart snapclient.
+setup_routing_only() {
+    resolve_client_user
+    info "Routing snapclient into $(route_target) (--route $ROUTE; client-rt.conf only, user $CLIENT_USER)"
+    check_route_target
+    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" unit="$CLIENT_HOME/.config/systemd/user/snapclient.service"
+    if [ "$DRY_RUN" -eq 0 ] && [ -f "$crt" ] && [ ! -f "$crt.orig" ]; then
+        cp -a "$crt" "$crt.orig" && ok "Backed up existing client-rt.conf -> $crt.orig"
+    fi
+    write_user_file ".config/pipewire/client-rt.conf" "$(target_client_rt_conf)"
+    if [ -f "$unit" ] && ! grep -q 'PIPEWIRE_CONFIG_NAME=client-rt.conf' "$unit"; then
+        warn "$unit does not point snapclient at client-rt.conf, so these rules do not reach it: re-run --mode target with --server-ip"
+    fi
+    if [ "$DO_RESTART" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ -z "$CLIENT_HOME_OVERRIDE" ]; then
+        # A stream's target is read when it is created: restart snapclient.
+        if as_user systemctl --user restart snapclient 2>/dev/null; then
+            ok "snapclient restarted: it plays into $(route_target)"
+        else
+            warn "Could not restart snapclient; check: systemctl --user --machine=$CLIENT_USER@ status snapclient"
+        fi
+    else
+        info "snapclient not restarted (--no-restart/--dry-run): the new routing applies at its next start"
+    fi
 }
 
 snapclient_unit() {
@@ -621,9 +782,11 @@ EOF
 }
 
 setup_target_local() {
+    if [ "$ROUTING_ONLY" -eq 1 ]; then setup_routing_only; return; fi
     [ -n "$SERVER_IP" ] || die "--mode target requires --server-ip <snapserver host IP>"
     resolve_client_user
-    info "Configuring this machine as a PipeWire-native Snapcast CLIENT (server $SERVER_IP, user $CLIENT_USER)"
+    info "Configuring this machine as a PipeWire-native Snapcast CLIENT (server $SERVER_IP, user $CLIENT_USER, route $ROUTE)"
+    [ "$TARGET_CLIENT_RT" -eq 0 ] || check_route_target
     ensure_snapclient_with_pipewire
     # Migration: older versions wrote a channel-split fragment (null-sink + loopback)
     # that now just clutters the graph and loops audio. Remove it if present.
@@ -665,7 +828,7 @@ setup_target_local() {
 
 ${c_green}Client ready.${c_off}
   - snapclient runs as a PipeWire node ("Snapcast") in $CLIENT_USER's session.
-  - It appears in the graph (wpctl status / qpwgraph); wire it to your output device yourself.
+  - client-rt.conf routes it into $(route_target) (--route $ROUTE); see wpctl status / qpwgraph.
   - Verify:  systemctl --user --machine=$CLIENT_USER@ status snapclient
 EOF
 }
@@ -689,11 +852,13 @@ setup_target_remote() {
     fi
     command -v ssh >/dev/null 2>&1 || die "ssh not found; cannot configure the remote board"
     scp -q "$SELF" "$TARGET_HOST:/tmp/snapcast-setup.sh" || die "Failed to copy script to $TARGET_HOST"
-    local rargs="--mode target --server-ip $SERVER_IP --client-latency $CLIENT_LATENCY --snapclient-version $SNAPCLIENT_VERSION --scope system"
+    local rargs="--mode target --server-ip $SERVER_IP --client-latency $CLIENT_LATENCY --snapclient-version $SNAPCLIENT_VERSION --scope system --route $ROUTE"
     [ -n "$CLIENT_USER" ]        && rargs="$rargs --client-user $CLIENT_USER"
     [ -n "$CLIENT_BUFFER_TIME" ] && rargs="$rargs --client-buffer-time $CLIENT_BUFFER_TIME"
     [ "$INSTALL_DEPS" -eq 0 ]    && rargs="$rargs --no-install"
     [ "$DO_RESTART" -eq 0 ]      && rargs="$rargs --no-restart"
+    [ "$TARGET_CLIENT_RT" -eq 0 ] && rargs="$rargs --no-client-rt"
+    [ "$ROUTING_ONLY" -eq 1 ]    && rargs="$rargs --routing-only"
     # -t allocates a TTY so sudo on the board can prompt for a password; run the whole
     # remote script under sudo (it needs root for /etc + services; --client-user keeps
     # snapclient in the right user's PipeWire session).
@@ -706,7 +871,11 @@ setup_target_remote() {
 # Main
 # ----------------------------------------------------------------------------
 resolve_scope
-info "Mode: $MODE | codec: $CODEC | buffer: ${BUFFER_MS}ms | format: $SAMPLEFORMAT"
+if [ "$ROUTING_ONLY" -eq 1 ]; then
+    info "Mode: $MODE | routing only: --route $ROUTE"
+else
+    info "Mode: $MODE | codec: $CODEC | buffer: ${BUFFER_MS}ms | format: $SAMPLEFORMAT | route: $ROUTE"
+fi
 
 case "$MODE" in
     host)          setup_host ;;

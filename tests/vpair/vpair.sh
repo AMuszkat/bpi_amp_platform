@@ -12,6 +12,10 @@
 #
 # VPAIR_DIR is where the speakers keep their sockets and state (default /tmp/vpair). Keep it
 # short: a PipeWire socket path must fit in 108 bytes.
+#
+# For `up`: VPAIR_SPEAKER_CONF is the PipeWire configuration instead of speaker.conf, and
+# VPAIR_PIPEWIRE_DROPINS a folder of drop-ins (*.conf) PipeWire loads with it, as a board loads
+# ~/.config/pipewire/pipewire.conf.d. Name one speaker to give it its own.
 
 set -euo pipefail
 
@@ -30,6 +34,7 @@ speaker_env() {
     return 0
 }
 
+# shellcheck disable=SC2046  # one argument per pid
 is_up() { [ -f "$BASE/$1/pids" ] && kill -0 $(cat "$BASE/$1/pids") 2> /dev/null; }
 
 # The speakers named on the command line, or both.
@@ -52,11 +57,18 @@ start_speaker() {
     mkdir -p "$d/config/wireplumber/bluetooth.lua.d"
     echo 'bluez_monitor.enabled = false' > "$d/config/wireplumber/bluetooth.lua.d/80-no-bluetooth.lua"
 
+    # Its configuration, and the drop-ins next to it: PipeWire loads <config>.d/*.conf.
+    cp "${VPAIR_SPEAKER_CONF:-$HERE/speaker.conf}" "$d/pipewire.conf"
+    if [ -n "${VPAIR_PIPEWIRE_DROPINS:-}" ]; then
+        [ -d "$VPAIR_PIPEWIRE_DROPINS" ] || { echo "vpair: no folder $VPAIR_PIPEWIRE_DROPINS (VPAIR_PIPEWIRE_DROPINS)" >&2; exit 2; }
+        ln -s "$(cd "$VPAIR_PIPEWIRE_DROPINS" && pwd)" "$d/pipewire.conf.d"
+    fi
+
     # WirePlumber needs a session bus; each speaker gets its own.
     dbus-daemon --session --fork --print-address=3 --print-pid=4 3> "$d/dbus.address" 4> "$d/dbus.pid"
     (
         eval "$(speaker_env "$s")"
-        pipewire -c "$HERE/speaker.conf" > "$d/pipewire.log" 2>&1 < /dev/null &
+        pipewire -c "$d/pipewire.conf" > "$d/pipewire.log" 2>&1 < /dev/null &
         echo $! > "$d/pipewire.pid"
         sleep 0.5
         wireplumber > "$d/wireplumber.log" 2>&1 < /dev/null &
@@ -79,6 +91,7 @@ start_speaker() {
 stop_speaker() {
     local d="$BASE/$1"
     if [ -f "$d/pids" ]; then
+        # shellcheck disable=SC2046  # one argument per pid
         kill $(cat "$d/pids") 2> /dev/null || true
         sleep 0.3
     fi
