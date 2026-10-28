@@ -173,6 +173,7 @@ class FakeHub:
         self.osc_refused = 0              # OSC datagrams without a valid token from their address
         self.wrong_welcome = False        # prove itself with a wrong server proof (a fake hub)
         self.tokens = {}                  # controller name -> the OSC token of its last connection
+        self.monitor_names = {}           # speaker -> the name its monitor link claims (a test's lie)
         self.stalled = set()              # control connections that stopped reading
         self.lock = threading.RLock()
         self._servers = []
@@ -525,7 +526,8 @@ class FakeHub:
                 time.sleep(0.005)
 
         nonce = secrets.token_hex(16)
-        self._send_line(conn, "monitor " + speaker, {"op": "hello", "role": "speaker", "name": speaker,
+        claimed = self.monitor_names.get(speaker, speaker)
+        self._send_line(conn, "monitor " + speaker, {"op": "hello", "role": "speaker", "name": claimed,
                                                      "nonce": nonce, "protocol": 1})
         authenticated = False
         try:
@@ -541,7 +543,7 @@ class FakeHub:
                             self._send_line(conn, "monitor " + speaker, {"op": "error", "about": "hello", "reason": "hello first"})
                         return
                     authenticated = True
-                    self._welcome(conn, "monitor " + speaker, nonce, message["nonce"], "speaker", speaker)
+                    self._welcome(conn, "monitor " + speaker, nonce, message["nonce"], "speaker", claimed)
                     threading.Thread(target=produce, daemon=True).start()
                     continue
                 with self.lock:

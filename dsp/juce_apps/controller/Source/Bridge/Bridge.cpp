@@ -105,7 +105,7 @@ namespace bpi
 
                     if (op != "hello")
                         fail ("sent " + op + " before its hello", true);
-                    else if (! bridge.answerServerHello (handshake, m, "speaker", false, hello, why))
+                    else if (! bridge.answerServerHello (handshake, m, "speaker", speaker, false, hello, why))
                         fail (why, true);
                     else
                         send (hello);
@@ -375,7 +375,7 @@ namespace bpi
     }
 
     bool Bridge::answerServerHello (Handshake& h, const juce::var& serverHello, const juce::String& expectedRole,
-                                    bool withOscPort, juce::var& ourHello, juce::String& why) const
+                                    const juce::String& expectedName, bool withOscPort, juce::var& ourHello, juce::String& why) const
     {
         h.serverRole = serverHello["role"].toString();
         h.serverName = serverHello["name"].toString();
@@ -384,6 +384,14 @@ namespace bpi
         if (h.serverRole != expectedRole)
         {
             why = "said it is a " + h.serverRole.quoted() + ", not a " + expectedRole;
+            return false;
+        }
+
+        // The name its proof will cover must be the one expected: a speaker of the pair could
+        // otherwise answer for its partner.
+        if (expectedName.isNotEmpty() && h.serverName != expectedName)
+        {
+            why = "is named " + h.serverName.quoted() + ", not " + expectedName.quoted() + " as expected";
             return false;
         }
 
@@ -586,7 +594,7 @@ namespace bpi
             if (op != "hello")
                 return failControl ("sent " + op + " before its hello");
 
-            if (! answerServerHello (controlHandshake, m, "hub", true, hello, why))
+            if (! answerServerHello (controlHandshake, m, "hub", options.hubName, true, hello, why))
                 return failControl (why);
 
             hubName = controlHandshake.serverName;
@@ -596,7 +604,8 @@ namespace bpi
                 st.haveSeq = false;
 
             sendControl (hello);
-            setStatus ("connected to " + control->getAddress() + ", waiting for the hub's proof");
+            setStatus ("connected to " + control->getAddress() + ", waiting for the proof of hub "
+                       + hubName.quoted() + (options.hubName.isEmpty() ? " (no hub name configured)" : ""));
             return;
         }
 

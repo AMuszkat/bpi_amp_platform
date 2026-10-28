@@ -50,6 +50,7 @@ namespace bpi
             bool trace = false;                  // every line in and out on stderr (proofs hidden)
             juce::String secret;                 // the pair's secret: proofs only, never shown
             bool insecure = false;               // believe a hub (or speaker) that has no secret
+            juce::String hubName;                // the hub's name to expect; empty: the one it proves
         };
 
         Bridge (PluginGraph&, Options);
@@ -172,7 +173,7 @@ namespace bpi
         /** Our hello to a server's: false (with why) when its nonce is malformed or no random
             nonce can be had. */
         bool answerServerHello (Handshake&, const juce::var& serverHello, const juce::String& expectedRole,
-                                bool withOscPort, juce::var& ourHello, juce::String& why) const;
+                                const juce::String& expectedName, bool withOscPort, juce::var& ourHello, juce::String& why) const;
 
         /** The server's welcome checked: true when it proves the pair's secret (or, with
             --insecure, it has none). */

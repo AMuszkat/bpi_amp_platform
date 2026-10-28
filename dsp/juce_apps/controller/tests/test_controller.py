@@ -522,5 +522,33 @@ class ControllerTest(unittest.TestCase):
         report("no secret", without_insecure="refused", with_insecure="synced", status=state["status"][:40])
 
 
+    def test_19_a_server_with_another_name_is_refused(self):
+        """The right speaker's monitor link claims to be the left one (with a valid proof for
+        that name): refused and shown, retried slowly, while the left one serves. On the control
+        link, a hub whose name is not the configured one is refused."""
+        hub = self.start_hub(document=default_document(probe=True))
+        hub.monitor_names = {"right": "left"}
+        code, steps, err = self.run_script(
+            "wait-synced\nopen 20\nwait-monitor 20 mon_level -20.5\nmonitor-speaker 20 right\nsleep 3000\nstate\n",
+            extra=["--test-probe", "--speaker", "right=" + RIGHT, "--hub-name", "left"])
+        self.assertPassed(code, steps, err)
+        speakers = {s["name"]: s for s in self.step(steps, "state")["state"]["speakers"]}
+        self.assertIn('is named "left", not "right"', speakers["right"]["monitor_refusal"])
+        self.assertFalse(speakers["right"]["monitor_connected"])
+        self.assertTrue(speakers["left"]["monitor_connected"])
+        right_hellos = len(hub.received_ops("monitor right", "hello"))
+        right_subscribes = len(hub.received_ops("monitor right", "subscribe"))
+        self.assertEqual(right_hellos, 0, "no hello, no proof to a server with the wrong name")
+        self.assertEqual(right_subscribes, 0)
+
+        code, steps, err = self.run_script("sleep 1500\nstate\n", extra=["--hub-name", "other"])
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        self.assertFalse(state["synced"])
+        self.assertIn('is named "left", not "other"', state["refused"])
+        report("names", monitor_refusal=speakers["right"]["monitor_refusal"][:34], hellos_to_wrong_speaker=right_hellos,
+               hub_refusal=state["refused"][:34])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

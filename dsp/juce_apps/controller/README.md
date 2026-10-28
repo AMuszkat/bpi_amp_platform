@@ -40,6 +40,7 @@ controller --self-test
 | `--test-probe` | add the test probe to the plugins (below) |
 | `--send-queue-limit BYTES` | what a link may hold for a peer that stopped reading before it drops the connection and reconnects (default 4 MiB) |
 | `--trace` | every line in and out, on stderr |
+| `--hub-name NAME` | the hub's name to expect (also the setting `hubName`); without it, the name the hub proves is accepted and shown |
 | `--insecure` | believe a hub (and its speakers) that has no secret yet and so proves nothing (`"auth": null`): only for a pair whose installer has not run. The status bar then starts with INSECURE, in red |
 | `--self-test` | checks the HMAC-SHA256 against RFC 4231 (cases 1, 2, 3 and 6) and exits 0 or 1 |
 | `--version`, `--help` | |
@@ -70,7 +71,11 @@ docs/protocol.md asks of a controller:
   never JUCE's `Random`; and `auth`, the client proof `HMAC("client:<Ns>:<Nc>:controller:<name>")`,
   lowercase hex HMAC-SHA256 keyed with the secret's UTF-8 bytes, per RFC 2104 over JUCE's
   SHA-256). The hub must answer `{"op":"welcome","auth":...}` with the server proof
-  `HMAC("server:<Ns>:<Nc>:hub:<hub name>")`, compared in constant time. Until it has, nothing
+  `HMAC("server:<Ns>:<Nc>:hub:<hub name>")`, compared in constant time. The name must be the
+  expected one: the configured hub name (`--hub-name`, setting `hubName`) when there is one,
+  else the name the hub proves is accepted and shown; on the monitor link, the speaker's name as
+  the hub's `state.speakers` gives it. Another name is refused before any proof is sent, shown,
+  and retried after 5 s. Until it has, nothing
   it sends is believed and nothing but the hello is sent: a wrong or missing proof, or anything
   else first, closes the connection and is shown ("did not prove the pair's secret"). Then it
   builds the canvas from the `state` that follows, every time it connects: the hub's document,
@@ -79,7 +84,7 @@ docs/protocol.md asks of a controller:
   and `state`'s `refused`, and the link asks again only after 5 s.
 - **OSC tokens.** Each control connection gives a session key `K = HMAC("session:<Ns>:<Nc>")`
   (hex) and an OSC token, the first 32 hex characters of HMAC-SHA256 keyed with K's hex over
-  `"osc"`. `/bpi/param` goes out as `,isfiss` with the token last (and `/bpi/gesture` would be
+  `"osc"` (no secret: an empty token, only with `--insecure`). `/bpi/param` goes out as `,isfiss` with the token last (and `/bpi/gesture` would be
   `,issss`); an OSC echo without this connection's token is ignored and counted
   (`state`'s `osc_dropped`). The OSC socket is bound to the control connection's own local
   address, rebound at every connection, since the hub takes OSC only from that address.
@@ -245,7 +250,9 @@ with neither secret anywhere in the output; and the HMAC against RFC 4231, a mal
 and a secret on the command line refused; a hub with a wrong welcome proof not believed (its state
 never applied, only hellos sent to it, retried every 5 s); forged OSC echoes (no token, a wrong
 one, another secret's) ignored while the hub's own are applied; and a hub without a secret
-refused, then believed with `--insecure` and shown as such. Each test prints its numbers.
+refused, then believed with `--insecure` and shown as such; and a speaker whose monitor link
+claims its partner's name, or a hub with another name than the configured one, refused and
+shown. Each test prints its numbers.
 
 The screenshot run opens the loudness control editor and the test probe beside the canvas and
 writes `build/controller-check/controller-screen.png` (the X screen) and `controller-juce.png`

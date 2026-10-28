@@ -38,6 +38,8 @@ namespace bpi
   --send-queue-limit N   bytes a link may hold for a peer that stopped reading before it
                          reconnects (default 4194304)
   --trace                every line in and out on stderr
+  --hub-name NAME        the hub's name to expect (the setting "hubName"); without it, the name
+                         the hub proves is accepted and shown
   --insecure             believe a hub (and speakers) with no secret yet, which prove nothing:
                          only for a pair whose installer has not run. Shown in the status bar
   --self-test            check HMAC-SHA256 against RFC 4231 and exit
@@ -62,6 +64,7 @@ namespace bpi
                 c.bridge.hubHost = settings->getValue ("hub");
                 c.bridge.name = settings->getValue ("name");
                 c.secretFile = settings->getValue ("secretFile");
+                c.bridge.hubName = settings->getValue ("hubName");
 
                 for (const auto& entry : juce::StringArray::fromTokens (settings->getValue ("speakers"), ",", ""))
                     if (entry.containsChar ('='))
@@ -96,6 +99,7 @@ namespace bpi
                 else if (a == "--secret")           c.error = "the secret is never given on the command line: put it in a file (mode 600) and give --secret-file";
                 else if (a == "--self-test")        c.selfTest = true;
                 else if (a == "--insecure")         c.bridge.insecure = true;
+                else if (a == "--hub-name")         c.bridge.hubName = value();
                 else if (a == "--send-queue-limit")
                 {
                     const auto v = value();
