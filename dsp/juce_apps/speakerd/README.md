@@ -611,14 +611,19 @@ cycle, and the cycles that took too long.
   virtual pair every run of late cycles came with position jumps.
 - **The cost on the audio thread:** 4 + 2 per node reads of the monotonic clock per cycle, the
   times copied into a record and the record into a lock-free ring of 512 cycles (no allocation,
-  no lock, no syscall), whether or not anybody watches: 277 ns per cycle with one node, 364 ns
-  with two, 902 ns with eight on x86_64 (0.0017 % of a 1024-sample cycle with two), 1.1 us with two
-  and 2.7 us with eight under qemu-aarch64 emulation. A clock read is `clock_gettime
-  (CLOCK_MONOTONIC)` through glibc, which takes it from the vDSO (the boards' glibc 2.36 looks
-  up `__kernel_clock_gettime` on aarch64): 44.6 ns on x86_64, and no system time for 2 million
-  reads. At start speakerd logs what one read costs on the machine it runs on: tens of
-  nanoseconds is the vDSO; several hundreds or more would mean a syscall, which a board whose
-  kernel does not let user space read its timer would show.
+  no lock), whether or not anybody watches: 277 ns per cycle with one node, 364 ns with two,
+  902 ns with eight on x86_64 (0.0017 % of a 1024-sample cycle with two), 1.1 us with two and
+  2.7 us with eight under qemu-aarch64 emulation.
+- **The clock reads are the one syscall speakerd may make on the audio thread**, a named
+  exception (`dsp/CLAUDE.md`). A read is `clock_gettime (CLOCK_MONOTONIC)` through glibc, which
+  takes it from the vDSO when the kernel offers one: 44.6 ns on x86_64, with no system time for
+  2 million reads, and the vDSO's on most aarch64 kernels (the boards' glibc 2.36 looks up
+  `__kernel_clock_gettime`). **On a Cortex-A73, the board's core, the kernel's workaround for ARM
+  erratum 858921** (`CONFIG_ARM64_ERRATUM_858921`, on by default) turns the vDSO clock off and
+  traps the counter, so **every read is a real syscall**: short, bounded and non-blocking, about a
+  microsecond, so a few microseconds per cycle against 21.3 ms. At start speakerd logs what one
+  read costs where it runs, `timing: a clock read costs <x> ns`: tens of nanoseconds is the vDSO,
+  around a microsecond the syscall; the installer's smoke check reports it.
 - **Where the numbers go.** The monitor thread drains the ring at least every 50 ms, always:
   - the stream `speakerd/timing`, for a subscriber, each value covering the cycles since the
     previous one;
@@ -668,7 +673,9 @@ build outputs: the reference a live capture is compared with.
 
 ## Real time
 
-- **The audio thread never blocks, allocates or makes a syscall of its own.** Per cycle it
+- **The audio thread never blocks or allocates, and makes no syscall of its own but the timing's
+  clock reads** (Timing: the vDSO's on most kernels, a short non-blocking syscall on a Cortex-A73
+  with the erratum 858921 workaround). Per cycle it
   sets the parameter values the local link posted, copies the stream in, makes the Mine channel,
   calls `AudioProcessorGraph::processBlock`, ramps the fade, applies the limits of `device.json`
   (a multiply and a clear, with constants fixed when the engine is made), caps the output at the
@@ -790,7 +797,7 @@ stable.
 | `apply: revision <n>: FAILED: <reason>; <layer> plays on` | it did not load (`<layer>` as in the `playing:` line); `failed` was answered. An `apply` refused at once says `apply: revision <n>: FAILED: <reason>` (`apply: FAILED: <reason>` when it has no revision) |
 | `monitor: subscribed <stream> at <rate> Hz`, `monitor: unsubscribed <stream>` | a subscription began (or changed rate), or ended |
 | `monitor: the client went: <k> subscription(s) ended` | the connection closed with subscriptions |
-| `timing: a clock read costs <x> ns` | at start: what one read of the monotonic clock costs here (tens of ns: the vDSO) |
+| `timing: a clock read costs <x> ns` | at start: what one read of the monotonic clock costs here: tens of ns is the vDSO, about a microsecond a syscall (a Cortex-A73 with the erratum 858921 workaround) |
 | `timing: in the last second <k> late cycle(s), the longest at <x> % of its cycle; <j> position jump(s)` | at most once a second, in a second with a late cycle or a position jump |
 | `timing: last <n> s: node <uid> (<name>) mean <x> % max <y> %; ...; graph mean ... max ...; cycle mean ... max ...; <c> cycles, <l> late, <j> position jump(s)` | once a minute |
 | `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after another speakerd was found or a sink or filter could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0). Nothing is logged after it; speakerd makes no new link once it has said it, and the output fades out through the links it has |

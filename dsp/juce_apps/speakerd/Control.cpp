@@ -376,7 +376,7 @@ namespace speakerd
         };
 
         if (! streamVar.isString() || streamVar.toString().isEmpty())
-            return refuse ("stream must be a stream name: output/level or node/<uid>/<mon_id>");
+            return refuse ("stream must be a stream name: output/level, speakerd/timing or node/<uid>/<mon_id>");
 
         if (monitor == nullptr)
             return;

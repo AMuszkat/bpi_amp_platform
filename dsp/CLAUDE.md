@@ -112,6 +112,16 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   cleanup. Under any other wrapper `publish()` only stores the value: JUCE's VST3 wrapper would
   take a mutex the message thread holds constantly. No other lock is allowed, and no other
   plugin code may notify listeners from the audio thread.
+- **The one syscall allowed on the audio thread** (an exception to the root rule): speakerd's
+  timing reads the monotonic clock (`clock_gettime (CLOCK_MONOTONIC)`, `nowNs()` in
+  `juce_apps/speakerd/TimedNode.h`) 4 + 2 × plugin nodes times per cycle. On most kernels that is
+  the vDSO's, no syscall; on the board's Cortex-A73 the kernel's workaround for ARM erratum
+  858921 (`CONFIG_ARM64_ERRATUM_858921`) disables the vDSO clock, and each read is a real
+  syscall. Why acceptable: it is bounded and never blocks (no lock, no wait, about a
+  microsecond), a few microseconds per cycle against 21 ms at the speaker's quantum, and it is
+  what gives the board per-node CPU numbers. speakerd logs the measured cost of a read at start
+  (`timing: a clock read costs <x> ns`) and the installer's smoke check reports it. No other
+  syscall is allowed, and nothing else may read a clock on the audio thread.
 - `crossover` and `firConv` compile in the generated headers; `loudness` and `ampScope` are
   pure-parameter plugins. `ampScope` talks to the MAX98396 driver only via `snd_ctl_*` /
   `snd_pcm_*`, never I²C. Extend the driver rather than work around it.

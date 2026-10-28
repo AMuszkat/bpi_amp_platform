@@ -659,10 +659,14 @@ in each plugin node (each is a thin wrapper around the hosted instance that time
 `processBlock`), in the whole graph and in the whole cycle, as fractions of the cycle's length,
 and counts the late cycles (processing longer than the cycle) and the position jumps (a cycle
 whose driver position does not follow on: an xrun or another driver, the only sign of an xrun
-PipeWire 0.3.65 gives a filter). The audio thread only reads the monotonic clock (the vDSO's,
-45 ns on x86_64) and writes a lock-free ring, under 1 us per cycle with eight nodes; the
-monitor thread turns that into the `speakerd/timing` stream, the `timing` of `status` (the last
-minute) and a log summary once a minute, so the journal has the numbers without a controller.
+PipeWire 0.3.65 gives a filter). The audio thread only reads the monotonic clock and writes a
+lock-free ring, under 1 us per cycle with eight nodes on x86_64. The clock read is the vDSO's
+(45 ns on x86_64) on most kernels; on the board's Cortex-A73 the kernel's workaround for ARM
+erratum 858921 very likely makes each one a real syscall, short and non-blocking (about a
+microsecond), which is kept as a named exception to the no-syscall rule (`dsp/CLAUDE.md`):
+`speakerd` logs the measured cost of a read at start. The monitor thread turns the ring into
+the `speakerd/timing` stream, the `timing` of `status` (the last minute) and a log summary once
+a minute, so the journal has the numbers without a controller.
 
 **What a plugin declares.** A plugin's monitors are parameters whose IDs start with `mon_`
 ([protocol.md](protocol.md), "How a plugin publishes a monitor"), in all three builds,
