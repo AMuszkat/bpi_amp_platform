@@ -11,6 +11,10 @@ Pass when:
 
 - speakerd's install puts ampd in its version: bin/ampd, executable, firmware/ampd/ampd.py byte for
   byte, and the version's setup/ holds ampd-setup.sh and the unit;
+- the secret file is read as the controller reads it: exactly one trailing \n or \r\n dropped,
+  nothing else; two line ends, a lone \r, a space or a tab around it, a byte-order mark or bytes
+  that are not UTF-8 are refused, writing nothing and never showing it; the secret alone, with
+  \n or with \r\n gives the same ampd.json secret;
 - ampd-setup.sh install refuses, writing nothing, before speakerd is installed, for an agent with
   no --hub-address, for --hub-address with --hub, and for a name that is not one; on the left
   speaker it writes ampd.json exactly {"version": 1, "name": "left", "hub": true, "listen":
@@ -177,6 +181,25 @@ class AmpdInstall(unittest.TestCase):
         self.assertIn("16 to 256 printable characters", refused.stdout)
         self.assertNotIn("too short", refused.stdout)
         self.assertFalse((folder / ".local/state/speakerd/ampd.json").exists())
+        # Read as the controller reads it: exactly one trailing \n or \r\n is dropped, nothing else.
+        odd = self.tmp / "odd.secret"
+        for content in (SECRET + "\n\n", SECRET + "\r", SECRET + "\n\r\n", " " + SECRET + "\n", SECRET + " \n",
+                        SECRET + "\t\n", "\ufeff" + SECRET + "\n"):
+            odd.write_bytes(content.encode())
+            refused = self.ampd_setup(folder, "install", "--hub-address", "bpi-amp.local", "--secret-file", odd,
+                                      check=False)
+            self.assertNotEqual(refused.returncode, 0, repr(content))
+            self.assertIn("at most one line end", refused.stdout, repr(content))
+            self.assertNotIn(SECRET, refused.stdout)
+            self.assertFalse((folder / ".local/state/speakerd/ampd.json").exists(), repr(content))
+        odd.write_bytes(b"\xff" + SECRET.encode())
+        self.assertNotEqual(self.ampd_setup(folder, "install", "--hub-address", "bpi-amp.local", "--secret-file", odd,
+                                            check=False).returncode, 0)
+        for content in (SECRET, SECRET + "\r\n"):
+            odd.write_bytes(content.encode())
+            self.ampd_setup(folder, "install", "--hub-address", "bpi-amp.local", "--secret-file", odd, "--no-restart")
+            self.assertEqual(self.config(folder)["secret"], SECRET, repr(content))
+            (folder / ".local/state/speakerd/ampd.json").unlink()
         for args, said in ((["install"], "an agent needs the hub's address"),
                            (["install", "--hub", "--hub-address", "bpi-amp.local"], "--hub-address is for an agent"),
                            (["install", "--name", "no spaces"], "--name: letters")):

@@ -1,0 +1,14 @@
+{
+  "about": "docs/protocol.md, Authentication: one known answer. Proofs are lowercase hex HMAC-SHA256 keyed with the secret's UTF-8 bytes; client_proof of \"client:<Ns>:<Nc>:<client role>:<client name>\", server_proof of \"server:<Ns>:<Nc>:<server role>:<server name>\", session_key K of \"session:<Ns>:<Nc>\", osc_token the first 32 hex characters of HMAC-SHA256 keyed with K's hex string, of \"osc\". A test secret, never a pair's.",
+  "secret": "0123456789abcdef-pair-secret",
+  "server_nonce": "00112233445566778899aabbccddeeff",
+  "client_nonce": "ffeeddccbbaa99887766554433221100",
+  "client_role": "controller",
+  "client_name": "ctl-test",
+  "server_role": "hub",
+  "server_name": "left",
+  "client_proof": "0e82cbf2d55bbe8c34cae30db176a88e6a3f9227a6322140df7f2a3142e8e22a",
+  "server_proof": "e067654372eb4ce9d2d86af15cf1fcaa9a311476d00e0b4645961852884cffb4",
+  "session_key": "9bd062cf4dbaf55e3e6efb6e07e908ce9bccc3ccbb271158ee5a48cb867d638a",
+  "osc_token": "390b2272219a58e77b6ad16b88cd17ac"
+}

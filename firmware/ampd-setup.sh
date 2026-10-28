@@ -184,10 +184,18 @@ import json, os, re, sys
 path, name, hub, listen, address, secret_file, old = sys.argv[1:]
 secret = None
 if secret_file:
-    with open(secret_file) as f:
-        secret = f.read().strip()
+    # Read as the controller reads it: the bytes as UTF-8, exactly one trailing \n or \r\n
+    # dropped, nothing else (so the same file works on both).
+    with open(secret_file, "rb") as f:
+        raw = f.read()
+    try:
+        secret = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        secret = ""
+    secret = secret[:-2] if secret.endswith("\r\n") else secret[:-1] if secret.endswith("\n") else secret
     if not re.fullmatch(r"[\x21-\x7e]{16,256}", secret):
-        sys.exit("err  the secret file must hold 16 to 256 printable characters, no space")
+        sys.exit("err  the secret file must hold 16 to 256 printable characters, no space, and at most one "
+                 "line end (\\n or \\r\\n) after them")
 elif os.path.exists(old):
     with open(old) as f:
         secret = json.load(f).get("secret")

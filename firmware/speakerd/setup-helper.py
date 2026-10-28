@@ -403,9 +403,11 @@ def cmd_status(args):
 
 
 # The once-a-minute line and the per-second line of speakerd's log (its README, "Log lines").
-TIMING_MINUTE = re.compile(r"^(?:speakerd: )?timing: last (\d+) s: (.*); graph mean ([\d.]+) % max ([\d.]+) %; "
+TIMING_MINUTE = re.compile(r"^(?:speakerd: )?timing: last (\d+) s: (?:(.*); )?graph mean ([\d.]+) % max ([\d.]+) %; "
                            r"cycle mean ([\d.]+) % max ([\d.]+) %; (\d+) cycles, (\d+) late, (\d+) position jump\(s\)$")
 TIMING_MINUTE_NODE = re.compile(r"^node (\d+) \((.*)\) mean ([\d.]+) % max ([\d.]+) %$")
+# At start: what one read of the monotonic clock costs (tens of ns: the vDSO; hundreds: a syscall).
+TIMING_CLOCK = re.compile(r"^(?:speakerd: )?timing: a clock read costs ([\d.]+) ns\s*$")
 TIMING_SECOND = re.compile(r"^(?:speakerd: )?timing: in the last second (\d+) late cycle\(s\), the longest at "
                            r"([\d.]+) % of its cycle; (\d+) position jump\(s\)$")
 
@@ -452,8 +454,10 @@ def cmd_timing(args):
     jumps in the window from the status before and after it (late_total, jumps_total) and from
     the log's `timing: in the last second` lines in the window (it names every second with one).
     FAIL when the graph's longest cycle is above --limit of its cycle, or a cycle was late in the
-    window; warn on position jumps in the window."""
-    opts = {"--limit": "0.5", "--before": "", "--after": "", "--window-log": "", "--start-log": "", "--window": "?"}
+    window; warn on position jumps in the window, and when a clock read costs more than
+    --clock-warn-ns (speakerd's start-up line: then clock reads are system calls)."""
+    opts = {"--limit": "0.5", "--before": "", "--after": "", "--window-log": "", "--start-log": "", "--window": "?",
+            "--clock-warn-ns": "150"}
     while args:
         if args[0] not in opts or len(args) < 2:
             fail(f"timing: unknown or incomplete option {args[0]}")
@@ -462,6 +466,14 @@ def cmd_timing(args):
     limit = float(opts["--limit"])
     before, after = read_status_timing(opts["--before"]), read_status_timing(opts["--after"])
     window_lines, start_lines = read_lines(opts["--window-log"]), read_lines(opts["--start-log"])
+
+    clock = None
+    for line in start_lines:
+        m = TIMING_CLOCK.match(line)
+        if m:
+            clock = float(m.group(1))
+    clock_said = (f"; a clock read costs {clock:g} ns" if clock is not None
+                  else "; speakerd did not say what a clock read costs")
 
     summary, source = after, None
     if summary is not None:
@@ -484,7 +496,7 @@ def cmd_timing(args):
         print(f"info timing: graph mean {100 * graph.get('mean', 0):.1f} % max {100 * graph.get('max', 0):.1f} %, "
               f"cycle mean {100 * cycle.get('mean', 0):.1f} % max {100 * cycle.get('max', 0):.1f} %; "
               f"{summary.get('cycles', '?')} cycles, {summary.get('late', '?')} late, "
-              f"{summary.get('jumps', '?')} position jump(s) ({source})")
+              f"{summary.get('jumps', '?')} position jump(s){clock_said} ({source})")
         worst = graph.get("max", 0)
         if worst > limit:
             print(f"FAIL the graph's longest cycle took {100 * worst:.1f} % of its cycle ({source}): above "
@@ -492,6 +504,17 @@ def cmd_timing(args):
         else:
             print(f"pass the graph's longest cycle took {100 * worst:.1f} % of its cycle ({source}; at most "
                   f"{100 * limit:.0f} %)")
+
+    if summary is None:
+        print(f"info timing{clock_said.replace(';', ':', 1)}")
+    if clock is not None and clock > float(opts["--clock-warn-ns"]):
+        # Per cycle speakerd reads the clock 4 times, and twice per plugin node.
+        n = len(summary.get("nodes") or []) if summary is not None else None
+        reads = f"{4 + 2 * n}" if n is not None else "(4+2n)"
+        cost = f" = {(4 + 2 * n) * clock / 1000:.1f} us" if n is not None else " for n plugin nodes"
+        print(f"warn clock reads are system calls on this kernel (ARM erratum 858921 workaround?): per-node timing "
+              f"costs about {reads}\u00d7{clock:g} ns{cost} per cycle (a clock read costs {clock:g} ns, more than "
+              f"{float(opts['--clock-warn-ns']):g})")
 
     # The window: the counters' difference when speakerd answered before and after, and the log.
     late = jumps = 0

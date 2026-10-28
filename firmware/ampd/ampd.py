@@ -15,6 +15,7 @@ Python 3.9 or later, the standard library only (a board has no pip). One thread 
 
 import argparse
 import asyncio
+import collections
 import concurrent.futures
 import copy
 import datetime
@@ -43,6 +44,7 @@ VERSION = "0.1.0"
 PROTOCOL = 1
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
 LINE_LIMIT = 32 * 1024 * 1024          # a longer line closes the connection
+HELLO_LINE_LIMIT = 64 * 1024           # the same before the peer proved the secret, and on the monitor link
 RETRY = 1.0                            # every reconnection, every second
 HELLO_TIMEOUT = 10.0
 APPLY_TIMEOUT = 10.0                   # a speaker that does not answer an apply in this has failed it
@@ -63,6 +65,7 @@ MAX_CONTROL_PEERS = 32                         # controllers and agents on the h
 MAX_MONITOR_CLIENTS = 32
 MAX_SUBSCRIPTIONS = 32                         # per monitor client
 WRITE_LIMIT = 1024 * 1024                      # a client this far behind in reading is dropped
+DOCUMENTS_WRITE_LIMIT = 4 * LINE_LIMIT          # a controller's unread documents (state, graph) besides that
 PEER_WRITE_LIMIT = 256 * 1024 * 1024           # the same for an agent or speakerd (documents are big)
 
 
@@ -414,18 +417,30 @@ class Conn:
 
     def __init__(self, reader, writer, limit=WRITE_LIMIT):
         self.reader, self.writer, self.limit = reader, writer, limit
+        self.line_limit = getattr(reader, "_limit", LINE_LIMIT)
+        # Documents sent (state, graph), by their place in what was ever written: the limit
+        # counts what is unread besides them (Conn.send).
+        self.written, self.documents = 0, collections.deque()
         peer, own = writer.get_extra_info("peername"), writer.get_extra_info("sockname")
         self.address = peer[0] if isinstance(peer, tuple) else None
         self.local_address = own[0] if isinstance(own, tuple) else None
         self.closed = False
 
+    def set_line_limit(self, limit):
+        """The longest line this connection reads from now on. asyncio's StreamReader takes its
+        limit when it is made and has no public setter: its `_limit` (CPython 3.7 and later) is
+        what readline checks, and what it buffers at most twice of before it stops reading."""
+        self.line_limit = limit
+        self.reader._limit = limit
+
     async def read(self):
-        """The next object, or None at the end. ProtocolError for a line longer than 32 MiB or
-        one that is not a JSON object: the connection closes (the peer reconnects)."""
+        """The next object, or None at the end. ProtocolError for a line longer than the line
+        limit (64 KiB until the peer proved the pair's secret, 32 MiB after) or one that is not a
+        JSON object: the connection closes (the peer reconnects)."""
         try:
             line = await self.reader.readline()
         except (asyncio.LimitOverrunError, ValueError):
-            raise ProtocolError("a line longer than 32 MiB") from None
+            raise ProtocolError(f"a line longer than {self.line_limit // 1024} KiB") from None
         if not line or not line.endswith(b"\n"):
             return None      # the end, or the peer went away in the middle of a line
         try:
@@ -436,19 +451,38 @@ class Conn:
             raise ProtocolError("a line that is not a JSON object")
         return obj
 
-    def send(self, obj):
+    def unread_documents(self, backlog):
+        """How much of `backlog` (written, not yet taken by the kernel) is documents."""
+        taken = self.written - backlog
+        while self.documents and self.documents[0][1] <= taken:
+            self.documents.popleft()
+        return sum(end - max(start, taken) for start, end in self.documents)
+
+    def send(self, obj, document=False):
+        """Queues one line. A peer that leaves more than `limit` unread, not counting whole
+        documents (`document`: a state or graph, up to 32 MiB each, which a controller may
+        take a while to read), or more than DOCUMENTS_WRITE_LIMIT of documents, is dropped."""
         if self.closed:
             return
-        if self.limit is not None and self.backlog() > self.limit:
-            # It does not read what it gets: nothing more queues for it.
-            THROTTLED.say(("backlog", self.address), f"dropped a connection from {self.address}: more than "
-                                                     f"{self.limit // 1024} KiB unread")
-            self.close()
-            return
+        if self.limit is not None:
+            backlog = self.backlog()
+            documents = self.unread_documents(backlog)
+            if backlog - documents > self.limit or documents > DOCUMENTS_WRITE_LIMIT:
+                # It does not read what it gets: nothing more queues for it.
+                THROTTLED.say(("backlog", self.address), f"dropped a connection from {self.address}: more than "
+                              + (f"{self.limit // 1024} KiB unread besides documents" if documents <= DOCUMENTS_WRITE_LIMIT
+                                 else f"{DOCUMENTS_WRITE_LIMIT >> 20} MiB of documents unread"))
+                self.close()
+                return
+        data = json.dumps(obj, separators=(",", ":")).encode() + b"\n"
         try:
-            self.writer.write(json.dumps(obj, separators=(",", ":")).encode() + b"\n")
+            self.writer.write(data)
         except (ConnectionError, RuntimeError):
             self.close()
+            return
+        if document:
+            self.documents.append((self.written, self.written + len(data)))
+        self.written += len(data)
 
     def backlog(self):
         transport = self.writer.transport
@@ -1005,13 +1039,13 @@ class Hub(Role):
         message = {"op": "graph", "revision": core.revision, "base": core.revision - 1 if base is None else base,
                    "time": core.rev_time, "origin": core.rev_origin, "document": core.document()}
         for controller in self.controllers:
-            controller.conn.send(message)
+            controller.conn.send(message, document=True)
 
     def broadcast_state(self):
         """A speaker came online, went offline or changed layer, or the hub adopted a revision:
         every controller gets the whole state again (docs/protocol.md, clarification 2)."""
         for controller in self.controllers:
-            controller.conn.send(self.state(controller.conn))
+            controller.conn.send(self.state(controller.conn), document=True)
         self.core.status_changed()
 
     def status(self):
@@ -1333,7 +1367,7 @@ class Hub(Role):
         self.controllers.append(peer)
         log(f"controller {peer.name} connected from {conn.address}"
             + (f" (osc port {peer.osc[1]})" if peer.osc else " (no osc_port: no OSC echoes)"))
-        conn.send(self.state(conn))
+        conn.send(self.state(conn), document=True)
         self.core.status_changed()
         try:
             while True:
@@ -1580,7 +1614,8 @@ class Agent(Role):
         local_addr = None if core.listen in ("0.0.0.0", "::", "") else (core.listen, 0)
         while True:
             try:
-                reader, writer = await asyncio.open_connection(host, port, limit=LINE_LIMIT, local_addr=local_addr)
+                reader, writer = await asyncio.open_connection(host, port, limit=HELLO_LINE_LIMIT,
+                                                               local_addr=local_addr)
             except OSError as e:
                 self.once.say("connect", f"hub: cannot connect to {host}:{port}: {e.strerror or e}: trying again every second")
                 await asyncio.sleep(RETRY)
@@ -1608,6 +1643,7 @@ class Agent(Role):
                 if core.secret is not None and not proof_holds(core.secret, "server", ns, nc, "hub", hub_name,
                                                                welcome.get("auth")):
                     raise ProtocolError(f"the hub at {host}:{port} did not prove the pair's secret: not believing it")
+                conn.set_line_limit(LINE_LIMIT)
                 self.once.reset()
                 self.hub_name = hello.get("name")
                 self.last_seq.clear()    # a new hub session: its seq may have started again
@@ -1636,7 +1672,8 @@ class Agent(Role):
             except asyncio.TimeoutError:
                 self.once.say("hello", f"hub: {host}:{port} said no hello within {HELLO_TIMEOUT:g} s: trying again every second")
             except ProtocolError as e:
-                self.once.say("hello", f"hub: {e}: trying again every second")
+                # Each kind of failure said once (the hub's own words, which change, left out of the key).
+                self.once.say(("hello", re.sub(r"\{.*\}", "{}", str(e))), f"hub: {e}: trying again every second")
             except ConnectionError:
                 pass
             finally:
@@ -1807,6 +1844,8 @@ async def control_connection(core, reader, writer):
             if done is None:
                 return
             hello, token = done
+            # Proven (or no secret configured): documents may come now.
+            conn.set_line_limit(LINE_LIMIT)
             await hub.serve(conn, hello, token)
         else:
             conn.send({"op": "error", "about": "hello", "reason": f"{core.name} is not the hub: the hub is {core.hub_address}"})
@@ -1880,9 +1919,9 @@ async def main_async(args, config):
 
     try:
         control = await asyncio.start_server(handler(lambda r, w: control_connection(core, r, w)), core.listen,
-                                             args.control_port, limit=LINE_LIMIT, reuse_address=True)
+                                             args.control_port, limit=HELLO_LINE_LIMIT, reuse_address=True)
         monitor = await asyncio.start_server(handler(core.monitor.serve), core.listen, args.monitor_port,
-                                             limit=LINE_LIMIT, reuse_address=True)
+                                             limit=HELLO_LINE_LIMIT, reuse_address=True)
         transport, _ = await loop.create_datagram_endpoint(lambda: Knobs(core.role), local_addr=(core.listen, args.knob_port))
     except OSError as e:
         log(f"cannot listen on {core.listen}: {e.strerror or e}")

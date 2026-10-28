@@ -21,6 +21,8 @@ also builds and runs speakerd on a speaker, and renders through it offline.
 """
 
 import atexit
+import hashlib
+import hmac
 import itertools
 import json
 import os
@@ -1088,14 +1090,31 @@ def osc_decode(data):
 TEST_SECRET = "vpair-test-secret-not-a-real-one"
 
 
+def _hmac_hex(key, text):
+    return hmac.new(key.encode("utf-8"), text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def ampd_proof(side, ns, nc, role, name, secret=TEST_SECRET):
-    """docs/protocol.md's proof (firmware/ampd/ampd.py, proof): side "client" or "server"."""
-    return _ampd_module().proof(secret, side, ns, nc, role, name)
+    """docs/protocol.md's proof, from the document, not from ampd (so a drift in ampd's format
+    fails the tests): lowercase hex HMAC-SHA256 keyed with the secret of
+    "<side>:<Ns>:<Nc>:<role>:<name>", side "client" or "server"."""
+    return _hmac_hex(secret, f"{side}:{ns}:{nc}:{role}:{name}")
+
+
+def ampd_session_key(ns, nc, secret=TEST_SECRET):
+    """K = HMAC(secret, "session:<Ns>:<Nc>"), hex."""
+    return _hmac_hex(secret, f"session:{ns}:{nc}")
 
 
 def ampd_token(ns, nc, secret=TEST_SECRET):
-    """The OSC token of a control connection with nonces `ns` (the server's) and `nc`."""
-    return _ampd_module().osc_token(secret, ns, nc)
+    """The OSC token of a control connection with nonces `ns` (the server's) and `nc`: the first
+    32 hex characters of HMAC-SHA256 keyed with K's hex string, of "osc"."""
+    return _hmac_hex(ampd_session_key(ns, nc, secret), "osc")[:32]
+
+
+# docs/protocol.md's authentication, once, with fixed inputs and answers: the controller's tests
+# assert the same file.
+AUTH_VECTOR = HERE / "auth_vector.json"
 
 
 def client_hello(server_hello, role, name, secret=TEST_SECRET, **extra):

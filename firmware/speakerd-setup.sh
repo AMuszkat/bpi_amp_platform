@@ -91,6 +91,10 @@ WINDOW=10
 # took more than this fraction of the cycle's length: half the budget, so the rest of the
 # PipeWire cycle and a bad moment still fit before a cycle is late.
 TIMING_GRAPH_LIMIT=0.5
+# smoke warns when speakerd's start-up line says one read of the monotonic clock costs more than
+# this (ns): tens is the vDSO; hundreds means a system call (on Cortex-A73 kernels, likely the
+# ARM erratum 858921 workaround), and per-node timing then costs (4 + 2 per node) of them a cycle.
+CLOCK_READ_WARN_NS=150
 LOG_FILE=""
 REMOTE_ARGS=()
 
@@ -1450,7 +1454,7 @@ do_smoke() {
         esac
     done < <(helper timing --limit "$TIMING_GRAPH_LIMIT" --before "$WORK/timing-before.json" \
                  --after "$WORK/timing-after.json" --window-log "$WORK/timing-window.log" \
-                 --start-log "$WORK/timing-start.log" --window "$WINDOW" \
+                 --start-log "$WORK/timing-start.log" --window "$WINDOW" --clock-warn-ns "$CLOCK_READ_WARN_NS" \
              || echo "FAIL the timing check did not run")
 
     # ampd, when it is installed: running, connected to speakerd, an agent to the hub.
