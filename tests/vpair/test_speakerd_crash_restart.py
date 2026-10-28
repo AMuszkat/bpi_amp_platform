@@ -31,7 +31,8 @@ Pass when:
   last-known-good, not factory; a start whose end was never recorded counts as a crash;
 - once five starts failed within 60 s, a start first waits (SPEAKERD_BACKOFF, 0.5 s here) and
   says so;
-- while a process called AudioPluginHost runs, the unit's ExecStart does not start speakerd and
+- while a process called AudioPluginHost runs (a stand-in named harness.TEST_PLUGIN_HOST, the
+  name the test gives speakerd-run), the unit's ExecStart does not start speakerd and
   says why, and starts it once that process has gone.
 
     python3 -m unittest -v tests.vpair.test_speakerd_crash_restart
@@ -41,13 +42,12 @@ import os
 import re
 import shutil
 import signal
-import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-from harness import FIRMWARE, Pair, UserUnit, built, firmware, stub_speakerd
+from harness import FIRMWARE, TEST_PLUGIN_HOST, Pair, UserUnit, built, firmware, stub_plugin_host, stub_speakerd
 
 LAYER_LINE = "speakerd: stub:"
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
@@ -185,16 +185,12 @@ class Supervision(unittest.TestCase):
         self.assertIn("has no exit recorded, counted as a crash", result["log"])
 
     def test_waits_for_an_audiopluginhost(self):
-        fake = self.tmp / "bin" / "AudioPluginHost"
-        fake.parent.mkdir(exist_ok=True)
-        shutil.copy("/bin/sleep", fake)
-        host = subprocess.Popen([str(fake), "60"])
+        host = stub_plugin_host(self.tmp / "bin")
         self.addCleanup(lambda: (host.kill(), host.wait()))
-        time.sleep(0.2)
         unit = self.unit(self.stub_home)
         (self.stub_dir / "fate").write_text("run")
         run = unit.start()
-        said = run.wait_for("speakerd-run: *** AudioPluginHost runs", timeout=10)
+        said = run.wait_for(f"speakerd-run: *** {TEST_PLUGIN_HOST} runs", timeout=10)
         time.sleep(2.5)
         self.assertNotIn(LAYER_LINE, run.log(), "speakerd started while an AudioPluginHost runs")
         host.kill()

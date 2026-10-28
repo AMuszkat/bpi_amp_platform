@@ -787,14 +787,20 @@ def render(state, samples, bundles=(), args=(), timeout=120):
 # The board side: firmware/'s installers, the systemd unit they install, who drives the graph
 
 FIRMWARE = ROOT / "firmware"
+# The process name the installers and speakerd-run look for instead of AudioPluginHost, and the
+# system LV2 folders they look in, in every test: a test must never see, wait for or stop this
+# machine's own AudioPluginHost, nor read its system plugins. A test's stand-in plugin host is
+# a copy of sleep with this name (at most 15 characters, the kernel's comm).
+TEST_PLUGIN_HOST = "vpairPluginHost"
+TEST_ENV = {"SPEAKERD_PLUGIN_HOST_NAME": TEST_PLUGIN_HOST, "SPEAKERD_SYSTEM_LV2_DIRS": "/nonexistent-vpair-lv2"}
 
 
 def firmware(script, *args, env=None, timeout=120, check=True):
     """Runs a firmware/ script (speakerd-setup.sh, setup.sh, snapcast-setup.sh) and returns the
-    CompletedProcess, stdout and stderr together. Fails with its output when `check` and it
-    fails."""
+    CompletedProcess, stdout and stderr together, with TEST_ENV and `env` on top of this
+    environment. Fails with its output when `check` and it fails."""
     result = subprocess.run(["bash", str(FIRMWARE / script), *map(str, args)],
-                            env=dict(os.environ, **(env or {})), stdin=subprocess.DEVNULL,
+                            env={**os.environ, **TEST_ENV, **(env or {})}, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             timeout=timeout)
     if check and result.returncode != 0:
@@ -804,6 +810,17 @@ def firmware(script, *args, env=None, timeout=120, check=True):
 
 
 _stub = {}
+
+
+def stub_plugin_host(folder):
+    """Starts a stand-in for AudioPluginHost (a copy of sleep called TEST_PLUGIN_HOST) and
+    returns its process; the caller kills it."""
+    fake = Path(folder) / TEST_PLUGIN_HOST
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy("/bin/sleep", fake)
+    host = subprocess.Popen([str(fake), "120"])
+    time.sleep(0.2)
+    return host
 
 
 def stub_speakerd():
@@ -847,7 +864,7 @@ class UserUnit:
 
     def __init__(self, path, home, speaker, env=None):
         self.path, self.home, self.speaker = Path(path), Path(home), speaker
-        self.extra_env = dict(env or {})
+        self.extra_env = {**TEST_ENV, **(env or {})}
         self.service = {}
         section = None
         for raw in self.path.read_text().splitlines():

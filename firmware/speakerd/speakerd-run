@@ -45,6 +45,9 @@ CRASHES_ON_FACTORY_TO_PASSTHROUGH=3
 FAILURES_TO_BACKOFF=5
 HISTORY_LINES=200
 PLUGIN_HOST_POLL=2
+# The old plugin host's process name; another only for the virtual pair tests, which must not
+# wait for this machine's own AudioPluginHost.
+PLUGIN_HOST="${SPEAKERD_PLUGIN_HOST_NAME:-AudioPluginHost}"
 
 log() { printf 'speakerd-run: %s\n' "$*" >&2; }
 
@@ -137,7 +140,7 @@ plugin_host_pids() {
     local f comm pid stat pids=()
     for f in /proc/[0-9]*/comm; do
         { read -r comm < "$f"; } 2> /dev/null || continue   # it may have exited since the glob
-        [ "$comm" = AudioPluginHost ] || continue
+        [ "$comm" = "$PLUGIN_HOST" ] || continue
         pid="${f#/proc/}"; pid="${pid%/comm}"
         # A zombie (state Z) has exited already: it plays nothing.
         { stat="$(< "/proc/$pid/stat")"; } 2> /dev/null || continue
@@ -178,11 +181,11 @@ start() {
     [ -e "${HOME:-/nonexistent}/.lv2" ] && log "warning: HOME ($HOME) has a .lv2 folder, which may shadow the bundles"
 
     while pids="$(plugin_host_pids)"; [ -n "$pids" ]; do
-        [ $said = 1 ] || log "*** AudioPluginHost runs (pid $pids): two plugin hosts would feed the amplifier at once. Not starting speakerd until it has exited. ***"
+        [ $said = 1 ] || log "*** $PLUGIN_HOST runs (pid $pids): two plugin hosts would feed the amplifier at once. Not starting speakerd until it has exited. ***"
         said=1
         sleep "$PLUGIN_HOST_POLL"
     done
-    [ $said = 0 ] || log "AudioPluginHost has exited: starting speakerd"
+    [ $said = 0 ] || log "$PLUGIN_HOST has exited: starting speakerd"
 
     choose_layer
     if [ "$FAILED_RECENTLY" -ge "$FAILURES_TO_BACKOFF" ] && { [ "$LAST_EXIT" = crash ] || [ "$LAST_EXIT" = pipewire ]; }; then

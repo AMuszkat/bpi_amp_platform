@@ -163,26 +163,33 @@ version_value() {   # $1 = VERSION file, $2 = key
 
 # $1 = [user@]host, $2 = the bundle folder, $3 = the script (in firmware/), the rest its
 # arguments. The script runs from the bundle's folder, as the ssh user (the board's audio
-# user), with --bundle pointing at the copy; relative paths in the arguments are relative to
-# the bundle (extra/...).
+# user, never root: the installers run as that user, who could not read root's folders), with
+# --bundle pointing at the copy (after the arguments: an installer's action comes first); relative paths in the arguments are relative to the bundle
+# (extra/...). The copy goes to ~/.cache on the board, not /tmp (often mounted noexec), and is
+# removed however the script ends. A --dry-run among the arguments is the board-side dry run:
+# it contacts the board and changes nothing there.
 remote_run() {
-    local host="$1" bundle="$2" script="$3" rdir rc
+    local host="$1" bundle="$2" script="$3" rdir rc inner
     shift 3
-    if [ "${DRY_RUN:-0}" -eq 1 ]; then
-        info "(dry-run) would copy $bundle ($(du -sh "$bundle" | cut -f1)) to $host:/tmp/bpi-amp-setup.XXXXXX/ and run there:"
-        echo "    bash firmware/$script --bundle <that folder> $(shown "$@")"
-        return 0
-    fi
+    case "$host" in root@*) die "ssh to the board as its audio user, not root ($host)" ;; esac
     command -v ssh > /dev/null || die "ssh is not installed"
-    rdir="$(ssh "$host" 'mktemp -d /tmp/bpi-amp-setup.XXXXXX')" || die "cannot reach $host over ssh"
+    # shellcheck disable=SC2016  # expanded on the board: its own $HOME
+    rdir="$(ssh -- "$host" 'mkdir -p "$HOME/.cache" && mktemp -d "$HOME/.cache/bpi-amp-setup.XXXXXX"')" \
+        || die "cannot reach $host over ssh"
+    [ -n "$rdir" ] || die "$host made no folder for the bundle"
     info "Copying the bundle ($(du -sh "$bundle" | cut -f1)) to $host:$rdir"
     # shellcheck disable=SC2029  # expanded here on purpose: the folder made on the board
-    tar -C "$bundle" -cf - . | ssh "$host" "tar -C $(printf %q "$rdir") -xf -" || die "copying the bundle to $host failed"
+    if ! tar -C "$bundle" -cf - . | ssh -- "$host" "tar -C $(printf %q "$rdir") -xf -"; then
+        ssh -- "$host" "rm -rf $(printf %q "$rdir")" || true
+        die "copying the bundle to $host failed"
+    fi
     info "Running firmware/$script on $host"
+    # Every argument quoted for the board's shell; the folder goes whatever happens.
+    inner="d=$(printf %q "$rdir"); trap 'cd / && rm -rf \"\$d\"' EXIT; cd \"\$d\" && bash firmware/$(printf %q "$script") $(shown "$@") --bundle ."
     set +e
     # -t: a terminal, so that sudo on the board can ask for a password (snapcast-setup.sh).
-    # shellcheck disable=SC2029  # expanded here on purpose: the folder and the arguments
-    ssh -t "$host" "cd $(printf %q "$rdir") && bash firmware/$script --bundle . $(shown "$@"); rc=\$?; cd / && rm -rf $(printf %q "$rdir"); exit \$rc"
+    # shellcheck disable=SC2029  # expanded here on purpose: the quoted command
+    ssh -t -- "$host" "bash -c $(printf %q "$inner")"
     rc=$?
     set -e
     return $rc

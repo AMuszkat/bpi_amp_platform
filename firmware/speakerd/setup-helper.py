@@ -9,6 +9,7 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
     setup-helper.py graph FILE [--allow-tweeter-without-crossover]
     setup-helper.py write FILE                     stdin to FILE, atomically
     setup-helper.py drivers PROFILER_OUTPUT DUMP   which node drives which, from pw-profiler
+    setup-helper.py sink DUMP                      the live speakerd sink: the drop-in's? the default sink
 
 Each prints shell-readable `key=value` lines or a message, and exits 1 with the reason on
 stderr when it cannot do what it was asked.
@@ -160,6 +161,32 @@ def cmd_node(args):
     print(f"ports={quote(' '.join(input_ports(node_id, ports)))}")
 
 
+# What 60-speakerd-sink.conf gives the speakerd sink, and only it.
+DROPIN_SINK = {"factory.name": "support.null-audio-sink", "media.class": "Audio/Sink",
+               "priority.session": 1500, "priority.driver": 0}
+
+
+def cmd_sink(args):
+    """Whether the running PipeWire has the speakerd sink of the drop-in (not one speakerd made
+    itself, nor one from another config), and what the default sink is."""
+    dump = load_json(args[0], "the pw-dump")
+    nodes, _ = nodes_and_ports(dump)
+    node_id, props = find_node(nodes, "speakerd")
+    default = ""
+    for obj in dump:
+        if obj.get("type") == "PipeWire:Interface:Metadata" and (obj.get("props") or {}).get("metadata.name") == "default":
+            for item in obj.get("metadata") or []:
+                if item.get("key") == "default.audio.sink":
+                    value = item.get("value")
+                    default = value.get("name", "") if isinstance(value, dict) else str(value)
+    wrong = [f"{k} {props.get(k)!r} (the drop-in's: {v!r})" for k, v in DROPIN_SINK.items()
+             if node_id is not None and props.get(k) != v]
+    print(f"present={'yes' if node_id is not None else 'no'}")
+    print(f"dropin={'yes' if node_id is not None and not wrong else 'no'}")
+    print(f"differs={quote('; '.join(wrong))}")
+    print(f"default_sink={quote(default)}")
+
+
 def cmd_drivers(args):
     """pw-profiler's output names each driver by id ("logging driver 25") and each follower by
     id and name ("logging follower 40 ("pw-play")"). PipeWire 0.3.65's pw-dump shows no driver
@@ -302,6 +329,11 @@ def is_crossover(node):
     return identifier.rstrip("/").rsplit("/", 1)[-1].lower().startswith("crossover") and not node.get("bypassed")
 
 
+# The crossover's outputs (dsp/juce_plugins/crossover/README.md): channel 0 is the low band
+# (the woofer's), channel 1 the high band. Only the high band may reach the tweeter.
+CROSSOVER_HIGH = 1
+
+
 def cmd_graph(args):
     path = args[0]
     allow = "--allow-tweeter-without-crossover" in args[1:]
@@ -332,23 +364,35 @@ def cmd_graph(args):
             if end not in (INPUT_NODE, OUTPUT_NODE) and end not in by_uid:
                 fail(f"{path}: a connection names node {end}, which is not in the document")
         if dst == (OUTPUT_NODE, TWEETER_CHANNEL):
-            feeders.add(src[0])
+            feeders.add(src)
         else:
-            edges.setdefault(src[0], set()).add(dst[0])
-    # Every path from the stream to the tweeter must pass through a crossover (README: "Only a
-    # crossover may feed the tweeter"). Walk from the input without entering a crossover.
-    reached, todo = {INPUT_NODE}, [INPUT_NODE]
+            edges.setdefault(src, set()).add(dst[0])
+
+    def unsafe_outputs(uid):
+        """The outputs of a node that carry the stream unfiltered for a tweeter: all of them,
+        except a (not bypassed) crossover's high band."""
+        outputs = {s for s in list(edges) + list(feeders) if s[0] == uid}
+        if uid in by_uid and is_crossover(by_uid[uid]):
+            return {s for s in outputs if s[1] != CROSSOVER_HIGH}
+        return outputs
+
+    # Only a crossover's high band may feed the tweeter (README: "Only a crossover may feed the
+    # tweeter"): walk from the input along everything else, the low band included.
+    reached, todo, unsafe_out = {INPUT_NODE}, [INPUT_NODE], set()
     while todo:
-        for nxt in edges.get(todo.pop(), ()):
-            if nxt not in reached and not (nxt in by_uid and is_crossover(by_uid[nxt])):
-                reached.add(nxt)
-                todo.append(nxt)
-    unsafe = sorted(f for f in feeders if f in reached)
+        for out in unsafe_outputs(todo.pop()):
+            unsafe_out.add(out)
+            for nxt in edges.get(out, ()):
+                if nxt not in reached:
+                    reached.add(nxt)
+                    todo.append(nxt)
+    unsafe = sorted(f"{node}:{channel}" for node, channel in feeders & unsafe_out)
     names = ", ".join(str(by_uid[u].get("name") or str(by_uid[u]["plugin"]["identifier"]).rsplit("/", 1)[-1])
                       for u in sorted(by_uid)) or "no plugin"
     if unsafe:
-        message = ("the stream reaches the tweeter without a crossover (through node(s) "
-                   f"{', '.join(map(str, unsafe))}): full range on a tweeter can destroy it")
+        message = ("the stream reaches the tweeter other than through a crossover's high band (output "
+                   f"{', '.join(unsafe)}; a crossover's channel 0 is its low band): full range or the "
+                   "woofer's band on a tweeter can destroy it")
         if not allow:
             fail(f"{path}: {message}")
         print(f"warning={quote(message + ' (allowed by --allow-tweeter-without-crossover)')}")
@@ -360,7 +404,7 @@ def cmd_write(args):
     write_atomically(args[0], sys.stdin.read())
 
 
-COMMANDS = {"amp": (cmd_amp, 1), "node": (cmd_node, 2), "device": (cmd_device, 1),
+COMMANDS = {"amp": (cmd_amp, 1), "node": (cmd_node, 2), "device": (cmd_device, 1), "sink": (cmd_sink, 1),
             "graph": (cmd_graph, 1), "write": (cmd_write, 1), "drivers": (cmd_drivers, 2)}
 
 

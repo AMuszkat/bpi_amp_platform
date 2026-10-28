@@ -1,8 +1,11 @@
 # Per-developer settings. Copy to local.mk (gitignored) and adjust:
 #   cp local.mk.example local.mk
-# Read by Makefile and localBuild/Makefile. Any of these can instead come from
-# the environment (export BOARD_HOST=...). The *-setup.sh scripts read
-# BOARD_HOST / BOARD_USER from the environment only (or take --target-host).
+# Read by Makefile and localBuild/Makefile, and (BOARD_HOST, BOARD_USER) by
+# setup.sh, speakerd-setup.sh and tools/board.sh, which parse this file without
+# running make. Any of these can instead come from the environment
+# (export BOARD_HOST=...), which wins. The snapcast, usb-serial and wifi setup
+# scripts read the environment only (or take --target-host). BOARD_USER is the
+# board's audio user, the one whose PipeWire drives the amplifier, never root.
 
 # Network name or address of the board
 BOARD_HOST := bpi-amp.local

@@ -47,6 +47,7 @@ BASE_CONF=0
 RATE=""
 FACTORY=""
 PLUGINS=()
+ARCH=aarch64
 SPEAKERD_ARGS=()     # passed to speakerd-setup.sh install (and check)
 REMOTE_ARGS=()       # passed to this script on the board
 
@@ -62,7 +63,9 @@ Options:
                               environment or firmware/local.mk; else user@bpi-amp.local).
   --only <a,b,...>            install only these components (${COMPONENTS[*]}).
   --skip <a,b,...>            install every component but these.
-  --dry-run                   say what each component would change; change nothing.
+  --dry-run                   say what each component would change; change nothing. With target-remote:
+                              copy the bundle and run this dry run ON the board (it contacts the board,
+                              and changes nothing there).
   --no-restart                write the files, restart nothing.
 
   pipewire:
@@ -87,6 +90,7 @@ Options:
   --import-filtergraph <file> an AudioPluginHost .filtergraph on the board, converted into factory.json.
   --stop-plugin-host          stop a running AudioPluginHost instead of refusing.
   --plugin <plugin[:build]>   target-remote: a plugin bundle to copy, repeatable (default ${DEFAULT_PLUGINS[*]}).
+  --arch <aarch64|native>     target-remote: the build tree the bundle comes from (default aarch64).
   --bundle <dir>              target: the bundle (default: the folder above this script, when it is one).
 
   --no-systemd, --home <dir>  for the virtual pair tests (see speakerd-setup.sh).
@@ -125,6 +129,7 @@ while [ $# -gt 0 ]; do
         --stop-plugin-host) SPEAKERD_ARGS+=("$1"); remote "$1"; shift ;;
         --factory)         FACTORY="${2:?}"; shift 2 ;;
         --plugin)          PLUGINS+=("${2:?}"); shift 2 ;;
+        --arch)            ARCH="${2:?}"; shift 2 ;;
         -h | -help | --help) usage; exit 0 ;;
         *)                 die "unknown option: $1 (try --help)" ;;
     esac
@@ -132,6 +137,7 @@ done
 case "$MODE" in target | target-remote) ;; *) die "--mode is target or target-remote" ;; esac
 case "$ROUTE" in speakerd | plugin-host) ;; *) die "--route is speakerd or plugin-host" ;; esac
 case "$RATE" in "" | 44100 | 48000) ;; *) die "--rate is 44100 or 48000" ;; esac
+case "$ARCH" in aarch64 | native) ;; *) die "--arch is aarch64 or native" ;; esac
 [ -z "$RATE" ] || [ "$BASE_CONF" -eq 1 ] || die "--rate needs --base-conf: the rate is in the board's own pipewire.conf (default.clock.rate and the amplifier's audio.rate), which only --base-conf replaces. See firmware/CLAUDE.md, 'Rates'."
 
 # The components, in boot order.
@@ -155,7 +161,7 @@ if [ "$MODE" = target-remote ]; then
     [ -n "$TARGET_HOST" ] || TARGET_HOST="$(board_target)"
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    if selected speakerd; then make_bundle "$tmp/bundle" aarch64 "${PLUGINS[@]}"
+    if selected speakerd; then make_bundle "$tmp/bundle" "$ARCH" "${PLUGINS[@]}"
     else make_bundle "$tmp/bundle" none; fi
     if [ -n "$FACTORY" ]; then
         mkdir -p "$tmp/bundle/extra"
@@ -206,9 +212,10 @@ restart_pipewire() {
         return 0
     fi
     info "Restarting PipeWire"
-    systemctl --user restart pipewire.service pipewire-pulse.service wireplumber.service 2> /dev/null \
-        || systemctl --user restart pipewire.service wireplumber.service \
-        || warn "could not restart PipeWire: systemctl --user restart pipewire wireplumber"
+    # Fatal: what follows (the speakerd sink, the route into it) needs the new configuration.
+    systemctl --user restart pipewire.service wireplumber.service \
+        || die "could not restart PipeWire (systemctl --user restart pipewire wireplumber): stopping before anything is routed"
+    systemctl --user restart pipewire-pulse.service 2> /dev/null || true
     if systemctl --user is-enabled snapclient.service > /dev/null 2>&1; then
         if systemctl --user restart snapclient.service; then ok "Restarted snapclient"; else warn "could not restart snapclient"; fi
     fi
@@ -242,6 +249,9 @@ install_base_conf() {
 # Check every chosen component before changing any
 # ----------------------------------------------------------------------------
 info "Components, in boot order: ${CHOSEN[*]} (home $H)"
+if selected speakerd && [ "$ROUTE" = plugin-host ] && selected snapcast; then
+    die "--route plugin-host with the speakerd component would leave the AudioPluginHost's rule pointing at the amplifier while speakerd plays it too: route into speakerd, or skip one of them"
+fi
 if selected speakerd; then
     info "Checking speakerd"
     [ -n "$BUNDLE" ] || die "speakerd needs a bundle (--bundle, or run the setup.sh of an unpacked bundle): nothing was changed"
@@ -259,20 +269,29 @@ fi
 # ----------------------------------------------------------------------------
 # Install, in boot order
 # ----------------------------------------------------------------------------
+# Every check has passed. The old plugin host goes first, before PipeWire restarts under it.
+if selected speakerd && [[ " ${SPEAKERD_ARGS[*]} " == *" --stop-plugin-host "* ]]; then
+    echo
+    info "The old plugin host"
+    speakerd_setup stop-plugin-host --stop-plugin-host
+fi
 for c in "${CHOSEN[@]}"; do
     echo
     case "$c" in
         pipewire)
-            [ "$BASE_CONF" -eq 0 ] || { info "pipewire: the repository's pipewire.conf"; install_base_conf; }
-            before="$(cat "$DROPIN" 2> /dev/null || true)"
+            if [ "$BASE_CONF" -eq 1 ]; then
+                info "pipewire: the repository's pipewire.conf"
+                install_base_conf
+                [ "$BASE_CHANGED" -eq 0 ] || restart_pipewire
+            fi
             if [ "$ROUTE" = speakerd ] || selected speakerd || [ -f "$DROPIN" ]; then
+                # The drop-in, a PipeWire restart if it changed, and the RUNNING PipeWire's
+                # speakerd node checked: all fatal.
                 info "pipewire: the persistent speakerd sink"
-                speakerd_setup sink --no-restart
+                speakerd_setup sink
             else
                 info "pipewire: no speakerd sink (nothing plays into it with --route plugin-host and no speakerd)"
             fi
-            after="$(cat "$DROPIN" 2> /dev/null || true)"
-            if [ "$before" != "$after" ] || [ "$BASE_CHANGED" -eq 1 ]; then restart_pipewire; fi
             ;;
         snapcast)
             if [ -n "$SERVER_IP" ]; then

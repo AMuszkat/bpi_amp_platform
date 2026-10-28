@@ -29,8 +29,15 @@ Pass when:
   with status 2 (the copy would shadow it); after a rollback, the next start loads it from the
   previous version's folder; speakerd's HOME is still empty after it ran;
 - firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it is
-  capped, it is linked from the sink to the amplifier and nothing else feeds the amplifier, no
-  AudioPluginHost runs, the amplifier drives, and no restart or xrun in 3 s.
+  capped, the live speakerd sink has the drop-in's properties and is the default sink, it is
+  linked from the sink to the amplifier and nothing else feeds the amplifier, no AudioPluginHost
+  runs, the amplifier drives, and no restart or xrun in 3 s;
+- snapcast-setup.sh --route speakerd finds the drop-in's sink in the running PipeWire and routes;
+- with a PipeWire that does NOT load the drop-in (the file installed, the speaker started without
+  it): the route into speakerd is refused and client-rt.conf left as it was, both with no
+  speakerd sink at all and with the sink speakerd made itself (which it says it made); smoke
+  fails on the sink that is not the drop-in's; and `sink` and `install` refuse, saying nothing may
+  be routed into speakerd.
 
 The installer installs only a speakerd that enforces device.json's limits (SPEAKERD_MIN_VERSION
 in firmware/speakerd-setup.sh), which came after commit 2cb3278: against an older one the
@@ -48,7 +55,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import (HERE, RATE, Pair, Player, UserUnit, active, built, drivers, firmware, graph_document,
+from harness import (FIRMWARE, HERE, RATE, TEST_PLUGIN_HOST, Pair, Player, UserUnit, active, built, drivers, firmware, graph_document,
                      lv2_uri, render, rms_dbfs, state_dir, steady, tone, with_plugin)
 
 import numpy as np
@@ -247,11 +254,89 @@ class Installed(unittest.TestCase):
                               "--log", self.log["left"], "--window", "3", env=env, check=False)
         print("\n" + result.stdout)
         for check in ("pass it plays: layer factory", "pass capped: output at -20 dB, tweeter muted",
+                      "pass the speakerd sink is the drop-in's (priority.session 1500, priority.driver 0)",
+                      "pass the default sink is speakerd",
                       "pass linked: speakerd sink -> speakerd-dsp -> amplifier",
-                      "pass nothing but speakerd-dsp plays into amplifier", "pass no AudioPluginHost runs",
+                      "pass nothing but speakerd-dsp plays into amplifier", f"pass no {TEST_PLUGIN_HOST} runs",
                       "pass amplifier drives the graph", "pass no restart in 3 s", "pass no xrun in 3 s"):
             self.assertIn(check, result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_the_route_into_speakerd(self):
+        env = {k: v for k, v in self.pair["left"].env.items() if k.startswith(("XDG_", "DBUS_"))}
+        home = self.user_home
+        result = firmware("snapcast-setup.sh", "--mode", "target", "--routing-only", "--route", "speakerd",
+                          "--client-home", home, env=env)
+        self.assertIn("The running PipeWire has the drop-in's speakerd sink", result.stdout)
+        self.assertIn('target.object = "speakerd"', (home / ".config/pipewire/client-rt.conf").read_text())
+
+
+class DropInNotLoaded(unittest.TestCase):
+    """A speaker whose PipeWire does not load ~/.config/pipewire/pipewire.conf.d (as with another
+    config name, or PIPEWIRE_CONFIG_DIR): the drop-in file is there, the sink is not. Nothing may
+    be routed into speakerd, and smoke, sink and install say so."""
+
+    @classmethod
+    def setUpClass(cls):
+        built("speakerd")
+        built("loudness", "headless")
+        cls.tmp = Path(tempfile.mkdtemp(prefix="vpair-no-dropin-"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
+        cls.user_home = cls.tmp / "user"
+        (cls.tmp / "no-pipewire").mkdir()
+        cls.bundle = cls.tmp / "bundle"
+        firmware("speakerd-setup.sh", "bundle", "--arch", "native", "--out", cls.bundle, "--plugin", "loudness:headless")
+        firmware("speakerd-setup.sh", "install", "--bundle", cls.bundle, "--home", cls.user_home, "--no-systemd",
+                 "--role", "left", "--amplifier", "amplifier", env={"XDG_RUNTIME_DIR": str(cls.tmp / "no-pipewire")})
+        cls.pair = Pair().__enter__()
+        cls.addClassCleanup(cls.pair.__exit__, None, None, None)
+        cls.env = {k: v for k, v in cls.pair["left"].env.items() if k.startswith(("XDG_", "DBUS_"))}
+
+    def route(self):
+        home = self.tmp / "routing"
+        crt = home / ".config/pipewire/client-rt.conf"
+        crt.parent.mkdir(parents=True, exist_ok=True)
+        crt.write_text("# the routing there was\n")
+        # The drop-in file exists in this home: only the live check can refuse.
+        dropin = home / ".config/pipewire/pipewire.conf.d/60-speakerd-sink.conf"
+        dropin.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIRMWARE / "pipewire/pipewire.conf.d/60-speakerd-sink.conf", dropin)
+        result = firmware("snapcast-setup.sh", "--mode", "target", "--routing-only", "--route", "speakerd",
+                          "--client-home", home, env=self.env, check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(crt.read_text(), "# the routing there was\n", "client-rt.conf was rewritten")
+        return result.stdout
+
+    def test_nothing_is_routed_and_smoke_sink_and_install_refuse(self):
+        said = self.route()
+        print(f"\n  no sink: {said.strip().splitlines()[-1]}")
+        self.assertIn("the running PipeWire has no speakerd sink", said)
+
+        log = self.tmp / "speakerd.log"
+        unit = UserUnit(self.user_home / ".config/systemd/user/speakerd.service", self.user_home, self.pair["left"])
+        run = unit.start(log_path=log)
+        try:
+            run.wait_for("speakerd: playing: ")
+            self.assertIn("speakerd: pipewire: created the input sink 'speakerd'", run.log())
+
+            said = self.route()
+            print(f"\n  speakerd's own sink: {said.strip().splitlines()[-1]}")
+            self.assertIn("the running PipeWire's speakerd sink is not the drop-in's", said)
+
+            smoke = firmware("speakerd-setup.sh", "smoke", "--home", self.user_home, "--no-systemd", "--log", log,
+                             "--window", "0", env=self.env, check=False)
+            self.assertNotEqual(smoke.returncode, 0, smoke.stdout)
+            self.assertIn("FAIL the speakerd sink is not the drop-in's", smoke.stdout)
+
+            for action in (["sink"], ["install", "--bundle", self.bundle]):
+                refused = firmware("speakerd-setup.sh", *action, "--home", self.user_home, "--no-systemd",
+                                   env=self.env, check=False)
+                self.assertNotEqual(refused.returncode, 0, refused.stdout)
+                self.assertIn("is not the drop-in's", refused.stdout)
+                self.assertIn("Nothing may be routed into speakerd", refused.stdout)
+        finally:
+            run.signal(signal.SIGTERM)
+            run.finish()
 
 
 if __name__ == "__main__":

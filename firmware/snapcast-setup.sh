@@ -564,6 +564,55 @@ check_route_target() {
     else
         die "--route speakerd: no PipeWire config of $CLIENT_USER defines the speakerd sink, so snapclient would fall back to the amplifier (full range, tweeter included). Install it first: firmware/speakerd-setup.sh sink (or firmware/setup.sh)."
     fi
+    check_live_speakerd_sink
+}
+
+# A config file is not a sink: the RUNNING PipeWire must have the speakerd node with the
+# drop-in's properties (priority.session 1500, priority.driver 0). A PipeWire that does not
+# load ~/.config/pipewire/pipewire.conf.d (another config name, PIPEWIRE_CONFIG_DIR) has at
+# most a sink speakerd made itself, which is gone after the next restart of PipeWire: then
+# snapclient would fall back to the amplifier. With --dry-run this only says what it finds;
+# the tests (--client-home) skip it when no PipeWire is reachable.
+check_live_speakerd_sink() {
+    local helper dump out present="" dropin="" differs="" default_sink=""
+    helper="$(cd "$(dirname "$SELF")" && pwd)/speakerd/setup-helper.py"
+    [ -f "$helper" ] || die "--route speakerd: cannot check the running PipeWire's speakerd sink ($helper is missing)"
+    dump="$(mktemp)"
+    if [ -n "$CLIENT_HOME_OVERRIDE" ]; then
+        timeout 10 pw-dump > "$dump" 2> /dev/null || true
+    else
+        as_user timeout 10 pw-dump > "$dump" 2> /dev/null || true
+    fi
+    if [ ! -s "$dump" ]; then
+        rm -f "$dump"
+        if [ "$DRY_RUN" -eq 1 ]; then warn "(dry-run) cannot reach $CLIENT_USER's PipeWire: the live speakerd sink is not checked"; return 0; fi
+        if [ -n "$CLIENT_HOME_OVERRIDE" ]; then warn "no PipeWire reachable: the live speakerd sink is not checked (test mode)"; return 0; fi
+        die "--route speakerd: cannot reach $CLIENT_USER's PipeWire to check that its speakerd sink exists"
+    fi
+    out="$(python3 "$helper" sink "$dump")" || { rm -f "$dump"; die "--route speakerd: cannot read the running PipeWire's nodes"; }
+    rm -f "$dump"
+    eval "$out"
+    : "$default_sink"
+    if [ "$dropin" = yes ]; then
+        ok "The running PipeWire has the drop-in's speakerd sink"
+        return 0
+    fi
+    local why="the running PipeWire has no speakerd sink"
+    [ "$present" = no ] || why="the running PipeWire's speakerd sink is not the drop-in's ($differs): it does not load ~/.config/pipewire/pipewire.conf.d"
+    if [ "$DRY_RUN" -eq 1 ]; then warn "(dry-run) $why: --route speakerd would be refused now"; return 0; fi
+    die "--route speakerd: $why, so snapclient could fall back to the amplifier (full range, tweeter included). Not routing it."
+}
+
+# Before the first route into speakerd, keeps the routing there was as
+# client-rt.conf.before-speakerd, which the speakerd uninstall restores.
+save_routing_before_speakerd() {
+    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" as=run_root
+    [ "$ROUTE" = speakerd ] && [ "$DRY_RUN" -eq 0 ] || return 0
+    # Our own home (or the test's) needs no root.
+    if [ -n "$CLIENT_HOME_OVERRIDE" ] || [ "$(id -un)" = "$CLIENT_USER" ]; then as=""; fi
+    $as test -f "$crt" || return 0
+    $as grep -q 'target.object *= *"speakerd"' "$crt" && return 0
+    $as cp -a "$crt" "$crt.before-speakerd" && ok "Kept the routing from before speakerd as $crt.before-speakerd"
 }
 
 route_target() { if [ "$ROUTE" = speakerd ]; then echo speakerd; else echo Ap.cap; fi; }
@@ -577,6 +626,7 @@ setup_routing_only() {
     if [ "$DRY_RUN" -eq 0 ] && [ -f "$crt" ] && [ ! -f "$crt.orig" ]; then
         cp -a "$crt" "$crt.orig" && ok "Backed up existing client-rt.conf -> $crt.orig"
     fi
+    save_routing_before_speakerd
     write_user_file ".config/pipewire/client-rt.conf" "$(target_client_rt_conf)"
     if [ -f "$unit" ] && ! grep -q 'PIPEWIRE_CONFIG_NAME=client-rt.conf' "$unit"; then
         warn "$unit does not point snapclient at client-rt.conf, so these rules do not reach it: re-run --mode target with --server-ip"
@@ -807,6 +857,7 @@ setup_target_local() {
         if [ "$DRY_RUN" -eq 0 ] && run_root test -f "$crt" && ! run_root test -f "$crt.orig"; then
             run_root cp -a "$crt" "$crt.orig" && ok "Backed up existing client-rt.conf -> $crt.orig"
         fi
+        save_routing_before_speakerd
         write_user_file ".config/pipewire/client-rt.conf" "$(target_client_rt_conf)"
     fi
     write_user_file ".config/systemd/user/snapclient.service" "$(snapclient_unit)"

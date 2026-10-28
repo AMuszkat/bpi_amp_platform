@@ -1,22 +1,26 @@
-"""firmware_speakerd_install (docs/autonomous-development.md, section 5): the installer's local
-mode lays speakerd out as firmware/CLAUDE.md documents it, always capped, and refuses what is
-unsafe.
+"""firmware_speakerd_install (docs/autonomous-development.md, section 5): the installers lay
+speakerd out as firmware/CLAUDE.md documents it, always capped, refuse what is unsafe before
+they change anything, and their remote mode and the board script quote what they send.
 
 firmware/speakerd-setup.sh runs here as it runs on a board, with two test hooks: --home (a
-fresh folder stands for the audio user's home) and --no-systemd (the container has no systemd:
-the systemctl calls are only printed). The bundles are made by the installer's own bundle step.
-What is under test is the installer, so their speakerd is the stand-in of stub_speakerd.c,
-which says the version STUB_VERSION gives it (the installer's minimum, SPEAKERD_MIN_VERSION,
-unless a test says otherwise), next to the real loudness_headless build. Nothing here reaches
-a board.
+fresh folder stands for the audio user's home) and --no-systemd (the systemctl calls are only
+printed), or, for the systemd path, stand-ins for systemctl and journalctl that record each call
+and answer as a test tells them. The bundles are made by the installer's own bundle step; their
+speakerd is the stand-in of stub_speakerd.c, which says the version STUB_VERSION gives it (the
+installer's minimum, SPEAKERD_MIN_VERSION, unless a test says otherwise). The old plugin host is
+a copy of sleep called harness.TEST_PLUGIN_HOST. The remote mode runs through a stand-in ssh
+that runs the board's side on this machine, as an unprivileged user when run as root, in a
+stand-in board home; the board script runs with --dry-run. Nothing here reaches a board.
 
 Pass when:
 
 - the bundle holds bin/speakerd, lv2/loudness_headless.lv2 and a VERSION whose id is the
   commit, "-dirty" if the tree is, and the hash of its contents;
-- a speakerd that cannot say its version (as before --version) or is older than the minimum is
-  refused by install, which installs nothing, and by rollback;
-- a first install without --role is refused, and installs nothing;
+- a speakerd that cannot say its version, one older than the minimum, and one that cannot be
+  executed (as from a noexec /tmp: said so) are refused by install, which installs nothing, and
+  rollback refuses an older one;
+- a first install without --role is refused, and installs nothing, and a running plugin host
+  is left running although --stop-plugin-host was given (refused before anything is stopped);
 - the first install lays out, in the home: .local/lib/speakerd/<id>/ with bin/speakerd,
   bin/speakerd-run, lv2/loudness_headless.lv2, VERSION (with the speakerd version) and setup/
   (the installer); current -> <id>; an empty home/ (speakerd's HOME);
@@ -27,33 +31,51 @@ Pass when:
   library speakerd and its plugins need is there;
 - installing the same bundle again adds no version and changes nothing, but a device.json whose
   limits a person lifted (0 dB, tweeter on) is capped again, keeping its role and amplifier;
-  --role right changes the role alone; a device.json with a key speakerd does not know, or a
-  key twice, is refused (speakerd would reject it and play its fail-safe defaults);
+  --role right changes the role alone; one of --amplifier, --woofer-port, --tweeter-port
+  changes that alone and keeps device.json's others; a device.json with a key speakerd does not
+  know, or a key twice, is refused (speakerd would reject it and play its fail-safe defaults);
 - a second, different bundle becomes current, the first previous; rollback swaps them, and
   rollback again swaps them back; with --keep 2 a third version removes the oldest, never
   current or previous;
-- while a process called AudioPluginHost runs, install refuses, says so, and installs
-  nothing; with --stop-plugin-host it stops that process and installs; a file that would
-  start one again is named;
-- a factory graph that sends the stream to the tweeter without a crossover is refused, and is
-  accepted with --allow-tweeter-without-crossover;
-- --import-filtergraph writes speakerd's conversion as factory.json, having given speakerd
-  the board's device.json (--device), and a conversion that fails (exit 2) is refused;
+- while the plugin host runs, install refuses, says so, and installs nothing; with
+  --stop-plugin-host it stops it, disables the user unit that starts it (and names the
+  autostart file), and uninstall re-enables that unit;
+- a factory graph that sends the stream to the tweeter other than through a crossover's high
+  band (channel 1) is refused: straight, through a bypassed crossover, and from a crossover's low
+  band (channel 0); it is accepted with --allow-tweeter-without-crossover;
+- a plugin bundle with one of the bundle's URIs in a system LV2 folder is named loudly;
+- --import-filtergraph writes speakerd's conversion as factory.json, having given speakerd the
+  device.json to be (--device), and a conversion that fails (exit 2) is refused;
 - the amplifier is found in a pw-dump: the one ALSA sink; with several, bpi-alsa-playback-pcm
   or alsa-playback-pcm; none or an ambiguous set is refused, naming the sinks; on a virtual
   speaker (whose amplifier is a null sink) install refuses without --amplifier, and with
   --amplifier amplifier reads its ports playback_FL and playback_FR;
 - smoke passes the exact line `speakerd: device: limits: output at -20 dB, tweeter muted` when
   device.json has those limits, and reports, each as a failure: a `device.json: FAILED` line,
-  the limits line with either fail-safe suffix (or any other), and no limits line at all;
+  the limits line with either fail-safe suffix (or any other), speakerd's `NO INPUT SINK
+  CONFIGURED` line, and no limits line at all;
 - snapcast-setup.sh --route speakerd refuses while no PipeWire config defines the speakerd
   sink, and after `speakerd-setup.sh sink` routes snapclient (and shairport-sync and an
-  AudioPluginHost) into "speakerd"; uninstall routes snapclient back to Ap.cap first, removes
-  the unit, the drop-in and the versions and keeps the state, and --purge removes that too;
+  AudioPluginHost) into "speakerd", keeping the routing there was; uninstall puts that routing
+  back exactly (or, with none kept, the AudioPluginHost route), removes the unit, the drop-in
+  and the versions and keeps the state, and --purge removes that too;
 - setup.sh checks before it changes: --dry-run changes nothing; --route speakerd without the
-  pipewire component and without the sink is refused before anything changes; and the
-  components pipewire, snapcast (re-routing an installed snapclient) and speakerd install in
-  that order.
+  pipewire component and without the sink, and --route plugin-host with the speakerd component,
+  are refused before anything changes; and the components pipewire, snapcast (re-routing an
+  installed snapclient) and speakerd install in that order;
+- under (stand-in) systemd, install fails unless speakerd, after its start, runs and says
+  exactly the limits device.json gives: no line within the wait, an inactive service, a
+  fail-safe suffix, a FAILED line and NO INPUT SINK CONFIGURED each fail it; setup.sh stops on a
+  PipeWire restart that fails, before anything is routed into speakerd, and stops the plugin host
+  before it restarts PipeWire;
+- the remote mode (target-remote) copies one bundle to the board's ~/.cache and runs the board's
+  side there, also for check (with the artifacts) and for --dry-run (the board-side dry run,
+  which installs nothing), every argument arriving as given (a path with a space, a value with a
+  semicolon that runs nothing), and the copy is removed afterwards; ssh as root is refused;
+- the board script (with --dry-run) refuses `journal -n` that is not a number and a deploy
+  option that is not an agent's (--base-conf, --stop-plugin-host, --server-ip, --no-restart),
+  quotes journal's argument, and reads status from the board's installed script with a fixed
+  command.
 
     python3 -m unittest -v tests.vpair.test_firmware_speakerd_install
 """
@@ -64,15 +86,63 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
-from harness import FIRMWARE, Pair, built, firmware, graph_document, lv2_uri, stub_speakerd
+from harness import (FIRMWARE, ROOT, TEST_PLUGIN_HOST, Pair, built, firmware, graph_document, lv2_uri,
+                     stub_plugin_host, stub_speakerd)
 
 DOCUMENT = graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1", "s0_e0_gain": 12.0})
 CAPPED = {"gain_db": -20.0, "tweeter": "muted"}
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
+LIMITS = "speakerd: device: limits: output at -20 dB, tweeter muted"
+
+# Stand-ins for systemctl, journalctl and loginctl (by the name they are called), for the
+# installers' systemd path: each call is recorded in $FAKE_SYSTEMD/calls; is-active answers
+# $FAKE_SYSTEMD/active (default active); journalctl prints $FAKE_SYSTEMD/journal; a call whose
+# arguments contain a line of $FAKE_SYSTEMD/fail fails. At a restart of pipewire.service it
+# notes whether a process called $FAKE_PLUGIN_HOST runs.
+FAKE_SYSTEMD = r'''#!/bin/bash
+name="$(basename "$0")"; d="${FAKE_SYSTEMD:?}"
+echo "$name $*" >> "$d/calls"
+case "$name" in
+    journalctl) cat "$d/journal" 2> /dev/null; exit 0 ;;
+    loginctl) echo yes; exit 0 ;;
+esac
+if [ -f "$d/fail" ]; then
+    while read -r bad; do [ -n "$bad" ] && [[ "$*" == *"$bad"* ]] && exit 1; done < "$d/fail"
+fi
+case " $* " in
+    *" restart "*pipewire.service*)
+        alive=no
+        for f in /proc/[0-9]*/stat; do
+            { s="$(< "$f")"; } 2> /dev/null || continue
+            [[ "$s" == *"(${FAKE_PLUGIN_HOST:-none})"* ]] || continue
+            s="${s##*) }"; [ "${s%% *}" = Z ] || alive=yes
+        done
+        echo "pipewire restarted; the plugin host runs: $alive" >> "$d/calls" ;;
+    *" is-active "*speakerd*)
+        state="$(cat "$d/active" 2> /dev/null || echo active)"
+        [[ " $* " == *" --quiet "* ]] || echo "$state"
+        [ "$state" = active ]; exit ;;
+    *" is-enabled "*) exit 1 ;;
+    *" show "*) echo 0 ;;
+esac
+exit 0
+'''
+
+# A stand-in for ssh: the board's side runs on this machine, in $FAKE_BOARD/home, as nobody when
+# run as root (the board's audio user is never root), and nothing is contacted. It records the
+# host in $FAKE_BOARD/hosts.
+FAKE_SSH = r'''#!/bin/bash
+while [ $# -gt 0 ]; do case "$1" in -t | -T) shift ;; --) shift; break ;; -*) shift ;; *) break ;; esac; done
+host="$1"; shift
+echo "$host" >> "${FAKE_BOARD:?}/hosts"
+export HOME="$FAKE_BOARD/home"
+cd "$HOME" || exit 255
+if [ "$(id -u)" = 0 ]; then exec setpriv --reuid=65534 --regid=65534 --clear-groups bash -c "$*"; fi
+exec bash -c "$*"
+'''
 
 
 def tree(root):
@@ -107,7 +177,15 @@ def stub_build_root(root):
     return root
 
 
-class Install(unittest.TestCase):
+def write_script(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+class Setup(unittest.TestCase):
+    """What every class of this module shares: the stand-in builds and bundles."""
+
     @classmethod
     def setUpClass(cls):
         built("loudness", "headless")
@@ -121,8 +199,6 @@ class Install(unittest.TestCase):
                    "STUB_DIR": str(cls.tmp / "stub")}
         cls.root = stub_build_root(cls.tmp / "build")
         cls.bundle = cls.make_bundle("one", ["loudness:headless"])
-        cls.bundle2 = cls.make_bundle("two", ["loudness:headless", "loudness:complete"])
-        cls.bundle3 = cls.make_bundle("three", ["loudness:complete"])
         cls.factory = cls.tmp / "factory.json"
         cls.factory.write_text(json.dumps(DOCUMENT, indent=2))
 
@@ -144,7 +220,18 @@ class Install(unittest.TestCase):
         shutil.rmtree(path, ignore_errors=True)
         return path
 
-    # ---------------------------------------------------------------------------------------
+    def plugin_host(self):
+        host = stub_plugin_host(self.tmp / "bin")
+        self.addCleanup(lambda: (host.kill(), host.wait()))
+        return host
+
+
+class Install(Setup):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.bundle2 = cls.make_bundle("two", ["loudness:headless", "loudness:complete"])
+        cls.bundle3 = cls.make_bundle("three", ["loudness:complete"])
 
     def test_the_bundle(self):
         files = tree(self.bundle)
@@ -175,6 +262,16 @@ class Install(unittest.TestCase):
             self.assertIn(f"needs speakerd {MIN_VERSION} or newer", result.stdout)
             self.assertFalse((home / ".local/lib/speakerd").exists(), result.stdout)
 
+        # One that cannot be executed, as from a noexec /tmp.
+        noexec = self.tmp / "bundle-noexec"
+        shutil.rmtree(noexec, ignore_errors=True)
+        shutil.copytree(self.bundle, noexec, symlinks=True)
+        (noexec / "bin/speakerd").chmod(0o644)
+        result = self.install(home, "--role", "left", bundle=noexec, check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("noexec", result.stdout)
+        self.assertFalse((home / ".local/lib/speakerd").exists(), result.stdout)
+
         # Rollback to a version whose speakerd is older: refused too.
         self.install(home, "--role", "left")
         self.install(home, bundle=self.bundle2)
@@ -189,10 +286,12 @@ class Install(unittest.TestCase):
 
     def test_the_first_install_needs_a_role(self):
         home = self.fresh_home("no-role")
-        result = self.install(home, check=False)
+        host = self.plugin_host()
+        result = self.install(home, "--stop-plugin-host", check=False)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("--role left|right|mono is required", result.stdout)
         self.assertFalse((home / ".local/lib/speakerd").exists(), result.stdout)
+        self.assertIsNone(host.poll(), f"the plugin host was stopped by an install that refused:\n{result.stdout}")
 
     def test_the_layout(self):
         home = self.fresh_home("layout")
@@ -251,6 +350,15 @@ class Install(unittest.TestCase):
         right = json.loads(device_json.read_text())
         self.assertEqual(right, dict(again, role="right"))
 
+        # One port, or the node, alone: the rest stays device.json's.
+        for option, value, key in (("--tweeter-port", "playback_RL", "tweeter"), ("--woofer-port", "playback_RR", "woofer"),
+                                   ("--amplifier", "another-amplifier", "node")):
+            expected = json.loads(device_json.read_text())
+            expected["amplifier"][key] = value
+            firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home, "--no-systemd",
+                     option, value, env=self.env)
+            self.assertEqual(json.loads(device_json.read_text()), expected, option)
+
         for text, said in ((json.dumps(dict(right, trim=1.5)), "trim"),
                            (json.dumps(dict(right, amplifier=dict(right["amplifier"], gain=1))), "amplifier.gain"),
                            ('{"version": 1, "role": "left", "role": "right"}', "role appear twice")):
@@ -286,56 +394,77 @@ class Install(unittest.TestCase):
         self.assertFalse((lib / one).exists(), "\n".join(sorted(tree(lib))))
         self.assertTrue((lib / two).is_dir())
 
-    def test_refuses_while_an_audiopluginhost_runs(self):
+    def test_the_old_plugin_host(self):
         home = self.fresh_home("plugin-host")
-        fake = self.tmp / "bin" / "AudioPluginHost"
-        fake.parent.mkdir(exist_ok=True)
-        shutil.copy("/bin/sleep", fake)
-        host = subprocess.Popen([str(fake), "60"])
-        self.addCleanup(lambda: (host.kill(), host.wait()))
-        time.sleep(0.2)
+        host = self.plugin_host()
         autostart = home / ".config/autostart/plugin-host.desktop"
         autostart.parent.mkdir(parents=True)
-        autostart.write_text("[Desktop Entry]\nExec=/opt/AudioPluginHost session.filtergraph\n")
+        autostart.write_text(f"[Desktop Entry]\nExec=/opt/{TEST_PLUGIN_HOST} session.filtergraph\n")
+        unit = home / ".config/systemd/user/plugin-host.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text(f"[Service]\nExecStart=/opt/{TEST_PLUGIN_HOST}\n")
 
         result = self.install(home, "--role", "left", check=False)
         print(f"\n  refused with status {result.returncode}")
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn(f"AudioPluginHost runs (pid {host.pid})", result.stdout)
+        self.assertIn(f"{TEST_PLUGIN_HOST} runs (pid {host.pid})", result.stdout)
         self.assertIn("Refusing to install", result.stdout)
         self.assertFalse((home / ".local/lib/speakerd").exists())
-        self.assertIsNone(host.poll(), "the AudioPluginHost was stopped without --stop-plugin-host")
+        self.assertIsNone(host.poll(), "the plugin host was stopped without --stop-plugin-host")
+
+        # Refused for another reason (no such port) with --stop-plugin-host: nothing stopped.
+        refused = self.install(home, "--role", "left", "--stop-plugin-host", "--woofer-port", "playback_FR",
+                               "--tweeter-port", "playback_FR", check=False)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIsNone(host.poll(), f"stopped by an install that refused:\n{refused.stdout}")
 
         result = self.install(home, "--role", "left", "--stop-plugin-host")
-        self.assertIsNotNone(host.poll(), f"the AudioPluginHost still runs:\n{result.stdout}")
-        self.assertIn("Stopping AudioPluginHost", result.stdout)
+        self.assertIsNotNone(host.poll(), f"the plugin host still runs:\n{result.stdout}")
+        self.assertIn(f"Stopping {TEST_PLUGIN_HOST}", result.stdout)
         self.assertIn(str(autostart), result.stdout)
+        self.assertIn("systemctl --user disable --now plugin-host.service", result.stdout)
         self.assertTrue((home / ".local/lib/speakerd/current").is_symlink())
+        uninstalled = firmware("speakerd-setup.sh", "uninstall", "--home", home, "--no-systemd", env=self.env).stdout
+        self.assertIn("systemctl --user enable --now plugin-host.service", uninstalled)
+        self.assertFalse((home / ".local/state/speakerd/plugin-host-units").exists())
 
-    def test_refuses_a_full_range_tweeter(self):
+    def test_refuses_a_tweeter_without_a_crossovers_high_band(self):
         home = self.fresh_home("tweeter")
         result = self.install(home, "--role", "left", "--factory", self.factory, check=False)
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("reaches the tweeter without a crossover", result.stdout)
+        self.assertIn("reaches the tweeter other than through a crossover's high band", result.stdout)
         self.assertFalse((home / ".local/state/speakerd/factory.json").exists())
-        crossover = dict(DOCUMENT, nodes=DOCUMENT["nodes"] + [
-            {"uid": 17, "plugin": {"format": "LV2", "identifier": lv2_uri("crossover")}}])
-        crossover["connections"] = [
-            {"src": {"node": 1, "channel": 0}, "dst": {"node": 16, "channel": 0}},
-            {"src": {"node": 16, "channel": 0}, "dst": {"node": 17, "channel": 0}},
-            {"src": {"node": 17, "channel": 0}, "dst": {"node": 2, "channel": 0}},
-            {"src": {"node": 17, "channel": 1}, "dst": {"node": 2, "channel": 1}}]
-        safe = self.tmp / "crossover.json"
-        safe.write_text(json.dumps(crossover))
-        self.install(home, "--role", "left", "--factory", safe)
-        bypassed = json.loads(json.dumps(crossover))
-        bypassed["nodes"][1]["bypassed"] = True
-        unsafe = self.tmp / "bypassed.json"
-        unsafe.write_text(json.dumps(bypassed))
-        refused = self.install(home, "--factory", unsafe, check=False)
-        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+
+        def crossover(high_to_tweeter=1, bypassed=False):
+            document = json.loads(json.dumps(DOCUMENT))
+            document["nodes"].append({"uid": 17, "plugin": {"format": "LV2", "identifier": lv2_uri("crossover")},
+                                      **({"bypassed": True} if bypassed else {})})
+            document["connections"] = [
+                {"src": {"node": 1, "channel": 0}, "dst": {"node": 16, "channel": 0}},
+                {"src": {"node": 16, "channel": 0}, "dst": {"node": 17, "channel": 0}},
+                {"src": {"node": 17, "channel": 1 - high_to_tweeter}, "dst": {"node": 2, "channel": 0}},
+                {"src": {"node": 17, "channel": high_to_tweeter}, "dst": {"node": 2, "channel": 1}}]
+            path = self.tmp / f"crossover-{high_to_tweeter}-{bypassed}.json"
+            path.write_text(json.dumps(document))
+            return path
+
+        self.install(home, "--role", "left", "--factory", crossover())
+        for unsafe, what in ((crossover(bypassed=True), "a bypassed crossover"), (crossover(0), "the low band")):
+            refused = self.install(home, "--factory", unsafe, check=False)
+            self.assertNotEqual(refused.returncode, 0, f"{what} reached the tweeter:\n{refused.stdout}")
         self.install(home, "--factory", self.factory, "--allow-tweeter-without-crossover")
         self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), DOCUMENT)
+
+    def test_names_a_bundle_shadowed_by_a_system_lv2_folder(self):
+        home = self.fresh_home("shadow")
+        system = self.tmp / "system-lv2"
+        shutil.rmtree(system, ignore_errors=True)
+        shutil.copytree(built("loudness", "headless"), system / "old-loudness.lv2")
+        result = self.install(home, "--role", "left", env=dict(self.env, SPEAKERD_SYSTEM_LV2_DIRS=str(system)))
+        self.assertIn("A system LV2 folder has a plugin with the URI of one of the bundle's", result.stdout)
+        self.assertIn(f"{lv2_uri('loudness_headless')}: {system / 'old-loudness.lv2'}", result.stdout)
+        quiet = self.install(home, check=True)
+        self.assertNotIn("A system LV2 folder", quiet.stdout)
 
     def test_import_filtergraph(self):
         session = self.tmp / "session.filtergraph"
@@ -350,9 +479,10 @@ class Install(unittest.TestCase):
                           "--allow-tweeter-without-crossover", env=env)
         self.assertIn("Converting", result.stdout)
         self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), DOCUMENT)
-        calls = (self.tmp / "stub/calls").read_text()
-        self.assertIn(f"--import-filtergraph {session} --prefer-headless --device "
-                      f"{home / '.local/state/speakerd/device.json'}", calls)
+        calls = [line for line in (self.tmp / "stub/calls").read_text().splitlines() if line.startswith("import: ")]
+        self.assertEqual(len(calls), 1, calls)
+        self.assertRegex(calls[0], rf"--import-filtergraph {re.escape(str(session))} --prefer-headless --device \S+/device\.json ")
+        self.assertNotIn("--allow-unsafe-routing", calls[0])
         failed = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home, "--no-systemd",
                           "--import-filtergraph", session, env=self.env, check=False)
         self.assertNotEqual(failed.returncode, 0, failed.stdout)
@@ -397,7 +527,7 @@ class Install(unittest.TestCase):
                                "--no-systemd", "--role", "left", env=env, check=False)
             self.assertNotEqual(refused.returncode, 0, refused.stdout)
             self.assertIn("found no ALSA Audio/Sink", refused.stdout)
-            found = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home,
+            found = firmware("speakerd-setup.sh", "check", "--bundle", self.bundle, "--home", home,
                              "--no-systemd", "--role", "left", "--amplifier", "amplifier", env=env)
             self.assertIn("ports playback_FL playback_FR", found.stdout)
             self.assertIn("woofer = amplifier:playback_FL, tweeter = amplifier:playback_FR", found.stdout)
@@ -406,14 +536,16 @@ class Install(unittest.TestCase):
         home = self.fresh_home("smoke")
         self.install(home, "--role", "left")
         start = "speakerd-run: starting speakerd x from layer current (test)"
-        limits = "speakerd: device: limits: output at -20 dB, tweeter muted"
         not_capped = "FAIL speakerd does not play device.json's limits"
         cases = {
             "not read": ([start, "speakerd: device.json: FAILED: limits: unknown key 'limts'; using the defaults",
-                          limits + " (device.json not read: the fail-safe)"],
+                          LIMITS + " (device.json not read: the fail-safe)"],
                          ["FAIL device.json: FAILED", not_capped]),
-            "no limits": ([start, limits + " (no limits in device.json: the fail-safe)"], [not_capped]),
-            "another suffix": ([start, limits + " (something else)"], [not_capped]),
+            "no limits": ([start, LIMITS + " (no limits in device.json: the fail-safe)"], [not_capped]),
+            "another suffix": ([start, LIMITS + " (something else)"], [not_capped]),
+            "own sink": ([start, LIMITS, "speakerd: pipewire: created the input sink 'speakerd'",
+                          "speakerd: *** NO INPUT SINK CONFIGURED: PipeWire had no node 'speakerd', so speakerd made it ***"],
+                         ["FAIL *** NO INPUT SINK CONFIGURED"]),
             "silent": ([start], ["FAIL speakerd did not say which limits it enforces"]),
         }
         for name, (lines, fails) in cases.items():
@@ -422,16 +554,25 @@ class Install(unittest.TestCase):
             result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
                               "--window", "0", env=self.env, check=False)
             self.assertNotEqual(result.returncode, 0, result.stdout)
-            self.assertNotIn("pass capped", result.stdout, name)
+            self.assertRegex(result.stdout, r"smoke: \d+ failed, \d+ warning\(s\)")
+            if name != "own sink":
+                self.assertNotIn("pass capped", result.stdout, name)
             for fail in fails:
                 self.assertIn(fail, result.stdout, name)
         # The exact line, with device.json's own limits, passes that check (no PipeWire here, so
-        # smoke fails on the links all the same).
+        # smoke fails on the sink and the links all the same, and still prints its summary).
         log = self.tmp / "smoke-capped.log"
-        log.write_text("\n".join([start, limits]) + "\n")
+        log.write_text("\n".join([start, LIMITS]) + "\n")
         result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
                           "--window", "0", env=self.env, check=False)
         self.assertIn("pass capped: output at -20 dB, tweeter muted", result.stdout)
+        self.assertIn("FAIL the speakerd sink is not the drop-in's", result.stdout)
+        # A broken device.json: every check still reports, and the summary prints.
+        (home / ".local/state/speakerd/device.json").write_text("{ broken")
+        result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                          "--window", "0", env=self.env, check=False)
+        self.assertIn("FAIL device.json cannot be read", result.stdout)
+        self.assertRegex(result.stdout, r"smoke: \d+ failed")
 
     def test_routing_and_uninstall(self):
         home = self.fresh_home("routing")
@@ -442,24 +583,35 @@ class Install(unittest.TestCase):
         self.assertIn("would fall back to the amplifier", refused.stdout)
         self.assertFalse(crt.exists())
 
+        original = '# a person\'s own routing\nstream.rules = [ { matches = [ { application.name = "Snapclient" } ] actions = { update-props = { target.object = "Ap.cap" } } } ]\n'
+        crt.parent.mkdir(parents=True, exist_ok=True)
+        crt.write_text(original)
         firmware("speakerd-setup.sh", "sink", "--home", home, "--no-systemd", env=self.env)
         firmware("snapcast-setup.sh", "--mode", "target", "--routing-only", "--route", "speakerd",
                  "--client-home", home, env=self.env)
         text = crt.read_text()
         self.assertEqual(text.count('target.object = "speakerd"'), 3, text)
         self.assertNotIn("Ap.cap", text.split("stream.rules")[1])
+        self.assertEqual((home / ".config/pipewire/client-rt.conf.before-speakerd").read_text(), original)
 
         self.install(home, "--role", "left")
         firmware("speakerd-setup.sh", "uninstall", "--home", home, "--no-systemd", env=self.env)
-        text = crt.read_text()
-        self.assertIn('target.object = "Ap.cap"', text)
-        self.assertNotIn('target.object = "speakerd"', text)
+        self.assertEqual(crt.read_text(), original, "uninstall did not restore the routing from before speakerd")
+        self.assertFalse((home / ".config/pipewire/client-rt.conf.before-speakerd").exists())
         for gone in (".config/systemd/user/speakerd.service", ".config/pipewire/pipewire.conf.d/60-speakerd-sink.conf",
                      ".local/lib/speakerd"):
             self.assertFalse((home / gone).exists(), gone)
         self.assertTrue((home / ".local/state/speakerd/device.json").exists())
+
+        # With no routing kept: the AudioPluginHost route is written.
+        crt.unlink()
+        firmware("speakerd-setup.sh", "sink", "--home", home, "--no-systemd", env=self.env)
+        firmware("snapcast-setup.sh", "--mode", "target", "--routing-only", "--route", "speakerd",
+                 "--client-home", home, env=self.env)
         self.install(home, "--role", "left")
         firmware("speakerd-setup.sh", "uninstall", "--home", home, "--no-systemd", "--purge", env=self.env)
+        self.assertIn('target.object = "Ap.cap"', crt.read_text())
+        self.assertNotIn('target.object = "speakerd"', crt.read_text())
         self.assertFalse((home / ".local/state/speakerd").exists())
 
     def test_setup_checks_first_and_installs_in_boot_order(self):
@@ -472,10 +624,12 @@ class Install(unittest.TestCase):
 
         firmware("setup.sh", *args, "--dry-run", env=self.env)
         self.assertEqual(tree(home), before)
-        refused = firmware("setup.sh", *args, "--skip", "pipewire", env=self.env, check=False)
-        self.assertNotEqual(refused.returncode, 0, refused.stdout)
-        self.assertIn("needs the speakerd sink", refused.stdout)
-        self.assertEqual(tree(home), before)
+        for extra, said in ((["--skip", "pipewire"], "needs the speakerd sink"),
+                            (["--route", "plugin-host"], "--route plugin-host with the speakerd component")):
+            refused = firmware("setup.sh", *args, *extra, env=self.env, check=False)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn(said, refused.stdout)
+            self.assertEqual(tree(home), before)
 
         result = firmware("setup.sh", *args, env=self.env).stdout
         order = [result.index(f"==> {c}:") for c in ("pipewire", "snapcast", "speakerd", "ampd")]
@@ -483,6 +637,168 @@ class Install(unittest.TestCase):
         self.assertTrue((home / ".config/pipewire/pipewire.conf.d/60-speakerd-sink.conf").exists())
         self.assertIn('target.object = "speakerd"', (home / ".config/pipewire/client-rt.conf").read_text())
         self.assertTrue((home / ".local/lib/speakerd/current").is_symlink())
+
+
+class Systemd(Setup):
+    """The systemd path, with stand-ins for systemctl, journalctl and loginctl."""
+
+    def systemd(self, name, journal=(), active="active", fail=()):
+        d = self.tmp / f"systemd-{name}"
+        shutil.rmtree(d, ignore_errors=True)
+        for tool in ("systemctl", "journalctl", "loginctl"):
+            write_script(d / "bin" / tool, FAKE_SYSTEMD)
+        (d / "journal").write_text("".join(line + "\n" for line in journal))
+        (d / "active").write_text(active)
+        (d / "fail").write_text("".join(line + "\n" for line in fail))
+        env = dict(self.env, FAKE_SYSTEMD=str(d), PATH=f"{d / 'bin'}:{os.environ['PATH']}",
+                   SPEAKERD_START_WAIT="1", FAKE_PLUGIN_HOST=TEST_PLUGIN_HOST)
+        return d, env
+
+    def test_install_checks_what_speakerd_says_after_its_start(self):
+        start = "speakerd-run: starting speakerd x from layer current (test)"
+        cases = {
+            "the limits": ([start, LIMITS], "active", None),
+            "no line": ([start], "active", "has said nothing about its limits"),
+            "inactive": ([start, LIMITS], "inactive", "speakerd is not running after its start"),
+            "fail-safe": ([start, LIMITS + " (no limits in device.json: the fail-safe)"], "active",
+                          "does not play device.json's limits"),
+            "FAILED": ([start, "speakerd: device.json: FAILED: limits: no; using the defaults", LIMITS], "active",
+                       "could not read device.json"),
+            "own sink": ([start, LIMITS, "speakerd: *** NO INPUT SINK CONFIGURED: PipeWire had no node 'speakerd' ***"],
+                         "active", "the drop-in is not loaded"),
+        }
+        for name, (journal, active, said) in cases.items():
+            with self.subTest(name):
+                d, env = self.systemd(name.replace(" ", "-"), journal, active)
+                home = self.fresh_home(f"home-{name.replace(' ', '-')}")
+                result = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home,
+                                  "--role", "left", "--amplifier", "amplifier", env=env, check=False)
+                calls = (d / "calls").read_text()
+                self.assertIn("systemctl --user restart speakerd.service", calls)
+                if said is None:
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("device: limits: output at -20 dB, tweeter muted", result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn(said, result.stdout)
+
+    def test_setup_stops_on_a_failed_pipewire_restart(self):
+        d, env = self.systemd("restart-fails", fail=["restart pipewire.service"])
+        home = self.fresh_home("home-restart-fails")
+        unit = home / ".config/systemd/user/snapclient.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=client-rt.conf\n")
+        result = firmware("setup.sh", "--home", home, "--bundle", self.bundle, "--role", "left",
+                          "--amplifier", "amplifier", env=env, check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("could not restart PipeWire", result.stdout)
+        self.assertFalse((home / ".config/pipewire/client-rt.conf").exists(), "snapclient was routed all the same")
+        self.assertFalse((home / ".local/lib/speakerd").exists())
+
+    def test_setup_stops_the_plugin_host_before_pipewire_restarts(self):
+        d, env = self.systemd("plugin-host-first", journal=["speakerd-run: starting speakerd", LIMITS])
+        home = self.fresh_home("home-plugin-host-first")
+        unit = home / ".config/systemd/user/snapclient.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=client-rt.conf\n")
+        host = self.plugin_host()
+        result = firmware("setup.sh", "--home", home, "--bundle", self.bundle, "--role", "left",
+                          "--amplifier", "amplifier", "--stop-plugin-host", env=env, check=False)
+        calls = (d / "calls").read_text()
+        restarts = [line for line in calls.splitlines() if line.startswith("pipewire restarted")]
+        print(f"\n  {restarts}")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIsNotNone(host.poll())
+        self.assertTrue(restarts, calls)
+        self.assertTrue(all(line.endswith("runs: no") for line in restarts), calls)
+
+
+class Remote(Setup):
+    """The remote mode through a stand-in ssh, and the board script with --dry-run."""
+
+    def board(self, name):
+        board = self.tmp / f"board-{name}"
+        shutil.rmtree(board, ignore_errors=True)
+        (board / "home").mkdir(parents=True)
+        (board / "hosts").touch()
+        write_script(board / "bin/ssh", FAKE_SSH)
+        if os.geteuid() == 0:
+            # The board's side runs as nobody: it must reach its home, and nothing else of ours.
+            shutil.chown(board / "home", 65534, 65534)
+            os.chmod(self.tmp, 0o711)
+            os.chmod(board, 0o711)
+        env = dict(self.env, FAKE_BOARD=str(board), PATH=f"{board / 'bin'}:{os.environ['PATH']}",
+                   BUILD_ROOT=str(self.root))
+        return board, env
+
+    def remote(self, env, action, *args, host="user@bpi-amp.invalid"):
+        return firmware("speakerd-setup.sh", action, "--mode", "target-remote", "--target-host", host,
+                        "--arch", "native", "--plugin", "loudness:headless", *args, env=env, check=False)
+
+    def test_check_and_dry_run_on_the_board(self):
+        board, env = self.board("check")
+        result = self.remote(env, "check", "--role", "left", "--amplifier", "amplifier")
+        print("\n" + result.stdout[-600:])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("is good for this machine", result.stdout)
+        self.assertIn("Nothing in the way of an install", result.stdout)
+        self.assertEqual((board / "hosts").read_text().split(), ["user@bpi-amp.invalid"] * 3)
+
+        result = self.remote(env, "install", "--role", "left", "--amplifier", "amplifier", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Dry run: nothing changed", result.stdout)
+        self.assertEqual(list((board / "home/.cache").iterdir()), [], "the bundle was left on the board")
+        self.assertFalse((board / "home/.local").exists())
+
+    def test_every_argument_arrives_as_given(self):
+        board, env = self.board("quoting")
+        # Where the board's user could write, so that an argument run as a command would show.
+        marker = board / "home" / "injected"
+        given = f"/no such folder/session; touch {marker}"
+        result = self.remote(env, "install", "--role", "left", "--amplifier", "amplifier",
+                             "--import-filtergraph", given, "--dry-run")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"no .filtergraph at {given}", result.stdout)
+        self.assertFalse(marker.exists(), "an argument ran as a command on the board")
+        self.assertEqual(list((board / "home/.cache").iterdir()), [])
+
+    def test_not_as_root(self):
+        board, env = self.board("root")
+        result = self.remote(env, "status", host="root@bpi-amp.invalid")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("not root", result.stdout)
+        self.assertEqual((board / "hosts").read_text(), "")
+
+    def test_the_board_script(self):
+        for lock in (ROOT / ".claude/lab.lock",
+                     Path(subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=ROOT,
+                                         capture_output=True, text=True).stdout.strip()).parent / ".claude/lab.lock"):
+            if lock.exists():
+                self.skipTest(f"the lab is locked ({lock}): the board script refuses everything")
+        env = dict(os.environ, BOARD_HOST="bpi-amp.invalid", BOARD_USER="user")
+
+        def board(*args):
+            return subprocess.run(["bash", str(ROOT / "tools" / "board.sh"), "--dry-run", *args], env=env,
+                                  capture_output=True, text=True, timeout=60)
+
+        marker = self.tmp / "journal-injected"
+        refused = board("journal", "-n", f"1; touch {marker}")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("whole number", refused.stderr)
+        self.assertFalse(marker.exists())
+        journal = board("journal", "-n", "50")
+        self.assertEqual(journal.returncode, 0, journal.stderr)
+        self.assertIn("ssh -t -- user@bpi-amp.invalid journalctl --user -u speakerd.service -b --no-pager -n 50",
+                      journal.stdout.replace("\\", ""))
+        status = board("status")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn('ssh -t -- user@bpi-amp.invalid bash "$HOME/.local/lib/speakerd/current/setup/speakerd-setup.sh" status',
+                      status.stdout.replace("\\", ""))
+        for option in ("--base-conf", "--stop-plugin-host", "--server-ip", "--no-restart"):
+            refused = board("deploy", option, *(["192.0.2.10"] if option == "--server-ip" else []))
+            self.assertNotEqual(refused.returncode, 0, option)
+            self.assertIn(f"deploy does not take {option}", refused.stderr)
+        self.assertNotEqual(board("smoke", "--window", "3; x").returncode, 0)
 
 
 if __name__ == "__main__":

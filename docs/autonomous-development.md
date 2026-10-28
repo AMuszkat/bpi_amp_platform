@@ -123,13 +123,16 @@ boot order: the PipeWire drop-in with the persistent `speakerd` sink, snapclient
 it, and `speakerd` (`ampd` comes with step 3). `firmware/speakerd-setup.sh` installs `speakerd`
 as a versioned systemd user service with rollback, capped on every install, whose wrapper
 restarts it on last known good after a crash and on factory after three. Both copy one bundle
-to the board and run their local mode there; they build nothing. `tools/board.sh`, the script
-of the coming `/board` skill, builds the aarch64 artifacts and deploys, runs a smoke test that
-makes no sound (it plays, capped, linked, clocked by the amplifier, no restart or xrun for a
-while), reads the journal and rolls back, and refuses while the lab is locked or rung 2 is
-not green for the commit. Their local mode is tested on the virtual pair; the remote mode is
-not, and the first deploy is a person's (section 8). The smoke test does not yet compare the
-amplifier telemetry with the expected response.
+to the board and run their local mode there; they build nothing. Nothing is routed into
+`speakerd` unless the running PipeWire has the drop-in's sink. `tools/board.sh`, the script of
+the `/board` skill (`.claude/skills/board`), builds the aarch64 artifacts and deploys, runs a
+smoke test that makes no sound (it plays, capped, through the drop-in's sink, linked, clocked
+by the amplifier, no restart or xrun for a while), reads the journal and rolls back, and
+refuses while the lab is locked or rung 2 is not green for the commit. Their local mode is
+tested on the virtual pair, their remote mode through a stand-in `ssh` that runs the board's
+side on the same machine; neither has run on a board yet, and the first deploy is a person's
+(section 8, and the staged procedure in `firmware/CLAUDE.md`). The smoke test does not yet
+compare the amplifier telemetry with the expected response.
 
 ## 2. The rules an agent runs under
 
@@ -140,7 +143,7 @@ forgotten and hooks cannot.
 |---|---|---|
 | No hostname, IP, user name or home path in any tracked file | the repository is public | `PreToolUse` on Edit/Write and a pre-commit check |
 | Nothing is deployed to rung 3 unless rung 2 is green for the same commit | an agent cannot hear a broken crossover | `PreToolUse` gate on the deploy skill |
-| Every deploy caps the master gain and mutes the tweeter path until the first smoke test passes | a wrong graph must not reach a tweeter at full level | the deploy skill itself, checked by the gate |
+| Every deploy caps the master gain and mutes the tweeter path until the first smoke test passes | a wrong graph must not reach a tweeter at full level | the deploy skill itself (every install writes the cap into `device.json`, and smoke checks that `speakerd` enforces it), and `PreToolUse` on Bash, which refuses any command that lifts it (`--person-present`) |
 | A lab lock file stops every hardware action | a human may be measuring, or the boards may be on a bench | `PreToolUse` on any ssh to a board |
 | No `git push` to `main`, no force push, no history rewrite | agents work on branches and open pull requests | `PreToolUse` on Bash |
 | No allocation, lock or syscall in anything that runs on the audio thread | a xrun is a click on a speaker | the reviewer agent, plus a RT-safety check in `ctest` |
@@ -177,7 +180,7 @@ flowchart TB
 | `board-ops` | `firmware/` | the board skill only | edits source, runs on a locked lab |
 
 All eight definitions are in `.claude/agents/`, with these tool grants and rules;
-`board-ops` says so and stops until the `/board` skill exists.
+`board-ops` works only through the `/board` skill (`tools/board.sh`).
 
 The split between `plugin-dev`, `host-dev` and `controller-dev` follows the three build
 targets. They work in separate git worktrees so that the orchestrator can run them in
@@ -195,7 +198,7 @@ agent never improvises a `pw-cli` or `ssh` line.
 | `/vpair up\|down\|scenario <name>` | brings the virtual pair up with a given build and runs one scenario from `tests/scenarios/` | verifier, orchestrator |
 | `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | verifier |
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
-| `/board <name> status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3; refuses when the lab lock exists or rung 2 is not green | board-ops |
+| `/board status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3 (the board of `firmware/local.mk`); refuses when the lab lock exists or rung 2 is not green | board-ops |
 | `/juce` | the JUCE knowledge base in `dsp/docs/juce-knowledge/` | dev agents |
 | `/release` | builds every target, writes the catalogue with version hashes, tags | orchestrator |
 
@@ -221,8 +224,8 @@ lock and on a green test status for the exact commit with a clean tree; `post-ed
 checks the Mermaid diagrams of an edited document when `tools/mermaid-check` is installed;
 `stop.py` runs the virtual pair tests when their files, `firmware/ampd/` or
 `dsp/juce_apps/` changed. The skills `/build`, `/test`, `/vpair` and `/pw-inspect` exist
-with their scripts in `tools/`; `/test` writes the status file the gate reads. `/measure`,
-`/board` and `/release` wait for `speakerd`, `ampd` and the version hash.
+with their scripts in `tools/`; `/test` writes the status file the gate reads. `/board` exists
+too (`tools/board.sh`); `/measure` and `/release` wait for `ampd` and the version hash.
 
 The deploy gate is the one that matters most. It reads `tests/.status/<commit>.json`, which
 the verifier writes after a rung 2 run, and refuses the deploy if the file is missing, red or
@@ -261,9 +264,9 @@ the architecture:
 | `speakerd_quantum_change` | with a stream playing, the quantum changes and comes back, and after each change the gain is the render's again, with nothing non-finite or above full scale reaching the amplifier |
 | `speakerd_device_limits` | with `device.json` limits of -20 dB and the tweeter muted, live and in the render, the tweeter is exact zeros and the woofer is the unlimited capture minus 20 dB; a +6 dBFS input or a +20 dB boost never puts a sample above -20 dBFS (-40 in passthrough); a `device.json` without limits, with a misspelt key, broken or missing says so and plays the same way capped |
 | `speakerd_import` | AudioPluginHost's example session, imported, renders sample for sample like the same settings given as parameters, also with `--prefer-headless`; malformed sessions and one that sends the input straight to the tweeter are refused, with nothing on stdout |
-| `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install, rolls back both ways, and refuses without a role, while an AudioPluginHost runs, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph that reaches the tweeter without a crossover |
+| `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install, rolls back both ways, and refuses, before it changes anything, without a role, while an AudioPluginHost runs, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph that reaches the tweeter other than through a crossover's high band; under systemd it fails unless `speakerd` runs and says exactly its limits; the remote mode and the board script quote every argument |
 | `speakerd_crash_restart` | the installed unit starts speakerd on current, on last known good after a crash (a real speakerd killed by SIGSEGV), on factory after three crashes within 60 s, on passthrough after three more on factory, and never while an AudioPluginHost runs |
-| `speakerd_installed` | on a speaker set up like a board, the persistent `speakerd` sink exists before speakerd and never drives while the amplifier exists, speakerd plays through it with the tweeter at exact zeros and the woofer at the render minus 20 dB, the deployed bundle runs and not an older copy in `~/.lv2`, and the smoke test passes |
+| `speakerd_installed` | on a speaker set up like a board, the persistent `speakerd` sink exists before speakerd and never drives while the amplifier exists, speakerd plays through it with the tweeter at exact zeros and the woofer at the render minus 20 dB, the deployed bundle runs and not an older copy in `~/.lv2`, and the smoke test passes; with a PipeWire that does not load the drop-in, nothing is routed into `speakerd` and smoke, `sink` and `install` refuse |
 | `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately |
 | `monitor_freshness` | with 5 % packet loss and 20 ms jitter, every frame drawn is less than 50 ms old at the 99th percentile, and the speaker never holds more than one pending frame per stream |
 | `scope_resolution` | a scope frame from the speaker is identical to the frame the complete build computes from the same Demo capture |
@@ -338,7 +341,8 @@ In order, because each unlocks the next:
 2. **The hooks**, because agents will start touching boards the moment a deploy script exists.
    In place (`.claude/hooks/`, wired in `.claude/settings.json`).
 3. **The skills**, replacing ad-hoc shell. `/build`, `/test`, `/vpair` and `/pw-inspect` are in
-   place; `/measure` and `/board` follow `speakerd` and `ampd`, `/release` the version hash.
+   place, and so is `/board` (`tools/board.sh`); `/measure` follows `ampd`, `/release` the
+   version hash.
 4. **The agent definitions** and the `CLAUDE.md` map of the repository with the rules. In
    place (`.claude/agents/`, the root `CLAUDE.md`).
 5. **CI** running rungs 1 and 2 on pull requests. In place (`.github/workflows/ci.yml`), not
