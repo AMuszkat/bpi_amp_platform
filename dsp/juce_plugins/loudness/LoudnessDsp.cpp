@@ -243,7 +243,8 @@ void LoudnessProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 void LoudnessProcessor::writeMonitors (int numSamples)
 {
     // Audio thread, at most about 60 times a second. Monitors.h says why the listeners are
-    // told from here and what that costs: no allocation, and no lock anyone else takes.
+    // told from here (only under the LV2 wrapper) and what that costs: no allocation, and no
+    // lock anyone else takes.
     samplesUntilMonitorWrite -= numSamples;
 
     if (samplesUntilMonitorWrite > 0)
@@ -257,6 +258,7 @@ void LoudnessProcessor::writeMonitors (int numSamples)
     if (refresh)
         monitorWritesUntilRefresh = 60;
 
-    monitors::publish (*monitorLevelDb, levelDb.load (std::memory_order_relaxed), refresh);
-    monitors::publish (*monitorActiveSetting, (float) activeSetting.load (std::memory_order_relaxed), refresh);
+    const bool notify = monitors::hostNeedsNotifying (*this);
+    monitors::publish (*monitorLevelDb, levelDb.load (std::memory_order_relaxed), notify, refresh);
+    monitors::publish (*monitorActiveSetting, (float) activeSetting.load (std::memory_order_relaxed), notify, refresh);
 }

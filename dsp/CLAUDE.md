@@ -100,9 +100,18 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   never by resizing.
 - **Monitors** (`mon_` parameters, `docs/protocol.md`) are added with `addParameter()` after
   the APVTS, never through it, and published on the audio thread with `monitors::publish()`
-  (`loudness/Monitors.h`): JUCE's LV2 wrapper does not report a bare `setValue()`, and
-  notifying from any other thread can race the wrapper's cleanup into a destroyed listener.
-  Their getters go in `<plugin>/plugin-check.monitors.h`.
+  (`loudness/Monitors.h`). Their getters go in `<plugin>/plugin-check.monitors.h`.
+- **The one lock allowed on the audio thread** (an exception to the root rule): under JUCE's
+  LV2 wrapper only, `monitors::publish()` tells a monitor's listeners when its stored value
+  moved by a step, or once a second, and `AudioProcessorParameter::sendValueChangedMessageToListeners()`
+  takes that parameter's own listener lock. Nothing else ever takes it, so it is uncontended:
+  one compare-and-swap, no syscall, no wait. Why it cannot be avoided: the LV2 wrapper reports
+  to the host only parameters its listener heard change (a bare `setValue()` never leaves the
+  plugin), and a thread of the plugin cannot notify safely, because the wrapper destroys its
+  listener before the processor without telling the plugin, while `run()` never overlaps
+  cleanup. Under any other wrapper `publish()` only stores the value: JUCE's VST3 wrapper would
+  take a mutex the message thread holds constantly. No other lock is allowed, and no other
+  plugin code may notify listeners from the audio thread.
 - `crossover` and `firConv` compile in the generated headers; `loudness` and `ampScope` are
   pure-parameter plugins. `ampScope` talks to the MAX98396 driver only via `snd_ctl_*` /
   `snd_pcm_*`, never I²C. Extend the driver rather than work around it.

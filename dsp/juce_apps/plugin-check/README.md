@@ -34,8 +34,11 @@ shared code linked straight into a small program, the way the controller app lin
 builds, for what LV2 hosting cannot see. It checks that the monitors are declared after the
 other parameters, not automatable and of category output meter; that the build's own saved
 state carries none and restoring a state that names them sets none; in the complete and
-headless builds, that each monitor holds what its getter reads after the tone; and in the
-control build, that setting a monitor moves its getter (`getLevelDb()` and friends). The
+headless builds, that each monitor holds what its getter reads after the tone, and that it
+tells the processor's listeners only when created as for JUCE's LV2 wrapper (with
+`setTypeOfNextNewPlugin`), when its stored value moved by a step or once a second, and never
+as the VST3 wrapper; and in the control build, that setting a monitor moves its getter
+(`getLevelDb()` and friends). The
 getters are named in `juce_plugins/<plugin>/plugin-check.monitors.h`; the complete build prints
 what they read (`EXPECT` lines), which `run.sh` passes to the checker above as
 `--expect-monitor`.

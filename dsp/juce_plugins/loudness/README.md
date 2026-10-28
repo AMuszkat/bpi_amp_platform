@@ -63,8 +63,9 @@ They are in every build, declared after the other parameters, not automatable, o
 output meter, and never in the saved state: they are added with `addParameter()`, not through
 the APVTS, and `setStateInformation()` drops any `mon_` entry a state brings. The complete and
 headless builds publish them from the audio thread about 60 times a second: `setValue()`,
-then a notification when the value moved, which JUCE's LV2 wrapper needs to report it to the
-host (see `Monitors.h` for why it has to come from the audio thread). In the control build nothing measures: the getters read the two parameters, so
+and, under JUCE's LV2 wrapper only, a notification when the stored value moved by a step (or
+once a second), which that wrapper needs to report it to the host (see `Monitors.h` for why it
+has to come from the audio thread, and `dsp/CLAUDE.md` for the lock it takes). In the control build nothing measures: the getters read the two parameters, so
 the editor shows whatever value they are given. With the 35 parameters, the host-side bypass
 JUCE's LV2 hosting adds and the two monitors, an LV2 host sees 38 parameters.
 
