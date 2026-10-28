@@ -6,7 +6,8 @@ Two virtual speakers, `left` and `right`, on one machine, for testing the remote
 
 Each virtual speaker has what a real one has around its audio path:
 
-- its own **PipeWire**, at 48 kHz and quantum 1024 (`speaker.conf`), with the profiler module
+- its own **PipeWire**, at 48 kHz and quantum 1024 (`speaker.conf`), with the profiler module and the real-time module (its data thread runs the amplifier's timer, so a
+  loaded machine does not starve the cycles)
   as on the boards; a test may start a speaker from another configuration, and with a folder of
   drop-ins, as a board loads `~/.config/pipewire/pipewire.conf.d`;
 - its own **WirePlumber**, which links streams to their targets as on the board;

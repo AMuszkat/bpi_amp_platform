@@ -1604,6 +1604,14 @@ class TimedRecorder:
              "--rate", str(RATE), "--channels", "2", "--format", "f32", "-"],
             env=self.speaker.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             bufsize=0)
+        # pw-record writes from its audio callback: a reader slow to drain the pipe (a loaded
+        # machine) would block that callback, and the recording lose samples. 1 MiB is about 2.7 s
+        # of this recording.
+        try:
+            import fcntl
+            fcntl.fcntl(self.process.stdout.fileno(), getattr(fcntl, "F_SETPIPE_SZ", 1031), 1 << 20)
+        except OSError:
+            pass
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
         try:
@@ -1615,6 +1623,13 @@ class TimedRecorder:
         return self
 
     def _read(self):
+        # The arrival times are the measurement: this thread runs real-time where it may
+        # (RLIMIT_RTPRIO, as in the development container), so a loaded machine does not delay
+        # the stamps. Where it may not, it runs as it is.
+        try:
+            os.sched_setscheduler(threading.get_native_id(), os.SCHED_FIFO, os.sched_param(20))
+        except (AttributeError, OSError):
+            pass
         total = 0
         fd = self.process.stdout.fileno()
         while True:
@@ -1625,6 +1640,26 @@ class TimedRecorder:
             self.chunks.append(data)
             total += len(data)
             self.stamps.append((now, total // 8))
+
+    def local_t0(self, around, before=1.0, after=1.0):
+        """t0 as stop() gives it, from the chunks that arrived within `before` seconds before and
+        `after` seconds after the time `around` only, for each side: (t0 before, t0 after), or None
+        where too few chunks arrived. Samples the recorder lost (an xrun under load) shift the
+        mapping from then on: the two differ then."""
+        def envelope(chunks):
+            offsets = sorted(t - n / RATE for t, n in chunks)
+            return offsets[len(offsets) // 20] if len(offsets) >= 10 else None
+        stamps = list(self.stamps)
+        return (envelope([(t, n) for t, n in stamps if around - before <= t < around]),
+                envelope([(t, n) for t, n in stamps if around <= t < around + after]))
+
+    def snapshot(self):
+        """What it recorded so far, as stop() returns it, while it goes on recording."""
+        chunks, stamps = list(self.chunks), list(self.stamps)
+        raw = b"".join(chunks)
+        x = np.frombuffer(raw[:len(raw) // 8 * 8], dtype="<f4").reshape(-1, 2).astype(np.float64)
+        offsets = sorted(t - n / RATE for t, n in stamps)
+        return x, (offsets[len(offsets) // 20] if offsets else None)
 
     def stop(self):
         """Ends the recording; returns (samples (n, 2), t0): sample i was in the graph at
