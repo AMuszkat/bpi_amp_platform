@@ -31,7 +31,9 @@ Pass when:
 - firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it is
   capped, the live speakerd sink has the drop-in's properties and is the default sink, it is
   linked from the sink to the amplifier and nothing else feeds the amplifier, no AudioPluginHost
-  runs, the amplifier drives, and no restart or xrun in 3 s; and with the amplifier made the
+  runs, the amplifier drives, no restart or xrun in 3 s, and speakerd's timing (its status,
+  read through the local link) shows the graph's longest cycle within half its cycle and no
+  late cycle in those 3 s; and with the amplifier made the
   default sink (as `wpctl set-default` would), smoke fails, saying so and how to undo it;
 - snapcast-setup.sh --route speakerd finds the drop-in's sink in the running PipeWire and routes;
 - with a PipeWire that does NOT load the drop-in (the file installed, the speaker started without
@@ -260,8 +262,11 @@ class Installed(unittest.TestCase):
                       "pass the default sink is speakerd",
                       "pass linked: speakerd sink -> speakerd-dsp -> amplifier",
                       "pass nothing but speakerd-dsp plays into amplifier", f"pass no {TEST_PLUGIN_HOST} runs",
-                      "pass amplifier drives the graph", "pass no restart in 3 s", "pass no xrun in 3 s"):
+                      "pass amplifier drives the graph", "pass no restart in 3 s", "pass no xrun in 3 s",
+                      "pass the graph's longest cycle took", "(speakerd's status, the last",
+                      "pass no late cycle in 3 s (speakerd's late_total and jumps_total before and after"):
             self.assertIn(check, result.stdout)
+        self.assertRegex(result.stdout, r"info timing: node \d+ \(loudness_headless\) mean [\d.]+ % max [\d.]+ % of the cycle")
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_smoke_fails_when_the_amplifier_is_the_default_sink(self):

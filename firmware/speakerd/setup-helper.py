@@ -11,6 +11,11 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
     setup-helper.py write FILE                     stdin to FILE, atomically
     setup-helper.py drivers PROFILER_OUTPUT DUMP   which node drives which, from pw-profiler
     setup-helper.py sink DUMP                      the live speakerd sink: the drop-in's? the default sink
+    setup-helper.py status SOCKET                  speakerd's `status` through its local link, as JSON
+                                                   (exits 3 when another client holds the link: ampd)
+    setup-helper.py timing --limit F [--before FILE] [--after FILE] [--window-log FILE]
+                           [--start-log FILE] [--window S]
+                                                   smoke's timing check: lines "pass|FAIL|warn|info <text>"
 
 Each prints shell-readable `key=value` lines or a message, and exits 1 with the reason on
 stderr when it cannot do what it was asked.
@@ -369,12 +374,160 @@ def cmd_graph(args):
     print(f"summary={quote(summary)}")
 
 
+def cmd_status(args):
+    """speakerd's answer to {"op":"status"} on its local link (docs/protocol.md): the hello first,
+    then the answer. speakerd takes one client: with ampd connected it answers busy (exit 3)."""
+    import socket
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(3.0)
+    try:
+        sock.connect(args[0])
+        reader = sock.makefile("rb")
+        sock.sendall(b'{"op":"status"}\n')
+        for _ in range(64):
+            line = reader.readline(1 << 20)
+            if not line:
+                break
+            msg = json.loads(line)
+            if msg.get("op") == "error" and msg.get("reason") == "busy":
+                print("speakerd's local link is busy: another client (ampd) holds it", file=sys.stderr)
+                sys.exit(3)
+            if msg.get("op") == "status":
+                print(json.dumps(msg))
+                return
+        fail("speakerd did not answer status")
+    except (OSError, ValueError) as e:
+        fail(f"speakerd's local link {args[0]}: {e}")
+    finally:
+        sock.close()
+
+
+# The once-a-minute line and the per-second line of speakerd's log (its README, "Log lines").
+TIMING_MINUTE = re.compile(r"^(?:speakerd: )?timing: last (\d+) s: (.*); graph mean ([\d.]+) % max ([\d.]+) %; "
+                           r"cycle mean ([\d.]+) % max ([\d.]+) %; (\d+) cycles, (\d+) late, (\d+) position jump\(s\)$")
+TIMING_MINUTE_NODE = re.compile(r"^node (\d+) \((.*)\) mean ([\d.]+) % max ([\d.]+) %$")
+TIMING_SECOND = re.compile(r"^(?:speakerd: )?timing: in the last second (\d+) late cycle\(s\), the longest at "
+                           r"([\d.]+) % of its cycle; (\d+) position jump\(s\)$")
+
+
+def minute_from_log(line):
+    """A `timing: last <n> s: ...` line as status's timing object (fractions, not percent)."""
+    m = TIMING_MINUTE.match(line)
+    if not m:
+        return None
+    nodes = []
+    for part in m.group(2).split("; ") if m.group(2) else []:
+        n = TIMING_MINUTE_NODE.match(part)
+        if n:
+            nodes.append({"uid": int(n.group(1)), "name": n.group(2), "mean": float(n.group(3)) / 100,
+                          "max": float(n.group(4)) / 100})
+    return {"seconds": int(m.group(1)), "nodes": nodes,
+            "graph": {"mean": float(m.group(3)) / 100, "max": float(m.group(4)) / 100},
+            "cycle": {"mean": float(m.group(5)) / 100, "max": float(m.group(6)) / 100},
+            "cycles": int(m.group(7)), "late": int(m.group(8)), "jumps": int(m.group(9))}
+
+
+def read_status_timing(path):
+    try:
+        with open(path) as f:
+            timing = json.loads(f.read() or "null")
+    except (OSError, ValueError):
+        return None
+    timing = timing.get("timing") if isinstance(timing, dict) else None
+    return timing if isinstance(timing, dict) and isinstance(timing.get("graph"), dict) else None
+
+
+def read_lines(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read().splitlines()
+    except (OSError, TypeError):
+        return []
+
+
+def cmd_timing(args):
+    """smoke's timing check (firmware/CLAUDE.md, "smoke"): what speakerd's audio thread spends, per
+    node, for the graph and the cycle, from its status (the last minute, read after the window) or
+    else its log's last `timing: last <n> s:` line since it started; the late cycles and position
+    jumps in the window from the status before and after it (late_total, jumps_total) and from
+    the log's `timing: in the last second` lines in the window (it names every second with one).
+    FAIL when the graph's longest cycle is above --limit of its cycle, or a cycle was late in the
+    window; warn on position jumps in the window."""
+    opts = {"--limit": "0.5", "--before": "", "--after": "", "--window-log": "", "--start-log": "", "--window": "?"}
+    while args:
+        if args[0] not in opts or len(args) < 2:
+            fail(f"timing: unknown or incomplete option {args[0]}")
+        opts[args[0]] = args[1]
+        args = args[2:]
+    limit = float(opts["--limit"])
+    before, after = read_status_timing(opts["--before"]), read_status_timing(opts["--after"])
+    window_lines, start_lines = read_lines(opts["--window-log"]), read_lines(opts["--start-log"])
+
+    summary, source = after, None
+    if summary is not None:
+        source = f"speakerd's status, the last {summary.get('seconds', '?')} s"
+    else:
+        for line in reversed(start_lines + window_lines):
+            summary = minute_from_log(line)
+            if summary is not None:
+                source = f"speakerd's log, the {summary['seconds']} s before its last 'timing: last' line"
+                break
+    if summary is None:
+        print("warn the graph's timing was NOT measured: speakerd's local link is busy (ampd holds it) or did not "
+              "answer, and speakerd has logged no 'timing: last <n> s' line since it started (it does once a "
+              "minute; a speakerd older than its timing never does)")
+    else:
+        for node in summary.get("nodes") or []:
+            print(f"info timing: node {node.get('uid')} ({node.get('name')}) mean {100 * node.get('mean', 0):.1f} % "
+                  f"max {100 * node.get('max', 0):.1f} % of the cycle")
+        graph, cycle = summary["graph"], summary.get("cycle") or {}
+        print(f"info timing: graph mean {100 * graph.get('mean', 0):.1f} % max {100 * graph.get('max', 0):.1f} %, "
+              f"cycle mean {100 * cycle.get('mean', 0):.1f} % max {100 * cycle.get('max', 0):.1f} %; "
+              f"{summary.get('cycles', '?')} cycles, {summary.get('late', '?')} late, "
+              f"{summary.get('jumps', '?')} position jump(s) ({source})")
+        worst = graph.get("max", 0)
+        if worst > limit:
+            print(f"FAIL the graph's longest cycle took {100 * worst:.1f} % of its cycle ({source}): above "
+                  f"{100 * limit:.0f} %, too close to a late cycle")
+        else:
+            print(f"pass the graph's longest cycle took {100 * worst:.1f} % of its cycle ({source}; at most "
+                  f"{100 * limit:.0f} %)")
+
+    # The window: the counters' difference when speakerd answered before and after, and the log.
+    late = jumps = 0
+    said = []
+    for line in window_lines:
+        m = TIMING_SECOND.match(line)
+        if m:
+            late += int(m.group(1))
+            jumps += int(m.group(3))
+            said.append(line.split("timing: ", 1)[1])
+    how = "its log's per-second lines"
+    if before is not None and after is not None and "late_total" in before and "late_total" in after:
+        late = max(late, after["late_total"] - before["late_total"])
+        jumps = max(jumps, after.get("jumps_total", 0) - before.get("jumps_total", 0))
+        how = "speakerd's late_total and jumps_total before and after, and its log"
+    elif not window_lines and before is None:
+        how += " (no log in the window)"
+    shown = "; ".join(said[:3]) + ("; ..." if len(said) > 3 else "")
+    if late:
+        print(f"FAIL {late} late cycle(s) in {opts['--window']} s ({how}){': ' + shown if shown else ''}")
+    else:
+        print(f"pass no late cycle in {opts['--window']} s ({how})")
+    if jumps:
+        print(f"warn {jumps} position jump(s) in {opts['--window']} s: a cycle the driver skipped (an xrun) or "
+              f"another driver ({how}){': ' + shown if shown else ''}")
+    if summary is not None and not late and summary.get("late"):
+        print(f"warn {summary['late']} late cycle(s) before the window ({source})")
+
+
 def cmd_write(args):
     write_atomically(args[0], sys.stdin.read())
 
 
 COMMANDS = {"amp": (cmd_amp, 1), "node": (cmd_node, 2), "device": (cmd_device, 1), "sink": (cmd_sink, 1),
-            "graph": (cmd_graph, 1), "write": (cmd_write, 1), "drivers": (cmd_drivers, 2)}
+            "graph": (cmd_graph, 1), "write": (cmd_write, 1), "drivers": (cmd_drivers, 2),
+            "status": (cmd_status, 1), "timing": (cmd_timing, 0)}
 
 
 def main():
