@@ -284,3 +284,30 @@ These settle what version 1 left open; every implementation follows them.
     that is down.
 29. **The hub's own address** in `state.speakers`, when it listens on every address, is the
     one the controller connected to.
+
+## Authentication (version 1, from the review of step 3)
+
+Every pair has a **secret**: 16 to 256 printable characters without spaces, in each speaker's
+`ampd.json` (`"secret"`, mode 0600, written by the installer from a file, never printed) and in
+each controller's settings. It never crosses the network.
+
+- **The proof** is `"auth"`: the lowercase hex HMAC-SHA256, keyed with the secret's UTF-8
+  bytes, of the UTF-8 string `<nonce>:<role>:<name>`, with the role and name of the same
+  `hello`.
+- **Control link.** The hub always speaks first:
+  `{"op":"hello","role":"hub","name":..,"revision":..,"seq":..,"nonce":"<32 hex>","protocol":1}`.
+  A controller or agent reads it before sending its own `hello` with `"auth"`. Agents
+  connecting to the hub do the same.
+- **Monitor link.** On connect the speaker sends
+  `{"op":"hello","role":"speaker","name":..,"nonce":..,"protocol":1}`; the client answers
+  `{"op":"hello","role":"controller","name":..,"auth":..}` before any `subscribe`.
+- **Refusal.** A missing or wrong proof, on either link, gets
+  `{"op":"error","about":"hello","reason":..}` and the connection closes.
+- **OSC** is accepted by the hub only from the IP address of an authenticated controller, and
+  by an agent only from its hub. A second agent with a connected agent's name replaces it only
+  with a valid proof.
+- **Limits.** A hub takes at most 32 control peers and 32 monitor clients with at most 32
+  subscriptions each; a controller with more than 1 MiB unread is dropped. A document has at
+  most 64 plugin nodes and 512 connections.
+- **No secret configured** (only before an installer has run): `ampd` logs it loudly and
+  accepts every peer.
