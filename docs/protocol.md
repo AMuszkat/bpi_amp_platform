@@ -243,3 +243,24 @@ These settle what version 1 left open; every implementation follows them.
 12. **The document's own revision.** A proposal's `document.revision` equals its `revision`.
 13. **Rate.** A controller sends at most 50 changes a second per parameter on either link.
 14. **Monitor values** are in the plugin's units (dBFS for `mon_levelDb`), never normalised.
+15. **`speakerd` answers more than unknown parameters.** It also answers a `mon_` ID and an
+    invalid value (a choice text the plugin lacks, `true` for a non-switch) with
+    `{"op":"error","about":"param",...}`.
+16. **The layer after an apply** is `current` (ampd writes every applied revision to
+    `graph.json`).
+17. **An apply's `revision`** is authoritative; its document may omit its own `revision`, and
+    one that names a different revision fails.
+18. **Applies are queued in order** (at most 8), never refused for being busy, so a hub's
+    rollback right behind a failed revision is applied. A parameter that arrives while a
+    revision is building goes to the playing graph and is carried over to the new one.
+    `applied` is sent once the new graph has run one audio cycle (or 200 ms after the swap
+    when no cycle runs).
+19. **Monitor streams.** `v` is an array for `output/level` and a plain number for
+    `node/<uid>/<mon_id>`. Each stream has its own rate (`rate_hz`, default 30, capped at 60,
+    0 or less refused); a period with no audio cycle sends nothing, so at a quantum of 1024 at
+    48 kHz a stream gives about 47 values a second at most. RMS is plain RMS (a full-scale sine
+    reads -3.01 dBFS); -120 is the floor. A `subscribe` to a name that is no stream is answered
+    `{"op":"error","about":"subscribe","stream":..,"reason":..}`; a well-formed `node/...`
+    stream the graph lacks is kept and starts when a revision has it.
+20. **`status`** is answered with the `hello`'s fields and `"op":"status"`.
+21. **Files.** `speakerd` writes no state file; it creates and removes its socket.
