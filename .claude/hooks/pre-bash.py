@@ -4,9 +4,11 @@ instructions alone cannot:
 
 - no push to main or master, no force push;
 - no private data in a commit (the staged additions are scanned);
-- nothing reaches a board (ssh, scp, rsync, the deploy targets of the build scripts) while
-  the lab lock .claude/lab.lock exists, or without a green test status for the exact
-  commit being deployed (tests/.status/<commit>.json, written by /test), with a clean tree.
+- nothing reaches a board (ssh, scp, rsync, the deploy targets of the build scripts, the
+  /board skill's tools/board.sh) while the lab lock .claude/lab.lock exists, or without a
+  green test status for the exact commit being deployed (tests/.status/<commit>.json,
+  written by /test), with a clean tree. Looking at a board (tools/board.sh status or
+  journal) only needs the lab to be unlocked.
 
 Override, logged: a command that starts with BPI_DEPLOY_OVERRIDE=1 deploys regardless of
 the test status (never regardless of the lab lock).
@@ -30,7 +32,10 @@ PUSH_REFSPEC_MAIN = re.compile(r"\bgit\s+push\b.*:\s*(refs/heads/)?(main|master)
 FORCE = re.compile(r"\bgit\s+push\b.*(\s-f\b|\s--force\b|\s--force-with-lease\b)")
 COMMIT = re.compile(r"\bgit\s+commit\b")
 DEPLOY = re.compile(r"(^|[\s;&|(])(ssh|scp|rsync|sftp)\s|build-podman\.sh\b.*\s-install\b"
-                    r"|\bmake\b.*\binstall|--target-host\b|--mode\s+(target-remote|both)\b")
+                    r"|\bmake\b.*\binstall|--target-host\b|--mode\s+(target-remote|both)\b"
+                    r"|\btools/board\.sh\b")
+# Reading a board changes nothing on it: the lab lock applies, the test status does not.
+BOARD_READ = re.compile(r"\btools/board\.sh\s+(status|journal)\b")
 
 
 def refuse(msg):
@@ -58,6 +63,8 @@ def check_deploy(command):
     if os.path.exists(LAB_LOCK):
         return refuse(f"the lab is locked ({LAB_LOCK} exists): nothing may reach a board. "
                       "A person removes the lock when the boards are free.")
+    if BOARD_READ.search(command) and not DEPLOY.search(BOARD_READ.sub("", command)):
+        return 0
     override = command.lstrip().startswith("BPI_DEPLOY_OVERRIDE=1")
     head = git("rev-parse", "HEAD").strip()
     dirty = git("status", "--porcelain").strip()
