@@ -671,9 +671,14 @@ class Speakerd:
     """
 
     def __init__(self, speaker, state, bundles=(), args=(), wait_for="playing: ", timeout=30,
-                 prefix=(), exit_status=0):
+                 prefix=(), exit_status=0, allow_tweeter=True):
         self.speaker = speaker
         self.command = [*prefix, str(built("speakerd")), "--state-dir", str(state)]
+        # Test documents route full range to both channels to measure them, which speakerd's
+        # tweeter rule refuses while device.json says the tweeter is on; allow_tweeter=False
+        # runs speakerd as a board does, for the scenarios that test the rule itself.
+        if allow_tweeter:
+            self.command.append("--allow-tweeter-without-crossover")
         for bundle in bundles:
             self.command += ["--lv2-bundle", str(bundle)]
         self.command += list(args)
@@ -807,7 +812,7 @@ class Speakerd:
             shutil.rmtree(self._home, ignore_errors=True)
 
 
-def render(state, samples, bundles=(), args=(), timeout=120):
+def render(state, samples, bundles=(), args=(), timeout=120, allow_tweeter=True):
     """speakerd's offline render (--render): runs `samples` (mono, or (n, 2) for FL and FR)
     through the graph of the first layer of `state` that loads, with the `bundles` given and an
     empty HOME, and returns the output, (n, 2) woofer and tweeter, and speakerd's output."""
@@ -816,6 +821,8 @@ def render(state, samples, bundles=(), args=(), timeout=120):
         home.mkdir()
         _write_wav(src, samples)
         command = [str(built("speakerd")), "--state-dir", str(state), "--render", str(src), str(out)]
+        if allow_tweeter:
+            command.append("--allow-tweeter-without-crossover")
         for bundle in bundles:
             command += ["--lv2-bundle", str(bundle)]
         command += list(args)

@@ -269,7 +269,7 @@ the architecture:
 
 | Scenario | Pass when |
 |---|---|
-| `knob_latency` | a parameter sent to the hub is audible in both captures within 60 ms, and the two captures differ by less than 5 ms |
+| `knob_latency` | a parameter sent to the hub is audible in both captures within 60 ms; at a quantum of 128 the two captures also differ by less than 5 ms. At the boards' 1024 the two speakers' graph clocks can be up to one quantum (21.3 ms) apart, so only the 60 ms holds there (approved by the person; sample-accurate timing across speakers is a later step) |
 | `graph_edit` | adding a node and a connection changes both captures in the same revision, with no gap longer than the fade and no click above a threshold; a revision one speaker fails is rejected and rolled back on the other |
 | `graph_rejected` | a document naming a plugin missing on one speaker is refused and nothing changes |
 | `hub_down` | the right speaker keeps playing its revision when the left container is stopped, and switches to the L+R mix if configured |

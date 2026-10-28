@@ -84,7 +84,7 @@ path must fit in 108 bytes.
 | `test_ampd_protocol.py` | ampd, hub and agent, does what `docs/protocol.md` says, against stand-in speakerds |
 | `test_two_controllers.py` | two controllers' interleaved changes end in the hub's state; a controller connecting mid-drag sees the gesture |
 | `test_firmware_ampd_install.py` | `firmware/ampd-setup.sh` and setup.sh's ampd component: the layout, the refusals, the unit, status and smoke |
-| `test_knob_latency.py` | a parameter sent to the hub is heard on both speakers within 60 ms, less than 5 ms apart |
+| `test_knob_latency.py` | a parameter sent to the hub is heard on both speakers within 60 ms, and less than 5 ms apart at a quantum of 128 (at 1024 the gap is up to one quantum) |
 | `test_graph_edit.py` | a new revision changes both captures with no gap or click; one a speaker fails is rolled back on the other |
 | `test_hub_down.py` | the right speaker plays on, unchanged, when the left stops |
 | `test_meter_values.py` | `output/level` and loudness's `mon_levelDb` track a stepped tone on each speaker; the Mine pin |
