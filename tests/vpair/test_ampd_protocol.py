@@ -71,11 +71,21 @@ Pass when:
   straight is failed by the right, never reaches its speakerd, is rejected with "right: the tweeter
   is on here (device.json) and ..." and rolled back on the left; with the hub's on, it is rejected
   before any speaker gets it;
-- a line that is not JSON closes the connection; an unknown op is ignored.
+- a line that is not JSON closes the connection; an unknown op is ignored;
+- before a peer proved the pair's secret, and on the monitor link, a line is at most 64 KiB: a
+  100 KiB hello closes the connection on the control and the monitor link, and an agent hangs up
+  on a 100 KiB hello from a hub ("a line longer than 64 KiB"); a 60 KiB one is welcomed;
+- a legal document of 24 MiB (a plugin's state) is applied, and a controller that reads nothing
+  meanwhile is kept and then gets it and the three values after it, in order;
+- tests/vpair/auth_vector.json's client proof, server proof, K and OSC token are what
+  docs/protocol.md's definitions give (hmac and hashlib here) and what ampd's functions give;
+  the harness computes every proof and token from the definitions, not from ampd.
 
     python3 -m unittest -v tests.vpair.test_ampd_protocol
 """
 
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -86,9 +96,9 @@ import time
 import unittest
 from pathlib import Path
 
-from harness import (ADDRESS, KNOB_PORT, TWEETER_MUTED, Ampd, Controller, MonitorClient, StandInPair, StandInSpeakerd,
-                     MonitorRefused, ampd_proof, check_welcome, client_hello, graph_document, lv2_uri, osc_encode,
-                     revision_document, state_dir)
+from harness import (ADDRESS, AUTH_VECTOR, KNOB_PORT, TWEETER_MUTED, Ampd, Controller, MonitorClient, StandInPair,
+                     StandInSpeakerd, MonitorRefused, _ampd_module, ampd_proof, check_welcome, client_hello,
+                     graph_document, lv2_uri, osc_encode, revision_document, state_dir)
 from stand_in_speakerd import TIMING
 
 HEADLESS = lv2_uri("loudness_headless")
@@ -561,6 +571,17 @@ class Protocol(unittest.TestCase):
                 conn.close()
             line = agent.wait_for("hub: ")
             print(f"\n  {line}")
+            # A hello longer than 64 KiB before the hub proved anything: the agent hangs up.
+            conn, _ = listener.accept()
+            conn.settimeout(5)
+            try:
+                conn.sendall(b'{"op":"hello","role":"hub","name":"left","pad":"' + b"a" * (100 * 1024) + b'"}\n')
+                hung_up = conn.recv(1) == b""
+            except OSError:
+                hung_up = True
+            conn.close()
+            self.assertTrue(hung_up, "the agent read a 100 KiB hello")
+            print(f"  {agent.wait_for('hub: a line longer than 64 KiB')}")
             time.sleep(0.5)
             self.assertFalse(agent.lines_starting("hub: connected"), agent.log())
             self.assertTrue(agent.lines_starting("hub: the hub at 127.0.1.1:7450 did not prove the pair's secret"),
@@ -680,6 +701,114 @@ class Protocol(unittest.TestCase):
             self.assertTrue(answer["reason"].startswith("left: the tweeter is on here"), answer["reason"])
             for name in ("left", "right"):
                 self.assertEqual(pair.sd[name].events("apply", "in"), [])
+
+    def test_the_authentication_vector(self):
+        """tests/vpair/auth_vector.json, computed here from docs/protocol.md's definitions, and by
+        ampd's own functions: a drift in ampd's strings fails here (the controller's tests assert
+        the same file)."""
+        v = json.loads(AUTH_VECTOR.read_text())
+
+        def mac(key, text):
+            return hmac.new(key.encode("utf-8"), text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        ns, nc, secret = v["server_nonce"], v["client_nonce"], v["secret"]
+        client = mac(secret, f"client:{ns}:{nc}:{v['client_role']}:{v['client_name']}")
+        server = mac(secret, f"server:{ns}:{nc}:{v['server_role']}:{v['server_name']}")
+        key = mac(secret, f"session:{ns}:{nc}")
+        token = mac(key, "osc")[:32]
+        print(f"\n  client proof {client}\n  server proof {server}\n  K {key}\n  OSC token {token}")
+        self.assertEqual((client, server, key, token),
+                         (v["client_proof"], v["server_proof"], v["session_key"], v["osc_token"]))
+        ampd = _ampd_module()
+        self.assertEqual(ampd.proof(secret, "client", ns, nc, v["client_role"], v["client_name"]), v["client_proof"])
+        self.assertEqual(ampd.proof(secret, "server", ns, nc, v["server_role"], v["server_name"]), v["server_proof"])
+        self.assertEqual(ampd.osc_token(secret, ns, nc), v["osc_token"])
+        self.assertTrue(ampd.proof_holds(secret, "client", ns, nc, v["client_role"], v["client_name"], v["client_proof"]))
+        self.assertTrue(ampd.proof_holds(secret, "server", ns, nc, v["server_role"], v["server_name"], v["server_proof"]))
+        # The two directions never stand for each other; one character off is no proof.
+        self.assertFalse(ampd.proof_holds(secret, "server", ns, nc, v["client_role"], v["client_name"], v["client_proof"]))
+        wrong = v["client_proof"][:-1] + ("0" if v["client_proof"][-1] != "0" else "1")
+        self.assertFalse(ampd.proof_holds(secret, "client", ns, nc, v["client_role"], v["client_name"], wrong))
+
+    def test_lines_before_the_proof_are_capped(self):
+        """Before a peer proved the pair's secret, and on the monitor link, a line is at most
+        64 KiB: a longer one closes the connection. After the proof a document may be 32 MiB
+        (test_a_large_document_keeps_every_controller)."""
+        long_line = b'{"op":"hello","role":"controller","name":"big","pad":"' + b"a" * (100 * 1024) + b'"}\n'
+        with StandInPair(self.tmp, documents()) as pair:
+            for port in (7450, 7452):
+                conn = socket.create_connection((ADDRESS["left"], port), timeout=5)
+                f = conn.makefile("rb")
+                self.assertEqual(json.loads(f.readline())["op"], "hello")
+                start = time.monotonic()
+                try:
+                    conn.sendall(long_line)
+                    closed = f.readline() == b""
+                except OSError:
+                    closed = True
+                print(f"\n  port {port}: a 100 KiB hello closed the connection after {time.monotonic() - start:.2f} s")
+                self.assertTrue(closed, f"port {port}: a 100 KiB line before the proof did not close the connection")
+                f.close()
+                conn.close()
+            # A hello under the cap (60 KiB of padding) is welcomed.
+            conn = socket.create_connection((ADDRESS["left"], 7450), timeout=5)
+            f = conn.makefile("rb")
+            server = json.loads(f.readline())
+            hello, nc = client_hello(server, "controller", "padded", pad="a" * (60 * 1024))
+            conn.sendall(json.dumps(hello).encode() + b"\n")
+            self.assertTrue(check_welcome(server, json.loads(f.readline()), nc))
+            self.assertEqual(json.loads(f.readline())["op"], "state")
+            f.close()
+            conn.close()
+            self.assertTrue(pair.ampd["left"].lines_starting("controller padded connected"))
+
+    def test_a_large_document_keeps_every_controller(self):
+        """A legal document of 24 MiB (a plugin state) reaches a controller that does not read for
+        a while, and the values after it too: the 1 MiB limit counts what queues besides
+        documents."""
+        big = with_node(DOCUMENT)
+        big["nodes"][1]["state"] = "A" * (24 * 1024 * 1024)
+        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:
+            slow = socket.create_connection((ADDRESS["left"], 7450), timeout=60)
+            f = slow.makefile("rb")
+            server = json.loads(f.readline())
+            hello, nc = client_hello(server, "controller", "ctl-slow")
+            slow.sendall(json.dumps(hello).encode() + b"\n")
+            self.assertTrue(check_welcome(server, json.loads(f.readline()), nc))
+            self.assertEqual(json.loads(f.readline())["op"], "state")
+            # ctl-slow reads nothing now.
+            start = time.monotonic()
+            self.assertEqual(a.propose(big, timeout=60)["op"], "applied")
+            print(f"\n  a 24 MiB document applied on both in {time.monotonic() - start:.2f} s")
+            for value in (4.25, 4.5, 4.75):
+                a.param(16, "s0_e0_gain", value)
+                time.sleep(0.2)
+            time.sleep(1.0)
+            seen, copies, read = [], 0, 0
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                line = f.readline()
+                if not line:
+                    break
+                read += len(line)
+                msg = json.loads(line)
+                if msg.get("op") in ("state", "graph") and msg.get("revision") == 4:
+                    copies += 1
+                    self.assertEqual(len(msg["document"]["nodes"][1]["state"]), 24 * 1024 * 1024)
+                if msg.get("op") == "param":
+                    seen.append(msg.get("value"))
+                    if msg.get("value") == 4.75:
+                        break
+            print(f"  ctl-slow read {read / 2**20:.1f} MiB afterwards: {copies} document(s) of revision 4, "
+                  f"the values {seen}")
+            f.close()
+            slow.close()
+            log = pair.ampd["left"].log()
+            self.assertNotIn("dropped a connection", log)
+            self.assertGreaterEqual(copies, 1)
+            self.assertEqual(seen, [4.25, 4.5, 4.75])
+            self.assertEqual(a.wait(lambda m: m["op"] == "param" and m.get("value") == 4.75, what="ctl-a's echo")
+                             .get("value"), 4.75)
 
     def test_bad_lines(self):
         with StandInPair(self.tmp, documents()):

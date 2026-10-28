@@ -20,8 +20,9 @@ at the boards' quantum, 1024, the 60 ms is checked and the difference printed.
 A change is set aside (said, and not measured) only on evidence that does not come from the
 change itself: the recorder lost samples around the send (its time mapping moved), the capture
 was not steady from 0.6 s before the send to the send, or pw-profiler recorded an xrun or a late
-cycle for speakerd-dsp or the recorder in that window (harness.Profiler; the late-cycle count of
-speakerd's `speakerd/timing` stream will replace it). A change that is not at its new level 3 ms
+cycle for speakerd-dsp or the recorder in that window (harness.Profiler, pw-profiler: what this
+test uses; speakerd's own late-cycle and position-jump counts are also available, in its
+`status`, its `speakerd/timing` stream and its log, and are not used here). A change that is not at its new level 3 ms
 after it began, drops out in the 30 ms after it, or is not a clean change (steady again at a
 level more than 6 dB away, the way the change goes, from 50 ms to 500 ms after it), with no xrun
 or late cycle recorded there, is a FAILURE. Up to 30 changes are sent (10 at least), and at least

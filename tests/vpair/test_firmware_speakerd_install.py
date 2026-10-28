@@ -68,6 +68,10 @@ Pass when:
   more than half its cycle (50.1 %; 50.0 % passes) and when a cycle was late in the window (the
   log's `timing: in the last second` lines in it, or late_total's difference), and warns on
   position jumps in the window, on late cycles before it, and when nothing measured the timing;
+  it reads the passthrough minute line (no node: it begins with the graph); it prints speakerd's
+  start-up `timing: a clock read costs <x> ns` in the timing line and warns, never fails, above
+  150 ns ("clock reads are system calls on this kernel ...: per-node timing costs about 6×812 ns
+  = 4.9 us per cycle" with one node);
 - snapcast-setup.sh --route speakerd refuses while no PipeWire config defines the speakerd
   sink, and after `speakerd-setup.sh sink` routes snapclient (and shairport-sync and an
   AudioPluginHost) into "speakerd", keeping the routing there was; uninstall puts that routing
@@ -752,6 +756,23 @@ class Install(Setup):
         # A speakerd that has not logged a minute yet, its link busy (ampd holds it): not measured.
         out = smoke([start, LIMITS])
         self.assertIn("warn the graph's timing was NOT measured", out)
+        self.assertIn("info timing: speakerd did not say what a clock read costs", out)
+        # Passthrough: no plugin node, so the minute line begins with the graph.
+        out = smoke([start, LIMITS, "speakerd: timing: last 60 s: graph mean 0.0 % max 0.1 %; cycle mean 0.2 % "
+                                    "max 0.4 %; 2813 cycles, 0 late, 0 position jump(s)"])
+        self.assertIn("pass the graph's longest cycle took 0.1 % of its cycle (speakerd's log", out)
+        self.assertNotIn("info timing: node", out)
+        # What a clock read costs, from speakerd's start-up line: tens of ns (the vDSO) is said;
+        # above 150 ns (system calls) is a warning, with what per-node timing then costs.
+        out = smoke([start, "speakerd: timing: a clock read costs 44.6 ns", LIMITS, minute(3.6)])
+        self.assertIn("2813 cycles, 0 late, 0 position jump(s); a clock read costs 44.6 ns (speakerd's log", out)
+        self.assertNotIn("clock reads are system calls", out)
+        out = smoke([start, "speakerd: timing: a clock read costs 812.0 ns ", LIMITS, minute(3.6)])
+        print("  " + next(line for line in out.splitlines() if "clock reads" in line))
+        self.assertIn("a clock read costs 812 ns (speakerd's log", out)
+        self.assertIn("warn clock reads are system calls on this kernel (ARM erratum 858921 workaround?): per-node "
+                      "timing costs about 6\u00d7812 ns = 4.9 us per cycle", out)
+        self.assertNotIn("FAIL clock", out)
 
         # From speakerd's status on its local link, read before and after the window.
         runtime = self.tmp / "timing-runtime"
