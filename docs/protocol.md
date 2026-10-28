@@ -178,12 +178,15 @@ On the monitor link, straight to the speaker whose values are wanted:
 in every build of the plugin (complete, control, headless), declared after the plugin's other
 parameters, not automatable, of category output meter, and left out of the plugin's saved
 state. The headless and complete builds write it from the audio thread's atomics with
-`setValue` and, when the value moved (at most about 60 times a second, and once a second
-anyway), tell the parameter's listeners from inside that same audio cycle. JUCE's LV2 wrapper
+`setValue` (at most about 60 times a second) and, under JUCE's LV2 wrapper only, tell the
+parameter's listeners from inside that same audio cycle when the stored value moved by a step
+of its range, and once a second anyway; under any other wrapper (VST3 in a DAW) they only write
+it, since no host there reads monitors and JUCE's VST3 wrapper would take a mutex on the audio
+thread. JUCE's LV2 wrapper
 reports only parameters its listener was told about, and sends them to the host at the end of
 the cycle, which is how `speakerd` sees them, with `getValue()` on its monitor thread. The only
 lock this takes on the plugin's audio thread is the monitor parameter's own listener lock,
-which nothing else takes; a thread of the plugin's own cannot do it safely, because the LV2
+which nothing else takes (the exception named in `dsp/CLAUDE.md`); a thread of the plugin's own cannot do it safely, because the LV2
 wrapper destroys its listener before the plugin without telling it. The control build's
 proxy fills it from the stream, and the plugin's own getters (`getLevelDb()` and friends) read
 it there, so the editor code does not change. `loudness` publishes `mon_levelDb`
