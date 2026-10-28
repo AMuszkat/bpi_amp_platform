@@ -3,6 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
+#include <limits>
+
 #if (MSVC)
 #include "ipps.h"
 #endif
@@ -10,9 +12,7 @@
 //==============================================================================
 /**
 */
-class PluginProcessor  : public juce::AudioProcessor,
-                                     private juce::AudioProcessorValueTreeState::Listener,
-                                     public juce::ChangeBroadcaster
+class PluginProcessor  : public juce::AudioProcessor
 {
 public:
     //==============================================================================
@@ -28,6 +28,7 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
    #endif
 
+    using juce::AudioProcessor::processBlock;          // keep the double overload visible
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     //==============================================================================
@@ -64,12 +65,14 @@ private:
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
     
-    //void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
-    void parameterChanged (const juce::String &parameterID, float newValue) override;
-    std::atomic<bool> requiresUpdate { true };
-    
     juce::AudioProcessorValueTreeState apvts;
     juce::AudioProcessorValueTreeState::ParameterLayout create_param_layout();
+
+    // The gain is read on the audio thread at the start of every block. Nothing of this
+    // plugin runs when a parameter changes: a host may change one on the audio thread, and
+    // the editor's plot polls the parameters from its own timer (PlotComponent).
+    std::atomic<float>* gainParam = nullptr;
+    float appliedGainDb = std::numeric_limits<float>::quiet_NaN();   // audio thread only
     
     // using iirFilt = juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>, juce::dsp::IIR::Coefficients<float>>;
 
@@ -82,13 +85,14 @@ private:
     juce::dsp::ProcessorChain<juce::dsp::Gain<float>, firLpFilt> lpChain;
     juce::dsp::ProcessorChain<juce::dsp::Gain<float>, firHpFilt> hpChain;
 
-    // Temporary buffers to hold chain outputs prior to routing/mixing
+    // Temporary buffers to hold chain outputs prior to routing/mixing, sized in prepareToPlay
+    // for the block size the host announced. A larger block is processed in chunks of that
+    // size, so processBlock never resizes (allocates) them.
     juce::AudioBuffer<float> lpBuffer;
     juce::AudioBuffer<float> hpBuffer;
+    void processChunk (juce::AudioBuffer<float>& buffer, int start, int numSamples) noexcept;
 
-    void updatePlot();
     std::vector<double> frequencies;
     std::vector<double> magnitudes;
-    double sampleRate = 0;
     double mapLog10(double x, double inMin, double inMax, double outMin, double outMax);
 };

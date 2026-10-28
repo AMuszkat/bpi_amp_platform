@@ -7,11 +7,16 @@
 //   4. state saved by the control build restores into the headless build, and back;
 //   5. the headless build processes audio exactly like the complete build, and the control
 //      build leaves audio untouched;
-//   6. optionally, the control build's editor opens in a window (for a screenshot).
+//   6. the monitors (parameters whose IDs start with "mon_", docs/protocol.md): the three builds
+//      have the same ones, no saved state carries them, and the hosted headless build publishes
+//      what the complete build's getters read for the same tone (--expect-monitor, from the
+//      in-process check that run.sh runs first);
+//   7. optionally, the control build's editor opens in a window (for a screenshot).
 //
 // Usage:
 //   plugin-check --complete <bundle.lv2> --control <bundle.lv2> --headless <bundle.lv2>
-//                [--probe <paramID>=<normalised value> ...] [--show-editor <seconds>]
+//                [--probe <paramID>=<normalised value> ...]
+//                [--expect-monitor <paramID>=<value>:<tolerance> ...] [--show-editor <seconds>]
 //
 // The probes are set before the audio check, so it can turn on something audible (a gain,
 // a forced setting). Exit status 0 means every check passed.
@@ -21,6 +26,7 @@
 
 #include <cmath>
 #include <map>
+#include <thread>
 
 namespace
 {
@@ -201,6 +207,98 @@ namespace
         pump (to, sampleRate, blockSize);
     }
 
+    bool isMonitor (const juce::String& id) { return id.startsWith ("mon_"); }
+
+    juce::StringArray monitorIds (juce::AudioPluginInstance& p)
+    {
+        juce::StringArray ids;
+
+        for (const auto& [id, info] : describe (p))
+            if (isMonitor (id))
+                ids.add (id);
+
+        return ids;
+    }
+
+    /** The plugin's own state inside a hosted LV2 plugin's saved state. JUCE's LV2 wrapper
+        stores what the plugin's getStateInformation() returns as a MemoryBlock::toBase64Encoding()
+        string ("<size>.<JUCE base64>"), so every token of that shape is decoded. */
+    juce::StringArray pluginStatesIn (const juce::String& lv2State)
+    {
+        juce::StringArray found;
+        const auto alphabet = juce::String ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+.");
+        juce::StringArray tokens;
+        tokens.addTokens (lv2State.retainCharacters (alphabet + " \n\t\"'<>;,"), " \n\t\"'<>;,", "");
+
+        for (const auto& token : tokens)
+        {
+            if (token.length() < 16 || ! token.upToFirstOccurrenceOf (".", false, false).containsOnly ("0123456789"))
+                continue;
+
+            juce::MemoryBlock block;
+
+            if (block.fromBase64Encoding (token))
+                if (auto xml = juce::AudioProcessor::getXmlFromBinary (block.getData(), (int) block.getSize()))
+                    found.add (xml->toString());
+        }
+
+        return found;
+    }
+
+    /** Plays the -20 dBFS tone of render() through the plugin, then keeps playing it for half a
+        second in real time, the way a host on the speaker would: a plugin reports a monitor
+        after the cycles that follow a change, and its notifier runs on the wall clock. Returns
+        each monitor's value as the host sees it, read while the plugin is still playing. */
+    std::map<juce::String, float> playAndReadMonitors (juce::AudioPluginInstance& p, double sampleRate, int blockSize)
+    {
+        const int channels = juce::jmax (p.getTotalNumInputChannels(), p.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> block (channels, blockSize);
+        juce::MidiBuffer midi;
+        int64_t position = 0;
+
+        const auto playBlock = [&]
+        {
+            block.clear();
+
+            for (int i = 0; i < blockSize; ++i)
+                block.setSample (0, i, 0.1f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 100.0
+                                                                  * (double) (position + i) / sampleRate));
+
+            p.processBlock (block, midi);
+            position += blockSize;
+        };
+
+        p.prepareToPlay (sampleRate, blockSize);
+
+        while (position < (int64_t) (2.0 * sampleRate))
+            playBlock();
+
+        const auto blockTime = std::chrono::microseconds ((int64_t) (1.0e6 * blockSize / sampleRate));
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds (500);
+
+        while (std::chrono::steady_clock::now() < until)
+        {
+            playBlock();
+            std::this_thread::sleep_for (blockTime);
+        }
+
+        std::map<juce::String, float> values;
+
+        for (const auto& [id, info] : describe (p))
+        {
+            if (! isMonitor (id))
+                continue;
+
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (info.param))
+                values[id] = ranged->convertFrom0to1 (ranged->getValue());
+            else
+                values[id] = info.param->getText (info.param->getValue(), 64).getFloatValue();
+        }
+
+        p.releaseResources();
+        return values;
+    }
+
     /** Shows the editor in a window and keeps it up for `seconds`. */
     void showEditor (juce::AudioPluginInstance& p, int seconds)
     {
@@ -230,7 +328,7 @@ int main (int argc, char* argv[])
     juce::ScopedJuceInitialiser_GUI juce;
 
     juce::String complete, control, headless;
-    juce::StringArray probes;
+    juce::StringArray probes, expectedMonitors;
     int editorSeconds = 0;
 
     for (int i = 1; i < argc; ++i)
@@ -242,6 +340,7 @@ int main (int argc, char* argv[])
         else if (arg == "--control")     { control = next; ++i; }
         else if (arg == "--headless")    { headless = next; ++i; }
         else if (arg == "--probe")       { probes.add (next); ++i; }
+        else if (arg == "--expect-monitor") { expectedMonitors.add (next); ++i; }
         else if (arg == "--show-editor") { editorSeconds = next.getIntValue(); ++i; }
         else
         {
@@ -376,7 +475,72 @@ int main (int argc, char* argv[])
                     "otherwise the audio check proves nothing");
     }
 
-    // 6. Editor
+    // 6. Monitors
+    {
+        const auto ids = monitorIds (*pComplete);
+        const bool same = ids == monitorIds (*pControl) && ids == monitorIds (*pHeadless);
+        report (same, "the three builds have the same monitors",
+                ids.isEmpty() ? juce::String ("none") : ids.joinIntoString (", "));
+
+        // No saved state carries a monitor, in any build. The plugin's own state is checked
+        // inside the LV2 state, so the check cannot pass by failing to find it.
+        for (auto* p : { pComplete.get(), pControl.get(), pHeadless.get() })
+        {
+            pump (*p, sampleRate, blockSize);
+            juce::MemoryBlock st;
+            p->getStateInformation (st);
+            const auto inner = pluginStatesIn (st.toString());
+
+            report (! inner.isEmpty() && ! st.toString().contains ("mon_") && ! inner.joinIntoString ("").contains ("mon_"),
+                    "the saved state of " + p->getName() + " carries no monitor",
+                    inner.isEmpty() ? "no plugin state found in it" : juce::String());
+        }
+
+        // The hosted headless build, set up from the control build's state as in check 5,
+        // publishes what the complete build's getters read for the same tone. The hosted
+        // complete build is read too: it publishes the same way.
+        if (! expectedMonitors.isEmpty())
+        {
+            for (auto* p : { pComplete.get(), pControl.get(), pHeadless.get() })
+            {
+                for (auto* param : p->getParameters())
+                    param->setValueNotifyingHost (param->getDefaultValue());
+
+                pump (*p, sampleRate, blockSize);
+            }
+
+            setProbes (*pComplete, probes);
+            setProbes (*pControl, probes);
+            transferState (*pControl, *pHeadless, sampleRate, blockSize);
+
+            for (auto* p : { pHeadless.get(), pComplete.get() })
+            {
+                const auto values = playAndReadMonitors (*p, sampleRate, blockSize);
+
+                for (const auto& expected : expectedMonitors)
+                {
+                    const auto id = expected.upToFirstOccurrenceOf ("=", false, false);
+                    const auto rest = expected.fromFirstOccurrenceOf ("=", false, false);
+                    const auto want = rest.upToFirstOccurrenceOf (":", false, false).getFloatValue();
+                    const auto tolerance = rest.fromFirstOccurrenceOf (":", false, false).getFloatValue();
+                    const auto it = values.find (id);
+
+                    report (it != values.end() && std::abs (it->second - want) <= tolerance + 1.0e-4f,
+                            "hosted " + p->getName() + " publishes " + id + " as the complete build's getter reads it",
+                            it == values.end() ? juce::String ("no such monitor")
+                                               : "host reads " + juce::String (it->second, 3) + ", getter "
+                                                   + juce::String (want, 3) + ", tolerance " + juce::String (tolerance, 3));
+                }
+            }
+        }
+        else
+        {
+            report (ids.isEmpty(), "monitors have expectations from the in-process check",
+                    ids.isEmpty() ? juce::String() : "no --expect-monitor given");
+        }
+    }
+
+    // 7. Editor
     if (editorSeconds > 0)
         showEditor (*pControl, editorSeconds);
 

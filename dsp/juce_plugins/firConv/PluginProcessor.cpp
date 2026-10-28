@@ -24,8 +24,7 @@ PluginProcessor::PluginProcessor()
 #endif
 ,apvts(*this, nullptr, "PARAMETERS", create_param_layout())
 {
-    apvts.addParameterListener("gain",this);
-    apvts.addParameterListener("freq",this);
+    gainParam = apvts.getRawParameterValue ("gain");
 
     createLogFrequencyVector(frequencies, 1000, 1.0, 20000.0);
     magnitudes.resize (frequencies.size());
@@ -96,35 +95,36 @@ int PluginProcessor::getCurrentProgram()
     return 0;
 }
 
-void PluginProcessor::setCurrentProgram (int index)
+void PluginProcessor::setCurrentProgram (int)
 {
 }
 
-const juce::String PluginProcessor::getProgramName (int index)
+const juce::String PluginProcessor::getProgramName (int)
 {
     return {};
 }
 
-void PluginProcessor::changeProgramName (int index, const juce::String& newName)
+void PluginProcessor::changeProgramName (int, const juce::String&)
 {
 }
 
 //==============================================================================
-void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
+    // Everything is allocated here. The filters below work sample by sample, so a block of
+    // any size is processed without allocating; a host that prepares before it has a device
+    // (sample rate or block size 0) gets sane values.
     juce::dsp::ProcessSpec spec;
-    spec.sampleRate = sampleRate;
-    spec.maximumBlockSize = (juce::uint32) samplesPerBlock;
+    spec.sampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
+    spec.maximumBlockSize = (juce::uint32) (samplesPerBlock > 0 ? samplesPerBlock : 512);
     spec.numChannels = 1; // mono in/out
-    this->sampleRate = sampleRate;
 
     using FirCoeffs = juce::dsp::FIR::Coefficients<float>;
 
-    // Gain (user "gain" parameter drives it; see parameterChanged).
+    // Gain: the "gain" parameter, applied at the next block.
     gain.prepare(spec);
     gain.setGainDecibels(0.0f);
+    appliedGainDb = std::numeric_limits<float>::quiet_NaN();
 
     // Pre-LP FIR (remez low-pass): rolls the correction off above the driver's usable band.
     preLp.coefficients = FirCoeffs::Ptr(
@@ -174,29 +174,6 @@ void PluginProcessor::releaseResources()
     // spare memory, etc.
 }
 
-// void PluginProcessor::valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&)
-// {
-//     requiresUpdate.store (true);
-//     DBG("prop changed");
-// }
-
-void PluginProcessor::parameterChanged (const juce::String &parameterID, float newValue)
-{
-    if (parameterID == "gain")
-    {
-        DBG("gain changes");
-        gain.setGainDecibels(newValue);
-    }
-    // if (parameterID == "freq")
-    // {
-    //     DBG("freq changes");
-    //     auto& iirfilter = processorChain.get<1>();
-    //     *iirfilter.state = juce::dsp::IIR::ArrayCoefficients<float>::makeHighPass  (getSampleRate(), newValue);
-    // }
-
-    updatePlot();
-}
-
 #ifndef JucePlugin_PreferredChannelConfigurations
 bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
@@ -219,12 +196,21 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 }
 #endif
 
-void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
-    
-    // if (requiresUpdate.load())
-    //     update();
+
+    // Audio thread: nothing here allocates, locks or makes a syscall.
+    const float gainDb = gainParam->load (std::memory_order_relaxed);
+
+    if (! juce::exactlyEqual (gainDb, appliedGainDb))
+    {
+        gain.setGainDecibels (gainDb);
+        appliedGainDb = gainDb;
+    }
+
+    if (buffer.getNumChannels() == 0)
+        return;
 
     // Mono processing: gain -> pre-LP (FIR) -> pre-HP (IIR biquad cascade) -> inverse (FIR).
     auto inoutBlock = juce::dsp::AudioBlock<float> (buffer).getSubsetChannelBlock (0, 1);
@@ -251,12 +237,18 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 //==============================================================================
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    copyXmlToBinary (*apvts.copyState().createXml(), destData);
+    if (auto xml = apvts.copyState().createXml())
+        copyXmlToBinary (*xml, destData);
 }
 
 void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    apvts.replaceState (juce::ValueTree::fromXml (*getXmlFromBinary (data, sizeInBytes)));
+    // A state that is not ours, or not a state at all, is ignored: getXmlFromBinary() returns
+    // nullptr for it, and dereferencing that crashed the host.
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+
+    if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
+        apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
 //==============================================================================
@@ -264,13 +256,6 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new PluginProcessor();
-}
-
-void PluginProcessor::updatePlot()
-{
-//  auto& iirfilter = processorChain.get<1>();
-//  iirfilter.state->getMagnitudeForFrequencyArray(frequencies.data(), magnitudes.data(), frequencies.size(), sampleRate);
- sendChangeMessage();
 }
 
 void PluginProcessor::createFrequencyPlot(juce::Path& p, const std::vector<double>& freqs,  const std::vector<double>& mags, const juce::Rectangle<int>& bounds)
@@ -304,7 +289,7 @@ const std::vector<double>& PluginProcessor::getFrequencies ()
 void PluginProcessor::createLogFrequencyVector(std::vector<double>& frequencyVector, int numPoints, double minFreq, double maxFreq)
 {
     frequencyVector.clear(); // Clear any existing content
-    frequencyVector.reserve(numPoints);
+    frequencyVector.reserve((size_t) numPoints);
 
     // Calculate the logarithmic spacing between frequencies
     float logMinFreq = std::log(minFreq);

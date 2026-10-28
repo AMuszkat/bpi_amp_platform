@@ -10,11 +10,10 @@
     Replaces the old ResponsePlot. The curve maths and the responsiveness work carry
     over unchanged -- cached parameter pointers, one cached Path per setting rebuilt
     only when that setting's parameters change, and updates driven by APVTS listeners
-    rather than a polling timer (APVTS dispatches parameterChanged synchronously, so a
-    drag tracks the pointer with no added latency; the same callback arrives on the
-    audio thread for host automation, hence the atomic dirty mask + AsyncUpdater).
-    The design has no live/glide curve, so unlike its predecessor this component needs
-    no timer at all: it repaints on change and is otherwise idle.
+    (APVTS dispatches parameterChanged synchronously, so a drag tracks the pointer with no
+    added latency). The same callback arrives on the audio thread for host automation, where
+    it only sets an atomic dirty mask: posting the AsyncUpdater from there would allocate and
+    lock. A 30 Hz timer picks those changes up; it does nothing while nothing changed.
 
     AXES. The visible range is configurable (setViewLimits; default 20 Hz - 20 kHz and
     +/-28 dB, as the design specifies). The grid is generated from it: a line at every
@@ -25,6 +24,7 @@
 */
 class MorphPad  : public juce::Component,
                   private juce::AsyncUpdater,
+                  private juce::Timer,
                   private juce::AudioProcessorValueTreeState::Listener
 {
 public:
@@ -56,9 +56,8 @@ public:
 
 private:
     void handleAsyncUpdate() override;
+    void timerCallback() override;
     void parameterChanged (const juce::String& parameterID, float newValue) override;
-
-    void markSettingDirty (int setting);        // any thread
     void rebuildDirtyCurves();
 
     void updatePadArea();
@@ -111,6 +110,7 @@ private:
     bool fillDirty = true;
 
     std::atomic<int> pendingDirty { 0 };
+    const juce::Thread::ThreadID uiThread = juce::Thread::getCurrentThreadId();
     std::atomic<int> displayed { 0 };
 
     juce::Rectangle<float> padArea;

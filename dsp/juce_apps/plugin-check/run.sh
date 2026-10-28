@@ -30,29 +30,35 @@ BUILD_DIR="$(mkdir -p "${BUILD_DIR:-$HERE/build-check}" && cd "${BUILD_DIR:-$HER
 SRC="$ROOT/juce_plugins/$PLUGIN"
 [ -f "$SRC/CMakeLists.txt" ] || { echo "No plugin '$PLUGIN' in $ROOT/juce_plugins" >&2; exit 2; }
 
-echo "=== Building $PLUGIN: complete, control, headless"
-cmake -S "$SRC" -B "$BUILD_DIR/$PLUGIN" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR" > "$BUILD_DIR/$PLUGIN-configure.log"
-cmake --build "$BUILD_DIR/$PLUGIN" -j"$(nproc)" \
-      --target "${PLUGIN}_LV2" "${PLUGIN}_control_LV2" "${PLUGIN}_headless_LV2"
+# One build tree for the plugin's three targets and the in-process checker linked against each
+# (in-process/CMakeLists.txt), so the plugin is compiled once for both.
+PLUGIN_BUILD="$BUILD_DIR/$PLUGIN-builds"
+echo "=== Building $PLUGIN: complete, control, headless, and the in-process checks"
+cmake -S "$HERE/in-process" -B "$PLUGIN_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DPLUGIN_DIR="$SRC" -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR" > "$BUILD_DIR/$PLUGIN-configure.log"
+cmake --build "$PLUGIN_BUILD" -j"$(nproc)" \
+      --target "${PLUGIN}_LV2" "${PLUGIN}_control_LV2" "${PLUGIN}_headless_LV2" \
+               "${PLUGIN}_in_process" "${PLUGIN}_control_in_process" "${PLUGIN}_headless_in_process"
 
 echo "=== Building plugin-check"
 cmake -S "$HERE" -B "$BUILD_DIR/plugin-check" -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR" > "$BUILD_DIR/plugin-check-configure.log"
 cmake --build "$BUILD_DIR/plugin-check" -j"$(nproc)"
 
-bundle() { echo "$BUILD_DIR/$PLUGIN/${1}_artefacts/Release/LV2/$1.lv2"; }
+bundle() { echo "$PLUGIN_BUILD/plugin/${1}_artefacts/Release/LV2/$1.lv2"; }
 
 args=(--complete "$(bundle "$PLUGIN")"
       --control  "$(bundle "${PLUGIN}_control")"
       --headless "$(bundle "${PLUGIN}_headless")")
 
+probes=()
 if [ -f "$SRC/plugin-check.probes" ]; then
     while read -r line; do
         line="${line%%#*}"; line="${line// /}"
-        [ -n "$line" ] && args+=(--probe "$line")
+        [ -n "$line" ] && probes+=(--probe "$line")
     done < "$SRC/plugin-check.probes"
 fi
+args+=("${probes[@]}")
 
 # An empty home, so the LV2 host sees only the bundles named above, not the copies the build
 # put in ~/.lv2 (which may be stale or from another branch).
@@ -78,11 +84,26 @@ fi
 
 [ "$EDITOR" = 1 ] && args+=(--show-editor 8)
 
-echo "=== Running plugin-check"
 REPORT="$BUILD_DIR/$PLUGIN-report.txt"
+: > "$REPORT"
 set +e
+
+# Each build linked in directly: its monitors, its getters, its own state. The complete build
+# says what each monitor reads after the tone (EXPECT lines), which the hosted headless build
+# must then publish.
+echo "=== Running the in-process checks"
+in_process_ok=1
+for build in "$PLUGIN" "${PLUGIN}_control" "${PLUGIN}_headless"; do
+    "$PLUGIN_BUILD/${build}_in_process" "${probes[@]}" 2>&1 | tee -a "$REPORT"
+    [ "${PIPESTATUS[0]}" = 0 ] || in_process_ok=0
+done
+while read -r expect; do
+    args+=(--expect-monitor "$expect")
+done < <(sed -n 's/^EXPECT //p' "$REPORT")
+
+echo "=== Running plugin-check"
 "$BUILD_DIR/plugin-check/plugin-check_artefacts/Release/plugin-check" "${args[@]}" 2>&1 \
-    | grep --line-buffered -v 'attempt to map invalid URI' | tee "$REPORT" &
+    | grep --line-buffered -v 'attempt to map invalid URI' | tee -a "$REPORT" &
 CHECK=$!
 
 # Screenshot the control editor while it is up, when ImageMagick is there.
@@ -110,4 +131,4 @@ if [ "$EDITOR" = 1 ] && command -v import > /dev/null; then
 fi
 
 wait $CHECK
-grep -q '^ALL CHECKS PASSED' "$REPORT"
+[ $in_process_ok = 1 ] && grep -q '^ALL CHECKS PASSED' "$REPORT"

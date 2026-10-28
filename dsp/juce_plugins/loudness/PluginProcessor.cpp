@@ -63,9 +63,42 @@ LoudnessProcessor::LoudnessProcessor()
     glideParam      = apvts.getRawParameterValue (LoudnessIDs::glide);
     detectorParam   = apvts.getRawParameterValue (LoudnessIDs::detector);
     bypassParam     = apvts.getRawParameterValue (LoudnessIDs::bypass);
+
+    addMonitors();
 }
 
-LoudnessProcessor::~LoudnessProcessor() = default;
+LoudnessProcessor::~LoudnessProcessor()
+{
+    // Joins the notifier's thread while the parameters it watches still exist.
+    monitorNotifier.reset();
+}
+
+//==============================================================================
+void LoudnessProcessor::addMonitors()
+{
+    // After the APVTS has added the other parameters, so the monitors come last, and through
+    // addParameter() rather than the APVTS, so no saved state carries them (Monitors.h).
+    auto level = std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { LoudnessIDs::monLevelDb, 1 }, "Detector Level",
+        juce::NormalisableRange<float> { -120.0f, 0.0f, 0.1f }, -120.0f,
+        monitors::floatAttributes ("dBFS"));
+
+    auto setting = std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { LoudnessIDs::monActiveSetting, 1 }, "Active Setting",
+        0, LoudnessIDs::numSettings - 1, 0, monitors::intAttributes());
+
+    monitorLevelDb = level.get();
+    monitorActiveSetting = setting.get();
+    addParameter (level.release());
+    addParameter (setting.release());
+
+   #if ! SPEAKER_CONTROL
+    // The builds that measure tell the host when a monitor moves. The control build gets its
+    // values from outside, and whoever sets them notifies as it sees fit.
+    monitorNotifier = std::make_unique<monitors::Notifier> (
+        juce::Array<juce::AudioProcessorParameter*> { monitorLevelDb, monitorActiveSetting });
+   #endif
+}
 
 //==============================================================================
 juce::AudioProcessorValueTreeState::ParameterLayout LoudnessProcessor::createParameterLayout()
@@ -275,8 +308,10 @@ void LoudnessProcessor::setViewLimits (const ViewLimits& newLimits) noexcept
 
 void LoudnessProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // copyState() is a deep copy, so adding the view to it cannot race the live tree.
+    // copyState() is a deep copy, so adding the view to it cannot race the live tree. It holds
+    // no monitor (they are not APVTS parameters); removeFromState() makes that explicit.
     auto state = apvts.copyState();
+    monitors::removeFromState (state);
     const auto view = getViewLimits();
 
     juce::ValueTree viewTree (viewTag);
@@ -292,9 +327,15 @@ void LoudnessProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void LoudnessProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary (data, sizeInBytes))
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+
+    // A state that is not ours (or not a state at all) is ignored, never half-applied.
+    if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
     {
         auto state = juce::ValueTree::fromXml (*xml);
+
+        // A monitor is never restored, and never kept to be saved again.
+        monitors::removeFromState (state);
 
         // Sessions saved before the view existed simply keep the default view.
         if (auto viewTree = state.getChildWithName (viewTag); viewTree.isValid())

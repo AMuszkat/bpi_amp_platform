@@ -36,10 +36,13 @@ MorphPad::MorphPad (LoudnessProcessor& p)
             state.addParameterListener (qID, this);
         }
     }
+
+    startTimerHz (30);
 }
 
 MorphPad::~MorphPad()
 {
+    stopTimer();
     cancelPendingUpdate();
 
     auto& state = processor.getState();
@@ -71,18 +74,27 @@ void MorphPad::setDisplayedSetting (int index)
 void MorphPad::parameterChanged (const juce::String& parameterID, float)
 {
     // Synchronous, on whichever thread moved the parameter -- the message thread while
-    // dragging, the audio thread for host automation. Atomics only; the repaint happens
-    // in handleAsyncUpdate(). IDs are "s<setting>_e<band>_<what>", so char 1 is the set.
+    // dragging, the audio thread for host automation. IDs are "s<setting>_e<band>_<what>",
+    // so char 1 is the set.
     const int setting = (int) parameterID[1] - '0';
 
-    if (juce::isPositiveAndBelow (setting, LoudnessIDs::numSettings))
-        markSettingDirty (setting);
+    if (! juce::isPositiveAndBelow (setting, LoudnessIDs::numSettings))
+        return;
+
+    pendingDirty.fetch_or (1 << setting, std::memory_order_relaxed);
+
+    // On the thread that built this component (the message thread), repaint at once, so a
+    // drag tracks the pointer. On any other thread, only the atomic above: posting a message
+    // allocates and locks, and the audio thread must do neither. The timer picks it up.
+    // (MessageManager::isThisTheMessageThread() takes a mutex, hence the stored thread ID.)
+    if (juce::Thread::getCurrentThreadId() == uiThread)
+        triggerAsyncUpdate();
 }
 
-void MorphPad::markSettingDirty (int setting)
+void MorphPad::timerCallback()
 {
-    pendingDirty.fetch_or (1 << setting, std::memory_order_relaxed);
-    triggerAsyncUpdate();
+    if (pendingDirty.load (std::memory_order_relaxed) != 0)
+        handleAsyncUpdate();
 }
 
 void MorphPad::handleAsyncUpdate()

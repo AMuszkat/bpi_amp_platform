@@ -16,12 +16,15 @@ PlotComponent::PlotComponent (PluginProcessor& p, juce::AudioProcessorValueTreeS
     // Make sure that before the constructor has finished, you've set the
     // editor's size to whatever you need it to be.
     setSize (100, 100);
-    pluginProcessor.addChangeListener (this);
+
+    gainValue = valueTreeState.getRawParameterValue ("gain");
+    freqValue = valueTreeState.getRawParameterValue ("freq");
+    startTimerHz (30);
 }
 
 PlotComponent::~PlotComponent()
 {
-  pluginProcessor.removeChangeListener (this);
+    stopTimer();
 }
 
 //==============================================================================
@@ -63,8 +66,16 @@ void PlotComponent::paint (juce::Graphics& g)
 void PlotComponent::resized()
 {
 }
-void PlotComponent::changeListenerCallback(juce::ChangeBroadcaster* sender)
+void PlotComponent::timerCallback()
 {
+    const float gain = gainValue->load (std::memory_order_relaxed);
+    const float freq = freqValue->load (std::memory_order_relaxed);
+
+    if (juce::exactlyEqual (gain, plottedGain) && juce::exactlyEqual (freq, plottedFreq))
+        return;
+
+    plottedGain = gain;
+    plottedFreq = freq;
     updateFrequencyResponses();
     repaint();
 }
