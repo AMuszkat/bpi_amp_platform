@@ -178,8 +178,12 @@ On the monitor link, straight to the speaker whose values are wanted:
 in every build of the plugin (complete, control, headless), declared after the plugin's other
 parameters, not automatable, of category output meter, and left out of the plugin's saved
 state. The headless and complete builds write it from the audio thread's atomics through
-`setValue` (no host notification from the audio thread); JUCE's LV2 wrapper then reports the
-change to the host after the cycle, which is how `speakerd` sees it. The control build's
+`setValue` (no host notification from the audio thread). JUCE's LV2 wrapper reports only
+parameters its listener was told about, not a bare `setValue`, so a low-priority thread of
+the plugin tells it about changed monitors every 16 ms or so (and about all of them once a
+second); the wrapper then sends them to the host after its next cycle, which is how `speakerd`
+sees them, with `getValue()` on its monitor thread. A monitor therefore reaches the host only
+while the plugin processes, about 16 ms and one cycle after it changed. The control build's
 proxy fills it from the stream, and the plugin's own getters (`getLevelDb()` and friends) read
 it there, so the editor code does not change. `loudness` publishes `mon_levelDb`
 (dBFS, -120 to 0) and `mon_activeSetting` (0 to 3).
