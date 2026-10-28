@@ -81,7 +81,7 @@ namespace speakerd
 
         LoadedLayer passthrough;
         passthrough.name = "passthrough";
-        passthrough.built = builder.buildPassthrough (role, sampleRate, maxBlock);
+        passthrough.built = builder.buildPassthrough (sampleRate, maxBlock);
 
         log ("*** PASSTHROUGH: no state layer loaded ***");
         log ("using layer passthrough: woofer = " + channel + " at " + juce::String (passthroughGainDb, 0)

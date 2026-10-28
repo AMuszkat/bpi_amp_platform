@@ -6,7 +6,9 @@ cmake_minimum_required(VERSION 3.22)
 
 # 0.2.0: device.json's "limits" (a missing one is the fail-safe), --import-filtergraph.
 # 0.2.1: its own sink at priority.driver 0 and said loudly, client-rt.conf, the commit in --version.
-project(SPEAKERD VERSION 0.2.1)
+# 0.3.0: the local link to ampd (docs/protocol.md): parameters, graph revisions, status, the Mine
+#        pin, and the monitor thread (output/level, plugins' mon_ parameters).
+project(SPEAKERD VERSION 0.3.0)
 
 # A cross build (tools/build.sh speakerd aarch64) links the target's libpipewire, never this
 # machine's, and checks that it does (below) by the target's multiarch triplet.
@@ -41,12 +43,15 @@ juce_add_console_app(speakerd PRODUCT_NAME "speakerd")
 target_sources(speakerd
     PRIVATE
         Main.cpp
+        Control.cpp
         DeviceConfig.cpp
         FilterGraph.cpp
         GraphDocument.cpp
         GraphBuilder.cpp
         LV2State.cpp
+        LocalLink.cpp
         Engine.cpp
+        Monitor.cpp
         PipeWireNode.cpp
         Render.cpp
         StateLayers.cpp)

@@ -23,11 +23,40 @@ namespace speakerd
         juce::StringArray warnings;
     };
 
+    /** A monitor is a read-only parameter whose ID starts with this (docs/protocol.md): never
+        set, never in a document. */
+    inline bool isMonitorId (const juce::String& id)    { return id.startsWith ("mon_"); }
+
+    /** A hosted parameter, and what it takes to turn a value in the plugin's own units into its
+        normalised value and back, read once, while the plugin is not running. After that,
+        toNormalised() only calls the parameter's getValueForText, which reads constants. */
+    struct HostedParameter
+    {
+        juce::AudioProcessorParameter* parameter = nullptr;
+        juce::String id;              // the ID the plugin declared (the part after its URI)
+        juce::StringArray choices;    // a choice's (or a switch's) labels; empty for anything else
+        bool isBoolean = false;
+        double lowest = 0.0, highest = 1.0;   // the plugin's own values at 0 and at 1
+
+        /** The plugin's own value for a normalised one (JUCE's LV2 hosting maps the plugin's
+            range linearly). */
+        double plainValue (float normalised) const noexcept   { return lowest + (double) normalised * (highest - lowest); }
+    };
+
+    /** Every hosted parameter of a plugin, in its order. Message thread, before it runs. */
+    std::vector<HostedParameter> describeParameters (juce::AudioProcessor&);
+
+    /** A value in the plugin's own units, as in a document (a number, a choice's text, a
+        switch's true/false), as the parameter's normalised value. A value outside the range is
+        clamped, with a warning added. Any thread, for a parameter described above. */
+    juce::Result toNormalised (const HostedParameter&, const juce::var& value, float& normalised,
+                               juce::StringArray& warnings, const juce::String& where);
+
     /** Sets a hosted plugin's parameters from a document's values (`params` of a node: the
-        plugin's own units, by parameter ID), as a layer does. Fails on an unknown parameter ID or
-        a value the parameter cannot take; a value outside the range is clamped, with a warning.
-        A hosted LV2 plugin takes them in its next processBlock calls. Message thread, on a
-        plugin that is not running. */
+        plugin's own units, by parameter ID), as a layer does. Fails on an unknown parameter ID,
+        a monitor's (mon_), or a value the parameter cannot take; a value outside the range is
+        clamped, with a warning. A hosted LV2 plugin takes them in its next processBlock calls.
+        Message thread, on a plugin that is not running. */
     juce::Result setParameters (juce::AudioProcessor&, const std::vector<std::pair<juce::String, juce::var>>& params,
                                 const juce::String& where, const juce::String& pluginName, juce::StringArray& warnings);
 
@@ -45,10 +74,11 @@ namespace speakerd
             feeds itself (a loop). */
         juce::Result build (const GraphDocument&, double sampleRate, int maxBlock, BuiltGraph&);
 
-        /** The last layer, passthrough: no plugin at all. The speaker's own channel (left: FL,
-            right: FR, mono: (FL + FR) / 2) goes to the woofer at passthroughGainDb, clamped to
-            that level and with NaN and infinity as 0, and the tweeter gets nothing. */
-        BuiltGraph buildPassthrough (Role, double sampleRate, int maxBlock);
+        /** The last layer, passthrough: no plugin at all. The input node's Mine channel, the
+            speaker's own channel (left: FL, right: FR, mono: (FL + FR) / 2, made by the Engine
+            from device.json's role), goes to the woofer at passthroughGainDb, clamped to that
+            level and with NaN and infinity as 0, and the tweeter gets nothing. */
+        BuiltGraph buildPassthrough (double sampleRate, int maxBlock);
 
     private:
         juce::AudioPluginFormatManager& formats;

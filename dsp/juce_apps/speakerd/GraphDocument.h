@@ -18,12 +18,14 @@ namespace speakerd
     struct GraphDocument
     {
         /** Reserved node uids. 1 to 15 are kept for nodes speakerd provides itself. */
-        static constexpr juce::uint32 inputNode  = 1;   // outputs: 0 = FL, 1 = FR (2 = Mine, step 3)
+        static constexpr juce::uint32 inputNode  = 1;   // outputs: 0 = FL, 1 = FR, 2 = Mine
         static constexpr juce::uint32 outputNode = 2;   // inputs: 0 = woofer, 1 = tweeter
         static constexpr juce::uint32 firstPluginNode = 16;
 
-        static constexpr int inputChannels  = 2;
+        static constexpr int inputChannels  = 3;   // FL, FR, and Mine: the speaker's own channel, by its role
         static constexpr int outputChannels = 2;
+        static constexpr int mineChannel    = 2;
+        static constexpr int streamChannels = 2;   // what a player plays: FL, FR
 
         struct Node
         {
@@ -61,5 +63,8 @@ namespace speakerd
         /** Parses and checks the document: structure, types, uids, and that every connection
             names nodes that exist (channel counts of plugins are checked when they load). */
         static juce::Result parse (const juce::String& json, GraphDocument& out);
+
+        /** The same, for a document that is already JSON (the `document` of an `apply`). */
+        static juce::Result parse (const juce::var& json, GraphDocument& out);
     };
 }
