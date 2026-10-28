@@ -10,13 +10,15 @@
 //   6. the monitors (parameters whose IDs start with "mon_", docs/protocol.md): the three builds
 //      have the same ones, no saved state carries them, and the hosted headless build publishes
 //      what the complete build's getters read for the same tone (--expect-monitor, from the
-//      in-process check that run.sh runs first);
+//      in-process check that run.sh runs first), also when it is created, played at three
+//      sample rates and destroyed over and over, as speakerd does;
 //   7. optionally, the control build's editor opens in a window (for a screenshot).
 //
 // Usage:
 //   plugin-check --complete <bundle.lv2> --control <bundle.lv2> --headless <bundle.lv2>
 //                [--probe <paramID>=<normalised value> ...]
-//                [--expect-monitor <paramID>=<value>:<tolerance> ...] [--show-editor <seconds>]
+//                [--expect-monitor <paramID>=<value>:<tolerance> ...]
+//                [--show-editor <seconds> [--editor-until <file>]]
 //
 // The probes are set before the audio check, so it can turn on something audible (a gain,
 // a forced setting). Exit status 0 means every check passed.
@@ -25,8 +27,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <cmath>
+#include <dlfcn.h>
 #include <map>
-#include <thread>
+#include <vector>
 
 namespace
 {
@@ -245,11 +248,11 @@ namespace
         return found;
     }
 
-    /** Plays the -20 dBFS tone of render() through the plugin, then keeps playing it for half a
-        second in real time, the way a host on the speaker would: a plugin reports a monitor
-        after the cycles that follow a change, and its notifier runs on the wall clock. Returns
-        each monitor's value as the host sees it, read while the plugin is still playing. */
-    std::map<juce::String, float> playAndReadMonitors (juce::AudioPluginInstance& p, double sampleRate, int blockSize)
+    /** Plays the -20 dBFS tone of render() through the plugin for `seconds` and returns each
+        monitor's value as the host sees it: a plugin reports a monitor in the cycle that
+        published it, so the host has the last one when the tone ends. */
+    std::map<juce::String, float> playAndReadMonitors (juce::AudioPluginInstance& p, double sampleRate, int blockSize,
+                                                       double seconds = 2.0)
     {
         const int channels = juce::jmax (p.getTotalNumInputChannels(), p.getTotalNumOutputChannels());
         juce::AudioBuffer<float> block (channels, blockSize);
@@ -270,17 +273,8 @@ namespace
 
         p.prepareToPlay (sampleRate, blockSize);
 
-        while (position < (int64_t) (2.0 * sampleRate))
+        while (position < (int64_t) (seconds * sampleRate))
             playBlock();
-
-        const auto blockTime = std::chrono::microseconds ((int64_t) (1.0e6 * blockSize / sampleRate));
-        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds (500);
-
-        while (std::chrono::steady_clock::now() < until)
-        {
-            playBlock();
-            std::this_thread::sleep_for (blockTime);
-        }
 
         std::map<juce::String, float> values;
 
@@ -299,9 +293,61 @@ namespace
         return values;
     }
 
-    /** Shows the editor in a window and keeps it up for `seconds`. */
-    void showEditor (juce::AudioPluginInstance& p, int seconds)
+    /** Makes X errors non-fatal for the rest of the run.
+
+        Every LV2 bundle carries its own copy of JUCE, and each copy, when it starts its X
+        connection, saves the process's X error handler, installs its own, and (around its
+        XShm probe) swaps a trap handler in and out again. The plugins' copies do that on their
+        own message threads while the host's copy does it on this one, so the saves and
+        restores can interleave and leave Xlib's default handler installed, which prints
+        "X Error of failed request" and exits the process. A harmless error then
+        kills the run: under load, the embedded editor is sometimes configured to 0x0 before
+        it has its size (BadValue in X_ConfigureWindow), and plugin-check died with its editor
+        window never painted. This installs a handler that counts the error and carries on,
+        as JUCE's own does. libX11 is loaded at runtime here, as JUCE loads it. */
+    int xErrors = 0, defaultHandlersReplaced = 0;
+    std::map<juce::String, int> xErrorKinds;
+
+    /** The head of Xlib's XErrorEvent, without including Xlib.h (whose macros clash with JUCE). */
+    struct XErrorEventHead
     {
+        int type;
+        void* display;
+        unsigned long resourceId, serial;
+        unsigned char errorCode, requestCode, minorCode;
+    };
+
+    void makeXErrorsNonFatal()
+    {
+        using Handler = int (*) (void*, XErrorEventHead*);
+        using SetHandler = Handler (*) (Handler);
+
+        if (auto* x11 = dlopen ("libX11.so.6", RTLD_LAZY))
+            if (auto set = reinterpret_cast<SetHandler> (dlsym (x11, "XSetErrorHandler")))
+                if (set ([] (void*, XErrorEventHead* e)
+                         {
+                             ++xErrors;
+                             ++xErrorKinds["error " + juce::String (e->errorCode) + " in request " + juce::String (e->requestCode)];
+                             return 0;
+                         }) == nullptr)
+                    ++defaultHandlersReplaced;     // Xlib's default, fatal, was in place
+    }
+
+    /** Shows the editor in a window and keeps it up for `seconds`, or until `untilFile` exists
+        (run.sh creates it once it has its screenshot: under load a plugin's editor can take
+        seconds to paint for the first time, and a fixed time either wastes time or closes the
+        window before the screenshot).
+
+        While it waits, run.sh may create `untilFile` + ".nudge" when its captures still show an
+        unpainted editor. Under load the embedded LV2 editor sometimes stays an unpainted
+        rectangle for good: the client window is never mapped into JUCE's XEmbed host window
+        (the host maps it when it sees the client's XEMBED_MAPPED flag, re-read whenever the
+        component's visibility changes). Hiding and showing the window again makes the host
+        look again. */
+    void showEditor (juce::AudioPluginInstance& p, int seconds, const juce::File& untilFile)
+    {
+        makeXErrorsNonFatal();
+
         std::unique_ptr<juce::AudioProcessorEditor> editor (p.createEditorIfNeeded());
         report (editor != nullptr, "control editor opens");
 
@@ -314,12 +360,48 @@ namespace
         window.setContentNonOwned (editor.get(), true);
         window.setTopLeftPosition (0, 0);
         window.setVisible (true);
+        makeXErrorsNonFatal();      // in case a copy of JUCE restored another one meanwhile
 
         std::cout << "EDITOR " << editor->getWidth() << "x" << editor->getHeight() << std::endl;
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (seconds * 1000);
+        const auto end = juce::Time::getMillisecondCounter() + (juce::uint32) seconds * 1000;
+
+        const auto nudgeFile = untilFile.withFileExtension (untilFile.getFileExtension() + ".nudge");
+        int nudges = 0;
+
+        while (juce::Time::getMillisecondCounter() < end
+                && (untilFile == juce::File() || ! untilFile.existsAsFile()))
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+
+            if (untilFile != juce::File() && nudgeFile.existsAsFile())
+            {
+                nudgeFile.deleteFile();
+                window.setVisible (false);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+                window.setVisible (true);
+                ++nudges;
+            }
+        }
+
+        if (nudges > 0)
+            std::cout << "(the editor window was hidden and shown again " << nudges
+                      << " time(s), because it had not painted)" << std::endl;
 
         window.clearContentComponent();
         editor.reset();
+
+        if (xErrors > 0 || defaultHandlersReplaced > 0)
+        {
+            juce::StringArray kinds;
+
+            for (const auto& [kind, count] : xErrorKinds)
+                kinds.add (juce::String (count) + " x " + kind);
+
+            std::cout << "(X: " << xErrors << " error(s) ignored while the editor was up"
+                      << (kinds.isEmpty() ? juce::String() : ": " + kinds.joinIntoString (", "))
+                      << "; Xlib's fatal default handler was "
+                      << (defaultHandlersReplaced > 0 ? "in place, and replaced" : "not in place") << ")" << std::endl;
+        }
     }
 }
 
@@ -330,6 +412,7 @@ int main (int argc, char* argv[])
     juce::String complete, control, headless;
     juce::StringArray probes, expectedMonitors;
     int editorSeconds = 0;
+    juce::File editorUntil;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -342,6 +425,7 @@ int main (int argc, char* argv[])
         else if (arg == "--probe")       { probes.add (next); ++i; }
         else if (arg == "--expect-monitor") { expectedMonitors.add (next); ++i; }
         else if (arg == "--show-editor") { editorSeconds = next.getIntValue(); ++i; }
+        else if (arg == "--editor-until") { editorUntil = juce::File (next); ++i; }
         else
         {
             std::cerr << "unknown argument " << arg << std::endl;
@@ -352,7 +436,8 @@ int main (int argc, char* argv[])
     if (complete.isEmpty() || control.isEmpty() || headless.isEmpty())
     {
         std::cerr << "usage: plugin-check --complete <bundle> --control <bundle> --headless <bundle>"
-                     " [--probe id=value ...] [--show-editor seconds]" << std::endl;
+                     " [--probe id=value ...] [--expect-monitor id=value:tolerance ...]"
+                     " [--show-editor seconds [--editor-until file]]" << std::endl;
         return 2;
     }
 
@@ -499,7 +584,24 @@ int main (int argc, char* argv[])
         // The hosted headless build, set up from the control build's state as in check 5,
         // publishes what the complete build's getters read for the same tone. The hosted
         // complete build is read too: it publishes the same way.
-        if (! expectedMonitors.isEmpty())
+        struct Expectation { juce::String id; float value, tolerance; };
+        std::vector<Expectation> expectations;
+
+        for (const auto& expected : expectedMonitors)
+        {
+            const auto rest = expected.fromFirstOccurrenceOf ("=", false, false);
+            expectations.push_back ({ expected.upToFirstOccurrenceOf ("=", false, false),
+                                      rest.upToFirstOccurrenceOf (":", false, false).getFloatValue(),
+                                      rest.fromFirstOccurrenceOf (":", false, false).getFloatValue() });
+        }
+
+        const auto meets = [] (const std::map<juce::String, float>& values, const Expectation& e)
+        {
+            const auto it = values.find (e.id);
+            return it != values.end() && std::abs (it->second - e.value) <= e.tolerance + 1.0e-4f;
+        };
+
+        if (! expectations.empty())
         {
             for (auto* p : { pComplete.get(), pControl.get(), pHeadless.get() })
             {
@@ -517,21 +619,61 @@ int main (int argc, char* argv[])
             {
                 const auto values = playAndReadMonitors (*p, sampleRate, blockSize);
 
-                for (const auto& expected : expectedMonitors)
+                for (const auto& e : expectations)
                 {
-                    const auto id = expected.upToFirstOccurrenceOf ("=", false, false);
-                    const auto rest = expected.fromFirstOccurrenceOf ("=", false, false);
-                    const auto want = rest.upToFirstOccurrenceOf (":", false, false).getFloatValue();
-                    const auto tolerance = rest.fromFirstOccurrenceOf (":", false, false).getFloatValue();
-                    const auto it = values.find (id);
+                    const auto it = values.find (e.id);
 
-                    report (it != values.end() && std::abs (it->second - want) <= tolerance + 1.0e-4f,
-                            "hosted " + p->getName() + " publishes " + id + " as the complete build's getter reads it",
+                    report (meets (values, e),
+                            "hosted " + p->getName() + " publishes " + e.id + " as the complete build's getter reads it",
                             it == values.end() ? juce::String ("no such monitor")
                                                : "host reads " + juce::String (it->second, 3) + ", getter "
-                                                   + juce::String (want, 3) + ", tolerance " + juce::String (tolerance, 3));
+                                                   + juce::String (e.value, 3) + ", tolerance " + juce::String (e.tolerance, 3));
                 }
             }
+
+            // speakerd creates and destroys instances on every graph it applies, and prepares
+            // them again when the rate changes: a plugin that publishes monitors has to survive
+            // that, and keep publishing. Each cycle loads the headless build, restores the
+            // control build's state, plays the tone at three sample rates, reads the monitors
+            // after each, and destroys it.
+            constexpr int cycles = 40;
+            const double rates[] { 44100.0, 48000.0, 96000.0 };
+            int published = 0;
+            juce::String firstMiss;
+
+            for (int cycle = 0; cycle < cycles; ++cycle)
+            {
+                juce::String error;
+                auto instance = formats.createPluginInstance (pHeadless->getPluginDescription(), sampleRate, blockSize, error);
+
+                if (instance == nullptr)
+                {
+                    firstMiss = "cycle " + juce::String (cycle) + " did not load: " + error;
+                    break;
+                }
+
+                transferState (*pControl, *instance, sampleRate, blockSize);
+
+                for (const auto rate : rates)
+                {
+                    const auto values = playAndReadMonitors (*instance, rate, blockSize);
+                    bool all = true;
+
+                    for (const auto& e : expectations)
+                        all = all && meets (values, e);
+
+                    if (all)
+                        ++published;
+                    else if (firstMiss.isEmpty())
+                        firstMiss = "cycle " + juce::String (cycle) + " at " + juce::String (rate) + " Hz";
+                }
+            }
+
+            report (published == cycles * 3,
+                    "the hosted headless build, created, played at 44.1, 48 and 96 kHz and destroyed "
+                        + juce::String (cycles) + " times, publishes its monitors every time",
+                    juce::String (published) + " of " + juce::String (cycles * 3)
+                        + (firstMiss.isEmpty() ? juce::String() : ", first miss: " + firstMiss));
         }
         else
         {
@@ -542,7 +684,7 @@ int main (int argc, char* argv[])
 
     // 7. Editor
     if (editorSeconds > 0)
-        showEditor (*pControl, editorSeconds);
+        showEditor (*pControl, editorSeconds, editorUntil);
 
     pComplete.reset();
     pControl.reset();

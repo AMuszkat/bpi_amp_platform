@@ -99,10 +99,10 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   timer. Buffers are sized in `prepareToPlay`, and a larger block is processed in chunks,
   never by resizing.
 - **Monitors** (`mon_` parameters, `docs/protocol.md`) are added with `addParameter()` after
-  the APVTS, never through it, and are written on the audio thread with `setValue()` only.
-  JUCE's LV2 wrapper does not report a `setValue()`: the plugin's notifier thread
-  (`loudness/Monitors.h`) is what makes a host see them. Their getters go in
-  `<plugin>/plugin-check.monitors.h`.
+  the APVTS, never through it, and published on the audio thread with `monitors::publish()`
+  (`loudness/Monitors.h`): JUCE's LV2 wrapper does not report a bare `setValue()`, and
+  notifying from any other thread can race the wrapper's cleanup into a destroyed listener.
+  Their getters go in `<plugin>/plugin-check.monitors.h`.
 - `crossover` and `firConv` compile in the generated headers; `loudness` and `ampScope` are
   pure-parameter plugins. `ampScope` talks to the MAX98396 driver only via `snd_ctl_*` /
   `snd_pcm_*`, never I²C. Extend the driver rather than work around it.

@@ -62,9 +62,9 @@ so that the speaker host can read them and the controller can show them
 They are in every build, declared after the other parameters, not automatable, of category
 output meter, and never in the saved state: they are added with `addParameter()`, not through
 the APVTS, and `setStateInformation()` drops any `mon_` entry a state brings. The complete and
-headless builds write them from the audio thread about 60 times a second with a plain
-`setValue()`, and a notifier thread tells the host (see `Monitors.h` for why JUCE's LV2 wrapper
-needs that). In the control build nothing measures: the getters read the two parameters, so
+headless builds publish them from the audio thread about 60 times a second: `setValue()`,
+then a notification when the value moved, which JUCE's LV2 wrapper needs to report it to the
+host (see `Monitors.h` for why it has to come from the audio thread). In the control build nothing measures: the getters read the two parameters, so
 the editor shows whatever value they are given. With the 35 parameters, the host-side bypass
 JUCE's LV2 hosting adds and the two monitors, an LV2 host sees 38 parameters.
 
@@ -73,7 +73,7 @@ JUCE's LV2 hosting adds and the two monitors, an LV2 host sees 38 parameters.
 - `PluginProcessor.*`: parameters, state and the getters (every build). `LoudnessDsp.cpp`:
   detector, setting selection, glide, biquads, and writing the monitors (not in the control
   build).
-- `Monitors.h`: the monitor helpers (declaring, writing, removing from a state, the notifier).
+- `Monitors.h`: the monitor helpers (declaring, publishing, removing from a state).
 - `plugin-check.monitors.h`: which getter reads which monitor, for plugin-check's in-process
   check; not compiled into the plugin.
 - `MorphPad.*`: the pad. Its static half (grid, ghost curves) is cached in an opaque

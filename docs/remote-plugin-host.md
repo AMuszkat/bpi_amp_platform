@@ -657,15 +657,20 @@ mon_levelDb        AudioParameterFloat  -120 to 0 dBFS   // read by getLevelDb()
 mon_activeSetting  AudioParameterInt    0 to 3           // read by getActiveSetting()
 ```
 
-The complete and headless builds write them from the audio thread's atomics about 60 times a
-second with a plain `setValue()`. JUCE's LV2 wrapper reports to the host only the parameters
-it was told about through its `AudioProcessorListener`, which `setValue()` does not do, so a
-low-priority notifier thread in the plugin (`Monitors.h`) tells the listeners when a value
-moved, and the wrapper sends a `patch:Set` after the next cycle: that is the value `speakerd`
-reads from its hosted parameter. The control build's getters read the same parameters, which
-the controller fills from the stream, so the editor code does not change. `plugin-check`
+The complete and headless builds publish them from the audio thread's atomics about 60 times a
+second (`Monitors.h`): `setValue()`, then, when the value moved (and once a second anyway),
+`sendValueChangedMessageToListeners()`. JUCE's LV2 wrapper reports to the host only the
+parameters its `AudioProcessorListener` heard change, and sends them in a `patch:Set` at the
+end of the same `run()`: that is the value `speakerd` reads from its hosted parameter. The
+notification has to come from inside `run()`: the wrapper destroys its listener before the
+processor and walks the listeners without a lock, so a plugin thread notifying while the host
+cleans up could call into a destroyed object, and run and cleanup never overlap. It costs the
+audio thread an uncontended per-parameter lock and an atomic flag, what the wrapper itself
+does for every parameter the host sets. The control build's getters read the same parameters,
+which the controller fills from the stream, so the editor code does not change. `plugin-check`
 proves each step: the hosted headless build publishes what the complete build's getter reads,
-no saved state carries a monitor, and setting one moves the control build's getter.
+also over 40 create, play and destroy cycles at three sample rates, no saved state carries a
+monitor, and setting one moves the control build's getter.
 
 Frame streams use a shared view-model class that turns a
 ring buffer into a frame (trigger search, window selection, one min/max pair per pixel
