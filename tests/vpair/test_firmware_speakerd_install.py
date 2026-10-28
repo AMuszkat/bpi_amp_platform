@@ -43,8 +43,9 @@ Pass when:
   or alsa-playback-pcm; none or an ambiguous set is refused, naming the sinks; on a virtual
   speaker (whose amplifier is a null sink) install refuses without --amplifier, and with
   --amplifier amplifier reads its ports playback_FL and playback_FR;
-- smoke reports, each as a failure: a `device.json: FAILED` line, fail-safe limits, `device: no
-  limits`, and no limits line at all;
+- smoke passes the exact line `speakerd: device: limits: output at -20 dB, tweeter muted` when
+  device.json has those limits, and reports, each as a failure: a `device.json: FAILED` line,
+  the limits line with either fail-safe suffix (or any other), and no limits line at all;
 - snapcast-setup.sh --route speakerd refuses while no PipeWire config defines the speakerd
   sink, and after `speakerd-setup.sh sink` routes snapclient (and shairport-sync and an
   AudioPluginHost) into "speakerd"; uninstall routes snapclient back to Ap.cap first, removes
@@ -405,21 +406,32 @@ class Install(unittest.TestCase):
         home = self.fresh_home("smoke")
         self.install(home, "--role", "left")
         start = "speakerd-run: starting speakerd x from layer current (test)"
+        limits = "speakerd: device: limits: output at -20 dB, tweeter muted"
+        not_capped = "FAIL speakerd does not play device.json's limits"
         cases = {
-            "fail-safe": ([start, "speakerd: device.json: FAILED: limits: no such key; using the defaults",
-                           "speakerd: device: limits: output at -20 dB, tweeter muted (fail-safe)"],
-                          ["FAIL device.json: FAILED", "FAIL speakerd plays with its fail-safe limits"]),
-            "no limits": ([start, "speakerd: device: no limits"], ["FAIL speakerd plays with no limits"]),
+            "not read": ([start, "speakerd: device.json: FAILED: limits: unknown key 'limts'; using the defaults",
+                          limits + " (device.json not read: the fail-safe)"],
+                         ["FAIL device.json: FAILED", not_capped]),
+            "no limits": ([start, limits + " (no limits in device.json: the fail-safe)"], [not_capped]),
+            "another suffix": ([start, limits + " (something else)"], [not_capped]),
             "silent": ([start], ["FAIL speakerd did not say which limits it enforces"]),
         }
         for name, (lines, fails) in cases.items():
-            log = self.tmp / f"smoke-{name}.log"
+            log = self.tmp / f"smoke-{name.replace(' ', '-')}.log"
             log.write_text("\n".join(lines) + "\n")
             result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
                               "--window", "0", env=self.env, check=False)
             self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn("pass capped", result.stdout, name)
             for fail in fails:
                 self.assertIn(fail, result.stdout, name)
+        # The exact line, with device.json's own limits, passes that check (no PipeWire here, so
+        # smoke fails on the links all the same).
+        log = self.tmp / "smoke-capped.log"
+        log.write_text("\n".join([start, limits]) + "\n")
+        result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                          "--window", "0", env=self.env, check=False)
+        self.assertIn("pass capped: output at -20 dB, tweeter muted", result.stdout)
 
     def test_routing_and_uninstall(self):
         home = self.fresh_home("routing")

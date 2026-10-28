@@ -36,10 +36,13 @@ HELPER="$FIRMWARE_DIR/speakerd/setup-helper.py"
 
 CAP_GAIN_DB=-20.0
 CAP_TWEETER=muted
-# The oldest speakerd that may play on a board: the first that enforces device.json's limits
-# (and fails closed without them) and says its version (--version). An older one would ignore
-# the cap, so install and rollback refuse it. Confirm against dsp/juce_apps/speakerd/README.md.
+# The oldest speakerd that may play on a board: 0.2.0 is the first that enforces device.json's
+# limits (and fails closed without them) and says its version (speakerd --version). An older one
+# would ignore the cap, so install and rollback refuse it (dsp/juce_apps/speakerd/README.md).
 SPEAKERD_MIN_VERSION=0.2.0
+# speakerd's line for the limits it plays, exactly; with the fail-safe it adds a suffix, such as
+# " (no limits in device.json: the fail-safe)", which is never device.json's limits.
+LIMITS_LINE='^speakerd: device: limits: output at (-?[0-9.]+(e[-+]?[0-9]+)?) dB, tweeter (muted|on)$'
 RC_LOCAL=/etc/rc.local   # private-ok: a file on the board, not a host name
 
 # ----------------------------------------------------------------------------
@@ -539,16 +542,16 @@ check_started() {   # $1 = epoch seconds of the restart
     local log="" line
     for _ in $(seq 1 30); do
         log="$(journalctl --user -u speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
-        grep -qE '^speakerd: device(: limits|: no limits|\.json: FAILED)' <<< "$log" && break
+        grep -qE '^speakerd: device(: limits|\.json: FAILED)' <<< "$log" && break
         sleep 0.5
     done
     if line="$(grep -m1 '^speakerd: device.json: FAILED' <<< "$log")"; then
         loud "speakerd could not read device.json and plays with its fail-safe defaults:" "${line#speakerd: }"
         exit 1
     fi
-    if line="$(grep -m1 -E '^speakerd: device(: limits|: no limits)' <<< "$log")"; then
-        if grep -qiE 'fail.?safe|no limits' <<< "$line"; then
-            loud "speakerd plays with its fail-safe limits, not device.json's:" "${line#speakerd: }"
+    if line="$(grep -m1 '^speakerd: device: limits: ' <<< "$log")"; then
+        if [[ ! "$line" =~ $LIMITS_LINE ]]; then
+            loud "speakerd does not play device.json's limits:" "${line#speakerd: }"
             exit 1
         fi
         ok "${line#speakerd: }"
@@ -953,10 +956,10 @@ do_smoke() {
     want_gain="$(json_get "$device" '(d.get("limits") or {}).get("gain_db")')"
     want_tweeter="$(json_get "$device" '(d.get("limits") or {}).get("tweeter")')"
     if line="$(grep -m1 '^speakerd: device: limits: ' <<< "$since")"; then
-        gain="$(sed -n -E 's/.*output at (-?[0-9.]+) dB.*/\1/p' <<< "$line")"
-        tweeter_on="$(sed -n -E 's/.*tweeter (muted|on).*/\1/p' <<< "$line")"
-        if grep -qiE 'fail.?safe' <<< "$line"; then
-            failed "speakerd plays with its fail-safe limits, not device.json's: ${line#speakerd: }"
+        gain=""; tweeter_on=""
+        if [[ "$line" =~ $LIMITS_LINE ]]; then gain="${BASH_REMATCH[1]}"; tweeter_on="${BASH_REMATCH[3]}"; fi
+        if [ -z "$gain" ]; then
+            failed "speakerd does not play device.json's limits: '${line#speakerd: }'"
         elif [ -z "$want_gain" ]; then
             failed "device.json has no limits (speakerd then plays with its fail-safe ones; say them explicitly): ${line#speakerd: }"
         elif [ -z "$gain" ] || ! awk -v a="$gain" -v b="$want_gain" 'BEGIN { exit !(a - b < 0.001 && b - a < 0.001) }' || [ "$tweeter_on" != "$want_tweeter" ]; then
@@ -966,8 +969,6 @@ do_smoke() {
         else
             noted "the cap is lifted: output at $gain dB, tweeter $tweeter_on (only a person does that, after a smoke test)"
         fi
-    elif grep -q '^speakerd: device: no limits' <<< "$since"; then
-        failed "speakerd plays with no limits ('device: no limits'): device.json must cap it"
     else
         failed "speakerd did not say which limits it enforces ('device: limits: ...'): a speakerd without the limits must not play on a board"
     fi

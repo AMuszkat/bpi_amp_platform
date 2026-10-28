@@ -22,19 +22,20 @@ Pass when:
   above -20 dBFS (by more than a float's rounding, 0.01 dB), live or in the render;
 - passthrough (no layer) with the same limits peaks at no more than -40 dBFS on the woofer, and
   plays (above -50 dBFS), with the tweeter at exact zeros, for a +6 dBFS input;
-- a device.json with no `limits` says it plays the fail-safe limits; one with a misspelt
-  `"limts"`, one that is not valid JSON and a missing one each say `device.json: FAILED`; and
-  each plays the boost document at -1 dBFS with the tweeter at exact zeros and the woofer at
-  no more than -20 dBFS (and above -30 dBFS: it plays).
+- speakerd says `device: limits: output at 0 dB, tweeter on` and `... -20 dB, tweeter muted`
+  for those two device.json, exactly;
+- a device.json with no `limits` says `device: limits: output at -20 dB, tweeter muted (no
+  limits in device.json: the fail-safe)`; one with a misspelt `"limts"`, one that is not valid
+  JSON and a missing one each say `device.json: FAILED` and `... tweeter muted (device.json not
+  read: the fail-safe)`; and each plays the boost document at -1 dBFS with the tweeter at exact
+  zeros and the woofer at no more than -20 dBFS (and above -30 dBFS: it plays).
 
-These need the fail-closed limits of speakerd that came after commit 2cb3278 (and after
-b10e23b for the ceiling and the fail-closed file): against an older speakerd they fail, and say
-so. The wording matched for the fail-safe line is FAIL_SAFE below.
+These need speakerd 0.2.0, which came after commit 2cb3278: against an older speakerd they
+fail, and say so.
 
     python3 -m unittest -v tests.vpair.test_speakerd_device_limits
 """
 
-import re
 import shutil
 import tempfile
 import unittest
@@ -56,7 +57,9 @@ LOUD = tone(100.0, -1.0, 1.0)
 DEFAULT_AMPLIFIER = "bpi-alsa-playback-pcm"
 TOLERANCE_DB = 0.05
 ROUNDING_DB = 0.01
-FAIL_SAFE = re.compile(r"(?i)^speakerd: device.*fail.?safe")
+LIMITS = "speakerd: device: limits: output at {} dB, tweeter {}"
+NO_LIMITS_IN_FILE = LIMITS.format(-20, "muted") + " (no limits in device.json: the fail-safe)"
+NOT_READ = LIMITS.format(-20, "muted") + " (device.json not read: the fail-safe)"
 FAILED = "speakerd: device.json: FAILED"
 HINT = ("\n  (this needs speakerd's fail-closed device.json limits, which came after 2cb3278: an older "
         "speakerd ignores them)")
@@ -104,8 +107,10 @@ class DeviceLimits(unittest.TestCase):
     def test_minus_20_db_and_the_tweeter_muted(self):
         unlimited = state_dir(self.tmp / "unlimited", current=DOCUMENT, limits=NO_LIMITS)
         limited = state_dir(self.tmp / "limited", current=DOCUMENT, limits=CAP)
-        _, (open_capture,) = self.live(unlimited, [TONE])
+        open_log, (open_capture,) = self.live(unlimited, [TONE])
         log, (capture, hot) = self.live(limited, [TONE, HOT])
+        self.assertIn(LIMITS.format(0, "on"), open_log.splitlines(), HINT)
+        self.assertIn(LIMITS.format(-20, "muted"), log.splitlines(), HINT)
         reference, capped = woofer_gain(open_capture, TONE), woofer_gain(capture, TONE)
         summary = f"live: unlimited {reference:+.3f} dB, limited {capped:+.3f} dB (expected {reference - 20:+.3f})"
         print(f"\n  {summary}")
@@ -145,23 +150,20 @@ class DeviceLimits(unittest.TestCase):
     def test_fail_safe(self):
         good = {"version": 1, "role": "left", "amplifier": {"node": "amplifier"}}
         cases = [
-            ("no limits", good, "amplifier", FAIL_SAFE),
-            ("misspelt limts", dict(good, limts=NO_LIMITS), DEFAULT_AMPLIFIER, FAILED),
-            ("not JSON", '{"version": 1, "role": "left", "limits": {', DEFAULT_AMPLIFIER, FAILED),
-            ("missing", False, DEFAULT_AMPLIFIER, FAILED),
+            ("no limits", good, "amplifier", [NO_LIMITS_IN_FILE]),
+            ("misspelt limts", dict(good, limts=NO_LIMITS), DEFAULT_AMPLIFIER, [FAILED, NOT_READ]),
+            ("not JSON", '{"version": 1, "role": "left", "limits": {', DEFAULT_AMPLIFIER, [FAILED, NOT_READ]),
+            ("missing", False, DEFAULT_AMPLIFIER, [FAILED, NOT_READ]),
         ]
         for name, device, amplifier, said in cases:
             with self.subTest(name):
                 state = state_dir(self.tmp / f"fail-safe-{name.replace(' ', '-')}", current=BOOST, device=device)
                 log, (capture,) = self.live(state, [LOUD], amplifier=amplifier)
                 lines = log.splitlines()
-                if isinstance(said, str):
-                    found = any(line.startswith(said) for line in lines)
-                else:
-                    found = any(said.search(line) for line in lines)
                 device_lines = [line for line in lines if line.startswith("speakerd: device")]
-                self.assertTrue(found, f"{name}: speakerd did not say {getattr(said, 'pattern', said)!r}; it said "
-                                       f"{device_lines}{HINT}")
+                for line in said:
+                    found = any(have.startswith(line) for have in lines) if line == FAILED else line in lines
+                    self.assertTrue(found, f"{name}: speakerd did not say {line!r}; it said {device_lines}{HINT}")
                 self.check_capped(f"{name}, into {amplifier}", capture, floor_dbfs=-30.0)
 
 
