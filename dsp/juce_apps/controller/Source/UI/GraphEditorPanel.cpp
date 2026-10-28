@@ -720,7 +720,7 @@ namespace bpi
 
         juce::Colour statusColour() const
         {
-            if (! bridge.isSynced())                          return juce::Colours::darkred;
+            if (! bridge.isSynced() || bridge.isInsecure())   return juce::Colours::darkred;
             if (bridge.getStatus().contains ("rejected"))     return juce::Colours::darkred;
             if (bridge.hasPendingProposal())                  return juce::Colours::darkorange.darker();
             return juce::Colours::darkgreen;

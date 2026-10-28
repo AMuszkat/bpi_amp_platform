@@ -79,12 +79,13 @@ namespace bpi
         MonitorLink (Bridge& b, const juce::String& speakerName, const juce::String& host, int port)
             : bridge (b), speaker (speakerName), link ("monitor " + speakerName, host, port, b.options.sendQueueLimit)
         {
-            // The speaker speaks first; nothing is subscribed before its hello is answered.
-            link.onConnected = [this] { authenticated = false; bridge.notifyStatus(); };
+            // The speaker speaks first; nothing is subscribed, and no value believed, before
+            // its welcome proves it knows the pair's secret.
+            link.onConnected = [this] { handshake = {}; bridge.notifyStatus(); };
 
             link.onDisconnected = [this] (const juce::String&)
             {
-                authenticated = false;
+                handshake = {};
                 bridge.notifyStatus();
             };
 
@@ -92,25 +93,44 @@ namespace bpi
             {
                 bridge.trace ("<", "monitor " + speaker, m);
                 const auto op = m["op"].toString();
+                juce::String why;
 
-                if (op == "hello" && ! authenticated)
+                if (op == "error" && m["about"].toString() == "hello")
                 {
-                    send (bridge.controllerHello (m["nonce"].toString(), false));
-                    authenticated = true;
-                    refusal.clear();
-
-                    for (const auto& [stream, count] : counts)
-                        send (subscribeMessage (stream));
-
-                    bridge.notifyStatus();
+                    fail ("refused this controller: " + m["reason"].toString(), false);
                 }
-                else if (op == "error" && m["about"].toString() == "hello")
+                else if (handshake.phase == Handshake::Phase::waitingHello)
                 {
-                    refusal = m["reason"].toString();
-                    std::cerr << "[bridge] speaker " << speaker << " refused this controller: " << refusal << std::endl;
-                    bridge.notifyStatus();
+                    juce::var hello;
+
+                    if (op != "hello")
+                        fail ("sent " + op + " before its hello", true);
+                    else if (! bridge.answerServerHello (handshake, m, "speaker", speaker, false, hello, why))
+                        fail (why, true);
+                    else
+                        send (hello);
                 }
-                else if (op == "value")
+                else if (handshake.phase == Handshake::Phase::waitingWelcome)
+                {
+                    if (op != "welcome")
+                    {
+                        fail ("sent " + op + " before proving itself", true);
+                    }
+                    else if (! bridge.checkWelcome (handshake, m, why))
+                    {
+                        fail (why, true);
+                    }
+                    else
+                    {
+                        refusal.clear();
+
+                        for (const auto& [stream, count] : counts)
+                            send (subscribeMessage (stream));
+
+                        bridge.notifyStatus();
+                    }
+                }
+                else if (handshake.phase == Handshake::Phase::proven && op == "value")
                 {
                     bridge.handleMonitorValue (speaker, m);
                 }
@@ -121,7 +141,7 @@ namespace bpi
 
         void subscribe (const juce::String& stream)
         {
-            if (++counts[stream] == 1 && authenticated)
+            if (++counts[stream] == 1 && proven())
                 send (subscribeMessage (stream));
         }
 
@@ -136,7 +156,7 @@ namespace bpi
             {
                 counts.erase (it);
 
-                if (authenticated)
+                if (proven())
                     send (object ({ { "op", "unsubscribe" }, { "stream", stream } }));
             }
         }
@@ -149,11 +169,27 @@ namespace bpi
             return s;
         }
 
-        bool isConnected() const   { return link.isConnected() && authenticated; }
+        bool isConnected() const   { return link.isConnected() && proven(); }
         juce::String getRefusal() const   { return refusal; }
         juce::String getAddress() const   { return link.getAddress(); }
 
     private:
+        bool proven() const   { return handshake.phase == Handshake::Phase::proven; }
+
+        /** The speaker did not prove itself, or refused us: say why, believe nothing more on
+            this connection, and close it when it is ours to close. */
+        void fail (const juce::String& why, bool close)
+        {
+            handshake.phase = Handshake::Phase::failed;
+            refusal = why;
+            std::cerr << "[bridge] speaker " << speaker << ": " << why << "; trying again in 5 s" << std::endl;
+
+            if (close)
+                link.dropConnection (why, JsonLineLink::refusalBackOffMs);
+
+            bridge.notifyStatus();
+        }
+
         juce::var subscribeMessage (const juce::String& stream) const
         {
             return object ({ { "op", "subscribe" }, { "stream", stream }, { "rate_hz", bridge.options.monitorRateHz } });
@@ -169,7 +205,7 @@ namespace bpi
         const juce::String speaker;
         JsonLineLink link;
         std::map<juce::String, int> counts;
-        bool authenticated = false;
+        Handshake handshake;
         juce::String refusal;
     };
 
@@ -338,22 +374,105 @@ namespace bpi
             setStatus ("no hub: give --hub or set it in Hub > Connect");
     }
 
-    juce::var Bridge::controllerHello (const juce::String& nonce, bool withOscPort) const
+    bool Bridge::answerServerHello (Handshake& h, const juce::var& serverHello, const juce::String& expectedRole,
+                                    const juce::String& expectedName, bool withOscPort, juce::var& ourHello, juce::String& why) const
     {
-        auto hello = object ({ { "op", "hello" }, { "role", "controller" }, { "name", options.name } });
-        auto* o = hello.getDynamicObject();
+        h.serverRole = serverHello["role"].toString();
+        h.serverName = serverHello["name"].toString();
+        h.serverNonce = serverHello["nonce"].toString();
+
+        if (h.serverRole != expectedRole)
+        {
+            why = "said it is a " + h.serverRole.quoted() + ", not a " + expectedRole;
+            return false;
+        }
+
+        // The name its proof will cover must be the one expected: a speaker of the pair could
+        // otherwise answer for its partner.
+        if (expectedName.isNotEmpty() && h.serverName != expectedName)
+        {
+            why = "is named " + h.serverName.quoted() + ", not " + expectedName.quoted() + " as expected";
+            return false;
+        }
+
+        if (! auth::isNonce (h.serverNonce))
+        {
+            why = "sent a malformed nonce";
+            return false;
+        }
+
+        h.clientNonce = auth::randomNonce();
+
+        if (h.clientNonce.isEmpty())
+        {
+            why = "no random nonce: the system's random source did not answer";
+            return false;
+        }
+
+        ourHello = object ({ { "op", "hello" }, { "role", "controller" }, { "name", options.name } });
+        auto* o = ourHello.getDynamicObject();
 
         if (withOscPort)
             o->setProperty ("osc_port", oscPort);
 
         o->setProperty ("protocol", 1);
+        o->setProperty ("nonce", h.clientNonce);
 
-        // Without a secret there is no proof to give: a hub with none (before its installer
-        // ran) accepts that, any other refuses it and says so.
-        if (options.secret.isNotEmpty())
-            o->setProperty ("auth", auth::proof (options.secret, nonce, "controller", options.name));
+        // Without a secret there is no proof to give ("auth": null): only a server that has
+        // none either accepts that, and only --insecure believes such a server.
+        o->setProperty ("auth", options.secret.isNotEmpty()
+                                    ? juce::var (auth::clientProof (options.secret, h.serverNonce, h.clientNonce, "controller", options.name))
+                                    : juce::var());
 
-        return hello;
+        h.phase = Handshake::Phase::waitingWelcome;
+        return true;
+    }
+
+    bool Bridge::checkWelcome (Handshake& h, const juce::var& welcome, juce::String& why) const
+    {
+        const auto& given = welcome["auth"];
+
+        if (given.isVoid() || given.isUndefined())
+        {
+            if (! options.insecure)
+            {
+                why = "has no secret (its welcome carries no proof): connect with --insecure only to a pair that has not been installed yet";
+                return false;
+            }
+
+            h.insecure = true;
+            h.phase = Handshake::Phase::proven;
+            return true;
+        }
+
+        if (options.secret.isEmpty())
+        {
+            why = "proves a secret this controller does not have: give the pair's secret file";
+            return false;
+        }
+
+        const auto expected = auth::serverProof (options.secret, h.serverNonce, h.clientNonce, h.serverRole, h.serverName);
+
+        if (! given.isString() || ! auth::sameProof (given.toString(), expected))
+        {
+            why = "did not prove the pair's secret (a wrong welcome proof): not believed";
+            return false;
+        }
+
+        h.phase = Handshake::Phase::proven;
+        return true;
+    }
+
+    void Bridge::failControl (const juce::String& why)
+    {
+        controlHandshake.phase = Handshake::Phase::failed;
+        refusal = why;
+        lastRefusal = why;
+        synced = false;
+        setStatus ("The hub " + why + ". Trying again in 5 s");
+
+        if (control != nullptr)
+            control->dropConnection (why, JsonLineLink::refusalBackOffMs);
     }
 
     void Bridge::bindOscToControlAddress()
@@ -370,23 +489,6 @@ namespace bpi
             oscOut.connect (options.hubHost, options.knobsPort);
     }
 
-    void Bridge::answerHubHello (const juce::var& m)
-    {
-        hubName = m["name"].toString();
-
-        // A hub hello is a new start for the per-parameter seq (clarification 6).
-        for (auto& [key, st] : paramStates)
-            st.haveSeq = false;
-
-        if (helloSent)
-            return;
-
-        bindOscToControlAddress();
-        sendControl (controllerHello (m["nonce"].toString(), true));
-        helloSent = true;
-        setStatus ("connected to " + control->getAddress() + ", waiting for the hub's state");
-    }
-
     void Bridge::connectControl()
     {
         control = std::make_unique<JsonLineLink> ("control", options.hubHost, options.controlPort, options.sendQueueLimit);
@@ -394,7 +496,8 @@ namespace bpi
         // The hub speaks first (docs/protocol.md, "Authentication"): its hello brings the nonce.
         control->onConnected = [this]
         {
-            helloSent = false;
+            controlHandshake = {};
+            oscToken.clear();
             refusal.clear();
             setStatus ("connected to " + control->getAddress() + ", waiting for the hub's hello");
         };
@@ -403,11 +506,11 @@ namespace bpi
         {
             synced = false;
             pending.reset();
-            helloSent = false;
+            controlHandshake = {};
+            oscToken.clear();
 
             if (refusal.isNotEmpty())
-                setStatus ("The hub refused this controller: " + refusal
-                           + ". Check the pair's secret (Hub > Connect, or --secret-file); trying again in 5 s");
+                setStatus ("The hub " + refusal + ". Check the pair's secret (Hub > Connect, or --secret-file); trying again in 5 s");
             else
                 setStatus ("hub " + control->getAddress() + ": " + why + "; reconnecting");
 
@@ -448,7 +551,8 @@ namespace bpi
 
     void Bridge::setStatus (const juce::String& s)
     {
-        status = s;
+        // Loudly, for as long as it lasts: a hub without a secret proves nothing.
+        status = controlHandshake.insecure && ! s.startsWith ("INSECURE") ? "INSECURE (the hub has no secret): " + s : s;
         notifyStatus();
     }
 
@@ -468,10 +572,69 @@ namespace bpi
     void Bridge::handleControl (const juce::var& m)
     {
         const auto op = m["op"].toString();
+        using Phase = Handshake::Phase;
 
-        if (op == "hello")
+        if (op == "error" && m["about"].toString() == "hello")
         {
-            answerHubHello (m);
+            refusal = "refused this controller: " + (m["reason"].toString().isNotEmpty() ? m["reason"].toString() : juce::String ("no reason given"));
+            lastRefusal = refusal;
+            controlHandshake.phase = Phase::failed;
+            setStatus ("The hub " + refusal + ". Check the pair's secret");
+            return;
+        }
+
+        if (controlHandshake.phase == Phase::failed)
+            return;   // nothing more is believed on this connection
+
+        if (controlHandshake.phase == Phase::waitingHello)
+        {
+            juce::var hello;
+            juce::String why;
+
+            if (op != "hello")
+                return failControl ("sent " + op + " before its hello");
+
+            if (! answerServerHello (controlHandshake, m, "hub", options.hubName, true, hello, why))
+                return failControl (why);
+
+            hubName = controlHandshake.serverName;
+
+            // A hub hello is a new start for the per-parameter seq (clarification 6).
+            for (auto& [key, st] : paramStates)
+                st.haveSeq = false;
+
+            sendControl (hello);
+            setStatus ("connected to " + control->getAddress() + ", waiting for the proof of hub "
+                       + hubName.quoted() + (options.hubName.isEmpty() ? " (no hub name configured)" : ""));
+            return;
+        }
+
+        if (controlHandshake.phase == Phase::waitingWelcome)
+        {
+            juce::String why;
+
+            if (op != "welcome")
+                return failControl ("sent " + op + " before proving itself");
+
+            if (! checkWelcome (controlHandshake, m, why))
+                return failControl (why);
+
+            // The OSC token of this connection; none from a hub without a secret.
+            oscToken = controlHandshake.insecure ? juce::String()
+                                                 : auth::oscToken (options.secret, controlHandshake.serverNonce, controlHandshake.clientNonce);
+            bindOscToControlAddress();
+
+            if (controlHandshake.insecure)
+                std::cerr << "[bridge] INSECURE: the hub has no secret; believed because of --insecure" << std::endl;
+
+            setStatus (controlHandshake.insecure ? "believed without a proof (--insecure), waiting for its state"
+                                                 : "the hub proved itself, waiting for its state");
+            return;
+        }
+
+        if (op == "hello" || op == "welcome")
+        {
+            return;   // the handshake is over
         }
         else if (op == "state")
         {
@@ -496,12 +659,6 @@ namespace bpi
         {
             if (isInteger (m["node"]))
                 handleGesture ((juce::uint32) (juce::int64) m["node"], m["id"].toString(), m["state"].toString(), m["origin"].toString());
-        }
-        else if (op == "error" && m["about"].toString() == "hello")
-        {
-            refusal = m["reason"].toString().isNotEmpty() ? m["reason"].toString() : juce::String ("no reason given");
-            lastRefusal = refusal;
-            setStatus ("The hub refused this controller: " + refusal + ". Check the pair's secret");
         }
         else if (op == "error")
         {
@@ -812,12 +969,16 @@ namespace bpi
             return;
         }
 
-        juce::OSCMessage m ("/bpi/param");
+        if (controlHandshake.phase != Handshake::Phase::proven)
+            return;
+
+        juce::OSCMessage m ("/bpi/param");   // ,isfiss: node, id, value, seq, origin, token
         m.addInt32 ((juce::int32) uid);
         m.addString (id);
         m.addFloat32 ((float) plain);
         m.addInt32 (0);
         m.addString (options.name);
+        m.addString (oscToken);
 
         if (oscOut.send (m) && options.trace)
             std::cerr << "[bridge] > knobs /bpi/param " << (int) uid << " " << id << " " << plain << std::endl;
@@ -914,7 +1075,17 @@ namespace bpi
             return i < m.size() && m[i].isString() ? m[i].getString() : juce::String();
         };
 
-        if (address == "/bpi/param" && m.size() >= 5)
+        // Only echoes stamped with this connection's token (docs/protocol.md, "Authentication").
+        const auto tokenAt = address == "/bpi/param" ? 5 : 4;
+
+        if (controlHandshake.phase != Handshake::Phase::proven || m.size() <= tokenAt || ! m[tokenAt].isString()
+            || ! auth::sameProof (m[tokenAt].getString() + "#", oscToken + "#"))
+        {
+            ++oscDropped;
+            return;
+        }
+
+        if (address == "/bpi/param" && m.size() >= 6)
         {
             const auto node = number (0), value = number (2), seq = number (3);
 
@@ -927,7 +1098,7 @@ namespace bpi
                 handleParamEcho ((juce::uint32) *node, text (1), *value, (juce::uint32) (juce::int64) *seq, text (4), "knobs");
             }
         }
-        else if (address == "/bpi/gesture" && m.size() >= 4)
+        else if (address == "/bpi/gesture" && m.size() >= 5)
         {
             if (const auto node = number (0))
                 handleGesture ((juce::uint32) *node, text (1), text (2), text (3));
@@ -1296,7 +1467,8 @@ namespace bpi
             gestures.add (object ({ { "node", (int) key.uid }, { "id", key.id }, { "origin", origin } }));
 
         return object ({ { "connected", isConnected() }, { "connections_made", getConnectionCount() },
-                         { "refused", lastRefusal },
+                         { "refused", lastRefusal }, { "insecure", controlHandshake.insecure },
+                         { "proven", controlHandshake.phase == Handshake::Phase::proven }, { "osc_dropped", oscDropped },
                          { "queued_bytes", control != nullptr ? (juce::int64) control->getQueuedBytes() : (juce::int64) 0 },
                          { "synced", synced }, { "hub", hubName },
                          { "revision", revision }, { "seq", (juce::int64) lastSeq },

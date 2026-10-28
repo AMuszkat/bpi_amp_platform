@@ -49,6 +49,8 @@ namespace bpi
             size_t sendQueueLimit = JsonLineLink::defaultMaxQueuedBytes;   // per link, before it reconnects
             bool trace = false;                  // every line in and out on stderr (proofs hidden)
             juce::String secret;                 // the pair's secret: proofs only, never shown
+            bool insecure = false;               // believe a hub (or speaker) that has no secret
+            juce::String hubName;                // the hub's name to expect; empty: the one it proves
         };
 
         Bridge (PluginGraph&, Options);
@@ -60,6 +62,7 @@ namespace bpi
         //==============================================================================
         bool isConnected() const;            // the control link is up
         bool isSynced() const noexcept       { return synced; }   // the hub's state arrived
+        bool isInsecure() const noexcept     { return controlHandshake.insecure; }   // a hub without a secret, believed by --insecure
         juce::int64 getRevision() const noexcept   { return revision; }
         juce::uint32 getLastSeq() const noexcept   { return lastSeq; }
         int getConnectionCount() const             { return control != nullptr ? control->getConnectionCount() : 0; }
@@ -156,8 +159,27 @@ namespace bpi
 
         //==============================================================================
         void connectControl();
-        void answerHubHello (const juce::var&);
-        juce::var controllerHello (const juce::String& nonce, bool withOscPort) const;
+        /** One link's handshake (docs/protocol.md, "Authentication"): the server's hello, our
+            hello with our nonce and proof, the server's welcome with its proof. Nothing the
+            server sends is believed before its proof checked. */
+        struct Handshake
+        {
+            enum class Phase { waitingHello, waitingWelcome, proven, failed };
+            Phase phase = Phase::waitingHello;
+            juce::String serverRole, serverName, serverNonce, clientNonce;
+            bool insecure = false;          // proven by a server with no secret (--insecure)
+        };
+
+        /** Our hello to a server's: false (with why) when its nonce is malformed or no random
+            nonce can be had. */
+        bool answerServerHello (Handshake&, const juce::var& serverHello, const juce::String& expectedRole,
+                                const juce::String& expectedName, bool withOscPort, juce::var& ourHello, juce::String& why) const;
+
+        /** The server's welcome checked: true when it proves the pair's secret (or, with
+            --insecure, it has none). */
+        bool checkWelcome (Handshake&, const juce::var& welcome, juce::String& why) const;
+
+        void failControl (const juce::String& why);
         void bindOscToControlAddress();
         void handleControl (const juce::var&);
         void handleState (const juce::var&);
@@ -205,8 +227,10 @@ namespace bpi
         int oscPort = 0;
 
         bool synced = false;
-        bool helloSent = false;                 // on this control connection
-        juce::String refusal;                   // the hub's reason, until the link closes
+        Handshake controlHandshake;             // on this control connection
+        juce::String oscToken;                  // its OSC token, once the hub proved itself
+        int oscDropped = 0;                     // OSC datagrams without our token, ignored
+        juce::String refusal;                   // why the link closes, until it does
         juce::String lastRefusal;               // the same, until the hub's state arrives
         juce::String hubName, status;
         juce::int64 revision = 0;

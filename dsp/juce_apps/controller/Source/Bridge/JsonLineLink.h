@@ -43,6 +43,11 @@ namespace bpi
             hub leaves from it, the address the hub authenticated. */
         juce::String getLocalAddress() const;
 
+        /** Closes the connection now (a peer that failed to prove itself), and waits
+            `backOffMs` before the next one. Lines it already delivered stay delivered: the
+            caller ignores them. */
+        void dropConnection (const juce::String& reason, int backOffMs);
+
         /** The next reconnection waits this long instead of 1 s (after a refusal). */
         void backOffNextReconnect (int milliseconds)   { nextDelayMs = milliseconds; }
         int getConnectionCount() const noexcept   { return connectionCount.load(); }
@@ -71,6 +76,8 @@ namespace bpi
         std::atomic<bool> connected { false };
         std::atomic<int> connectionCount { 0 };
         std::atomic<int> nextDelayMs { 0 };
+        std::atomic<bool> dropRequested { false };
+        juce::String dropReason;      // under addressLock
         mutable std::mutex addressLock;
         juce::String localAddress;
 

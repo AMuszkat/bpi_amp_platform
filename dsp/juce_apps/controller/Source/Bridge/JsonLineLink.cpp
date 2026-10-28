@@ -69,6 +69,18 @@ namespace bpi
         }
     }
 
+    void JsonLineLink::dropConnection (const juce::String& reason, int backOffMs)
+    {
+        {
+            const std::lock_guard<std::mutex> lock (addressLock);
+            dropReason = reason;
+        }
+
+        nextDelayMs = backOffMs;
+        dropRequested = true;
+        wake();
+    }
+
     juce::String JsonLineLink::getLocalAddress() const
     {
         const std::lock_guard<std::mutex> lock (addressLock);
@@ -193,6 +205,7 @@ namespace bpi
             }
 
             clearQueue();   // nothing of an earlier connection goes out on this one
+            dropRequested = false;
             ++connectionCount;
             connected = true;
             post (eventConnected, {});
@@ -267,6 +280,12 @@ namespace bpi
 
         while (! threadShouldExit())
         {
+            if (dropRequested.exchange (false))
+            {
+                const std::lock_guard<std::mutex> lock (addressLock);
+                return dropReason;
+            }
+
             if (overflowed.load())
                 return "the peer stopped reading: more than " + juce::String ((juce::int64) maxQueued)
                        + " bytes were waiting to be sent";
