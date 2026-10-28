@@ -299,7 +299,8 @@ namespace speakerd
     void Monitor::run()
     {
         // What one read of the monitored clock costs, here: a few tens of nanoseconds from the
-        // vDSO; hundreds, or more, would mean a syscall on the audio thread.
+        // vDSO; about a microsecond means a syscall on the audio thread (a Cortex-A73 whose kernel
+        // works around ARM erratum 858921), the exception dsp/CLAUDE.md names.
         {
             constexpr int reads = 100000;
             const auto start = nowNs();

@@ -126,7 +126,9 @@ namespace speakerd
         also measures the peak and the sum of the squares of what it copied out, and pushes them
         into a lock-free ring for the monitor thread. Every cycle it records what it cost (the
         cycle, the graph, each plugin node: TimedNode) into another (TimingRecord). No
-        allocation, no lock of its own, no syscall (the clock is the vDSO's).
+        allocation, no lock of its own, and no syscall but the timing's clock reads, 4 + 2 per
+        plugin node: the vDSO's on most kernels, a short non-blocking syscall on a Cortex-A73
+        with the erratum 858921 workaround (nowNs, TimedNode.h; the exception in dsp/CLAUDE.md).
 
         The locks JUCE takes on the audio thread, and why none of them waits:
         - the graph takes each processor's callback lock around its processBlock; speakerd never
@@ -233,13 +235,13 @@ namespace speakerd
             new size with one silent block and fades back in. Call it often, from a timer. */
         Serviced service();
 
-        /** Fades the output out and keeps it silent, for a clean stop. Returns after two
-            silent cycles more, so that the end of the fade has reached the amplifier before
-            the node goes. */
-
         /** Closes or opens the output gate (see above). Any thread; lock-free. Open by default,
             for the render; the live node closes it until its links are active. */
         void setOutputGate (bool open) noexcept    { outputGateOpen.store (open, std::memory_order_release); }
+
+        /** Fades the output out and keeps it silent, for a clean stop. Returns after two
+            silent cycles more, so that the end of the fade has reached the amplifier before
+            the node goes. */
         void fadeOut();
 
         double getSampleRate() const noexcept      { return preparedRateForReaders.load(); }
@@ -261,8 +263,6 @@ namespace speakerd
         /** Whether the audio thread measures the output level. Off by default: nobody watches. */
         void setLevelWanted (bool wanted) noexcept  { levelWanted.store (wanted, std::memory_order_release); }
 
-        /** One consumer at a time: calls `fn (const LevelRecord&)` for every cycle measured since
-            the last call, oldest first, and returns how many. */
         /** One consumer at a time: calls `fn (const TimingRecord&)` for every cycle since the last
             call, oldest first, and returns how many. Every cycle is recorded, watched or not. */
         template <typename Fn>
@@ -279,6 +279,8 @@ namespace speakerd
         /** Cycles whose record did not fit in the timing ring (the monitor thread was behind). */
         juce::uint64 getTimingDropped() const noexcept  { return timingDropped.load (std::memory_order_relaxed); }
 
+        /** One consumer at a time: calls `fn (const LevelRecord&)` for every cycle measured since
+            the last call, oldest first, and returns how many. */
         template <typename Fn>
         int drainLevels (Fn&& fn)
         {
@@ -297,8 +299,9 @@ namespace speakerd
             be null (silence in, nothing out). `cycleRate` is the rate PipeWire runs at (0 if
             unknown), `position` the driver's position in samples (-1 if unknown): a cycle whose
             position does not follow on from the last one's is counted as a position jump. Never
-            blocks, allocates or makes a syscall: the timing reads the monotonic clock, which is
-            the vDSO's. */
+            blocks or allocates. Its only syscalls are the timing's clock reads where the kernel
+            has no vDSO clock (a Cortex-A73 with the erratum 858921 workaround): short and
+            non-blocking (nowNs, TimedNode.h). */
         void process (const float* const* in, float* const* out, int numSamples, double cycleRate,
                       juce::int64 position = -1) noexcept;
 

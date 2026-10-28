@@ -7,10 +7,15 @@
 
 namespace speakerd
 {
-    /** The monotonic clock in nanoseconds, for timing on the audio thread. std::chrono's
-        steady_clock is clock_gettime (CLOCK_MONOTONIC), which glibc answers from the vDSO on
-        x86_64 and aarch64 (__vdso_clock_gettime, __kernel_clock_gettime): no syscall, a few tens
-        of nanoseconds. speakerd logs what a read costs at start (README, Timing). */
+    /** The monotonic clock in nanoseconds, for timing on the audio thread: the one syscall
+        speakerd may make there, a named exception (dsp/CLAUDE.md). std::chrono's steady_clock
+        is clock_gettime (CLOCK_MONOTONIC). glibc answers it from the vDSO when the kernel offers
+        one (__vdso_clock_gettime on x86_64, __kernel_clock_gettime on aarch64): no syscall, a
+        few tens of nanoseconds. On a Cortex-A73 whose kernel works around ARM erratum 858921
+        (CONFIG_ARM64_ERRATUM_858921, on by default) the vDSO clock is off and every read is a
+        real syscall: short, bounded and non-blocking, about a microsecond. speakerd logs what a
+        read costs at start, `timing: a clock read costs <x> ns`, which tells which (README,
+        Timing). */
     inline juce::int64 nowNs() noexcept
     {
         return (juce::int64) std::chrono::duration_cast<std::chrono::nanoseconds> (

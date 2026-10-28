@@ -54,7 +54,7 @@ namespace speakerd
     public:
         static constexpr double defaultRateHz = 30.0;
         static constexpr double minRateHz = 0.1;     // below is refused
-        static constexpr double maxRateHz = 60.0;    // above is this
+        static constexpr double maxRateHz = 60.0;    // above is refused
         static constexpr double levelDrainSeconds = 0.05;
         static constexpr double timingDrainSeconds = 0.05;
         static constexpr int timingLogSeconds = 60;
