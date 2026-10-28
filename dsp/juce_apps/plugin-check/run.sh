@@ -88,9 +88,17 @@ CHECK=$!
 # Screenshot the control editor while it is up, when ImageMagick is there.
 if [ "$EDITOR" = 1 ] && command -v import > /dev/null; then
     for _ in $(seq 1 60); do grep -q '^EDITOR ' "$REPORT" 2>/dev/null && break; sleep 0.5; done
-    sleep 2
-    import -window root "$BUILD_DIR/$PLUGIN-control-editor.png" 2>/dev/null \
-        && echo "Screenshot: $BUILD_DIR/$PLUGIN-control-editor.png"
+    size="$(sed -n 's/^EDITOR \([0-9]*x[0-9]*\).*/\1/p' "$REPORT" | head -1)"
+    shot="$BUILD_DIR/$PLUGIN-control-editor.png"
+    # A window that has not painted yet is a plain rectangle of one or two colours; under load
+    # that can last seconds, so try again while the editor is up (it stays for 4 s).
+    for _ in $(seq 1 7); do
+        sleep 0.5
+        import -window root "$shot" 2> /dev/null || continue
+        colours="$(convert "$shot" -crop "${size:-640x480}+0+0" +repage -format '%k' info: 2> /dev/null || echo 0)"
+        [ "${colours:-0}" -gt 16 ] && break
+    done
+    [ -f "$shot" ] && echo "Screenshot: $shot"
 fi
 
 wait $CHECK
