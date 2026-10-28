@@ -815,6 +815,8 @@ install_version() {
     cp -p "$FIRMWARE_DIR/speakerd/speakerd-run" "$tmpdst/bin/speakerd-run"
     # ampd, the network agent, comes with the version: a rollback takes both back together.
     cp -p "$FIRMWARE_DIR/ampd/ampd.py" "$tmpdst/bin/ampd"
+    # The tweeter rule's one definition, which ampd imports from beside itself.
+    cp -p "$FIRMWARE_DIR/speakerd/tweeter_rule.py" "$tmpdst/bin/tweeter_rule.py"
     chmod 755 "$tmpdst/bin/speakerd" "$tmpdst/bin/speakerd-run" "$tmpdst/bin/ampd"
     if [ -d "$BUNDLE/lv2" ]; then cp -a "$BUNDLE/lv2" "$tmpdst/lv2"; else mkdir -p "$tmpdst/lv2"; fi
     cp -p "$BUNDLE/VERSION" "$tmpdst/VERSION"

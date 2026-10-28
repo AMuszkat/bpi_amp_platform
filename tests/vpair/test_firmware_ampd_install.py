@@ -45,6 +45,7 @@ from harness import (ADDRESS, AMPD, FIRMWARE, StandInSpeakerd, UserUnit, built, 
                      revision_document, stub_speakerd)
 
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
+SECRET = "the-pairs-test-secret-0123456789"
 DOCUMENT = revision_document(graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1"}), 2)
 
 # A stand-in for systemctl and journalctl: records the calls, prints $FAKE_SYSTEMD/journal.
@@ -89,6 +90,8 @@ class AmpdInstall(unittest.TestCase):
         shutil.copy(stub_speakerd(), root / "speakerd/speakerd_artefacts/Release/speakerd")
         (root / "loudness").mkdir()
         os.symlink(built("loudness", "headless").parents[2], root / "loudness/loudness_headless_artefacts")
+        cls.secret_file = cls.tmp / "ampd.secret"
+        cls.secret_file.write_text(SECRET + "\n")
         cls.bundle = cls.tmp / "bundle"
         firmware("speakerd-setup.sh", "bundle", "--arch", "native", "--out", cls.bundle, "--plugin", "loudness:headless",
                  env={"BUILD_ROOT": str(root)})
@@ -108,7 +111,11 @@ class AmpdInstall(unittest.TestCase):
                      "--amplifier", "amplifier", "--role", role, env=self.env)
         return folder
 
-    def ampd_setup(self, folder, *args, check=True, env=None):
+    def ampd_setup(self, folder, *args, check=True, env=None, secret=True):
+        """ampd-setup.sh with the test hooks; an install gets the pair's secret file unless `secret`
+        is False."""
+        if args and args[0] == "install" and secret and "--secret-file" not in args:
+            args = (*args, "--secret-file", self.secret_file)
         return firmware("ampd-setup.sh", *args, "--home", folder, "--no-systemd", env=env or self.env, check=check)
 
     def config(self, folder):
@@ -124,7 +131,13 @@ class AmpdInstall(unittest.TestCase):
         self.assertTrue(os.access(lib / "setup/ampd-setup.sh", os.X_OK))
         result = self.ampd_setup(folder, "install")
         self.assertEqual(self.config(folder), {"version": 1, "name": "left", "hub": True, "listen": "0.0.0.0",
-                                               "hub_address": None})
+                                               "hub_address": None, "secret": SECRET})
+        self.assertEqual((folder / ".local/state/speakerd/ampd.json").stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(SECRET, result.stdout)
+        status = self.ampd_setup(folder, "status")
+        self.assertNotIn(SECRET, status.stdout)
+        self.assertIn('"secret": "(set)"', status.stdout)
+        self.assertEqual((lib / "bin/tweeter_rule.py").read_bytes(), (FIRMWARE / "speakerd/tweeter_rule.py").read_bytes())
         unit = folder / ".config/systemd/user/ampd.service"
         self.assertEqual(unit.read_bytes(), (FIRMWARE / "ampd/ampd.service").read_bytes())
         self.assertIn("left, the hub, listening on 0.0.0.0", result.stdout)
@@ -145,7 +158,7 @@ class AmpdInstall(unittest.TestCase):
         self.assertEqual(self.config(folder)["listen"], "0.0.0.0")
         self.ampd_setup(folder, "install", "--listen", "127.0.1.1")
         self.assertEqual(self.config(folder), {"version": 1, "name": "left", "hub": True, "listen": "127.0.1.1",
-                                               "hub_address": None})
+                                               "hub_address": None, "secret": SECRET})
 
     def test_refusals(self):
         bare = self.prepare("bare")
@@ -155,6 +168,15 @@ class AmpdInstall(unittest.TestCase):
         self.assertFalse((bare / ".local/state/speakerd/ampd.json").exists())
 
         folder = self.prepare("right", "right")
+        short = self.tmp / "short.secret"
+        short.write_text("too short\n")
+        refused = self.ampd_setup(folder, "install", "--hub-address", "bpi-amp.local", check=False, secret=False)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn("no secret: give --secret-file FILE", refused.stdout)
+        refused = self.ampd_setup(folder, "install", "--hub-address", "bpi-amp.local", "--secret-file", short, check=False)
+        self.assertIn("16 to 256 printable characters", refused.stdout)
+        self.assertNotIn("too short", refused.stdout)
+        self.assertFalse((folder / ".local/state/speakerd/ampd.json").exists())
         for args, said in ((["install"], "an agent needs the hub's address"),
                            (["install", "--hub", "--hub-address", "bpi-amp.local"], "--hub-address is for an agent"),
                            (["install", "--name", "no spaces"], "--name: letters")):
@@ -164,12 +186,16 @@ class AmpdInstall(unittest.TestCase):
             self.assertFalse((folder / ".local/state/speakerd/ampd.json").exists())
         self.ampd_setup(folder, "install", "--hub-address", "bpi-amp.local")
         self.assertEqual(self.config(folder), {"version": 1, "name": "right", "hub": False, "listen": "0.0.0.0",
-                                               "hub_address": "bpi-amp.local"})
+                                               "hub_address": "bpi-amp.local", "secret": SECRET})
+        # A reinstall without --secret-file keeps it.
+        self.ampd_setup(folder, "install", secret=False)
+        self.assertEqual(self.config(folder)["secret"], SECRET)
         check = subprocess.run([str(folder / ".local/lib/speakerd/current/bin/ampd"), "--config",
                                 str(folder / ".local/state/speakerd/ampd.json"), "--check-config"],
                                capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stderr)
-        self.assertEqual(check.stdout.strip(), "right: an agent of the hub at bpi-amp.local, listening on 0.0.0.0")
+        self.assertEqual(check.stdout.strip(),
+                         "right: an agent of the hub at bpi-amp.local, listening on 0.0.0.0, with the pair's secret")
 
     def test_setup_sh(self):
         folder = self.prepare("setup-right")
@@ -180,13 +206,15 @@ class AmpdInstall(unittest.TestCase):
         self.assertIn("an agent needs the hub's address", refused.stdout)
         self.assertFalse((folder / ".local").exists(), refused.stdout)
 
-        result = firmware("setup.sh", *args, "--hub-address", "bpi-amp.local", env=self.env).stdout
+        result = firmware("setup.sh", *args, "--hub-address", "bpi-amp.local", "--secret-file", self.secret_file,
+                          env=self.env).stdout
+        self.assertNotIn(SECRET, result)
         order = [result.index(f"==> {c}:") for c in ("pipewire", "speakerd", "ampd")]
         self.assertEqual(order, sorted(order), result)
         self.assertEqual(self.config(folder)["hub_address"], "bpi-amp.local")
         firmware("setup.sh", "--home", folder, "--no-systemd", "--only", "ampd", "--listen", "127.0.1.2", env=self.env)
         self.assertEqual(self.config(folder), {"version": 1, "name": "right", "hub": False, "listen": "127.0.1.2",
-                                               "hub_address": "bpi-amp.local"})
+                                               "hub_address": "bpi-amp.local", "secret": SECRET})
 
     def test_under_systemd_ampd_must_say_it_listens(self):
         folder = self.prepare("systemd", "left")
@@ -200,7 +228,8 @@ class AmpdInstall(unittest.TestCase):
             (d / "journal").write_text("".join(line + "\n" for line in journal))
             shutil.rmtree(folder / ".config/systemd/user", ignore_errors=True)
             env = dict(self.env, FAKE_SYSTEMD=str(d), PATH=f"{d / 'bin'}:{os.environ['PATH']}", AMPD_START_WAIT="1")
-            result = firmware("ampd-setup.sh", "install", "--home", folder, env=env, check=False)
+            result = firmware("ampd-setup.sh", "install", "--home", folder, "--secret-file", self.secret_file, env=env,
+                              check=False)
             print(f"\n  journal {journal or 'empty'}: status {result.returncode}")
             self.assertEqual(result.returncode == 0, ok, result.stdout)
             if not ok:
