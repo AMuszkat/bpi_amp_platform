@@ -553,14 +553,15 @@ class ControllerTest(unittest.TestCase):
     def test_20_known_answer_vector(self):
         """The protocol's fixed vector (the inputs of tests/vpair/auth_vector.json): the
         controller's Auth and the fake hub give exactly the values Python's hmac gives."""
-        secret = "0123456789abcdef-pair-secret"
-        ns, nc = "00112233445566778899aabbccddeeff", "ffeeddccbbaa99887766554433221100"
-        expected = {
-            "client_proof": "0e82cbf2d55bbe8c34cae30db176a88e6a3f9227a6322140df7f2a3142e8e22a",
-            "server_proof": "e067654372eb4ce9d2d86af15cf1fcaa9a311476d00e0b4645961852884cffb4",
-            "session_key": "9bd062cf4dbaf55e3e6efb6e07e908ce9bccc3ccbb271158ee5a48cb867d638a",
-            "osc_token": "390b2272219a58e77b6ad16b88cd17ac",
-        }
+        # The one vector ampd's tests assert too: a drift on either side fails both.
+        vector_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "..", "..", "..", "..", "tests", "vpair", "auth_vector.json")
+        with open(vector_file) as f:
+            vector = json.load(f)
+        secret, ns, nc = vector["secret"], vector["server_nonce"], vector["client_nonce"]
+        self.assertEqual((vector["client_role"], vector["client_name"], vector["server_role"], vector["server_name"]),
+                         ("controller", "ctl-test", "hub", "left"), "the self-test computes these roles and names")
+        expected = {key: vector[key] for key in ("client_proof", "server_proof", "session_key", "osc_token")}
         # Python's own, per docs/protocol.md.
         import hashlib, hmac
         h = lambda k, t: hmac.new(k.encode(), t.encode(), hashlib.sha256).hexdigest()
