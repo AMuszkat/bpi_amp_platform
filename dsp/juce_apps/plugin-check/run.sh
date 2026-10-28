@@ -76,7 +76,7 @@ if [ "$EDITOR" = 1 ] && [ -z "${DISPLAY:-}" ]; then
     fi
 fi
 
-[ "$EDITOR" = 1 ] && args+=(--show-editor 4)
+[ "$EDITOR" = 1 ] && args+=(--show-editor 8)
 
 echo "=== Running plugin-check"
 REPORT="$BUILD_DIR/$PLUGIN-report.txt"
@@ -88,17 +88,25 @@ CHECK=$!
 # Screenshot the control editor while it is up, when ImageMagick is there.
 if [ "$EDITOR" = 1 ] && command -v import > /dev/null; then
     for _ in $(seq 1 60); do grep -q '^EDITOR ' "$REPORT" 2>/dev/null && break; sleep 0.5; done
-    size="$(sed -n 's/^EDITOR \([0-9]*x[0-9]*\).*/\1/p' "$REPORT" | head -1)"
     shot="$BUILD_DIR/$PLUGIN-control-editor.png"
-    # A window that has not painted yet is a plain rectangle of one or two colours; under load
-    # that can last seconds, so try again while the editor is up (it stays for 4 s).
-    for _ in $(seq 1 7); do
+    # The screen is black apart from the editor, and a window that has not painted yet is a
+    # plain rectangle of one or two colours; under load that can last seconds. So capture
+    # again while the editor is up (it stays for 8 s), keep the most colourful capture, and
+    # stop at the first that shows a painted editor.
+    best=0
+    for _ in $(seq 1 14); do
         sleep 0.5
-        import -window root "$shot" 2> /dev/null || continue
-        colours="$(convert "$shot" -crop "${size:-640x480}+0+0" +repage -format '%k' info: 2> /dev/null || echo 0)"
-        [ "${colours:-0}" -gt 16 ] && break
+        import -window root "$shot.next.png" 2> /dev/null || continue
+        colours="$(convert "$shot.next.png" -format '%k' info: 2> /dev/null || echo 0)"
+        if [ "${colours:-0}" -gt "$best" ]; then best="$colours"; mv -f "$shot.next.png" "$shot"; fi
+        [ "$best" -gt 16 ] && break
     done
-    [ -f "$shot" ] && echo "Screenshot: $shot"
+    rm -f "$shot.next.png"
+    if [ "$best" -gt 16 ]; then
+        echo "Screenshot: $shot"
+    elif [ -f "$shot" ]; then
+        echo "Screenshot: $shot (the editor had not painted: $best colours on the screen)"
+    fi
 fi
 
 wait $CHECK
