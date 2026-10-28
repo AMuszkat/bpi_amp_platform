@@ -79,22 +79,41 @@ namespace bpi
         MonitorLink (Bridge& b, const juce::String& speakerName, const juce::String& host, int port)
             : bridge (b), speaker (speakerName), link ("monitor " + speakerName, host, port, b.options.sendQueueLimit)
         {
-            link.onConnected = [this]
-            {
-                for (const auto& [stream, count] : counts)
-                    send (subscribeMessage (stream));
+            // The speaker speaks first; nothing is subscribed before its hello is answered.
+            link.onConnected = [this] { authenticated = false; bridge.notifyStatus(); };
 
+            link.onDisconnected = [this] (const juce::String&)
+            {
+                authenticated = false;
                 bridge.notifyStatus();
             };
-
-            link.onDisconnected = [this] (const juce::String&) { bridge.notifyStatus(); };
 
             link.onMessage = [this] (const juce::var& m)
             {
                 bridge.trace ("<", "monitor " + speaker, m);
+                const auto op = m["op"].toString();
 
-                if (m["op"].toString() == "value")
+                if (op == "hello" && ! authenticated)
+                {
+                    send (bridge.controllerHello (m["nonce"].toString(), false));
+                    authenticated = true;
+                    refusal.clear();
+
+                    for (const auto& [stream, count] : counts)
+                        send (subscribeMessage (stream));
+
+                    bridge.notifyStatus();
+                }
+                else if (op == "error" && m["about"].toString() == "hello")
+                {
+                    refusal = m["reason"].toString();
+                    std::cerr << "[bridge] speaker " << speaker << " refused this controller: " << refusal << std::endl;
+                    bridge.notifyStatus();
+                }
+                else if (op == "value")
+                {
                     bridge.handleMonitorValue (speaker, m);
+                }
             };
 
             link.start();
@@ -102,7 +121,7 @@ namespace bpi
 
         void subscribe (const juce::String& stream)
         {
-            if (++counts[stream] == 1)
+            if (++counts[stream] == 1 && authenticated)
                 send (subscribeMessage (stream));
         }
 
@@ -116,7 +135,9 @@ namespace bpi
             if (--it->second <= 0)
             {
                 counts.erase (it);
-                send (object ({ { "op", "unsubscribe" }, { "stream", stream } }));
+
+                if (authenticated)
+                    send (object ({ { "op", "unsubscribe" }, { "stream", stream } }));
             }
         }
 
@@ -128,7 +149,8 @@ namespace bpi
             return s;
         }
 
-        bool isConnected() const   { return link.isConnected(); }
+        bool isConnected() const   { return link.isConnected() && authenticated; }
+        juce::String getRefusal() const   { return refusal; }
         juce::String getAddress() const   { return link.getAddress(); }
 
     private:
@@ -147,6 +169,8 @@ namespace bpi
         const juce::String speaker;
         JsonLineLink link;
         std::map<juce::String, int> counts;
+        bool authenticated = false;
+        juce::String refusal;
     };
 
     //==============================================================================
@@ -314,25 +338,82 @@ namespace bpi
             setStatus ("no hub: give --hub or set it in Hub > Connect");
     }
 
+    juce::var Bridge::controllerHello (const juce::String& nonce, bool withOscPort) const
+    {
+        auto hello = object ({ { "op", "hello" }, { "role", "controller" }, { "name", options.name } });
+        auto* o = hello.getDynamicObject();
+
+        if (withOscPort)
+            o->setProperty ("osc_port", oscPort);
+
+        o->setProperty ("protocol", 1);
+
+        // Without a secret there is no proof to give: a hub with none (before its installer
+        // ran) accepts that, any other refuses it and says so.
+        if (options.secret.isNotEmpty())
+            o->setProperty ("auth", auth::proof (options.secret, nonce, "controller", options.name));
+
+        return hello;
+    }
+
+    void Bridge::bindOscToControlAddress()
+    {
+        // The hub takes OSC only from the address of an authenticated control connection: send
+        // it from that connection's own local address, whatever the routes say.
+        oscOut.disconnect();
+        oscOutSocket = std::make_unique<juce::DatagramSocket> (false);
+        const auto local = control != nullptr ? control->getLocalAddress() : juce::String();
+
+        if (local.isNotEmpty() && oscOutSocket->bindToPort (0, local))
+            oscOut.connectToSocket (*oscOutSocket, options.hubHost, options.knobsPort);
+        else
+            oscOut.connect (options.hubHost, options.knobsPort);
+    }
+
+    void Bridge::answerHubHello (const juce::var& m)
+    {
+        hubName = m["name"].toString();
+
+        // A hub hello is a new start for the per-parameter seq (clarification 6).
+        for (auto& [key, st] : paramStates)
+            st.haveSeq = false;
+
+        if (helloSent)
+            return;
+
+        bindOscToControlAddress();
+        sendControl (controllerHello (m["nonce"].toString(), true));
+        helloSent = true;
+        setStatus ("connected to " + control->getAddress() + ", waiting for the hub's state");
+    }
+
     void Bridge::connectControl()
     {
-        oscOut.connect (options.hubHost, options.knobsPort);
-
         control = std::make_unique<JsonLineLink> ("control", options.hubHost, options.controlPort, options.sendQueueLimit);
 
+        // The hub speaks first (docs/protocol.md, "Authentication"): its hello brings the nonce.
         control->onConnected = [this]
         {
-            sendControl (object ({ { "op", "hello" }, { "role", "controller" }, { "name", options.name },
-                                   { "osc_port", oscPort }, { "protocol", 1 } }));
-            setStatus ("connected to " + control->getAddress() + ", waiting for the hub's state");
+            helloSent = false;
+            refusal.clear();
+            setStatus ("connected to " + control->getAddress() + ", waiting for the hub's hello");
         };
 
         control->onDisconnected = [this] (const juce::String& why)
         {
             synced = false;
             pending.reset();
-            setStatus ("hub " + control->getAddress() + ": " + why + "; reconnecting");
-            std::cerr << "[bridge] control link " << control->getAddress() << ": " << why << "; reconnecting" << std::endl;
+            helloSent = false;
+
+            if (refusal.isNotEmpty())
+                setStatus ("The hub refused this controller: " + refusal
+                           + ". Check the pair's secret (Hub > Connect, or --secret-file); trying again in 5 s");
+            else
+                setStatus ("hub " + control->getAddress() + ": " + why + "; reconnecting");
+
+            std::cerr << "[bridge] control link " << control->getAddress() << ": "
+                      << (refusal.isNotEmpty() ? "refused: " + refusal : why) << "; reconnecting" << std::endl;
+            refusal.clear();
         };
 
         control->onMessage = [this] (const juce::var& m) { trace ("<", "control", m); handleControl (m); };
@@ -345,8 +426,18 @@ namespace bpi
 
     void Bridge::trace (const juce::String& direction, const juce::String& link, const juce::var& m)
     {
-        if (options.trace)
-            std::cerr << "[bridge] " << direction << " " << link << " " << document::toJson (m).substring (0, 400) << std::endl;
+        if (! options.trace)
+            return;
+
+        auto shown = m;
+
+        if (m.hasProperty ("auth"))   // a proof is no secret, but it stays out of logs all the same
+        {
+            shown = document::copy (m);
+            shown.getDynamicObject()->setProperty ("auth", "(proof)");
+        }
+
+        std::cerr << "[bridge] " << direction << " " << link << " " << document::toJson (shown).substring (0, 400) << std::endl;
     }
 
     void Bridge::sendControl (const juce::var& m)
@@ -365,7 +456,10 @@ namespace bpi
     {
         for (auto& s : speakers)
             if (auto* m = monitorFor (s.name))
+            {
                 s.monitorConnected = m->isConnected();
+                s.monitorRefusal = m->getRefusal();
+            }
 
         listeners.call ([] (Listener& l) { l.bridgeStatusChanged(); });
     }
@@ -377,8 +471,7 @@ namespace bpi
 
         if (op == "hello")
         {
-            hubName = m["name"].toString();
-            notifyStatus();
+            answerHubHello (m);
         }
         else if (op == "state")
         {
@@ -404,6 +497,12 @@ namespace bpi
             if (isInteger (m["node"]))
                 handleGesture ((juce::uint32) (juce::int64) m["node"], m["id"].toString(), m["state"].toString(), m["origin"].toString());
         }
+        else if (op == "error" && m["about"].toString() == "hello")
+        {
+            refusal = m["reason"].toString().isNotEmpty() ? m["reason"].toString() : juce::String ("no reason given");
+            lastRefusal = refusal;
+            setStatus ("The hub refused this controller: " + refusal + ". Check the pair's secret");
+        }
         else if (op == "error")
         {
             setStatus ("hub: " + m["about"].toString() + " " + m["node"].toString() + " " + m["id"].toString()
@@ -425,6 +524,7 @@ namespace bpi
         for (auto& [key, st] : paramStates)
             st.haveSeq = false;
 
+        lastRefusal.clear();
         applyDocumentToCanvas (acceptedDoc);
         updateSpeakers (m["speakers"]);
 
@@ -1188,6 +1288,7 @@ namespace bpi
 
             speakerList.add (object ({ { "name", s.name }, { "role", s.role }, { "online", s.online }, { "layer", s.layer },
                                        { "address", s.address }, { "monitor_connected", s.monitorConnected },
+                                       { "monitor_refusal", s.monitorRefusal },
                                        { "level", level }, { "level_count", s.levelCount }, { "subscriptions", subs } }));
         }
 
@@ -1195,6 +1296,7 @@ namespace bpi
             gestures.add (object ({ { "node", (int) key.uid }, { "id", key.id }, { "origin", origin } }));
 
         return object ({ { "connected", isConnected() }, { "connections_made", getConnectionCount() },
+                         { "refused", lastRefusal },
                          { "queued_bytes", control != nullptr ? (juce::int64) control->getQueuedBytes() : (juce::int64) 0 },
                          { "synced", synced }, { "hub", hubName },
                          { "revision", revision }, { "seq", (juce::int64) lastSeq },

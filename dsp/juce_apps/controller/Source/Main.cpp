@@ -22,6 +22,8 @@ namespace bpi
         const char* const usage = R"(usage: controller [options]
 
   --hub HOST             the hub (the left speaker's ampd); also Hub > Connect, and the setting "hub"
+  --secret-file FILE     the file holding the pair's secret (mode 600); also Hub > Connect, and
+                         the setting "secretFile". The secret itself is never an argument
   --name NAME            this controller's origin (default: ctl-<host name>)
   --osc-port PORT        UDP port for the hub's OSC echoes (default: 0, any free port)
   --control-port PORT    the hub's control link (default 7450)
@@ -36,6 +38,7 @@ namespace bpi
   --send-queue-limit N   bytes a link may hold for a peer that stopped reading before it
                          reconnects (default 4194304)
   --trace                every line in and out on stderr
+  --self-test            check HMAC-SHA256 against RFC 4231 and exit
   --version
 )";
 
@@ -43,7 +46,8 @@ namespace bpi
         {
             Bridge::Options bridge;
             juce::String script;
-            bool gui = true, scriptGui = false, testProbe = false, version = false, help = false;
+            juce::String secretFile;
+            bool gui = true, scriptGui = false, testProbe = false, version = false, help = false, selfTest = false;
             juce::String error;
         };
 
@@ -55,6 +59,7 @@ namespace bpi
             {
                 c.bridge.hubHost = settings->getValue ("hub");
                 c.bridge.name = settings->getValue ("name");
+                c.secretFile = settings->getValue ("secretFile");
 
                 for (const auto& entry : juce::StringArray::fromTokens (settings->getValue ("speakers"), ",", ""))
                     if (entry.containsChar ('='))
@@ -85,6 +90,9 @@ namespace bpi
                 else if (a == "--gui")              c.scriptGui = true;
                 else if (a == "--test-probe")       c.testProbe = true;
                 else if (a == "--trace")            c.bridge.trace = true;
+                else if (a == "--secret-file")      c.secretFile = value();
+                else if (a == "--secret")           c.error = "the secret is never given on the command line: put it in a file (mode 600) and give --secret-file";
+                else if (a == "--self-test")        c.selfTest = true;
                 else if (a == "--send-queue-limit")
                 {
                     const auto v = value();
@@ -156,6 +164,24 @@ namespace bpi
                 return;
             }
 
+            if (commandLine.selfTest)
+            {
+                juce::StringArray report;
+                const auto ok = auth::selfTest (report);
+                std::cout << report.joinIntoString ("\n") << "\n" << (ok ? "HMAC-SHA256 OK" : "HMAC-SHA256 FAILED") << "\n";
+                setApplicationReturnValue (ok ? 0 : 1);
+                quit();
+                return;
+            }
+
+            if (const auto r = loadSecret (commandLine.secretFile, commandLine.bridge); r.failed())
+            {
+                std::cerr << "[controller] " << r.getErrorMessage() << "\n";
+                setApplicationReturnValue (2);
+                quit();
+                return;
+            }
+
             if (commandLine.testProbe)
                 ControlPlugins::enableTestProbe();
 
@@ -184,6 +210,28 @@ namespace bpi
         }
 
     private:
+        /** The pair's secret from its file into the bridge's options. Only the reason of a
+            failure is printed, never the content. */
+        static juce::Result loadSecret (const juce::String& path, Bridge::Options& options)
+        {
+            options.secret.clear();
+
+            if (path.isEmpty())
+            {
+                std::cerr << "[controller] no secret file (--secret-file): a hub with a secret will refuse this controller\n";
+                return juce::Result::ok();
+            }
+
+            juce::String warning;
+            const auto file = juce::File::getCurrentWorkingDirectory().getChildFile (path);
+            const auto result = auth::readSecretFile (file, options.secret, warning);
+
+            if (warning.isNotEmpty())
+                std::cerr << "[controller] " << warning << "\n";
+
+            return result;
+        }
+
         void startBridge (const Bridge::Options& options)
         {
             mainWindow = nullptr;
@@ -194,11 +242,20 @@ namespace bpi
             {
                 mainWindow = std::make_unique<MainHostWindow> (*graph, *bridge, appProperties.getUserSettings());
                 mainWindow->onQuitRequested = [this] { systemRequestedQuit(); };
-                mainWindow->onConnectRequested = [this] (const juce::String& host)
+                mainWindow->onConnectRequested = [this] (const juce::String& host, const juce::String& secretFile)
                 {
-                    appProperties.getUserSettings()->setValue ("hub", host);
                     auto o = bridge->getOptions();
                     o.hubHost = host;
+
+                    if (const auto r = loadSecret (secretFile, o); r.failed())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+                                                                "The pair's secret", r.getErrorMessage());
+                        return;
+                    }
+
+                    appProperties.getUserSettings()->setValue ("hub", host);
+                    appProperties.getUserSettings()->setValue ("secretFile", secretFile);
                     juce::MessageManager::callAsync ([this, o] { startBridge (o); });
                 };
             }

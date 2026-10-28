@@ -20,7 +20,7 @@ import threading
 import time
 import unittest
 
-from fake_hub import FakeHub, LOUDNESS_URI, default_document
+from fake_hub import FakeHub, LOUDNESS_URI, SECRET, default_document
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
@@ -34,8 +34,28 @@ def report(name, **numbers):
     print("\n    [%s] %s" % (name, ", ".join("%s=%s" % kv for kv in numbers.items())), end=" ")
 
 
+def secret_file(directory, secret):
+    """The pair's secret in a file of mode 600, as the controller reads it."""
+    path = os.path.join(directory, "secret-%d" % abs(hash(secret)))
+    with open(path, "w") as f:
+        f.write(secret + "\n")
+    os.chmod(path, 0o600)
+    return path
+
+
 class ControllerTest(unittest.TestCase):
     hub = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.secrets_dir = tempfile.mkdtemp(prefix="controller-secret-")
+        cls.secret = secret_file(cls.secrets_dir, SECRET)
+
+    @classmethod
+    def tearDownClass(cls):
+        for name in os.listdir(cls.secrets_dir):
+            os.unlink(os.path.join(cls.secrets_dir, name))
+        os.rmdir(cls.secrets_dir)
 
     def setUp(self):
         if not os.access(CONTROLLER, os.X_OK):
@@ -50,12 +70,16 @@ class ControllerTest(unittest.TestCase):
         self.hub = FakeHub(LEFT, RIGHT, **kwargs).start()
         return self.hub
 
-    def run_script(self, script, extra=(), during=None, timeout=60):
+    def run_script(self, script, extra=(), during=None, timeout=60, secret=True):
         """Runs the controller's test mode; returns (exit status, the steps it printed, stderr)."""
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             f.write(script)
             path = f.name
         args = [CONTROLLER, "--hub", LEFT, "--name", "ctl-test", "--script", path, "--trace", *extra]
+        if secret is True:
+            args += ["--secret-file", self.secret]
+        elif secret:
+            args += ["--secret-file", secret]
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         thread = None
         if during is not None:
@@ -102,6 +126,9 @@ class ControllerTest(unittest.TestCase):
         hello = hello[0][0]
         self.assertEqual((hello["role"], hello["name"], hello["protocol"]), ("controller", "ctl-test", 1))
         self.assertGreater(hello["osc_port"], 0)
+        self.assertRegex(hello["auth"], "^[0-9a-f]{64}$")
+        self.assertEqual(hub.refused, [])
+        self.assertNotIn(SECRET, err, "the secret is never logged")
 
         state = self.step(steps, "state")["state"]
         self.assertTrue(state["synced"])
@@ -283,8 +310,11 @@ class ControllerTest(unittest.TestCase):
             extra=["--test-probe", "--speaker", "right=" + RIGHT])
         self.assertPassed(code, steps, err)
 
-        left = [(m["op"], m["stream"], m.get("rate_hz")) for m, _ in hub.received_ops("monitor left")]
-        right = [(m["op"], m["stream"], m.get("rate_hz")) for m, _ in hub.received_ops("monitor right")]
+        hellos = [m for m, _ in hub.received_ops("monitor left", "hello") + hub.received_ops("monitor right", "hello")]
+        self.assertEqual(len(hellos), 2)
+        self.assertTrue(all(h["role"] == "controller" and len(h["auth"]) == 64 for h in hellos))
+        left = [(m["op"], m["stream"], m.get("rate_hz")) for m, _ in hub.received_ops("monitor left") if m["op"] != "hello"]
+        right = [(m["op"], m["stream"], m.get("rate_hz")) for m, _ in hub.received_ops("monitor right") if m["op"] != "hello"]
         self.assertEqual(left[:2], [("subscribe", "node/20/mon_level", 30), ("unsubscribe", "node/20/mon_level", None)])
         self.assertEqual(right[:2], [("subscribe", "node/20/mon_level", 30), ("unsubscribe", "node/20/mon_level", None)])
         self.assertIn(("subscribe", "output/level", 30), left)
@@ -360,7 +390,8 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(after["connections_made"], 1, "the stall alone is no reason to reconnect")
         self.assertEqual(after["queued_bytes"], 0)
         params = [m for m, _ in self.hub.received_ops("control", "param")]
-        self.assertEqual(params[-1]["value"], 5.5, "the queue went out in order, the last line last")
+        gains = [m["value"] for m in params if m["id"] == "s0_e0_gain"]
+        self.assertEqual(gains[-1], 5.5, "the queue went out in order: the set after the sweep came last")
         report("stall", sweep_ticks=sweep["ticks"], values_set=sweep["values"], queued_kib=during["queued_bytes"] // 1024,
                longest_tick_gap_ms=ticks, lines_received=len(params), recovered_ms=self.step(steps, "wait-echo")["ms"])
 
@@ -379,6 +410,44 @@ class ControllerTest(unittest.TestCase):
         self.assertIn("stopped reading", err)
         report("dropped", queue_limit_kib=64, connections=state["connections_made"], longest_tick_gap_ms=ticks,
                recovered_ms=self.step(steps, "wait-echo")["ms"])
+
+
+    def test_14_wrong_secret_is_refused_shown_and_retried_slowly(self):
+        """A hub that refuses the proof: the reason is shown, nothing is synced, and the link
+        asks again every 5 s, not in a tight loop. The secret appears nowhere."""
+        hub = self.start_hub()
+        wrong = secret_file(self.secrets_dir, "not-the-pair-secret-xyz")
+        t0 = time.monotonic()
+        code, steps, err = self.run_script("sleep 7000\nstate\nopen 16\n", secret=wrong)
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        self.assertFalse(state["synced"])
+        self.assertIn("wrong proof", state["refused"])
+        self.assertIn("refused this controller", state["status"])
+        attempts = [r for r in hub.refused if r[0] == "control"]
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertLessEqual(len(attempts), 3, "a refused controller must back off, not retry at once")
+        self.assertEqual(hub.received_ops("knobs"), [])
+        self.assertNotIn("not-the-pair-secret-xyz", err)
+        self.assertNotIn(SECRET, err)
+        report("refused", attempts_in_7s=len(attempts), reason=state["refused"], synced=state["synced"],
+               run_s=round(time.monotonic() - t0, 1))
+
+    def test_15_hmac_and_secret_file(self):
+        """HMAC-SHA256 against RFC 4231, the same proof as Python's hmac, and a secret file
+        that is too short is refused before anything connects."""
+        out = subprocess.run([CONTROLLER, "--self-test"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(out.stdout.count(": ok"), 4)
+        short = secret_file(self.secrets_dir, "short")
+        bad = subprocess.run([CONTROLLER, "--hub", LEFT, "--secret-file", short, "--script", "/dev/null"],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("16 to 256 printable characters", bad.stderr)
+        self.assertNotIn("short\n", bad.stderr.replace("secret-", ""))
+        on_cli = subprocess.run([CONTROLLER, "--secret", "x" * 20], capture_output=True, text=True, timeout=30)
+        self.assertEqual(on_cli.returncode, 2)
+        report("hmac", rfc4231_cases=4, short_secret_exit=bad.returncode, secret_on_command_line_exit=on_cli.returncode)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,10 @@ check what the controller sent. Run alone, it serves a document until interrupte
 
 import argparse
 import copy
+import hashlib
+import hmac
 import json
+import secrets
 import socket
 import socketserver
 import struct
@@ -26,6 +29,12 @@ import time
 
 LOUDNESS_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/loudness_headless"
 PROBE_URI = "urn:bpi-amp:controller:test-probe"
+SECRET = "test-pair-secret-0123456789"   # the tests' shared secret (docs/protocol.md, "Authentication")
+
+
+def proof(secret, nonce, role, name):
+    """The hello's "auth": HMAC-SHA256 keyed with the secret over "<nonce>:<role>:<name>"."""
+    return hmac.new(secret.encode(), ("%s:%s:%s" % (nonce, role, name)).encode(), hashlib.sha256).hexdigest()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -119,7 +128,7 @@ class FakeHub:
     right speaker's, where only its monitor link listens."""
 
     def __init__(self, left="127.0.3.1", right="127.0.3.2", name="left",
-                 document=None, ports=(7450, 7451, 7452), control_rcvbuf=None):
+                 document=None, ports=(7450, 7451, 7452), control_rcvbuf=None, secret=SECRET):
         self.left, self.right, self.name = left, right, name
         self.control_port, self.knobs_port, self.monitor_port = ports
         self.document = copy.deepcopy(document or default_document())
@@ -142,6 +151,9 @@ class FakeHub:
         self.subscriptions = {"left": {}, "right": {}}   # speaker -> stream -> rate
         self.gestures = {}                # (node, id) -> origin
         self.control_rcvbuf = control_rcvbuf   # SO_RCVBUF of the control link's connections
+        self.secret = secret              # None: no secret, every peer accepted
+        self.refused = []                 # (link, name, reason) of every hello refused
+        self.osc_refused = 0              # OSC datagrams from an address no controller authenticated
         self.stalled = set()              # control connections that stopped reading
         self.lock = threading.RLock()
         self._servers = []
@@ -311,8 +323,26 @@ class FakeHub:
             return out
 
     # -- control link ---------------------------------------------------------------------
+    def _check_hello(self, link, message, nonce, conn):
+        """True for a hello with a valid proof; refuses (and closes) otherwise."""
+        if self.secret is None:
+            return True
+        name, given = message.get("name", ""), message.get("auth")
+        want = proof(self.secret, nonce, message.get("role", ""), name)
+        if isinstance(given, str) and hmac.compare_digest(given, want):
+            return True
+        reason = "no proof (auth)" if given is None else "wrong proof: check the pair's secret"
+        with self.lock:
+            self.refused.append((link, name, reason))
+        self._send_line(conn, link, {"op": "error", "about": "hello", "reason": reason})
+        return False
+
     def _serve_control(self, conn):
         name = None
+        nonce = secrets.token_hex(16)
+        self._send_line(conn, "control", {"op": "hello", "role": "hub", "name": self.name, "revision": self.revision,
+                                          "seq": self.seq, "nonce": nonce, "protocol": 1})
+        authenticated = False
         try:
             for raw in conn.rfile:
                 while conn in self.stalled and not self._stop.is_set():
@@ -323,13 +353,17 @@ class FakeHub:
                 message = json.loads(line)
                 self._log_in("control", message)
                 op = message.get("op")
-                if op == "hello" and message.get("role") == "controller":
+                if not authenticated:
+                    if op != "hello" or message.get("role") != "controller" \
+                            or not self._check_hello("control", message, nonce, conn):
+                        if op != "hello":
+                            self._send_line(conn, "control", {"op": "error", "about": "hello", "reason": "hello first"})
+                        return
+                    authenticated = True
                     name = message.get("name")
                     with self.lock:
                         self.controllers[name] = {"conn": conn,
                                                   "osc": (conn.client_address[0], int(message.get("osc_port", 0)))}
-                    self._send_line(conn, "control", {"op": "hello", "role": "hub", "name": self.name,
-                                                      "revision": self.revision, "protocol": 1})
                     self._send_line(conn, "control", self.state_message())
                 elif op == "param":
                     self._param(message, "control", conn)
@@ -407,6 +441,12 @@ class FakeHub:
                 address, tags, args = osc_decode(packet)
             except (ValueError, struct.error, UnicodeDecodeError):
                 continue
+            with self.lock:
+                allowed = self.secret is None or any(c["osc"][0] == sender[0] for c in self.controllers.values())
+            if not allowed:
+                with self.lock:
+                    self.osc_refused += 1
+                continue
             self._log_in("knobs", (address, tags, args))
             if address == "/bpi/param" and tags == ",isfis":
                 self._param({"node": args[0], "id": args[1], "value": args[2], "origin": args[4]}, "knobs")
@@ -435,7 +475,10 @@ class FakeHub:
                                     {"op": "value", "stream": stream, "t": round(now - t0, 3), "v": v})
                 time.sleep(0.005)
 
-        threading.Thread(target=produce, daemon=True).start()
+        nonce = secrets.token_hex(16)
+        self._send_line(conn, "monitor " + speaker, {"op": "hello", "role": "speaker", "name": speaker,
+                                                     "nonce": nonce, "protocol": 1})
+        authenticated = False
         try:
             for raw in conn.rfile:
                 line = raw.decode().strip()
@@ -443,6 +486,14 @@ class FakeHub:
                     continue
                 message = json.loads(line)
                 self._log_in("monitor " + speaker, message)
+                if not authenticated:
+                    if message.get("op") != "hello" or not self._check_hello("monitor " + speaker, message, nonce, conn):
+                        if message.get("op") != "hello":
+                            self._send_line(conn, "monitor " + speaker, {"op": "error", "about": "hello", "reason": "hello first"})
+                        return
+                    authenticated = True
+                    threading.Thread(target=produce, daemon=True).start()
+                    continue
                 with self.lock:
                     if message.get("op") == "subscribe":
                         subs[message["stream"]] = int(message.get("rate_hz", 30))
@@ -465,8 +516,16 @@ def main():
     parser.add_argument("--right", default="127.0.3.2", help="the right speaker's monitor address")
     parser.add_argument("--probe", action="store_true", help="put the test probe in the document")
     parser.add_argument("--trace", action="store_true", help="print every line in")
+    parser.add_argument("--secret-file", help="the pair's secret (default: the tests' own, %s)" % SECRET)
+    parser.add_argument("--no-secret", action="store_true", help="accept every peer, as a hub before its installer ran")
     args = parser.parse_args()
-    hub = FakeHub(args.address, args.right, document=default_document(probe=args.probe)).start()
+    secret = SECRET
+    if args.secret_file:
+        with open(args.secret_file) as f:
+            secret = f.read().rstrip("\r\n")
+    if args.no_secret:
+        secret = None
+    hub = FakeHub(args.address, args.right, document=default_document(probe=args.probe), secret=secret).start()
     print("fake hub on %s (control 7450, knobs 7451, monitor 7452), right speaker on %s" % (args.address, args.right))
     seen = 0
     try:

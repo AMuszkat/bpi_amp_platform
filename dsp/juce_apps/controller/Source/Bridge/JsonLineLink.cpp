@@ -12,6 +12,8 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #ifndef MSG_NOSIGNAL
  #define MSG_NOSIGNAL 0   // macOS: SIGPIPE is ignored for the whole process (Main.cpp)
@@ -65,6 +67,12 @@ namespace bpi
             const char byte = 1;
             [[maybe_unused]] const auto written = write (wakeFds[1], &byte, 1);   // full pipe: already awake
         }
+    }
+
+    juce::String JsonLineLink::getLocalAddress() const
+    {
+        const std::lock_guard<std::mutex> lock (addressLock);
+        return localAddress;
     }
 
     size_t JsonLineLink::getQueuedBytes() const
@@ -167,6 +175,23 @@ namespace bpi
             const int sendBuffer = (int) kernelSendBufferBytes;
             setsockopt (fd, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof (sendBuffer));
 
+            {
+                sockaddr_storage local {};
+                socklen_t length = sizeof (local);
+                char text[INET6_ADDRSTRLEN] {};
+
+                if (getsockname (fd, (sockaddr*) &local, &length) == 0)
+                {
+                    if (local.ss_family == AF_INET)
+                        inet_ntop (AF_INET, &((sockaddr_in*) &local)->sin_addr, text, sizeof (text));
+                    else if (local.ss_family == AF_INET6)
+                        inet_ntop (AF_INET6, &((sockaddr_in6*) &local)->sin6_addr, text, sizeof (text));
+                }
+
+                const std::lock_guard<std::mutex> lock (addressLock);
+                localAddress = text;
+            }
+
             clearQueue();   // nothing of an earlier connection goes out on this one
             ++connectionCount;
             connected = true;
@@ -178,10 +203,16 @@ namespace bpi
             s.close();
             clearQueue();
 
+            {
+                const std::lock_guard<std::mutex> lock (addressLock);
+                localAddress.clear();
+            }
+
             if (! threadShouldExit())
             {
                 post (eventDisconnected, {}, why);
-                wait (1000);
+                const auto delay = nextDelayMs.exchange (0);
+                wait (delay > 0 ? delay : 1000);
             }
         }
     }
@@ -317,6 +348,11 @@ namespace bpi
 
                 if (juce::JSON::parse (line, message).failed() || ! message.isObject())
                     return "a line that does not parse: " + line.substring (0, 80);   // docs/protocol.md: closes the connection
+
+                // A refused hello (docs/protocol.md, "Authentication"): the peer closes next, and
+                // asking again at once would only be refused again.
+                if (message["op"].toString() == "error" && message["about"].toString() == "hello")
+                    nextDelayMs = refusalBackOffMs;
 
                 post (eventMessage, message);
             }

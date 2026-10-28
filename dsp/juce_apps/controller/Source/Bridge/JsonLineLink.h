@@ -38,6 +38,13 @@ namespace bpi
         bool isConnected() const noexcept   { return connected.load(); }
         juce::String getAddress() const     { return host + ":" + juce::String (port); }
         size_t getQueuedBytes() const;
+
+        /** The local IP address of the connection now (empty when not connected): OSC to the
+            hub leaves from it, the address the hub authenticated. */
+        juce::String getLocalAddress() const;
+
+        /** The next reconnection waits this long instead of 1 s (after a refusal). */
+        void backOffNextReconnect (int milliseconds)   { nextDelayMs = milliseconds; }
         int getConnectionCount() const noexcept   { return connectionCount.load(); }
 
         std::function<void()> onConnected;                          // send the first lines from here
@@ -45,6 +52,7 @@ namespace bpi
         std::function<void (const juce::var&)> onMessage;
 
         static constexpr size_t maxLineBytes = 32u * 1024u * 1024u;
+        static constexpr int refusalBackOffMs = 5000;   // after {"op":"error","about":"hello"}
         static constexpr size_t kernelSendBufferBytes = 64u * 1024u;   // SO_SNDBUF (Linux doubles it)
 
     private:
@@ -62,6 +70,9 @@ namespace bpi
 
         std::atomic<bool> connected { false };
         std::atomic<int> connectionCount { 0 };
+        std::atomic<int> nextDelayMs { 0 };
+        mutable std::mutex addressLock;
+        juce::String localAddress;
 
         // Outgoing lines. Producers push at the back; only the link's thread pops the front,
         // and std::deque keeps the front's reference valid while others push.

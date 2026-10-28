@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Plugins/PluginGraph.h"
+#include "Auth.h"
 #include "GraphDocument.h"
 #include "JsonLineLink.h"
 
@@ -46,7 +47,8 @@ namespace bpi
             std::map<juce::String, juce::String> speakerAddresses;   // speaker name -> host
             int monitorRateHz = 30;
             size_t sendQueueLimit = JsonLineLink::defaultMaxQueuedBytes;   // per link, before it reconnects
-            bool trace = false;                  // every line in and out on stderr
+            bool trace = false;                  // every line in and out on stderr (proofs hidden)
+            juce::String secret;                 // the pair's secret: proofs only, never shown
         };
 
         Bridge (PluginGraph&, Options);
@@ -64,6 +66,7 @@ namespace bpi
         bool hasPendingProposal() const noexcept   { return pending.has_value(); }
         juce::String getHubName() const            { return hubName; }
         juce::String getStatus() const             { return status; }
+        juce::String getRefusal() const            { return lastRefusal; }   // why the hub refused us, if it did
         const juce::var& getAcceptedDocument() const noexcept   { return acceptedDoc; }
 
         struct Speaker
@@ -71,6 +74,7 @@ namespace bpi
             juce::String name, role, layer, address;
             bool online = false;
             bool monitorConnected = false;
+            juce::String monitorRefusal;    // why the speaker refused this controller, if it did
             std::array<float, 4> level { -120.0f, -120.0f, -120.0f, -120.0f };   // woofer peak, rms, tweeter peak, rms
             double levelTime = -1.0;        // speakerd's clock; < 0: none yet
             int levelCount = 0;
@@ -152,6 +156,9 @@ namespace bpi
 
         //==============================================================================
         void connectControl();
+        void answerHubHello (const juce::var&);
+        juce::var controllerHello (const juce::String& nonce, bool withOscPort) const;
+        void bindOscToControlAddress();
         void handleControl (const juce::var&);
         void handleState (const juce::var&);
         void handleGraph (const juce::var&);
@@ -193,10 +200,14 @@ namespace bpi
         std::unique_ptr<JsonLineLink> control;
         juce::DatagramSocket oscSocket { false };
         juce::OSCReceiver oscIn;
+        std::unique_ptr<juce::DatagramSocket> oscOutSocket;   // bound to the control link's local address
         juce::OSCSender oscOut;
         int oscPort = 0;
 
         bool synced = false;
+        bool helloSent = false;                 // on this control connection
+        juce::String refusal;                   // the hub's reason, until the link closes
+        juce::String lastRefusal;               // the same, until the hub's state arrives
         juce::String hubName, status;
         juce::int64 revision = 0;
         juce::uint32 lastSeq = 0;
