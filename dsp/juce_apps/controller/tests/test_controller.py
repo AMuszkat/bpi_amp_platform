@@ -20,7 +20,7 @@ import threading
 import time
 import unittest
 
-from fake_hub import FakeHub, LOUDNESS_URI, SECRET, client_proof, default_document, osc_token
+from fake_hub import FakeHub, LOUDNESS_URI, SECRET, client_proof, default_document, hmac_hex, osc_token, server_proof
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
@@ -448,7 +448,7 @@ class ControllerTest(unittest.TestCase):
         that is too short is refused before anything connects."""
         out = subprocess.run([CONTROLLER, "--self-test"], capture_output=True, text=True, timeout=30)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertEqual(out.stdout.count(": ok"), 4)
+        self.assertEqual(out.stdout.count(": ok"), 4)   # the four RFC 4231 cases
         short = secret_file(self.secrets_dir, "short")
         bad = subprocess.run([CONTROLLER, "--hub", LEFT, "--secret-file", short, "--script", "/dev/null"],
                              capture_output=True, text=True, timeout=30)
@@ -548,6 +548,39 @@ class ControllerTest(unittest.TestCase):
         self.assertIn('is named "left", not "other"', state["refused"])
         report("names", monitor_refusal=speakers["right"]["monitor_refusal"][:34], hellos_to_wrong_speaker=right_hellos,
                hub_refusal=state["refused"][:34])
+
+
+    def test_20_known_answer_vector(self):
+        """The protocol's fixed vector (the inputs of tests/vpair/auth_vector.json): the
+        controller's Auth and the fake hub give exactly the values Python's hmac gives."""
+        secret = "0123456789abcdef-pair-secret"
+        ns, nc = "00112233445566778899aabbccddeeff", "ffeeddccbbaa99887766554433221100"
+        expected = {
+            "client_proof": "0e82cbf2d55bbe8c34cae30db176a88e6a3f9227a6322140df7f2a3142e8e22a",
+            "server_proof": "e067654372eb4ce9d2d86af15cf1fcaa9a311476d00e0b4645961852884cffb4",
+            "session_key": "9bd062cf4dbaf55e3e6efb6e07e908ce9bccc3ccbb271158ee5a48cb867d638a",
+            "osc_token": "390b2272219a58e77b6ad16b88cd17ac",
+        }
+        # Python's own, per docs/protocol.md.
+        import hashlib, hmac
+        h = lambda k, t: hmac.new(k.encode(), t.encode(), hashlib.sha256).hexdigest()
+        k = h(secret, "session:%s:%s" % (ns, nc))
+        self.assertEqual(h(secret, "client:%s:%s:controller:ctl-test" % (ns, nc)), expected["client_proof"])
+        self.assertEqual(h(secret, "server:%s:%s:hub:left" % (ns, nc)), expected["server_proof"])
+        self.assertEqual(k, expected["session_key"])
+        self.assertEqual(h(k, "osc")[:32], expected["osc_token"])
+        # The fake hub's.
+        self.assertEqual(client_proof(secret, ns, nc, "controller", "ctl-test"), expected["client_proof"])
+        self.assertEqual(server_proof(secret, ns, nc, "hub", "left"), expected["server_proof"])
+        self.assertEqual(hmac_hex(secret, "session:%s:%s" % (ns, nc)), expected["session_key"])
+        self.assertEqual(osc_token(secret, ns, nc), expected["osc_token"])
+        # The controller's.
+        out = subprocess.run([CONTROLLER, "--self-test"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stdout)
+        got = {line.split()[1].rstrip(":"): line.split()[2] for line in out.stdout.splitlines() if line.startswith("vector ")}
+        self.assertEqual(got, expected)
+        report("vector", client_proof=expected["client_proof"][:16] + "...", server_proof=expected["server_proof"][:16] + "...",
+               K=expected["session_key"][:16] + "...", token=expected["osc_token"])
 
 
 if __name__ == "__main__":
