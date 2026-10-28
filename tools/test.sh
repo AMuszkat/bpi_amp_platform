@@ -34,7 +34,18 @@ run_unit() {
         echo "=== /test unit: $p"
         if dsp/juce_apps/plugin-check/run.sh "$p"; then echo "unit: $p passed"; else echo "unit: $p FAILED"; failed=1; fi
     done
-    if [ $failed = 0 ]; then record unit pass "${plugins[*]}"; else record unit fail "${plugins[*]}"; fi
+    # The controller's bridge against its fake hub (dsp/juce_apps/controller/tests).
+    local checked="${plugins[*]}"
+    if [ -f dsp/juce_apps/controller/CMakeLists.txt ]; then
+        echo "=== /test unit: controller"
+        if tools/build.sh controller && dsp/juce_apps/controller/tests/run.sh; then
+            echo "unit: controller passed"
+        else
+            echo "unit: controller FAILED"; failed=1
+        fi
+        checked+=" controller"
+    fi
+    if [ $failed = 0 ]; then record unit pass "$checked"; else record unit fail "$checked"; fi
     return $failed
 }
 

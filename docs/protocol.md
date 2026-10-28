@@ -264,3 +264,22 @@ These settle what version 1 left open; every implementation follows them.
     stream the graph lacks is kept and starts when a revision has it.
 20. **`status`** is answered with the `hello`'s fields and `"op":"status"`.
 21. **Files.** `speakerd` writes no state file; it creates and removes its socket.
+22. **The agent's `hello`** also carries `layer`, `speakerd` (its version), `device_role` and
+    `osc_port`; later changes of its speaker go to the hub as
+    `{"op":"status","speakerd":..,"layer":..,"revision":..}` on the control link.
+23. **`apply` carries `time` and `origin`** as well (and ampd writes them at the top of
+    `graph.json`, which `speakerd` ignores), so an agent can compare revisions by time.
+24. **The local link's seq.** `ampd` sends `speakerd` seq 0 and orders values itself, so a hub
+    restart cannot stall a speaker.
+25. **Which parameters exist.** The hub knows a node's parameters from the document's
+    `params`, and refuses any other: a document lists every parameter a controller may change
+    (controller-built documents do).
+26. **Exact values win.** OSC carries a 32-bit float; when the same seq arrives over both links,
+    the control link's copy is the one kept, so every `graph.json` holds the same value.
+27. **Gesture timeout.** 5 s from the `begin` or the dragger's last value; the hub then sends
+    every controller an `end` in the dragger's name.
+28. **Late answers.** A speaker that applies a revision after the 10 s gets the current
+    revision again. The hub's own `speakerd` being down during a proposal counts as a speaker
+    that is down.
+29. **The hub's own address** in `state.speakers`, when it listens on every address, is the
+    one the controller connected to.

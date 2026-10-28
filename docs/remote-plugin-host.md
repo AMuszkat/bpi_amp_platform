@@ -767,8 +767,10 @@ carries it, and the hub only applies a graph when control and headless hashes ag
 can never show a parameter, or wait for a monitor stream, that the speaker does not have.
 
 **What `plugin-check` verifies.** `dsp/juce_apps/plugin-check/run.sh loudness` builds the three
-targets and loads them through JUCE's LV2 hosting. It checks that they expose the same 36
-parameters, that only the headless build lacks an editor, that saved state moves between the
+targets and loads them through JUCE's LV2 hosting. It checks that they expose the same 38
+parameters (35 of the plugin's, its two `mon_` monitors and the bypass JUCE's LV2 hosting
+adds), that the monitors are declared and published as section 5 says and stay out of every
+saved state, that only the headless build lacks an editor, that saved state moves between the
 control and headless builds in both directions, that the headless build set up only from the
 control build's saved state outputs exactly what the complete build outputs (bit for bit),
 that the control build leaves audio untouched, and that the control editor opens on its own:
@@ -945,7 +947,7 @@ and `firmware/local.mk` files, as before.
 ```mermaid
 flowchart LR
     s1["Step 1, done<br/>loudness builds as complete,<br/>control and headless.<br/>plugin-check proves they fit:<br/>same parameters, state, sound."] --> s2["Step 2, done<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
-    s2 --> s3["Step 3<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin, value monitors<br/>and the output level bar."]
+    s2 --> s3["Step 3, done<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin, value monitors<br/>and the output level bar."]
     s3 --> s4["Step 4<br/>Scope frames and records,<br/>catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
 ```
 
