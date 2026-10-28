@@ -87,6 +87,10 @@ TWEETER_LIMIT=""
 CAP=0
 PERSON_PRESENT=0
 WINDOW=10
+# smoke fails when the graph's longest cycle (speakerd's timing, per node and for the graph)
+# took more than this fraction of the cycle's length: half the budget, so the rest of the
+# PipeWire cycle and a bad moment still fit before a cycle is late.
+TIMING_GRAPH_LIMIT=0.5
 LOG_FILE=""
 REMOTE_ARGS=()
 
@@ -103,8 +107,9 @@ Actions:
               device.json and the layers stay unless --purge
   smoke       check without making a sound that speakerd plays capped, through the drop-in's
               speakerd sink, linked to the amplifier, driven by it, with no restart or xrun for a
-              while. Run it with a quiet stream playing: who drives is measured only when the
-              graph runs
+              while, and what its audio thread spends (per node, the graph: at most half the
+              cycle; no late cycle while watched). Run it with a quiet stream playing: who drives
+              is measured only when the graph runs
   sink        install the persistent speakerd sink and check that the running PipeWire has it
   check       what install would refuse, without changing anything
   limits      change device.json's limits (the cap), then restart speakerd. No limit at all is
@@ -1406,9 +1411,14 @@ do_smoke() {
         noted "speakerd's process was not found: its threads are not checked"
     fi
 
-    # A while without a restart, an xrun or a lost PipeWire.
+    # A while without a restart, an xrun or a lost PipeWire. speakerd's timing counters before
+    # it, when its local link is free (ampd holds it when it runs: then its log says).
+    local socket="$RUNTIME/control.sock"
+    helper status "$socket" > "$WORK/timing-before.json" 2> /dev/null || : > "$WORK/timing-before.json"
     said "watching for ${WINDOW} s"
     sleep "$WINDOW"
+    # speakerd's per-second timing line and its status come up to a second after the second.
+    sleep 1.1
     local after starts
     if [ "$NO_SYSTEMD" -eq 0 ]; then
         after="$(journalctl --user -u speakerd.service -u pipewire.service -u wireplumber.service --since "@$t0" -o cat --no-pager 2> /dev/null)"
@@ -1425,6 +1435,23 @@ do_smoke() {
     if grep -qi 'xrun' <<< "$after"; then failed "xruns while watched: $(grep -i -m3 'xrun' <<< "$after" | tr '\n' ';')"
     else pass "no xrun in ${WINDOW} s"; fi
     if grep -qE '^speakerd: (lost PipeWire|stopping)' <<< "$after"; then failed "speakerd stopped or lost PipeWire while watched"; fi
+
+    # What the audio thread spends: per node, the graph, the cycle; late cycles, position jumps.
+    local kind text
+    helper status "$socket" > "$WORK/timing-after.json" 2> /dev/null || : > "$WORK/timing-after.json"
+    printf '%s\n' "$after" > "$WORK/timing-window.log"
+    printf '%s\n' "$since" > "$WORK/timing-start.log"
+    while read -r kind text; do
+        case "$kind" in
+            pass) pass "$text" ;;
+            FAIL) failed "$text" ;;
+            warn) noted "$text" ;;
+            *)    said "$text" ;;
+        esac
+    done < <(helper timing --limit "$TIMING_GRAPH_LIMIT" --before "$WORK/timing-before.json" \
+                 --after "$WORK/timing-after.json" --window-log "$WORK/timing-window.log" \
+                 --start-log "$WORK/timing-start.log" --window "$WINDOW" \
+             || echo "FAIL the timing check did not run")
 
     # ampd, when it is installed: running, connected to speakerd, an agent to the hub.
     if ampd_installed; then

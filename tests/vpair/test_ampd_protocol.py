@@ -31,8 +31,10 @@ Pass when:
   speakerd whose current layer is an older revision than ampd's gets ampd's;
 - monitoring: two subscribers of one stream make one subscription to speakerd at the higher rate
   (60; 100, 0, -1 and 0.05 Hz are refused with an error, never clamped), each gets values at its own rate (within 30 %), the rate falls back when
-  the faster one leaves and an unsubscribe goes to speakerd when the last one does; a stream that
-  is not output/level or node/<uid>/mon_<id> is answered with an error;
+  the faster one leaves and an unsubscribe goes to speakerd when the last one does; speakerd/timing
+  is relayed at its rate with speakerd's object unchanged; a stream that is not output/level,
+  speakerd/timing or node/<uid>/mon_<id> (speakerd/timings, speakerd/timing/, Speakerd/timing,
+  speakerd/) is answered with an error;
 - persistence: while values change 25 times a second for 3 s, graph.json is replaced at most 4
   times and holds the last value within 1.1 s of it; a new revision is written at once (within
   0.5 s); graph.lkg.json appears once the revision has played --lkg-after seconds (2 here), not
@@ -59,7 +61,7 @@ Pass when:
   neither;
 - limits: a document with more than 64 nodes or 512 connections is rejected; a 400-digit number
   is answered with an error and the next value goes through; a stream that is not exactly
-  output/level or node/<16 and up>/mon_<1 to 64 characters> is refused, the 33rd subscription of
+  output/level, speakerd/timing or node/<16 and up>/mon_<1 to 64 characters> is refused, the 33rd subscription of
   a client is refused, and speakerd's refusal of a subscription reaches the subscriber;
 - a revision time that is not protocol.md's format counts as no time (not newer);
 - a value set while a revision applies (the right's speakerd takes 1.5 s) is kept by the new
@@ -87,6 +89,7 @@ from pathlib import Path
 from harness import (ADDRESS, KNOB_PORT, TWEETER_MUTED, Ampd, Controller, MonitorClient, StandInPair, StandInSpeakerd,
                      MonitorRefused, ampd_proof, check_welcome, client_hello, graph_document, lv2_uri, osc_encode,
                      revision_document, state_dir)
+from stand_in_speakerd import TIMING
 
 HEADLESS = lv2_uri("loudness_headless")
 PARAMS = {"mode": "Force 1", "s0_e0_gain": 0.0, "s0_e1_gain": 0.0}
@@ -346,17 +349,32 @@ class Protocol(unittest.TestCase):
                 fast.subscribe("output/level", 60)
                 sd.wait_event(lambda e: e.get("op") == "subscribe" and e["rate_hz"] == 60, what="the rate of 60 Hz")
                 fast.subscribe("node/16/mon_levelDb", 20)
+                fast.subscribe("speakerd/timing", 5)
                 start = time.monotonic()
                 time.sleep(3.0)
                 rates = {name: len(c.of("output/level", since=start)) / 3.0 for name, c in (("slow", slow), ("fast", fast))}
                 level = len(fast.of("node/16/mon_levelDb", since=start)) / 3.0
+                timing = len(fast.of("speakerd/timing", since=start)) / 3.0
                 print(f"\n  output/level: {rates['slow']:.1f} Hz asked 10, {rates['fast']:.1f} Hz asked 100 (60); "
-                      f"node/16/mon_levelDb {level:.1f} Hz asked 20")
+                      f"node/16/mon_levelDb {level:.1f} Hz asked 20; speakerd/timing {timing:.1f} Hz asked 5")
                 self.assertLess(abs(rates["slow"] - 10) / 10, 0.3)
                 self.assertLess(abs(rates["fast"] - 60) / 60, 0.3)
                 self.assertLess(abs(level - 20) / 20, 0.3)
+                self.assertLess(abs(timing - 5) / 5, 0.3)
                 value = fast.of("output/level")[-1][1]
                 self.assertEqual(value["v"], [-12.0, -15.0, -120.0, -120.0])
+                # speakerd/timing's object is relayed as speakerd sends it.
+                value = fast.of("speakerd/timing")[-1][1]["v"]
+                self.assertEqual({k: v for k, v in value.items() if k != "cycles_total"},
+                                 {k: v for k, v in TIMING.items() if k != "cycles_total"})
+                self.assertGreater(value["cycles_total"], 0)
+                for near in ("speakerd/timings", "speakerd/timing/", "Speakerd/timing", "speakerd/"):
+                    fast.subscribe(near)
+                deadline = time.monotonic() + 5
+                while len(fast.errors) < 8 and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual([e["stream"] for e in fast.errors[4:]],
+                                 ["speakerd/timings", "speakerd/timing/", "Speakerd/timing", "speakerd/"], fast.errors)
                 fast.close()
                 sd.wait_event(lambda e: e.get("op") == "subscribe" and e["rate_hz"] == 10 and e["t"] > start + 3.0,
                               what="the rate back at 10 Hz")

@@ -56,7 +56,7 @@ SEQ_MASK = 0xFFFFFFFF
 BIG = 2 ** 63 - 1
 TIME_FORMAT = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z")
 # The streams, exactly as speakerd reads them (used with fullmatch).
-STREAMS = (re.compile(r"output/level"), re.compile(r"node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}"))
+STREAMS = (re.compile(r"output/level"), re.compile(r"speakerd/timing"), re.compile(r"node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}"))
 SECRET_FORMAT = re.compile(r"[\x21-\x7e]{16,256}")
 MAX_NODES, MAX_CONNECTIONS = 64, 512           # a document with more is refused
 MAX_CONTROL_PEERS = 32                         # controllers and agents on the hub's control link
@@ -1754,7 +1754,7 @@ class Monitor:
         if op == "subscribe":
             if not valid_stream(stream):
                 conn.send({"op": "error", "about": "subscribe", "stream": stream,
-                           "reason": "a stream is output/level or node/<uid>/mon_<id> (uid 16 or more)"})
+                           "reason": "a stream is output/level, speakerd/timing or node/<uid>/mon_<id> (uid 16 or more)"})
                 return
             if stream not in client.subs and len(client.subs) >= MAX_SUBSCRIPTIONS:
                 conn.send({"op": "error", "about": "subscribe", "stream": stream,

@@ -18,7 +18,8 @@ speakerd that does exactly what it is told, including failing.
   ({"<node>/<id>": [values]}).
 - `subscribe` makes values at the rate asked (60 at most, 0 or less refused): output/level is the
   control file's "level" (four numbers, default [-12, -15, -120, -120]), node/<uid>/<mon_id> its
-  "monitors"[stream] (a number), and nothing while the current document has no node <uid>
+  "monitors"[stream] (a number), speakerd/timing the control file's "timing" (an object, default
+  TIMING with "cycles_total" counting up), and nothing while the current document has no node <uid>
   (clarification 19: the stream is kept and starts when a revision has it). A name that is no
   stream, or one in the control file's "refuse_streams", is answered with an error.
 - `status` is answered with the hello's fields.
@@ -35,6 +36,12 @@ import re
 import signal
 import sys
 import time
+
+# speakerd/timing's object as speakerd's README (Timing) shows it.
+TIMING = {"cycles": 47, "late": 0, "jumps": 0,
+          "cycle": {"mean": 0.001765, "max": 0.003544}, "graph": {"mean": 0.001572, "max": 0.003237},
+          "nodes": [{"uid": 16, "name": "loudness_headless", "mean": 0.0009778, "max": 0.001554}],
+          "cycles_total": 0, "late_total": 0, "jumps_total": 1, "dropped_total": 0}
 
 
 def first_layer(state):
@@ -89,6 +96,10 @@ class StandIn:
                 if stream == "output/level":
                     send({"op": "value", "stream": stream, "t": time.monotonic(),
                           "v": control.get("level", [-12.0, -15.0, -120.0, -120.0])})
+                elif stream == "speakerd/timing":
+                    timing = dict(control.get("timing", TIMING))
+                    timing["cycles_total"] = timing.get("cycles_total", 0) + int(time.monotonic() * 47)
+                    send({"op": "value", "stream": stream, "t": time.monotonic(), "v": timing})
                 elif int(stream.split("/")[1]) in {n.get("uid") for n in self.doc.get("nodes", [])}:
                     send({"op": "value", "stream": stream, "t": time.monotonic(),
                           "v": control.get("monitors", {}).get(stream, -30.0)})
@@ -141,7 +152,7 @@ class StandIn:
                               "reason": reason})
                 elif op == "subscribe":
                     stream, rate = msg.get("stream"), msg.get("rate_hz", 30)
-                    is_stream = isinstance(stream, str) and (stream == "output/level" or re.fullmatch(
+                    is_stream = isinstance(stream, str) and (stream in ("output/level", "speakerd/timing") or re.fullmatch(
                         r"node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}", stream))
                     if not is_stream or stream in self.control().get("refuse_streams", []) \
                             or not isinstance(rate, (int, float)) or rate <= 0:

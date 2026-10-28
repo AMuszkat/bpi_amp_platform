@@ -62,6 +62,12 @@ Pass when:
   device.json has those limits, and reports, each as a failure: a `device.json: FAILED` line,
   the limits line with either fail-safe suffix (or any other), speakerd's `NO INPUT SINK
   CONFIGURED` line, and no limits line at all;
+- smoke reports speakerd's timing: from its status on the local link, read before and after the
+  window, or (the link busy: ampd holds it) from its log's last `timing: last <n> s:` line, it
+  prints each node's and the graph's mean and max; it fails when the graph's longest cycle took
+  more than half its cycle (50.1 %; 50.0 % passes) and when a cycle was late in the window (the
+  log's `timing: in the last second` lines in it, or late_total's difference), and warns on
+  position jumps in the window, on late cycles before it, and when nothing measured the timing;
 - snapcast-setup.sh --route speakerd refuses while no PipeWire config defines the speakerd
   sink, and after `speakerd-setup.sh sink` routes snapclient (and shairport-sync and an
   AudioPluginHost) into "speakerd", keeping the routing there was; uninstall puts that routing
@@ -106,7 +112,9 @@ import os
 import re
 import shutil
 import subprocess
+import socket
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -692,6 +700,105 @@ class Install(Setup):
                           "--window", "0", env=self.env, check=False)
         self.assertIn("FAIL device.json cannot be read", result.stdout)
         self.assertRegex(result.stdout, r"smoke: \d+ failed")
+
+    def test_smoke_reports_the_timing(self):
+        home = self.fresh_home("smoke-timing")
+        self.install(home, "--role", "left")
+        start = "speakerd-run: starting speakerd x from layer current (test)"
+
+        def minute(graph_max, late=0, jumps=0):
+            return (f"speakerd: timing: last 60 s: node 16 (loudness_headless) mean 1.2 % max 3.4 %; "
+                    f"graph mean 1.3 % max {graph_max} %; cycle mean 1.5 % max 3.9 %; 2813 cycles, {late} late, "
+                    f"{jumps} position jump(s)")
+
+        def smoke(lines, window="0", env=None, during=()):
+            """smoke over a log of `lines`, `during` appended to it while it watches."""
+            log = self.tmp / "smoke-timing.log"
+            log.write_text("\n".join(lines) + "\n")
+            run = subprocess.Popen(["bash", str(FIRMWARE / "speakerd-setup.sh"), "smoke", "--home", str(home),
+                                    "--no-systemd", "--log", str(log), "--window", window],
+                                   env={**os.environ, **TEST_ENV, **(env or self.env)}, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            out = []
+            with run.stdout:
+                for line in run.stdout:
+                    out.append(line)
+                    if "info watching for" in line and during:
+                        with log.open("a") as f:
+                            f.write("\n".join(during) + "\n")
+            run.wait(timeout=60)
+            return "".join(out)
+
+        # From the log: its last minute line; nothing late in the window.
+        out = smoke([start, LIMITS, minute(3.6)])
+        print("\n" + "".join(line + "\n" for line in out.splitlines() if "timing" in line or "cycle" in line))
+        self.assertIn("info timing: node 16 (loudness_headless) mean 1.2 % max 3.4 % of the cycle", out)
+        self.assertIn("info timing: graph mean 1.3 % max 3.6 %, cycle mean 1.5 % max 3.9 %; 2813 cycles, 0 late, "
+                      "0 position jump(s)", out)
+        self.assertIn("pass the graph's longest cycle took 3.6 % of its cycle", out)
+        self.assertIn("pass no late cycle in 0 s", out)
+        # The graph above half its cycle fails; at exactly half it passes.
+        self.assertIn("FAIL the graph's longest cycle took 50.1 % of its cycle", smoke([start, LIMITS, minute(50.1)]))
+        self.assertIn("pass the graph's longest cycle took 50.0 % of its cycle", smoke([start, LIMITS, minute(50.0)]))
+        # Late cycles and position jumps said while it watches: a failure and a warning.
+        second = "speakerd: timing: in the last second {} late cycle(s), the longest at 104.2 % of its cycle; {} position jump(s)"
+        out = smoke([start, LIMITS, minute(3.6)], window="2", during=[second.format(2, 1), second.format(0, 1)])
+        self.assertIn("FAIL 2 late cycle(s) in 2 s", out)
+        self.assertIn("warn 2 position jump(s) in 2 s", out)
+        # Late cycles before the window: a warning only.
+        out = smoke([start, LIMITS, minute(3.6, late=3)])
+        self.assertIn("pass no late cycle in 0 s", out)
+        self.assertIn("warn 3 late cycle(s) before the window", out)
+        # A speakerd that has not logged a minute yet, its link busy (ampd holds it): not measured.
+        out = smoke([start, LIMITS])
+        self.assertIn("warn the graph's timing was NOT measured", out)
+
+        # From speakerd's status on its local link, read before and after the window.
+        runtime = self.tmp / "timing-runtime"
+        (runtime / "speakerd").mkdir(parents=True, exist_ok=True)
+        path = runtime / "speakerd/control.sock"
+        answers = []
+
+        def serve(server):
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                with conn:
+                    if not answers:
+                        conn.sendall(b'{"op":"error","reason":"busy"}\n')
+                        continue
+                    conn.sendall(b'{"op":"hello","role":"speakerd","protocol":1}\n')
+                    conn.recv(4096)
+                    conn.sendall(json.dumps(dict(op="status", timing=answers.pop(0))).encode() + b"\n")
+
+        timing = {"cycles": 2810, "late": 0, "jumps": 0, "seconds": 60,
+                  "cycle": {"mean": 0.0018, "max": 0.0035}, "graph": {"mean": 0.0016, "max": 0.0032},
+                  "nodes": [{"uid": 16, "name": "loudness_headless", "mean": 0.00098, "max": 0.0016}],
+                  "cycles_total": 9000, "late_total": 5, "jumps_total": 1, "dropped_total": 0}
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(path))
+        server.listen(4)
+        threading.Thread(target=serve, args=(server,), daemon=True).start()
+        try:
+            env = dict(self.env, XDG_RUNTIME_DIR=str(runtime))
+            answers[:] = [timing, dict(timing, late_total=5, jumps_total=1)]
+            out = smoke([start, LIMITS], env=env)
+            self.assertIn("pass the graph's longest cycle took 0.3 % of its cycle (speakerd's status, the last 60 s", out)
+            self.assertIn("info timing: node 16 (loudness_headless) mean 0.1 % max 0.2 % of the cycle", out)
+            self.assertIn("pass no late cycle in 0 s (speakerd's late_total and jumps_total before and after", out)
+            answers[:] = [timing, dict(timing, late_total=7, jumps_total=2, graph={"mean": 0.3, "max": 0.71})]
+            out = smoke([start, LIMITS], env=env)
+            self.assertIn("FAIL the graph's longest cycle took 71.0 % of its cycle", out)
+            self.assertIn("FAIL 2 late cycle(s) in 0 s", out)
+            self.assertIn("warn 1 position jump(s) in 0 s", out)
+            # Busy (ampd holds the link): the log's minute line instead.
+            answers[:] = []
+            out = smoke([start, LIMITS, minute(3.6)], env=env)
+            self.assertIn("pass the graph's longest cycle took 3.6 % of its cycle (speakerd's log", out)
+        finally:
+            server.close()
 
     def test_routing_and_uninstall(self):
         home = self.fresh_home("routing")
