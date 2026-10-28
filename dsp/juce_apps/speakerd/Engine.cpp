@@ -14,10 +14,68 @@ namespace speakerd
         }
     }
 
-    Engine::Engine (OutputLimits limits)
+    //==============================================================================
+    ParameterInbox::ParameterInbox (const std::vector<juce::AudioProcessorParameter*>& parameters)
+        : numSlots ((int) parameters.size()),
+          slots (std::make_unique<Slot[]> (parameters.size())),
+          fifo (numSlots + 1),                  // an AbstractFifo holds one item fewer than its size
+          queue ((size_t) numSlots + 1, 0)
+    {
+        for (int i = 0; i < numSlots; ++i)
+            slots[(size_t) i].parameter = parameters[(size_t) i];
+    }
+
+    void ParameterInbox::post (int slot, float normalised) noexcept
+    {
+        if (! juce::isPositiveAndBelow (slot, numSlots))
+            return;
+
+        auto& s = slots[(size_t) slot];
+        s.value.store (normalised, std::memory_order_relaxed);
+
+        // In the queue at most once: whoever turns `queued` on puts the slot in. The consumer
+        // turns it off before it reads the value, so a value stored after that is either read
+        // now or queued again: the newest value is never lost.
+        if (! s.queued.exchange (true, std::memory_order_acq_rel))
+        {
+            const auto scope = fifo.write (1);
+
+            if (scope.blockSize1 > 0)
+                queue[(size_t) scope.startIndex1] = slot;
+            else if (scope.blockSize2 > 0)
+                queue[(size_t) scope.startIndex2] = slot;
+        }
+    }
+
+    void ParameterInbox::applyPending() noexcept
+    {
+        const auto scope = fifo.read (fifo.getNumReady());
+
+        const auto apply = [this] (int slot)
+        {
+            auto& s = slots[(size_t) slot];
+            // An exchange, not a store: it reads the producer's exchange (acquire), so the value
+            // that producer stored before it is the one read below, or the producer, coming
+            // after this, finds `queued` off and queues the slot again.
+            s.queued.exchange (false, std::memory_order_acq_rel);
+            const auto value = s.value.load (std::memory_order_relaxed);
+
+            // For a hosted LV2 plugin: an atomic store and a flag (no listener, no lock); the
+            // plugin receives it as a patch:Set at the top of its next processBlock.
+            if (s.parameter != nullptr)
+                s.parameter->setValue (value);
+        };
+
+        for (int i = 0; i < scope.blockSize1; ++i)  apply (queue[(size_t) (scope.startIndex1 + i)]);
+        for (int i = 0; i < scope.blockSize2; ++i)  apply (queue[(size_t) (scope.startIndex2 + i)]);
+    }
+
+    //==============================================================================
+    Engine::Engine (OutputLimits limits, Role roleIn)
         : outputGain (validGain (limits.gain)),
           outputCeiling (juce::jmin (validGain (limits.gain), outputLimit)),
-          tweeterMuted (limits.tweeterMuted)
+          tweeterMuted (limits.tweeterMuted),
+          role (roleIn)
     {
     }
 
@@ -36,6 +94,7 @@ namespace speakerd
         }
 
         graph.reset();
+        inbox.reset();
     }
 
     //==============================================================================
@@ -109,47 +168,49 @@ namespace speakerd
         // Besides letting the plugins take their parameter values and finish their smoothing,
         // the last block primes the graph's output buffer at the block size the audio thread
         // will use.
-        jassert (blockSize > 0 && scratch.getNumChannels() >= 2 && scratch.getNumSamples() >= blockSize);
+        jassert (blockSize > 0 && scratch.getNumChannels() >= graphChannels && scratch.getNumSamples() >= blockSize);
         const auto total = (juce::int64) std::ceil (settleSeconds * sampleRate);
 
         for (juce::int64 done = 0; done < total; done += blockSize)
         {
-            juce::AudioBuffer<float> block (scratch.getArrayOfWritePointers(), 2, blockSize);
+            juce::AudioBuffer<float> block (scratch.getArrayOfWritePointers(), graphChannels, blockSize);
             block.clear();
             g.processBlock (block, m);
             m.clear();
         }
     }
 
-    void Engine::install (std::unique_ptr<juce::AudioProcessorGraph> newGraph, double sampleRate, int newMaxBlock,
-                          int settleBlock, bool fadeIn)
+    RunningGraph Engine::install (RunningGraph next, double sampleRate, int newMaxBlock, int settleBlock, bool fadeIn)
     {
+        auto& newGraph = next.graph;
         jassert (newGraph != nullptr && newMaxBlock > 0);
         settleBlock = juce::jlimit (1, newMaxBlock, settleBlock);
 
         // Beside the running graph, on buffers of its own: the audio thread does not know this
         // graph yet, so its second of silence costs the graph that is playing nothing.
         {
-            juce::AudioBuffer<float> scratch (2, settleBlock);
+            juce::AudioBuffer<float> scratch (graphChannels, settleBlock);
             juce::MidiBuffer scratchMidi;
             settle (*newGraph, sampleRate, settleBlock, scratch, scratchMidi);
         }
 
         // Room for a cycle padded to whole blocks (process()): less than maxBlock + one block.
-        juce::AudioBuffer<float> newIo (2, 2 * newMaxBlock);
+        juce::AudioBuffer<float> newIo (graphChannels, 2 * newMaxBlock);
         newIo.clear();
 
         park();    // a fade-out, if something is playing
 
-        auto old = std::move (graph);
-        graph = std::move (newGraph);
+        RunningGraph old { std::move (graph), std::move (inbox) };
+        graph = std::move (next.graph);
+        inbox = std::move (next.inbox);
         io = std::move (newIo);
         maxBlock = newMaxBlock;
+        maxBlockForReaders.store (newMaxBlock);
         setRate (sampleRate);
         setPrimedBlock (settleBlock);
 
         unpark (fadeIn);
-        old.reset();
+        return old;
     }
 
     Engine::Serviced Engine::service()
@@ -200,7 +261,7 @@ namespace speakerd
         {
             // One silent block at the new size: the graph reallocates its output buffer here,
             // on the message thread.
-            juce::AudioBuffer<float> block (io.getArrayOfWritePointers(), 2, wanted);
+            juce::AudioBuffer<float> block (io.getArrayOfWritePointers(), graphChannels, wanted);
             block.clear();
             graph->processBlock (block, midi);
             midi.clear();
@@ -243,6 +304,56 @@ namespace speakerd
 
     //==============================================================================
     void Engine::process (const float* const* in, float* const* out, int numSamples, double cycleRate) noexcept
+    {
+        processCycle (in, out, numSamples, cycleRate);
+
+        if (levelWanted.load (std::memory_order_acquire))
+            measureLevel (out, numSamples);
+    }
+
+    void Engine::measureLevel (float* const* out, int numSamples) noexcept
+    {
+        // What the amplifier gets: the samples just copied out (nothing, when a port has no
+        // buffer). A full ring drops the cycle: the monitor thread is behind, or gone.
+        if (numSamples <= 0)
+            return;
+
+        LevelRecord record;
+        record.samples = numSamples;
+
+        const auto measure = [numSamples] (const float* x, float& peak, float& squares)
+        {
+            if (x == nullptr)
+                return;
+
+            float p = 0.0f, s = 0.0f;
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const auto a = std::abs (x[i]);
+                p = a > p ? a : p;
+                s += x[i] * x[i];
+            }
+
+            peak = p;
+            squares = s;
+        };
+
+        if (out != nullptr)
+        {
+            measure (out[0], record.wooferPeak, record.wooferSquares);
+            measure (out[1], record.tweeterPeak, record.tweeterSquares);
+        }
+
+        const auto scope = levelFifo.write (1);
+
+        if (scope.blockSize1 > 0)
+            levelRing[(size_t) scope.startIndex1] = record;
+        else if (scope.blockSize2 > 0)
+            levelRing[(size_t) scope.startIndex2] = record;
+    }
+
+    void Engine::processCycle (const float* const* in, float* const* out, int numSamples, double cycleRate) noexcept
     {
         cycles.fetch_add (1, std::memory_order_relaxed);
 
@@ -295,6 +406,10 @@ namespace speakerd
 
         if (graph == nullptr || numSamples > maxBlock)
             return silentAtZero();
+
+        // Parameter values from the local link, before the graph runs: in force from this cycle.
+        if (inbox != nullptr)
+            inbox->applyPending();
 
         if (cycleRate > 0.0 && std::abs (cycleRate - preparedRate) > 0.5)
         {
@@ -354,9 +469,26 @@ namespace speakerd
                 juce::FloatVectorOperations::clear (dst + numSamples, padded - numSamples);
         }
 
+        // The Mine channel: this speaker's own channel of the stream, by its role.
+        {
+            auto* mine = io.getWritePointer (2);
+            const auto* fl = io.getReadPointer (0);
+            const auto* fr = io.getReadPointer (1);
+
+            switch (role)
+            {
+                case Role::left:   juce::FloatVectorOperations::copy (mine, fl, padded); break;
+                case Role::right:  juce::FloatVectorOperations::copy (mine, fr, padded); break;
+                case Role::mono:
+                    juce::FloatVectorOperations::add (mine, fl, fr, padded);
+                    juce::FloatVectorOperations::multiply (mine, 0.5f, padded);
+                    break;
+            }
+        }
+
         for (int b = 0; b < blocks; ++b)
         {
-            juce::AudioBuffer<float> chunk (io.getArrayOfWritePointers(), 2, b * block, block);
+            juce::AudioBuffer<float> chunk (io.getArrayOfWritePointers(), graphChannels, b * block, block);
             graph->processBlock (chunk, midi);
             midi.clear();
         }

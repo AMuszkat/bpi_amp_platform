@@ -280,11 +280,12 @@ headless builds of the plugins. It adds only what an unattended host inside a sp
   known good, factory, passthrough) and reads the speaker's role from `device.json`. Nobody
   has to open a session.
 - **A command socket instead of a GUI.** Parameter changes and graph revisions arrive from
-  `ampd` over a local socket and reach the audio thread through a lock-free queue.
+  `ampd` over a local socket and reach the audio thread through a lock-free queue (built in
+  step 3: the local link of [protocol.md](protocol.md)).
 - **Safe structural changes.** Adding, removing or moving a plugin fades the output for about
   30 ms, so it never clicks.
 - **The role-aware input.** It resolves the "Mine" input pin to FL or FR from the speaker's
-  role.
+  role (built in step 3: input channel 2).
 - **Monitoring.** A normal-priority thread samples the plugins' meters and scope buffers, the
   output level of each amplifier channel, the amplifier telemetry, the time per node and the
   xrun count, and hands the newest of each to `ampd` (section 5). Nobody is watching a window,
@@ -382,6 +383,34 @@ speaker in place of AudioPluginHost:
   configuration, snapclient, `speakerd`; `ampd` from step 3), and `tools/board.sh` is the gated
   path an agent uses to reach a board (the `/board` skill).
 
+**What step 3 decided for `speakerd`** (0.3.0; `dsp/juce_apps/speakerd/README.md` has the
+details, [protocol.md](protocol.md) the messages):
+
+- **The local link is a Unix socket speakerd listens on**, `$XDG_RUNTIME_DIR/speakerd/control.sock`
+  (mode 0600; `--control-socket PATH` names another, `--no-control-socket` turns it off), one
+  client at a time. speakerd starts listening once its PipeWire node is up and plays whether or
+  not `ampd` is there; a socket it cannot make (another process listens there) is logged, never
+  fatal. One normal-priority thread does the socket I/O and never blocks on it.
+- **A parameter is resolved on the link thread and applied on the audio thread.** The link
+  thread finds the hosted parameter by node uid and ID, checks `seq` and turns the value
+  (a number, a choice's text, a switch's `true`/`false`) into the normalised value. The audio
+  thread takes it from a lock-free inbox (one slot per parameter, newest wins, never full) at the
+  top of the next cycle and sets it with `setValue`, which for JUCE's LV2 hosting takes no lock,
+  so the step-2 rule holds: nobody sets a running graph's parameters from another thread.
+  Measured on the virtual pair, every change lands on a cycle boundary, as a one-sample step,
+  and twelve changes sent at random moments land within 17.4 ms of each other relative to their
+  send times, less than one 21.3 ms cycle: each is in force from the next cycle.
+- **A revision is applied by the existing swap path**, and applies are queued in order, never
+  refused for being busy: a hub that rolls a failed revision back sends the previous one right
+  behind it. A parameter that arrives while a revision is being built goes to the playing graph
+  and again to the new one. The swap costs the two 30 ms fades and the rest of the cycle in
+  which the fade-out ended (72.6 ms in all, measured); an apply that fails leaves the playing
+  graph untouched, to the sample.
+- **The monitor thread** samples only subscribed streams, each at its own rate up to 60 Hz.
+  `output/level` is measured by the audio thread into a lock-free ring only while subscribed (3
+  us per 1024-sample cycle on x86_64) and tracks a stepped tone within 0.01 dB; a plugin's
+  monitor is the value JUCE's LV2 hosting last received from it (section 5).
+
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it advertises the speaker over mDNS, receives
 parameter changes and graph revisions, hands them to `speakerd`, persists the state files that
@@ -467,13 +496,16 @@ sequenceDiagram
     end
 ```
 
-In step 2, `speakerd` applies a revision as a whole new graph: it builds rev N+1 beside the
+Since step 2, `speakerd` applies a revision as a whole new graph: it builds rev N+1 beside the
 running rev N, prepares it and runs it on a second of silence off the audio path (section 2),
 then swaps it in between a 30 ms fade-out and a 30 ms fade-in. The swap costs only the fades,
 but every plugin of the new graph starts again from silence, so a delay line or a level
 detector starts empty. `AudioProcessorGraph` can also add and remove nodes and connections
 while it runs; carrying the unchanged nodes across (a diff against rev N, under the same fade)
-is the later refinement that keeps their state.
+is the later refinement that keeps their state. In step 3 the revision arrives as an `apply` on
+the local link ([protocol.md](protocol.md)); `speakerd` answers `applied` once the new graph has
+run a cycle, or `failed` with the reason while rev N plays on untouched, and queues an `apply`
+that arrives while another is being built.
 
 ## 5. Monitoring: data from the speakers to the controller
 
@@ -581,6 +613,17 @@ sequenceDiagram
     A->>S: stop producing
 ```
 
+**What step 3 built in `speakerd`.** The monitor thread of the rules above, for values: the
+local link's client subscribes to `output/level` and to `node/<uid>/<mon_id>` streams, each
+sampled at its own rate (at most 60 Hz), and nothing is measured or sent for a stream nobody
+subscribed to ([protocol.md](protocol.md), and the speakerd README). A plugin's monitor is a
+parameter whose ID starts with `mon_`; JUCE's LV2 hosting keeps the value the plugin last
+reported in an atomic, which the monitor thread reads. **The plugin must report it through the
+parameter's listeners** (`setValueNotifyingHost`): JUCE's LV2 wrapper sends the host only the
+parameters its listener heard change, so a value written with plain `setValue` never leaves the
+plugin. Checked in the pinned JUCE (`juce_audio_plugin_client_LV2.cpp`, `ParameterStorage`) and
+on the virtual pair with a throwaway plugin.
+
 **What a plugin declares.** Next to its parameter layout, in the header all three targets
 share, a plugin lists its monitors:
 
@@ -656,8 +699,10 @@ flowchart LR
 
 The **Mine** pin resolves per speaker from its device role (left, right, or a sum for a mono
 speaker). Wiring FL or FR explicitly still works, for a graph that is deliberately asymmetric.
-Trim and delay per speaker are parameters of the input node and are device state, not group
-state. The controller shows the group graph; a small per-speaker panel (role, trim, delay,
+`speakerd` 0.3.0 implements it as input channel 2 of the graph document: the Engine makes Mine
+from the stream every cycle (FL, FR, or (FL + FR) / 2 for a mono speaker), so every graph has it,
+passthrough included, which plays Mine. Trim and delay per speaker are parameters of the input
+node and are device state, not group state. The controller shows the group graph; a small per-speaker panel (role, trim, delay,
 mute) sits beside it. Trim and delay are not in `device.json` yet: `speakerd` 0.2.0 rejects
 keys it does not know (a misspelt `limits` must not pass silently), so they arrive with the
 version that applies them.

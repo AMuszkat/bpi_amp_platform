@@ -1,24 +1,25 @@
 # speakerd
 
-The headless plugin host that runs on each speaker: step 2 of
+The headless plugin host that runs on each speaker: steps 2 and 3 of
 [`docs/remote-plugin-host.md`](../../../docs/remote-plugin-host.md). It is AudioPluginHost with
 the window removed. JUCE's `AudioProcessorGraph` hosts the headless LV2 builds of the plugins
 and runs inside the PipeWire cycle. At boot it loads its graph from the first state layer that
 loads, and it plays with no network, no controller and no `ampd`. It has no GUI and links no
-X11. It opens no network socket: only PipeWire's local one, and the local socket pair JUCE's
-message loop uses inside the process.
+X11. It opens no network socket: only PipeWire's local one, the local socket pair JUCE's
+message loop uses inside the process, and the [local link](#the-local-link) to `ampd`, a Unix
+socket.
 
-Not here yet (step 3): the local socket to `ampd`, parameter changes and graph revisions
-while running, the role-aware **Mine** input pin, and monitoring (meters, level bars, scope
-frames). The path a revision will take exists (`Engine::install`): the new graph is built and
-settled beside the running one, then swapped in between a 30 ms fade-out and a 30 ms fade-in.
-In step 2 it runs once, at boot, before anything plays. A rate change does not swap the graph:
-it re-prepares the running one in place, behind silence.
+Step 3 (0.3.0) added the local link: `ampd` sets parameters while the graph runs, applies graph
+revisions (built beside the running graph and swapped in under a 30 ms fade-out and fade-in),
+asks for the status, and subscribes to [monitor values](#monitoring): the output level of each
+amplifier channel and the plugins' `mon_` parameters. The input node gained the role-aware
+[**Mine** channel](#the-mine-channel). Scope frames and records are step 4. A rate change does
+not swap the graph: it re-prepares the running one in place, behind silence.
 
 ## Command line
 
 ```
-speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--lv2-bundle PATH]...
+speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--control-socket PATH | --no-control-socket] [--lv2-bundle PATH]...
 speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...
 speakerd --import-filtergraph FILE [--device DEVICE_JSON] [--prefer-headless] [--allow-unsafe-routing] [--lv2-bundle PATH]...
 speakerd --version
@@ -29,6 +30,8 @@ speakerd --version
 | `--state-dir DIR` | required: holds `graph.json`, `graph.lkg.json`, `factory.json`, `device.json` |
 | `--node-name NAME` | the name players target (default `speakerd`); the filter node is `NAME-dsp` |
 | `--from LAYER` | start trying at this layer: `current` (the default), `last-known-good`, `factory` or `passthrough`. speakerd keeps no count of its own crashes, since it writes no file. Whatever restarts it after a crash (systemd, `ampd`) says where to start |
+| `--control-socket PATH` | the [local link](#the-local-link): listen on this Unix socket instead of `$XDG_RUNTIME_DIR/speakerd/control.sock`. For several speakerds on one machine (each with its own path), and for tests. Live mode only |
+| `--no-control-socket` | no local link at all: nothing changes the graph while speakerd runs. Live mode only; not with `--control-socket` |
 | `--lv2-bundle PATH` | also load this LV2 bundle (repeatable). Plugins are otherwise found by URI in `~/.lv2`, `/usr/lib/lv2` and `/usr/local/lib/lv2`; JUCE ignores `$LV2_PATH` |
 | `--render IN.wav OUT.wav` | the offline render: no PipeWire (see below) |
 | `--block N` | the render's block size, default 1024 (the speaker's quantum). Render only: the live node runs at PipeWire's quantum, and `--block` without `--render` is a bad command line |
@@ -36,7 +39,7 @@ speakerd --version
 | `--device DEVICE_JSON` | with `--import-filtergraph`: the speaker's `device.json`, which says whether the session's output channel 0 (`playback_FL`) or 1 (`playback_FR`) is the woofer. Without it, `playback_FL` is |
 | `--prefer-headless` | with `--import-filtergraph`: a complete or control build's URI becomes its `_headless` sibling's, when that plugin is found (in the default paths or a `--lv2-bundle`) |
 | `--allow-unsafe-routing` | with `--import-filtergraph`: import the stream straight to the tweeter, or a control build, with a warning, instead of failing |
-| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.2.1 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
+| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.0 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
 
 | Exit status | |
 |---|---|
@@ -245,7 +248,7 @@ fades back in.
 
 | File | Layer | Written by |
 |---|---|---|
-| `graph.json` | current | `ampd` (step 3) |
+| `graph.json` | current | `ampd`: every revision it applies, with the current parameter values |
 | `graph.lkg.json` | last known good | `ampd` promotes it |
 | `factory.json` | factory | ships with the plugins |
 | `device.json` | not a layer: this speaker's role and amplifier | set once, never from the hub |
@@ -308,7 +311,7 @@ never drives its tweeter and plays its woofer at -20 dB at most.
 This is AudioPluginHost's `.filtergraph` as JSON: nodes with uids, the plugin by format and
 identifier, its state, and connections per channel between node uids. It adds a revision
 number and each node's parameter values by parameter ID. It is what a state layer holds and
-what the hub will send in step 3.
+what an `apply` on the [local link](#the-local-link) carries.
 
 ```json
 {
@@ -331,7 +334,9 @@ what the hub will send in step 3.
 }
 ```
 
-This plays FL through loudness to the woofer, and leaves the tweeter silent. **Only a crossover
+This plays FL through loudness to the woofer, and leaves the tweeter silent. With
+`{ "node": 1, "channel": 2 }` as the first source it plays the speaker's own channel (Mine), FL
+on a left speaker and FR on a right one, so one document serves both speakers of a pair. **Only a crossover
 may feed the tweeter** (output channel 1): a full-range signal can destroy it. A test on the
 virtual pair may route a plugin to both channels, to measure both; a document for a board never
 does.
@@ -340,12 +345,13 @@ does.
 |---|---|
 | `format` | optional; `"speakerd-graph"` if present |
 | `version` | `1` |
-| `revision` | an integer, 0 or more; logged, and compared by the hub in step 3 |
+| `revision` | an integer, 0 or more; logged, reported in the hello and the status, and compared by the hub |
 | `nodes` | the plugin nodes (may be empty) |
 | `connections` | per-channel connections (may be empty) |
 
-**Node uids.** 1 is the input node, the stream: output channel 0 is FL, 1 is FR (step 3 adds
-2, Mine). 2 is the output node, the amplifier: input channel 0 is amplifier 1 (the woofer), 1 is
+**Node uids.** 1 is the input node, the stream: output channel 0 is FL, 1 is FR, 2 is
+[Mine](#the-mine-channel) (from 0.3.0; an older speakerd fails a document that uses it). 2 is
+the output node, the amplifier: input channel 0 is amplifier 1 (the woofer), 1 is
 amplifier 2 (the tweeter). 3 to 15 are reserved for nodes speakerd provides. Plugin nodes use
 16 and up, each uid once.
 
@@ -374,7 +380,8 @@ against each plugin's real channel counts when it loads. A connection listed twi
 graph refuses, fails the layer. So does a loop (a node that feeds itself, through any path:
 `node <uid> (<name>) feeds itself: the graph has a loop`), which JUCE's graph would otherwise
 run, giving the connection that closes it silence. So does an unknown plugin, an unknown
-parameter ID, or a choice text the plugin does not have.
+parameter ID, a monitor's ID (one that starts with `mon_`: monitors are read-only and never in a
+document), or a choice text the plugin does not have.
 
 **What "takes its state" means.** JUCE's LV2 wrapper reports success for any state, and a JUCE
 plugin ignores a state it cannot read. So speakerd reads the plugin's own state out before (S0)
@@ -384,12 +391,25 @@ state changed, not that every value in it arrived. Its limit: a G that restates 
 values in other bytes (another attribute order, say) is reported as not taken, which fails the
 layer: the safe side.
 
-Not in version 1: bus layouts (each plugin keeps its default), and the Mine pin.
+Not in version 1: bus layouts (each plugin keeps its default).
+
+## The Mine channel
+
+The input node's channel 2, **Mine**, is the speaker's own channel of the stream, from the role
+in `device.json`: FL on a `left` speaker, FR on a `right` one, (FL + FR) / 2 on a `mono` one (a
+`device.json` that is missing or invalid plays `mono`). The Engine makes it every cycle, from the
+stream after NaN and infinity became 0, so every graph has it: a layer, a revision from the local
+link, and passthrough, which plays Mine. The graph runs on three input channels (FL, FR, Mine)
+and two output channels (woofer, tweeter).
+
+A document that connects from `1:2` plays the same on both speakers, each its own side; one that
+connects from `1:0` or `1:1` stays deliberately asymmetric. `--import-filtergraph` keeps a
+session's connections from FL and FR as they are: an AudioPluginHost session has no Mine.
 
 ## Passthrough
 
-The last layer, used when no other loads. The speaker's own channel goes to the woofer only, at
-**-20 dB** (and the `limits` of `device.json` on top of that), and the tweeter gets digital
+The last layer, used when no other loads. The speaker's own channel (Mine, as every graph has
+it) goes to the woofer only, at **-20 dB** (and the `limits` of `device.json` on top of that), and the tweeter gets digital
 silence. Left plays FL, right plays FR, and mono plays
 (FL + FR) / 2. The woofer is then clamped to +-0.1, and NaN or infinity becomes 0, so the
 woofer never sees more than -20 dBFS, even from a stream above full scale (a player's volume
@@ -401,6 +421,126 @@ speakerd announces passthrough loudly:
 speakerd: *** PASSTHROUGH: no state layer loaded ***
 speakerd: using layer passthrough: woofer = FL at -20 dB, tweeter muted
 ```
+
+## The local link
+
+How `ampd` talks to speakerd: [`docs/protocol.md`](../../../docs/protocol.md) is the contract,
+version 1; this is what speakerd does with it. A Unix stream socket, by default
+`$XDG_RUNTIME_DIR/speakerd/control.sock` (`--control-socket PATH` names another,
+`--no-control-socket` turns it off), carrying JSON lines: one object per line, UTF-8,
+`\n`-terminated.
+
+- **speakerd listens.** It starts listening once its PipeWire node is up (after the check that no
+  other speakerd runs), and plays whether or not anybody connects, connects later or goes away.
+  The folder is made, mode 0700, when it is missing; the socket is mode 0600. A socket file
+  nobody listens on (a speakerd that crashed left it) is replaced; one another process listens
+  on, or a path that is not a socket, is left alone, and speakerd plays without a local link (it
+  says so). At a stop it removes its socket file. Without `XDG_RUNTIME_DIR` and without
+  `--control-socket` there is no local link.
+- **One client at a time.** A second one gets `{"op":"error","reason":"busy"}` and is closed.
+- **A line longer than 32 MiB, or one that is not JSON, closes the connection** (the peer
+  reconnects). A line that is JSON but not an object, an unknown `op` and unknown keys are
+  ignored, as are `gesture` and a `hello` from `ampd`.
+- **Threads.** One normal-priority thread does all the socket I/O, and never blocks on it: what
+  the peer has not read waits in a buffer. A peer that lets 64 MiB pile up is disconnected; a
+  monitor value is dropped while 256 KiB wait. The audio thread never touches the link.
+
+### What speakerd sends
+
+| Message | When |
+|---|---|
+| `{"op":"hello","role":"speakerd","version":"0.3.0 (<commit>)","revision":8,"layer":"current","protocol":1}` | first, on every connection, also after a reconnect |
+| the same fields with `"op":"status"` | the answer to `{"op":"status"}` |
+| `{"op":"applied","revision":8}` | an `apply` built, swapped in, and the audio thread has run a cycle of it (or 200 ms went by with no cycle: nothing is linked) |
+| `{"op":"failed","revision":8,"reason":"..."}` | an `apply` that did not load; the graph that played plays on, untouched |
+| `{"op":"error","about":"param","node":16,"id":"gain","reason":"..."}` | a `param` that cannot be applied (below) |
+| `{"op":"error","about":"subscribe","stream":"...","reason":"..."}` | a `subscribe` to a name that is not a stream |
+| `{"op":"value","stream":"output/level","t":1234.567890,"v":[-12.10,-15.11,-120.00,-120.00]}` | a subscribed stream's value ([Monitoring](#monitoring)) |
+
+`revision` is the running graph's: the layer's document's, the last applied revision's, or 0
+for passthrough. `layer` is the state layer it came from at boot (`current`, `last-known-good`,
+`factory`, `passthrough`), and `current` once a revision has been applied (`ampd` writes every
+applied revision as `graph.json`, the current layer). `version` is what `--version` prints after
+`speakerd `.
+
+### What speakerd accepts
+
+**`{"op":"param","node":16,"id":"s0_e0_gain","value":4.5,"seq":1234,"origin":"ctl-mac"}`**: a
+parameter of the running graph, by node uid and parameter ID, in the plugin's own units, as in a
+document (dB, Hz, a choice's index or its text, a switch's 0/1 or `true`/`false`; outside the
+range is clamped). The link thread looks it up and turns it into the hosted parameter's
+normalised value; the audio thread sets it at the top of its next cycle, before the graph runs,
+so it is in force from that cycle (no ramp from speakerd: whatever smoothing the plugin does).
+
+- **`seq`** (0 to 2^32 - 1, missing = 0): a parameter whose `seq` is not newer than the last one
+  applied to that same parameter is ignored; newer is compared as a 32-bit counter that wraps
+  (`(int32) (seq - last) > 0`). `seq` 0 always applies and does not move the last one. The last
+  `seq` of every parameter is forgotten when a client connects: a new `ampd`'s hub may count from
+  anywhere.
+- **Answered only when it fails**, with the reason: a `node` that is not an integer or not in the
+  running graph (`no node 17 in revision 8`), an `id` the node does not have, a monitor's ID
+  (`mon_...`, read-only), a missing `value`, a value the parameter does not take (a choice text it
+  does not have, `true`/`false` for anything but a switch, a non-number), a bad `seq`. A
+  parameter ignored for its `seq` is not answered.
+- **While a revision is being built**, a parameter goes to the graph that plays, and is applied
+  again to the new graph once it is swapped in, if that graph has the same node and ID: it
+  arrived after the `apply`, so it is newer than the document.
+
+**`{"op":"apply","revision":8,"document":{...}}`**: a graph revision. The document is a [graph
+document](#the-graph-document-version-1); its `revision` may be left out (the apply's is used)
+and is refused if it differs. speakerd builds it beside the running graph, settles it on a second
+of silence off the audio path, and swaps it in under a 30 ms fade-out and a 30 ms fade-in (the
+plugins of the new graph start from silence, see the Real time section). It loads exactly as a
+layer must load; when it does not, the answer is `failed` with the reason and nothing was
+touched. **Applies are queued, never refused for being busy:** one that arrives while another
+is being built waits for it, and they are applied in order, each answered (a hub that rolls a
+failed revision back sends the previous one right behind it, and it must not be lost). At most 8
+are queued, the one being built included; a ninth fails at once (`8 revisions are waiting
+already`). An `apply` without an integer
+`revision` (0 or more) or without a `document` object fails at once. The message thread builds
+and settles it (the second of silence is computed, not waited for): with `loudness_headless`,
+`applied` comes about 100 ms after the `apply` on the virtual pair.
+
+**`{"op":"status"}`**: answered with the hello's fields, `"op":"status"`.
+
+**`{"op":"subscribe","stream":"output/level","rate_hz":30}`**, **`{"op":"unsubscribe","stream":"output/level"}`**:
+see [Monitoring](#monitoring).
+
+## Monitoring
+
+A normal-priority monitor thread samples the streams the client subscribed to and sends their
+values as `value` lines. Nothing is measured, sampled or sent for a stream nobody subscribed to;
+with no subscription the thread sleeps.
+
+| Stream | `v` |
+|---|---|
+| `output/level` | `[woofer_peak, woofer_rms, tweeter_peak, tweeter_rms]` in dBFS, of what the amplifier got since the previous value: after the fade, the limits of `device.json` and the caps, exactly the samples handed to PipeWire. RMS is the plain root mean square (a full-scale sine is 0 dBFS peak, -3.01 dBFS RMS). Silence, and anything below, is -120. Two decimals |
+| `node/<uid>/<mon_id>` | the value the hosted plugin last reported for its parameter `<mon_id>` (an ID that starts with `mon_`), in the plugin's own units, as a number |
+
+- **Rates.** Each stream is sampled at its own `rate_hz` (default 30, at most 60; above 60 is
+  60, 0 or less is refused). Subscribing again changes the rate. A period in which no audio cycle
+  ran sends no `output/level` value, so at the speaker's quantum (1024 at 48 kHz, 46.9 cycles a
+  second) 60 Hz gives about 47 values a second.
+- **`t`** is speakerd's monotonic clock (`CLOCK_MONOTONIC`), in seconds, six decimals.
+- **Subscriptions belong to the connection**: they end when it closes, and `ampd` subscribes
+  again after it reconnects. A `node/...` stream the running graph does not have sends nothing
+  (until a revision has it); a name that is not a stream is refused with an `error`.
+- **How `output/level` is measured.** While it is subscribed, the audio thread computes, per
+  cycle, each channel's largest absolute sample and sum of squares of what it hands to PipeWire,
+  and pushes them into a lock-free ring of 1024 cycles (no allocation, no lock, no syscall). The
+  monitor thread drains the ring at least every 50 ms and adds the cycles of each period up.
+  Unsubscribed, the audio thread's cost is one atomic load per cycle; subscribed, 3 us per
+  1024-sample cycle on x86_64 (0.014 % of the cycle), 18 us under qemu-aarch64 emulation.
+- **How a plugin's monitor reaches speakerd.** JUCE's LV2 hosting keeps the value a plugin
+  reports (a `patch:Set` on its atom output, after its `run()`) in an atomic, which the monitor
+  thread reads. JUCE's LV2 wrapper only reports a parameter that changed **through its
+  listeners**: `setValueNotifyingHost` (or anything that calls
+  `sendValueChangedMessageToListeners`). A plugin that writes its monitor with plain `setValue`
+  is never reported, and speakerd reads the default for ever (checked on the virtual pair with a
+  throwaway plugin: `setValue` from `processBlock` stayed at -120, `setValueNotifyingHost` read
+  -20 for a -20 dBFS input). `setValueNotifyingHost` on the plugin's audio thread takes that
+  parameter's `listenerLock` (a `CriticalSection`), uncontended in a headless build that nobody
+  else listens to.
 
 ## The render mode
 
@@ -418,9 +558,19 @@ build outputs: the reference a live capture is compared with.
 ## Real time
 
 - **The audio thread never blocks, allocates or makes a syscall of its own.** Per cycle it
-  copies the stream in, calls `AudioProcessorGraph::processBlock`, ramps the fade, applies the
-  limits of `device.json` (a multiply and a clear, with constants fixed when the engine is
-  made), caps the output at the ceiling and copies the two amplifier channels out.
+  sets the parameter values the local link posted, copies the stream in, makes the Mine channel,
+  calls `AudioProcessorGraph::processBlock`, ramps the fade, applies the limits of `device.json`
+  (a multiply and a clear, with constants fixed when the engine is made), caps the output at the
+  ceiling and copies the two amplifier channels out; while `output/level` is subscribed, it
+  measures them into the level ring.
+- **Parameters reach the audio thread through a lock-free inbox.** Each graph has one slot per
+  hosted parameter (newest value wins) and a lock-free queue of the slots that hold a new value,
+  each slot in it at most once, so it never overflows and the newest value is never lost,
+  however long no cycle runs. The link thread posts the normalised value; the audio thread, at
+  the top of a cycle, calls the hosted parameter's `setValue`: for JUCE's LV2 hosting an atomic
+  store and a flag, no listener and no lock, and the plugin gets it as a `patch:Set` in that very
+  `processBlock`. The inbox is swapped with its graph; a graph and its inbox are deleted only
+  after the tables the link and monitor threads use point at the new graph.
 - **Three locks JUCE takes on the audio thread, and why none of them waits.** (1) JUCE's graph
   takes each processor's callback lock around its `processBlock`; speakerd never takes those
   locks from another thread while the graph runs. (2) The graph hands its render sequence over
@@ -430,10 +580,9 @@ build outputs: the reference a live capture is compared with.
   which takes that parameter's `listenerLock` (`juce_AudioProcessorParameter.cpp`,
   `sendValueChangedMessageToListeners`); a `StateChanged` atom calls `updateHostDisplay`, which
   takes the processor's `listenerLock`. The message thread takes the same parameter lock when
-  it sets a value. So nobody sets a running graph's parameters on the message thread. In step 2
-  values are only set on a graph that is not running yet. **In step 3, parameter changes are
-  applied on the audio thread, from the command queue, never on the message thread while the
-  graph runs.**
+  it sets a value. So nobody sets a running graph's parameters on the message thread: values
+  from a document are set on a graph that is not running yet, and changes from the local link
+  are applied on the audio thread, from the inbox, with `setValue`, which takes no lock.
 - **Absolute caps.** NaN and infinity in the stream become 0 before any plugin sees them (so
   they cannot stick in a filter's state). After the graph, the fade and the limits' gain, NaN
   and infinity become 0 and every sample is clamped to the ceiling: plus or minus the limits'
@@ -472,7 +621,7 @@ stable.
 
 | Line | When |
 |---|---|
-| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf` |
+| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf`; 0.3.0 has the local link, the Mine channel and the monitors |
 | `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or invalid, its `limits` included; the defaults are limited (see device.json) |
 | `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
 | `device: limits: output at <gain> dB, tweeter <muted\|on>`, followed by ` (no limits in device.json: the fail-safe)` or ` (device.json not read: the fail-safe)` when they are the fail-safe | always, right after the line before. `<gain>` is printed as `%g` does: `-20`, `-6.5`, `0`. No limit at all reads `output at 0 dB, tweeter on` |
@@ -505,6 +654,19 @@ stable.
 | `pipewire: connection error: <message> (<error>)`, `pipewire: node '<name>-dsp' failed: <error>`, `pipewire: the input sink '<name>' failed: ...` | the connection to PipeWire was lost (the core reports `-EPIPE`), or the filter or the input sink failed; `lost PipeWire` follows |
 | `pipewire: node '<name>-dsp' went away`, possibly followed by ` (<reason>)` | the filter node was destroyed (by PipeWire, or with `pw-cli destroy`); `lost PipeWire` follows, and often a `pipewire: error, carrying on: ...` line before it |
 | `lost PipeWire` | after one of those; `stopping` and exit status 3 follow |
+| `local link: listening on <path>` | the local link is up (after the PipeWire node, before `playing:`) |
+| `local link: off (--no-control-socket)` | no local link, as asked |
+| `local link: FAILED: <reason>: speakerd plays without it` | the socket could not be made: no `XDG_RUNTIME_DIR` and no `--control-socket`, a path too long, a folder that cannot be made, something that is not a socket at the path, `another process listens on <path> (another speakerd?)`. Not fatal |
+| `local link: connected`, `local link: disconnected` | a client came, or closed its end |
+| `local link: closed the connection: <reason>` | speakerd closed it: `a line that is not JSON`, `a line longer than 32 MiB`, a peer that does not read, or a socket error |
+| `local link: refused a second client: busy` | a client came while another is connected |
+| `apply: revision <n>: waiting behind <k> other revision(s)` | an `apply` came while others are being built or wait |
+| `apply: revision <n>: building` | the message thread starts on it |
+| `apply: revision <n>: warning: <text>` | as a layer's warnings (no connection to the amplifier, a clamped value) |
+| `apply: revision <n>: applied, <k> plugin node(s)` | it plays; `applied` was answered |
+| `apply: revision <n>: FAILED: <reason>; <layer> plays on` | it did not load (`<layer>` as in the `playing:` line); `failed` was answered. An `apply` refused at once says `apply: revision <n>: FAILED: <reason>` (`apply: FAILED: <reason>` when it has no revision) |
+| `monitor: subscribed <stream> at <rate> Hz`, `monitor: unsubscribed <stream>` | a subscription began (or changed rate), or ended |
+| `monitor: the client went: <k> subscription(s) ended` | the connection closed with subscriptions |
 | `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after another speakerd was found or a sink or filter could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0). Nothing is logged after it; speakerd makes no new link once it has said it, and the output fades out through the links it has |
 | `render: <n> samples at <rate> Hz in blocks of <b>, layer <layer>, written to <path>` | the render is done |
 | `render: <reason>` | the render failed; exit status 4 follows |
@@ -518,7 +680,8 @@ stable.
 | `import: FAILED: <reason>` | the import failed; exit status 2 follows, nothing is on stdout |
 
 `<layer>` is `current (graph.json), revision 3`, `last-known-good (graph.lkg.json), revision 2`,
-`factory (factory.json), revision 1` or `passthrough`.
+`factory (factory.json), revision 1` or `passthrough`, and `revision 8 (applied)` once a revision
+came over the local link. Parameters set over the local link are not logged.
 
 ## Importing an AudioPluginHost session
 
@@ -606,11 +769,14 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | File | |
 |---|---|
 | `Main.cpp` | command line, signals, the live mode and its controller timer, the render mode |
+| `LocalLink.*` | the local link's socket and its thread: one client, JSON lines, a send buffer |
+| `Control.*` | what arrives over the local link: parameters (lookup, `seq`, the inbox), revisions (the queue, build, swap, answer), status |
+| `Monitor.*` | the monitor thread: subscriptions, `output/level`, the plugins' `mon_` values |
 | `StateLayers.*` | the boot order: the first layer that loads, or passthrough |
 | `GraphDocument.*` | the graph document, version 1: parsing and checks |
 | `GraphBuilder.*` | the document as an `AudioProcessorGraph`, the way `PluginGraph::restoreFromXml` does it; the passthrough graph |
 | `LV2State.*` | the plugin's own state into and out of the hosted build's LV2 state |
-| `Engine.*` | the running graph, the audio-thread entry point, the fades, the hand-over between the threads, settling, priming |
+| `Engine.*` | the running graph, the audio-thread entry point, the Mine channel, the parameter inbox, the level ring, the fades, the hand-over between the threads, settling, priming |
 | `Samples.h` | the absolute caps: NaN and infinity to 0, clamping |
 | `PipeWireNode.*` | the input sink, the `pw_filter` node, and the links |
 | `Render.*` | the offline render |

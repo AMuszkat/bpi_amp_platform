@@ -1,9 +1,13 @@
 #pragma once
 
+#include "DeviceConfig.h"
+
 #include <juce_audio_processors_headless/juce_audio_processors_headless.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
+#include <vector>
 
 namespace speakerd
 {
@@ -16,6 +20,62 @@ namespace speakerd
     {
         float gain;           // 0 <= gain <= 1
         bool tweeterMuted;
+    };
+
+    /** Parameter values on their way to the audio thread (step 3): one slot per hosted
+        parameter of one graph, newest value wins, and a lock-free queue of the slots that have a
+        new value. The socket thread resolves a parameter to its slot and posts the normalised
+        value; the audio thread, at the top of a cycle, before the graph runs, sets every posted
+        value on its hosted parameter (AudioProcessorParameter::setValue: for JUCE's LV2 hosting,
+        an atomic store and a flag, which the plugin receives as a patch:Set in that very
+        processBlock). A slot is in the queue at most once, so the queue never overflows and the
+        newest value is never lost, however long the audio thread does not run.
+
+        One producer at a time (the caller serialises them), one consumer: the audio thread. It
+        belongs to one graph and is swapped with it (Engine::install). */
+    class ParameterInbox
+    {
+    public:
+        explicit ParameterInbox (const std::vector<juce::AudioProcessorParameter*>&);
+
+        int size() const noexcept      { return numSlots; }
+
+        /** Any thread, one at a time: the slot's value is now `normalised`. Lock-free. */
+        void post (int slot, float normalised) noexcept;
+
+        /** Audio thread: sets every posted value on its parameter. */
+        void applyPending() noexcept;
+
+    private:
+        struct Slot
+        {
+            juce::AudioProcessorParameter* parameter = nullptr;
+            std::atomic<float> value { 0.0f };
+            std::atomic<bool> queued { false };
+        };
+
+        int numSlots;
+        std::unique_ptr<Slot[]> slots;
+        juce::AbstractFifo fifo;
+        std::vector<int> queue;
+
+        JUCE_DECLARE_NON_COPYABLE (ParameterInbox)
+    };
+
+    /** The output level of one cycle, as the amplifier gets it (after the fade, the limits and
+        the caps): per channel, the largest absolute sample and the sum of the squares. */
+    struct LevelRecord
+    {
+        float wooferPeak = 0.0f, tweeterPeak = 0.0f;
+        float wooferSquares = 0.0f, tweeterSquares = 0.0f;
+        int samples = 0;
+    };
+
+    /** A graph and the inbox of its parameters: what Engine::install swaps in, and hands back. */
+    struct RunningGraph
+    {
+        std::unique_ptr<juce::AudioProcessorGraph> graph;
+        std::unique_ptr<ParameterInbox> inbox;    // may be null (the render)
     };
 
     /*  The running graph, and the one place the audio thread enters it.
@@ -34,12 +94,16 @@ namespace speakerd
         ended at gain 0. park() waits for its own serial to come back, so it can never act on a
         cycle that ran before it asked.
 
-        What the audio thread does per cycle: it copies the stream in (NaN and infinity become
-        0), calls AudioProcessorGraph::processBlock in blocks of the size the graph is primed
+        What the audio thread does per cycle: it sets the parameter values posted to the running
+        graph's inbox, copies the stream in (NaN and infinity become 0) and makes the Mine channel
+        from it (left: FL, right: FR, mono: (FL + FR) / 2), calls AudioProcessorGraph::processBlock in blocks of the size the graph is primed
         for, ramps the fade, applies the output limits of device.json (a fixed gain, the tweeter
         muted: constants, fixed when the engine is made), caps the two amplifier channels (NaN
         and infinity become 0, the rest is clamped to the ceiling, +-the limits' gain, at most
-        +-1.0) and copies them out. No allocation, no lock of its own, no syscall.
+        +-1.0) and copies them out. While somebody watches the output level (setLevelWanted), it
+        also measures the peak and the sum of the squares of what it copied out, and pushes them
+        into a lock-free ring for the monitor thread. No allocation, no lock of its own, no
+        syscall.
 
         The locks JUCE takes on the audio thread, and why none of them waits:
         - the graph takes each processor's callback lock around its processBlock; speakerd never
@@ -52,9 +116,10 @@ namespace speakerd
           listenerLock (juce_AudioProcessorParameter.cpp, sendValueChangedMessageToListeners);
           a StateChanged atom calls updateHostDisplay, which takes the processor's listenerLock.
           The message thread takes the same parameter lock when it sets a value. So once a
-          graph runs, nobody sets its parameters on the message thread: in step 3, parameter
-          changes go to the audio thread through the command queue and are applied there. In
-          step 2 values are only set on a graph that is not running yet (GraphBuilder).
+          graph runs, nobody sets its parameters on the message thread: parameter changes go to
+          the audio thread through the graph's ParameterInbox and are applied there, with
+          setValue, which takes no lock. GraphBuilder sets values only on a graph that is not
+          running yet.
 
         Block size. JUCE's graph reallocates its output buffer whenever a call's block size
         differs from the previous call's. The graph is primed once, on the message thread, at
@@ -97,8 +162,17 @@ namespace speakerd
         static constexpr int upwardPrimeRatio = 4;
         static constexpr double upwardPrimeSeconds = 2.0;
 
-        /** `limits` are constants for the engine's life (see OutputLimits). */
-        explicit Engine (OutputLimits limits);
+        /** The channels of the buffer the graph runs on: its inputs are FL, FR and Mine, its
+            outputs the woofer and the tweeter. */
+        static constexpr int graphChannels = 3;
+
+        /** The cycles the level ring holds: several seconds at the speaker's quantum, a quarter
+            of a second at 32 samples. */
+        static constexpr int levelRingSize = 1024;
+
+        /** `limits` are constants for the engine's life (see OutputLimits); `role` says what the
+            Mine channel is. */
+        Engine (OutputLimits limits, Role role);
         ~Engine();
 
         //==============================================================================
@@ -109,9 +183,9 @@ namespace speakerd
             one (the audio thread does not know it yet), primed at `settleBlock`. Then it fades
             the output out if it was playing, swaps the graph in and fades back in (or, with
             fadeIn false, starts at full level, for the render mode): a swap costs the two fades.
-            The old graph is deleted here, on the message thread. */
-        void install (std::unique_ptr<juce::AudioProcessorGraph> graph, double sampleRate, int maxBlock,
-                      int settleBlock, bool fadeIn = true);
+            Returns the old graph and its inbox, which the audio thread no longer knows: the caller
+            deletes them, on the message thread, once nobody else refers to them. */
+        RunningGraph install (RunningGraph next, double sampleRate, int maxBlock, int settleBlock, bool fadeIn = true);
 
         /** What service() did. */
         struct Serviced
@@ -148,6 +222,26 @@ namespace speakerd
         int getQuantumChanges() const noexcept     { return quantumChanges.load (std::memory_order_relaxed); }
         int getGateOpenings() const noexcept       { return gateOpenings.load (std::memory_order_relaxed); }
         bool isAudible() const noexcept            { return audible.load (std::memory_order_relaxed); }
+        int getMaxBlock() const noexcept           { return maxBlockForReaders.load (std::memory_order_relaxed); }
+
+        //==============================================================================
+        // The output level, for the monitor thread
+
+        /** Whether the audio thread measures the output level. Off by default: nobody watches. */
+        void setLevelWanted (bool wanted) noexcept  { levelWanted.store (wanted, std::memory_order_release); }
+
+        /** One consumer at a time: calls `fn (const LevelRecord&)` for every cycle measured since
+            the last call, oldest first, and returns how many. */
+        template <typename Fn>
+        int drainLevels (Fn&& fn)
+        {
+            const auto scope = levelFifo.read (levelFifo.getNumReady());
+
+            for (int i = 0; i < scope.blockSize1; ++i)  fn (levelRing[(size_t) (scope.startIndex1 + i)]);
+            for (int i = 0; i < scope.blockSize2; ++i)  fn (levelRing[(size_t) (scope.startIndex2 + i)]);
+
+            return scope.blockSize1 + scope.blockSize2;
+        }
 
         //==============================================================================
         // Audio thread
@@ -158,6 +252,9 @@ namespace speakerd
         void process (const float* const* in, float* const* out, int numSamples, double cycleRate) noexcept;
 
     private:
+        void processCycle (const float* const* in, float* const* out, int numSamples, double cycleRate) noexcept;
+        void measureLevel (float* const* out, int numSamples) noexcept;
+
         enum Owner { nobody = 0, audioThread = 1, messageThread = 2 };
 
         void park();      // message thread: fade out, then take the graph
@@ -166,7 +263,7 @@ namespace speakerd
         void setPrimedBlock (int);
 
         /** Runs `graph` on settleSeconds of silence in blocks of `blockSize`, using `scratch`
-            (at least `blockSize` samples). The last block primes the graph's output buffer at
+            (graphChannels channels of at least `blockSize` samples). The last block primes the graph's output buffer at
             `blockSize`. Message thread, on a graph the audio thread is not running. */
         static void settle (juce::AudioProcessorGraph&, double sampleRate, int blockSize,
                             juce::AudioBuffer<float>& scratch, juce::MidiBuffer&);
@@ -175,13 +272,15 @@ namespace speakerd
         const float outputGain;       // 0 .. 1
         const float outputCeiling;    // min (outputGain, outputLimit)
         const bool tweeterMuted;
+        const Role role;          // what the Mine channel is
 
         std::atomic<int> owner { nobody };
 
         // Owned by whoever holds `owner`. preparedRate, maxBlock and primedBlock are only
         // written by the message thread while it holds it, so that thread may read them anytime.
         std::unique_ptr<juce::AudioProcessorGraph> graph;
-        juce::AudioBuffer<float> io;            // 2 x (2 * maxBlock): room for a padded cycle
+        std::unique_ptr<ParameterInbox> inbox;
+        juce::AudioBuffer<float> io;            // graphChannels x (2 * maxBlock): room for a padded cycle
         juce::MidiBuffer midi;
         double preparedRate = 0.0;
         int maxBlock = 0, primedBlock = 1, lastCycleBlock = 0;
@@ -199,6 +298,12 @@ namespace speakerd
         std::atomic<juce::uint64> cycles { 0 };
         std::atomic<int> lastBlockForReaders { 0 }, primedBlockForReaders { 0 }, quantumChanges { 0 }, gateOpenings { 0 };
         std::atomic<double> preparedRateForReaders { 0.0 };
+        std::atomic<int> maxBlockForReaders { 0 };
+
+        // The output level: the audio thread writes, the monitor thread reads.
+        std::atomic<bool> levelWanted { false };
+        juce::AbstractFifo levelFifo { levelRingSize };
+        std::array<LevelRecord, levelRingSize> levelRing;
 
         JUCE_DECLARE_NON_COPYABLE (Engine)
     };

@@ -2,18 +2,22 @@
 // section 2). It runs a graph of headless plugin builds inside the PipeWire cycle, from the first
 // state layer that loads, with no network, no X11 and no controller. See README.md.
 //
-//     speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--lv2-bundle PATH]...
+//     speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--control-socket PATH | --no-control-socket]
+//              [--lv2-bundle PATH]...
 //     speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...
 //     speakerd --import-filtergraph FILE [--device DEVICE_JSON] [--prefer-headless]
 //              [--allow-unsafe-routing] [--lv2-bundle PATH]...
 //     speakerd --version
 
 #include "BuildInfo.h"    // SPEAKERD_COMMIT, written at every build (BuildInfo.cmake)
+#include "Control.h"
 #include "DeviceConfig.h"
 #include "Engine.h"
 #include "FilterGraph.h"
 #include "GraphBuilder.h"
+#include "LocalLink.h"
 #include "Log.h"
+#include "Monitor.h"
 #include "PipeWireNode.h"
 #include "Render.h"
 #include "StateLayers.h"
@@ -63,13 +67,17 @@ namespace
         juce::File importFile;          // --import-filtergraph
         juce::File importDevice;        // --device
         bool preferHeadless = false, allowUnsafeRouting = false;
+        juce::String controlSocket;     // --control-socket; empty: the default path
+        bool noControlSocket = false;   // --no-control-socket
         juce::StringArray layerOptions; // the options of the live mode and the render that were given
         juce::StringArray importOptions;
+        juce::StringArray liveOptions;  // the options of the live mode only
     };
 
     void printUsage()
     {
-        std::cerr << "usage: speakerd --state-dir DIR [--node-name NAME] [--from LAYER] [--lv2-bundle PATH]...\n"
+        std::cerr << "usage: speakerd --state-dir DIR [--node-name NAME] [--from LAYER]\n"
+                     "                [--control-socket PATH | --no-control-socket] [--lv2-bundle PATH]...\n"
                      "       speakerd --state-dir DIR --render IN.wav OUT.wav [--block N] [--from LAYER] [--lv2-bundle PATH]...\n"
                      "       speakerd --import-filtergraph FILE [--device DEVICE_JSON] [--prefer-headless]\n"
                      "                [--allow-unsafe-routing] [--lv2-bundle PATH]...\n"
@@ -79,6 +87,10 @@ namespace
                      "  --node-name NAME    the sink players play into (default speakerd); the graph runs in NAME-dsp\n"
                      "  --from LAYER        start trying at this layer: current (default), last-known-good,\n"
                      "                      factory or passthrough\n"
+                     "  --control-socket PATH\n"
+                     "                      the local link to ampd: listen on this Unix socket instead of\n"
+                     "                      $XDG_RUNTIME_DIR/speakerd/control.sock\n"
+                     "  --no-control-socket no local link: nothing changes the graph while speakerd runs\n"
                      "  --lv2-bundle PATH   also load this LV2 bundle (repeatable); plugins are\n"
                      "                      otherwise found by URI in ~/.lv2, /usr/lib/lv2, /usr/local/lib/lv2\n"
                      "  --render IN OUT     no PipeWire: run IN.wav through the graph, write the woofer\n"
@@ -116,6 +128,12 @@ namespace
             if (arg == "--device" || arg == "--prefer-headless" || arg == "--allow-unsafe-routing")
                 options.importOptions.addIfNotAlreadyThere (arg);
 
+            if (arg == "--control-socket" || arg == "--no-control-socket")
+            {
+                options.liveOptions.addIfNotAlreadyThere (arg);
+                options.layerOptions.addIfNotAlreadyThere (arg);
+            }
+
             if (arg == "--help" || arg == "-h")
             {
                 printUsage();
@@ -143,6 +161,22 @@ namespace
                     std::cerr << "speakerd: --from takes " << layerNames().joinIntoString (", ") << "\n";
                     return false;
                 }
+            }
+            else if (arg == "--control-socket" && hasValues (1))
+            {
+                const juce::String path (argv[++i]);
+
+                if (path.isEmpty())
+                {
+                    std::cerr << "speakerd: --control-socket takes a path (--no-control-socket turns the local link off)\n";
+                    return false;
+                }
+
+                options.controlSocket = absoluteFile (path).getFullPathName();
+            }
+            else if (arg == "--no-control-socket")
+            {
+                options.noControlSocket = true;
             }
             else if (arg == "--lv2-bundle" && hasValues (1))
             {
@@ -203,6 +237,19 @@ namespace
         if (! options.importOptions.isEmpty())
         {
             std::cerr << "speakerd: " << options.importOptions.joinIntoString (", ") << ": for --import-filtergraph only\n";
+            return false;
+        }
+
+        if (options.noControlSocket && options.controlSocket.isNotEmpty())
+        {
+            std::cerr << "speakerd: --control-socket and --no-control-socket: one or the other\n";
+            return false;
+        }
+
+        if (options.render && ! options.liveOptions.isEmpty())
+        {
+            std::cerr << "speakerd: " << options.liveOptions.joinIntoString (", ") << ": for the live mode only "
+                         "(the render has no local link)\n";
             return false;
         }
 
@@ -284,8 +331,8 @@ namespace
     class Controller final : private juce::Timer
     {
     public:
-        Controller (Engine& e, PipeWireNode& n, const juce::String& layerIn)
-            : engine (e), node (n), layer (layerIn)
+        Controller (Engine& e, PipeWireNode& n, Control& c)
+            : engine (e), node (n), control (c)
         {
             startTimer (20);
         }
@@ -325,6 +372,13 @@ namespace
                          + juce::String (quantum / primed) + " block(s) of " + juce::String (primed));
             }
 
+            // A waiting graph revision from the local link: built and swapped in here (it takes
+            // about a second, the new graph's settling).
+            control.service();
+
+            if (quitRequested.load())
+                return;
+
             const auto serviced = engine.service();
 
             if (serviced.rate > 0.0)
@@ -349,7 +403,7 @@ namespace
 
             if (! announcedPlaying && node.isLinked() && engine.getCycles() > cyclesAtLink + 1 && engine.isAudible())
             {
-                log ("playing: layer " + layer + ", " + juce::String (juce::roundToInt (engine.getSampleRate()))
+                log ("playing: layer " + control.describe() + ", " + juce::String (juce::roundToInt (engine.getSampleRate()))
                      + " Hz, quantum " + juce::String (engine.getLastBlockSize()));
                 announcedPlaying = true;
             }
@@ -357,7 +411,7 @@ namespace
 
         Engine& engine;
         PipeWireNode& node;
-        const juce::String layer;
+        Control& control;
         juce::uint64 seenLinks = 0, cyclesAtLink = 0;
         int seenQuantumChanges = 0;
         bool announcedPlaying = false;
@@ -366,7 +420,7 @@ namespace
 
     int runLive (const Options& options, const DeviceConfig& device, juce::AudioPluginFormatManager& formats)
     {
-        Engine engine (outputLimitsOf (device));
+        Engine engine (outputLimitsOf (device), device.role);
         PipeWireNode node (engine, options.nodeName, device);
         PipeWireNode::Clock clock;
 
@@ -400,8 +454,10 @@ namespace
         // Prepared for the largest block a cycle can bring; settled at the quantum it will bring.
         const auto maxBlock = juce::jmax (clock.quantumLimit, clock.quantum);
         GraphBuilder builder (formats);
-        auto layer = loadFirstWorkingLayer (options.stateDir, builder, device.role, clock.rate, maxBlock, options.firstLayer);
-        engine.install (std::move (layer.built.graph), clock.rate, maxBlock, clock.quantum);
+        Control control (engine, builder, versionText());
+        control.installLayer (loadFirstWorkingLayer (options.stateDir, builder, device.role, clock.rate, maxBlock,
+                                                     options.firstLayer),
+                              clock.rate, maxBlock, clock.quantum);
 
         if (quitRequested.load())
         {
@@ -419,12 +475,50 @@ namespace
             return exitPipeWire;
         }
 
+        // The local link to ampd, and the monitor thread behind it. speakerd plays whether or not
+        // they start, and whether or not anybody connects.
+        LocalLink link (control);
+        Monitor monitor (engine, control, link);
+        control.setLink (&link);
+        control.setMonitor (&monitor);
+        bool linkUp = false;
+
+        if (options.noControlSocket)
+        {
+            log ("local link: off (--no-control-socket)");
+        }
+        else if (const auto path = options.controlSocket.isNotEmpty() ? options.controlSocket : LocalLink::defaultPath();
+                 path.isEmpty())
+        {
+            log ("local link: FAILED: no XDG_RUNTIME_DIR, and no --control-socket: speakerd plays without it");
+        }
+        else if (const auto started = link.start (path); started.failed())
+        {
+            log ("local link: FAILED: " + started.getErrorMessage() + ": speakerd plays without it");
+        }
+        else
+        {
+            monitor.start();
+            linkUp = true;
+            log ("local link: listening on " + path);
+        }
+
         int exitCode = exitOk;
         {
-            Controller controller (engine, node, layer.describe());
+            Controller controller (engine, node, control);
             juce::MessageManager::getInstance()->runDispatchLoop();
             exitCode = controller.getExitCode();
         }
+
+        // Nothing arrives once speakerd stops: the link closes, then the monitor thread ends.
+        if (linkUp)
+        {
+            link.stop();
+            monitor.stop();
+        }
+
+        control.setMonitor (nullptr);
+        control.setLink (nullptr);
 
         // No new link, and no line about one, once speakerd says it is stopping: the links that
         // exist stay for the fade-out.
@@ -451,8 +545,8 @@ namespace
         GraphBuilder builder (formats);
         auto layer = loadFirstWorkingLayer (options.stateDir, builder, device.role, rate, maxBlock, options.firstLayer);
 
-        Engine engine (outputLimitsOf (device));
-        engine.install (std::move (layer.built.graph), rate, maxBlock, options.block, false);
+        Engine engine (outputLimitsOf (device), device.role);
+        engine.install ({ std::move (layer.built.graph), nullptr }, rate, maxBlock, options.block, false);
 
         if (const auto rendered = render::run (engine, *input, options.renderOut, options.block); rendered.failed())
         {

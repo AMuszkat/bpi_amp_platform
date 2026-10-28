@@ -176,6 +176,13 @@ namespace speakerd
         if (auto r = juce::JSON::parse (text, json); r.failed())
             return Result::fail ("not valid JSON: " + r.getErrorMessage());
 
+        return parse (json, out);
+    }
+
+    Result GraphDocument::parse (const var& json, GraphDocument& out)
+    {
+        out = {};
+
         if (! json.isObject())
             return Result::fail ("not a JSON object");
 
@@ -239,7 +246,7 @@ namespace speakerd
                 return fail (where + ".dst", "the input node (1) has no inputs");
 
             if (connection.srcNode == inputNode && connection.srcChannel >= inputChannels)
-                return fail (where + ".src.channel", "the input node has channels 0 (FL) and 1 (FR)");
+                return fail (where + ".src.channel", "the input node has channels 0 (FL), 1 (FR) and 2 (Mine)");
 
             if (connection.dstNode == outputNode && connection.dstChannel >= outputChannels)
                 return fail (where + ".dst.channel", "the output node has channels 0 (woofer) and 1 (tweeter)");

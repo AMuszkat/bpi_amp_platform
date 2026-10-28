@@ -379,7 +379,8 @@ namespace speakerd::filtergraph
             if (dst.kind == Kind::input)
                 return Result::fail (where + ": into " + dst.describe() + ", which has no inputs");
 
-            if (src.kind == Kind::input && srcChannel >= GraphDocument::inputChannels)
+            // An AudioPluginHost session's Audio Input is the stream: FL and FR, no Mine.
+            if (src.kind == Kind::input && srcChannel >= GraphDocument::streamChannels)
                 return Result::fail (where + ": the stream has channels 0 (FL) and 1 (FR) only");
 
             if (dst.kind == Kind::output && dstChannel >= GraphDocument::outputChannels)
