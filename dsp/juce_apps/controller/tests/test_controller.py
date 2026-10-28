@@ -20,7 +20,7 @@ import threading
 import time
 import unittest
 
-from fake_hub import FakeHub, LOUDNESS_URI, SECRET, default_document
+from fake_hub import FakeHub, LOUDNESS_URI, SECRET, client_proof, default_document, osc_token
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
@@ -127,6 +127,12 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual((hello["role"], hello["name"], hello["protocol"]), ("controller", "ctl-test", 1))
         self.assertGreater(hello["osc_port"], 0)
         self.assertRegex(hello["auth"], "^[0-9a-f]{64}$")
+        self.assertRegex(hello["nonce"], "^[0-9a-f]{32}$")
+        hub_hello = [m for l, m, _ in hub.sent if l == "control" and m.get("op") == "hello"][0]
+        self.assertEqual(hello["auth"], client_proof(SECRET, hub_hello["nonce"], hello["nonce"], "controller", "ctl-test"))
+        welcome_then_state = [m["op"] for l, m, _ in hub.sent if l == "control"][1:3]
+        self.assertEqual(welcome_then_state, ["welcome", "state"])
+        self.assertTrue(self.step(steps, "state")["state"]["proven"])
         self.assertEqual(hub.refused, [])
         self.assertNotIn(SECRET, err, "the secret is never logged")
 
@@ -171,7 +177,11 @@ class ControllerTest(unittest.TestCase):
 
         osc = [(m, t) for m, t in hub.received_ops("knobs", "/bpi/param")]
         times = [t for _, t in osc]
-        self.assertTrue(all(m[1] == ",isfis" for m, _ in osc))
+        self.assertTrue(all(m[1] == ",isfiss" for m, _ in osc))
+        token = hub.tokens["ctl-test"]
+        self.assertRegex(token, "^[0-9a-f]{32}$")
+        self.assertTrue(all(m[2][5] == token for m, _ in osc), "every datagram carries the connection's token")
+        self.assertEqual(hub.osc_refused, 0)
         self.assertTrue(all(m[2][3] == 0 and m[2][4] == "ctl-test" for m, _ in osc))
         # At most 50 a second for one parameter: count the densest second, and the shortest gap.
         densest = max(sum(1 for u in times if t <= u < t + 1.0) for t in times)
@@ -448,6 +458,68 @@ class ControllerTest(unittest.TestCase):
         on_cli = subprocess.run([CONTROLLER, "--secret", "x" * 20], capture_output=True, text=True, timeout=30)
         self.assertEqual(on_cli.returncode, 2)
         report("hmac", rfc4231_cases=4, short_secret_exit=bad.returncode, secret_on_command_line_exit=on_cli.returncode)
+
+
+    def test_16_hub_with_a_wrong_welcome_proof_is_not_believed(self):
+        """A hub that cannot prove the pair's secret: its state is never applied, nothing is
+        sent to it beyond the hello, and the reason is shown."""
+        hub = self.start_hub()
+        hub.wrong_welcome = True
+        code, steps, err = self.run_script("sleep 6500\nset 16 s0_e0_gain 3\nstate\n")
+        failed = [s for s in steps if s.get("ok") is False]
+        self.assertEqual(code, 1, "set must fail: no state, no node 16")
+        self.assertEqual(failed[0]["cmd"], "set")
+        code, steps, err = self.run_script("sleep 200\nstate\n")
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        self.assertFalse(state["synced"])
+        self.assertFalse(state["proven"])
+        self.assertEqual(sorted(n["uid"] for n in state["nodes"]), [1, 2], "the fake hub's state was not applied")
+        self.assertIn("did not prove the pair's secret", state["refused"])
+        ops = sorted({m.get("op") for m, _ in hub.received_ops("control")})
+        self.assertEqual(ops, ["hello"], "nothing but hellos to a hub that has not proved itself")
+        hellos = len(hub.received_ops("control", "hello"))
+        self.assertLessEqual(hellos, 3 + 1, "a hub that fails its proof is retried every 5 s, not at once")
+        report("wrong welcome", synced=state["synced"], nodes=len(state["nodes"]), hellos_sent=hellos,
+               reason=state["refused"][:40])
+
+    def test_17_osc_echoes_without_the_token_are_ignored(self):
+        hub = self.start_hub()
+
+        def forge():
+            self.wait_for_controller()
+            time.sleep(0.5)
+            hub.forge_echo(16, "s0_e0_gain", -20.0)                      # no token
+            hub.forge_echo(16, "s0_e0_gain", -21.0, "0" * 32)            # a wrong one
+            hub.forge_echo(16, "s0_e0_gain", -22.0, osc_token("not-the-secret-0123456789", "a" * 32, "b" * 32))
+            time.sleep(0.3)
+            hub.change_param(16, "s0_e0_gain", 7.5)                       # the hub's own, stamped
+
+        code, steps, err = self.run_script("wait-synced\nsleep 700\nwait-param 16 s0_e0_gain 7.5\nstate\n", during=forge)
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        self.assertGreaterEqual(state["osc_dropped"], 3)
+        echoes = [l for l in err.splitlines() if "< knobs /bpi/param 16 s0_e0_gain" in l]
+        self.assertTrue(all("ctl-forger" not in l for l in echoes), "a forged echo was believed")
+        report("forged OSC", forged=3, dropped=state["osc_dropped"], stamped_echo_applied=7.5)
+
+    def test_18_hub_without_a_secret_only_with_insecure(self):
+        hub = self.start_hub(secret=None)
+        code, steps, err = self.run_script("sleep 1500\nstate\n", secret=None)
+        self.assertPassed(code, steps, err)
+        refused = self.step(steps, "state")["state"]
+        self.assertFalse(refused["synced"])
+        self.assertIn("has no secret", refused["refused"])
+        code, steps, err = self.run_script("wait-synced\nset 16 s0_e0_gain 2\nwait-echo 16 s0_e0_gain 2\nstate\n",
+                                           extra=["--insecure"], secret=None)
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        self.assertTrue(state["insecure"])
+        self.assertTrue(state["status"].startswith("INSECURE"))
+        self.assertIn("INSECURE", err)
+        hello = hub.received_ops("control", "hello")[-1][0]
+        self.assertIsNone(hello["auth"])
+        report("no secret", without_insecure="refused", with_insecure="synced", status=state["status"][:40])
 
 
 if __name__ == "__main__":

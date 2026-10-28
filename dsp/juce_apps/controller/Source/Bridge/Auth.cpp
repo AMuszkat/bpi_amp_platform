@@ -4,6 +4,16 @@
 
 #if ! JUCE_WINDOWS
  #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+#endif
+
+#if JUCE_LINUX
+ #include <sys/random.h>
+#endif
+
+#if JUCE_MAC || JUCE_IOS
+ #include <stdlib.h>
 #endif
 
 namespace bpi::auth
@@ -51,10 +61,78 @@ namespace bpi::auth
         return juce::String::toHexString (mac.getData(), (int) mac.getSize(), 0).toLowerCase();
     }
 
-    juce::String proof (const juce::String& secret, const juce::String& nonce,
-                        const juce::String& role, const juce::String& name)
+    juce::String hmacHex (const juce::String& key, const juce::String& text)
     {
-        return hmacSha256Hex (utf8 (secret), utf8 (nonce + ":" + role + ":" + name));
+        return hmacSha256Hex (utf8 (key), utf8 (text));
+    }
+
+    juce::String clientProof (const juce::String& secret, const juce::String& serverNonce, const juce::String& clientNonce,
+                              const juce::String& role, const juce::String& name)
+    {
+        return hmacHex (secret, "client:" + serverNonce + ":" + clientNonce + ":" + role + ":" + name);
+    }
+
+    juce::String serverProof (const juce::String& secret, const juce::String& serverNonce, const juce::String& clientNonce,
+                              const juce::String& role, const juce::String& name)
+    {
+        return hmacHex (secret, "server:" + serverNonce + ":" + clientNonce + ":" + role + ":" + name);
+    }
+
+    juce::String oscToken (const juce::String& secret, const juce::String& serverNonce, const juce::String& clientNonce)
+    {
+        const auto sessionKey = hmacHex (secret, "session:" + serverNonce + ":" + clientNonce);
+        return hmacHex (sessionKey, "osc").substring (0, 32);
+    }
+
+    juce::String randomNonce()
+    {
+        unsigned char bytes[16] {};
+        bool ok = false;
+
+       #if JUCE_LINUX
+        ok = getrandom (bytes, sizeof (bytes), 0) == (ssize_t) sizeof (bytes);
+       #elif JUCE_MAC || JUCE_IOS
+        arc4random_buf (bytes, sizeof (bytes));
+        ok = true;
+       #endif
+
+       #if ! JUCE_WINDOWS
+        if (! ok)
+        {
+            const auto fd = open ("/dev/urandom", O_RDONLY | O_CLOEXEC);
+
+            if (fd >= 0)
+            {
+                ok = read (fd, bytes, sizeof (bytes)) == (ssize_t) sizeof (bytes);
+                close (fd);
+            }
+        }
+       #endif
+
+        if (! ok)
+            return {};   // never a guessable nonce: no handshake instead
+
+        return juce::String::toHexString (bytes, (int) sizeof (bytes), 0).toLowerCase();
+    }
+
+    bool isNonce (const juce::String& s)
+    {
+        return s.length() == 32 && s.containsOnly ("0123456789abcdef");
+    }
+
+    bool sameProof (const juce::String& a, const juce::String& b)
+    {
+        const auto* x = a.toRawUTF8();
+        const auto* y = b.toRawUTF8();
+        const auto lx = a.getNumBytesAsUTF8(), ly = b.getNumBytesAsUTF8();
+
+        // Every byte of the expected length is looked at, whatever differs where.
+        unsigned difference = (unsigned) (lx ^ ly);
+
+        for (size_t i = 0; i < ly; ++i)
+            difference |= (unsigned) ((unsigned char) (i < lx ? x[i] : 0) ^ (unsigned char) y[i]);
+
+        return difference == 0 && ly > 0;
     }
 
     juce::Result readSecretFile (const juce::File& file, juce::String& secret, juce::String& warning)

@@ -40,6 +40,7 @@ controller --self-test
 | `--test-probe` | add the test probe to the plugins (below) |
 | `--send-queue-limit BYTES` | what a link may hold for a peer that stopped reading before it drops the connection and reconnects (default 4 MiB) |
 | `--trace` | every line in and out, on stderr |
+| `--insecure` | believe a hub (and its speakers) that has no secret yet and so proves nothing (`"auth": null`): only for a pair whose installer has not run. The status bar then starts with INSECURE, in red |
 | `--self-test` | checks the HMAC-SHA256 against RFC 4231 (cases 1, 2, 3 and 6) and exits 0 or 1 |
 | `--version`, `--help` | |
 
@@ -54,24 +55,34 @@ controller warns when others may read it). The secret is never an argument (`--s
 refused), never logged, printed or shown: only the proofs made with it leave the controller, and
 `--trace` hides those too. A secret file that is missing or malformed stops the controller at
 start (exit 2) or, from the Connect dialog, says why. Without a secret file it connects without a
-proof, which only a hub that has no secret yet accepts.
+proof (`"auth": null`), which only a hub that has no secret yet accepts, and believes such a
+hub only with `--insecure`.
 
 ## The bridge
 
 One object, `Source/Bridge/Bridge.cpp`, between the canvas and the speakers. It does what
 docs/protocol.md asks of a controller:
 
-- **Connection.** It connects to the hub's control link, reconnecting every second while it
-  cannot. The hub speaks first: its `hello` brings a `nonce`, and the controller answers with
-  its own `hello` (`role` controller, its `name`, `osc_port`, `protocol` 1, and `auth`: the
-  lowercase hex HMAC-SHA256, keyed with the secret's UTF-8 bytes, of `<nonce>:controller:<name>`;
-  HMAC per RFC 2104 over JUCE's SHA-256). It builds the canvas from the `state` that answers,
-  every time it connects: the hub's document, its parameter values, its speakers and who is
-  dragging what. A refusal (`{"op":"error","about":"hello"}`, a wrong or missing proof) is shown
-  in the status bar and `state`'s `refused`, and the link asks again only after 5 s.
-- **OSC from the authenticated address.** The hub takes OSC only from the address of an
-  authenticated control connection, so the OSC socket is bound to that connection's own local
-  address, rebound at every connection.
+- **Connection, both ways authenticated** (docs/protocol.md, "Authentication"). It connects to
+  the hub's control link, reconnecting every second while it cannot. The hub speaks first with
+  its nonce `Ns`; the controller answers with its own `hello` (`role` controller, its `name`,
+  `osc_port`, `protocol` 1, its nonce `Nc`: 32 hex from `getrandom()`, else `/dev/urandom`,
+  never JUCE's `Random`; and `auth`, the client proof `HMAC("client:<Ns>:<Nc>:controller:<name>")`,
+  lowercase hex HMAC-SHA256 keyed with the secret's UTF-8 bytes, per RFC 2104 over JUCE's
+  SHA-256). The hub must answer `{"op":"welcome","auth":...}` with the server proof
+  `HMAC("server:<Ns>:<Nc>:hub:<hub name>")`, compared in constant time. Until it has, nothing
+  it sends is believed and nothing but the hello is sent: a wrong or missing proof, or anything
+  else first, closes the connection and is shown ("did not prove the pair's secret"). Then it
+  builds the canvas from the `state` that follows, every time it connects: the hub's document,
+  its parameter values, its speakers and who is dragging what. A refusal of our proof
+  (`{"op":"error","about":"hello"}`) or a failed proof of the hub's is shown in the status bar
+  and `state`'s `refused`, and the link asks again only after 5 s.
+- **OSC tokens.** Each control connection gives a session key `K = HMAC("session:<Ns>:<Nc>")`
+  (hex) and an OSC token, the first 32 hex characters of HMAC-SHA256 keyed with K's hex over
+  `"osc"`. `/bpi/param` goes out as `,isfiss` with the token last (and `/bpi/gesture` would be
+  `,issss`); an OSC echo without this connection's token is ignored and counted
+  (`state`'s `osc_dropped`). The OSC socket is bound to the control connection's own local
+  address, rebound at every connection, since the hub takes OSC only from that address.
 - **Parameters.** It listens to every parameter of every control build. While a gesture is
   active (an editor's slider is held), a change goes over OSC, `/bpi/param ,isfis`, at most 50
   a second per parameter (later values wait for the next 20 ms slot, the newest wins). At the
@@ -105,9 +116,9 @@ docs/protocol.md asks of a controller:
 - **Placeholders.** A node whose plugin has no control build in this controller is shown as
   a placeholder (orange frame) with the pins its connections use: it is never dropped from
   a proposal.
-- **Monitoring.** It connects to every speaker's monitor link, answers the speaker's `hello`
-  with its proof (the same `<nonce>:controller:<name>`) before any `subscribe`, and shows a
-  refusal in the speakers panel. A plugin window that is open
+- **Monitoring.** It connects to every speaker's monitor link with the same handshake (the
+  speaker's welcome proves `"server:<Ns>:<Nc>:speaker:<name>"`): no `subscribe` goes out and no
+  `value` is believed before it, and a failure shows in the speakers panel. A plugin window that is open
   subscribes to its node's `mon_` streams (`node/<uid>/<mon_id>`, any parameter whose ID starts
   with `mon_`) on one speaker, chosen by the L / R buttons at the top of the window (the left
   speaker first); closing the last window of a node, or switching speaker, unsubscribes. The
@@ -171,7 +182,8 @@ well). Each command prints, for example:
 
 `state` prints `{"state": {...}}` with `connected`, `connections_made` (control link connections
 so far), `queued_bytes` (waiting to be written to the hub), `refused` (the hub's reason, if it
-refused this controller since the last state), `synced`, `hub`, `revision`, `seq`, `pending`
+refused this controller, or failed to prove itself, since the last state), `proven` (the hub's
+welcome checked), `insecure`, `osc_dropped`, `synced`, `hub`, `revision`, `seq`, `pending`
 (the revision waiting for an answer, or null), `outcome` (`applied N` or `rejected N: reason`),
 `status`, `nodes` (uid, kind: `input`, `output`, `control` or `placeholder`; for plugins name,
 identifier, bypassed, `params` and `monitors` in the plugin's units, `monitor_speaker`),
@@ -202,10 +214,12 @@ path before a real plugin publishes a monitor. A hub must know its identifier to
 
 `tests/fake_hub.py` is a small hub for these tests (Python, standard library only): the control
 link, the knobs link and both speakers' monitor links, on 127.0.3.1 (the hub, left) and
-127.0.3.2 (right). It authenticates as docs/protocol.md says, with the tests' secret
-(`fake_hub.SECRET`, or `--secret-file`): it speaks first with a nonce, checks the proof of each
-hello with Python's `hmac`, refuses a wrong one, and takes OSC only from an authenticated
-controller's address. It stamps `seq`, echoes, relays gestures, applies or rejects proposals
+127.0.3.2 (right). It authenticates both ways as docs/protocol.md says, with the tests' secret
+(`fake_hub.SECRET`, or `--secret-file`; `--no-secret` for a hub without one): it speaks first
+with a nonce, checks each client proof with Python's `hmac`, refuses a wrong one, answers with
+its `welcome` proof (a wrong one when a test sets `wrong_welcome`), takes OSC only with the token
+of an authenticated connection from its address, and stamps each controller's echoes with that
+controller's token. `forge_echo()` sends echoes without a token or with a wrong one. It stamps `seq`, echoes, relays gestures, applies or rejects proposals
 (stale base, an unknown plugin, or a reason a test sets), and produces monitor values at the
 rate asked for. Run alone (`python3 fake_hub.py --probe --trace`) it serves a document until
 interrupted.
@@ -228,7 +242,10 @@ reconnect that takes the new hub's state and pushes nothing; a hub that stops re
 going out in order once it reads again; and one that never reads again, dropped past a 64 KiB
 queue and reconnected; a wrong secret refused, shown, and retried every 5 s (2 attempts in 7 s),
 with neither secret anywhere in the output; and the HMAC against RFC 4231, a malformed secret file
-and a secret on the command line refused. Each test prints its numbers.
+and a secret on the command line refused; a hub with a wrong welcome proof not believed (its state
+never applied, only hellos sent to it, retried every 5 s); forged OSC echoes (no token, a wrong
+one, another secret's) ignored while the hub's own are applied; and a hub without a secret
+refused, then believed with `--insecure` and shown as such. Each test prints its numbers.
 
 The screenshot run opens the loudness control editor and the test probe beside the canvas and
 writes `build/controller-check/controller-screen.png` (the X screen) and `controller-juce.png`

@@ -32,9 +32,26 @@ PROBE_URI = "urn:bpi-amp:controller:test-probe"
 SECRET = "test-pair-secret-0123456789"   # the tests' shared secret (docs/protocol.md, "Authentication")
 
 
-def proof(secret, nonce, role, name):
-    """The hello's "auth": HMAC-SHA256 keyed with the secret over "<nonce>:<role>:<name>"."""
-    return hmac.new(secret.encode(), ("%s:%s:%s" % (nonce, role, name)).encode(), hashlib.sha256).hexdigest()
+def hmac_hex(key, text):
+    """Lowercase hex HMAC-SHA256 keyed with the key's UTF-8 bytes over a UTF-8 string."""
+    return hmac.new(key.encode(), text.encode(), hashlib.sha256).hexdigest()
+
+
+def client_proof(secret, ns, nc, role, name):
+    return hmac_hex(secret, "client:%s:%s:%s:%s" % (ns, nc, role, name))
+
+
+def server_proof(secret, ns, nc, role, name):
+    return hmac_hex(secret, "server:%s:%s:%s:%s" % (ns, nc, role, name))
+
+
+def osc_token(secret, ns, nc):
+    """K = HMAC("session:<Ns>:<Nc>") as hex; the token is HMAC-SHA256(K, "osc")[:32]."""
+    return hmac_hex(hmac_hex(secret, "session:%s:%s" % (ns, nc)), "osc")[:32]
+
+
+def is_nonce(n):
+    return isinstance(n, str) and len(n) == 32 and all(c in "0123456789abcdef" for c in n)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -153,7 +170,9 @@ class FakeHub:
         self.control_rcvbuf = control_rcvbuf   # SO_RCVBUF of the control link's connections
         self.secret = secret              # None: no secret, every peer accepted
         self.refused = []                 # (link, name, reason) of every hello refused
-        self.osc_refused = 0              # OSC datagrams from an address no controller authenticated
+        self.osc_refused = 0              # OSC datagrams without a valid token from their address
+        self.wrong_welcome = False        # prove itself with a wrong server proof (a fake hub)
+        self.tokens = {}                  # controller name -> the OSC token of its last connection
         self.stalled = set()              # control connections that stopped reading
         self.lock = threading.RLock()
         self._servers = []
@@ -234,16 +253,15 @@ class FakeHub:
             pass
 
     def _osc_out(self, address, *args):
-        packet = osc_encode(address, *args)
-
+        """An echo to every controller, stamped with that controller's own token."""
         def send():
             if self.echo_delay:
                 time.sleep(self.echo_delay)
             with self.lock:
-                targets = [c["osc"] for c in self.controllers.values() if c.get("osc")]
-            for target in targets:
+                targets = [(c["osc"], c["token"]) for c in self.controllers.values() if c.get("osc")]
+            for target, token in targets:
                 try:
-                    self.knobs.sendto(packet, target)
+                    self.knobs.sendto(osc_encode(address, *args, token), target)
                 except OSError:
                     pass
         with self.lock:
@@ -295,6 +313,15 @@ class FakeHub:
                        "time": "2026-10-28T09:15:02Z", "origin": origin, "document": copy.deepcopy(self.document)}
         self._to_controllers(message)
 
+    def forge_echo(self, node, pid, value, token=None):
+        """An OSC echo to every controller that is not the hub's: no token (None), or a given
+        one. A controller must ignore it."""
+        with self.lock:
+            targets = [c["osc"] for c in self.controllers.values() if c.get("osc")]
+        args = (node, pid, float(value), self.seq + 500, "ctl-forger") + (() if token is None else (token,))
+        for target in targets:
+            self.knobs.sendto(osc_encode("/bpi/param", *args), target)
+
     def stall_controllers(self):
         """The hub stops reading every control connection open now (as if stalled or stopped);
         connections made later are served normally."""
@@ -324,18 +351,32 @@ class FakeHub:
 
     # -- control link ---------------------------------------------------------------------
     def _check_hello(self, link, message, nonce, conn):
-        """True for a hello with a valid proof; refuses (and closes) otherwise."""
-        if self.secret is None:
+        """True for a client hello with a well-formed nonce and a valid client proof; refuses
+        (and closes) otherwise."""
+        name, given, nc = message.get("name", ""), message.get("auth"), message.get("nonce")
+        if not is_nonce(nc):
+            reason = "a missing or malformed nonce"
+        elif self.secret is None:
             return True
-        name, given = message.get("name", ""), message.get("auth")
-        want = proof(self.secret, nonce, message.get("role", ""), name)
-        if isinstance(given, str) and hmac.compare_digest(given, want):
+        elif isinstance(given, str) and hmac.compare_digest(
+                given.encode(), client_proof(self.secret, nonce, nc, message.get("role", ""), name).encode()):
             return True
-        reason = "no proof (auth)" if given is None else "wrong proof: check the pair's secret"
+        else:
+            reason = "no proof (auth)" if given is None else "wrong proof: check the pair's secret"
         with self.lock:
             self.refused.append((link, name, reason))
         self._send_line(conn, link, {"op": "error", "about": "hello", "reason": reason})
         return False
+
+    def _welcome(self, conn, link, ns, nc, role, name):
+        """The server's proof, before anything else (a wrong one in wrong_welcome mode)."""
+        if self.secret is None:
+            auth = None
+        elif self.wrong_welcome:
+            auth = server_proof(self.secret + "-not", ns, nc, role, name)
+        else:
+            auth = server_proof(self.secret, ns, nc, role, name)
+        self._send_line(conn, link, {"op": "welcome", "auth": auth})
 
     def _serve_control(self, conn):
         name = None
@@ -361,9 +402,13 @@ class FakeHub:
                         return
                     authenticated = True
                     name = message.get("name")
+                    nc = message["nonce"]
+                    token = osc_token(self.secret, nonce, nc) if self.secret is not None else ""
                     with self.lock:
-                        self.controllers[name] = {"conn": conn,
+                        self.tokens[name] = token
+                        self.controllers[name] = {"conn": conn, "token": token,
                                                   "osc": (conn.client_address[0], int(message.get("osc_port", 0)))}
+                    self._welcome(conn, "control", nonce, nc, "hub", self.name)
                     self._send_line(conn, "control", self.state_message())
                 elif op == "param":
                     self._param(message, "control", conn)
@@ -441,16 +486,20 @@ class FakeHub:
                 address, tags, args = osc_decode(packet)
             except (ValueError, struct.error, UnicodeDecodeError):
                 continue
+            # Only with the token of an authenticated controller connection from that address.
+            token = args[-1] if args and isinstance(args[-1], str) else None
             with self.lock:
-                allowed = self.secret is None or any(c["osc"][0] == sender[0] for c in self.controllers.values())
+                allowed = token is not None and tags in (",isfiss", ",issss") and any(
+                    c["osc"][0] == sender[0] and hmac.compare_digest(c["token"].encode(), token.encode())
+                    for c in self.controllers.values())
             if not allowed:
                 with self.lock:
                     self.osc_refused += 1
                 continue
             self._log_in("knobs", (address, tags, args))
-            if address == "/bpi/param" and tags == ",isfis":
+            if address == "/bpi/param" and tags == ",isfiss":
                 self._param({"node": args[0], "id": args[1], "value": args[2], "origin": args[4]}, "knobs")
-            elif address == "/bpi/gesture" and tags == ",isss":
+            elif address == "/bpi/gesture" and tags == ",issss":
                 self._gesture({"op": "gesture", "node": args[0], "id": args[1], "state": args[2], "origin": args[3]})
 
     # -- monitor links --------------------------------------------------------------------
@@ -492,6 +541,7 @@ class FakeHub:
                             self._send_line(conn, "monitor " + speaker, {"op": "error", "about": "hello", "reason": "hello first"})
                         return
                     authenticated = True
+                    self._welcome(conn, "monitor " + speaker, nonce, message["nonce"], "speaker", speaker)
                     threading.Thread(target=produce, daemon=True).start()
                     continue
                 with self.lock:

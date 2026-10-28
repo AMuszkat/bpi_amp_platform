@@ -38,6 +38,8 @@ namespace bpi
   --send-queue-limit N   bytes a link may hold for a peer that stopped reading before it
                          reconnects (default 4194304)
   --trace                every line in and out on stderr
+  --insecure             believe a hub (and speakers) with no secret yet, which prove nothing:
+                         only for a pair whose installer has not run. Shown in the status bar
   --self-test            check HMAC-SHA256 against RFC 4231 and exit
   --version
 )";
@@ -93,6 +95,7 @@ namespace bpi
                 else if (a == "--secret-file")      c.secretFile = value();
                 else if (a == "--secret")           c.error = "the secret is never given on the command line: put it in a file (mode 600) and give --secret-file";
                 else if (a == "--self-test")        c.selfTest = true;
+                else if (a == "--insecure")         c.bridge.insecure = true;
                 else if (a == "--send-queue-limit")
                 {
                     const auto v = value();
@@ -218,7 +221,8 @@ namespace bpi
 
             if (path.isEmpty())
             {
-                std::cerr << "[controller] no secret file (--secret-file): a hub with a secret will refuse this controller\n";
+                std::cerr << "[controller] no secret file (--secret-file): a hub with a secret refuses this controller, "
+                             "and one without is believed only with --insecure\n";
                 return juce::Result::ok();
             }
 
