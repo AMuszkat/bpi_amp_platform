@@ -18,14 +18,26 @@ import asyncio
 import concurrent.futures
 import copy
 import datetime
+import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import signal
 import struct
 import sys
 import time
+
+# The tweeter rule's one definition (firmware/speakerd/tweeter_rule.py), beside this file when
+# installed (bin/), in ../speakerd in the repository and in a bundle.
+_HERE = os.path.dirname(os.path.realpath(__file__))
+for _folder in (_HERE, os.path.join(os.path.dirname(_HERE), "speakerd")):
+    if os.path.isfile(os.path.join(_folder, "tweeter_rule.py")):
+        sys.path.insert(0, _folder)
+        break
+import tweeter_rule  # noqa: E402
 
 VERSION = "0.1.0"
 PROTOCOL = 1
@@ -42,8 +54,16 @@ MONITOR_BACKLOG = 256 * 1024           # a monitor client further behind than th
 LAYER_FILES = {"current": "graph.json", "last-known-good": "graph.lkg.json", "factory": "factory.json"}
 SEQ_MASK = 0xFFFFFFFF
 BIG = 2 ** 63 - 1
-TIME_FORMAT = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
-STREAM = re.compile(r"^(output/level|node/\d+/mon_[A-Za-z0-9_]+)$")
+TIME_FORMAT = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z")
+# The streams, exactly as speakerd reads them (used with fullmatch).
+STREAMS = (re.compile(r"output/level"), re.compile(r"node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}"))
+SECRET_FORMAT = re.compile(r"[\x21-\x7e]{16,256}")
+MAX_NODES, MAX_CONNECTIONS = 64, 512           # a document with more is refused
+MAX_CONTROL_PEERS = 32                         # controllers and agents on the hub's control link
+MAX_MONITOR_CLIENTS = 32
+MAX_SUBSCRIPTIONS = 32                         # per monitor client
+WRITE_LIMIT = 1024 * 1024                      # a client this far behind in reading is dropped
+PEER_WRITE_LIMIT = 256 * 1024 * 1024           # the same for an agent or speakerd (documents are big)
 
 
 def log(text):
@@ -85,11 +105,51 @@ STOPPING = []      # set when ampd stops: the connections' ends are not news the
 BACKGROUND = set()   # tasks nobody awaits: kept here until they end (asyncio keeps only weak references)
 
 
-def background(coroutine):
-    task = asyncio.get_running_loop().create_task(coroutine)
+async def _guarded(coroutine, who):
+    try:
+        return await coroutine
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        THROTTLED.say(("task", who, type(e).__name__), f"{who}: {type(e).__name__}: {e}: carrying on")
+
+
+def background(coroutine, who="a task"):
+    """Runs `coroutine` on its own; an error in it is said, and ends nothing else."""
+    task = asyncio.get_running_loop().create_task(_guarded(coroutine, who))
     BACKGROUND.add(task)
     task.add_done_callback(BACKGROUND.discard)
     return task
+
+
+def valid_time(value):
+    """A revision's time as protocol.md writes it ("2026-10-28T09:15:02Z"), or "" for anything else."""
+    return value if isinstance(value, str) and TIME_FORMAT.fullmatch(value) else ""
+
+
+def valid_stream(stream):
+    return isinstance(stream, str) and any(pattern.fullmatch(stream) for pattern in STREAMS)
+
+
+def auth_of(secret, nonce, role, name):
+    """What a peer answers a nonce with: HMAC-SHA256 of "<nonce>:<role>:<name>" under the pair's
+    secret, in hex (firmware/CLAUDE.md, "ampd on a board": the secret never crosses the network)."""
+    return hmac.new(secret.encode(), f"{nonce}:{role}:{name}".encode(), hashlib.sha256).hexdigest()
+
+
+def authenticated(secret, nonce, hello):
+    if secret is None:
+        return True
+    auth, role, name = hello.get("auth"), hello.get("role"), hello.get("name")
+    if not all(isinstance(v, str) for v in (auth, role, name)):
+        return False
+    return hmac.compare_digest(auth, auth_of(secret, nonce, role, name))
+
+
+def bad_message(who, msg, error):
+    """One message that broke something: said (at most every 10 s), and nothing else ends."""
+    op = msg.get("op") if isinstance(msg, dict) else None
+    THROTTLED.say(("bad-message", who, op), f"ignored a message from {who} ({op}): {type(error).__name__}: {error}")
 
 
 def now_iso():
@@ -175,7 +235,12 @@ def osc_decode(data):
 # Values and documents
 
 def good_number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """A finite number; a whole number within +-1e15 (a 400-digit one would not convert)."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return -10 ** 15 <= value <= 10 ** 15
+    return isinstance(value, float) and math.isfinite(value)
 
 
 def good_value(value):
@@ -203,6 +268,10 @@ def check_document(doc):
         return "nodes: missing (an array, possibly empty)"
     if not isinstance(connections, list):
         return "connections: missing (an array, possibly empty)"
+    if len(nodes) > MAX_NODES:
+        return f"nodes: {len(nodes)}, at most {MAX_NODES}"
+    if len(connections) > MAX_CONNECTIONS:
+        return f"connections: {len(connections)}, at most {MAX_CONNECTIONS}"
     uids = set()
     for i, node in enumerate(nodes):
         where = f"nodes[{i}]"
@@ -283,8 +352,8 @@ class ProtocolError(Exception):
 class Conn:
     """One JSON-lines connection (control, monitor or local)."""
 
-    def __init__(self, reader, writer):
-        self.reader, self.writer = reader, writer
+    def __init__(self, reader, writer, limit=WRITE_LIMIT):
+        self.reader, self.writer, self.limit = reader, writer, limit
         peer, own = writer.get_extra_info("peername"), writer.get_extra_info("sockname")
         self.address = peer[0] if isinstance(peer, tuple) else None
         self.local_address = own[0] if isinstance(own, tuple) else None
@@ -309,6 +378,12 @@ class Conn:
 
     def send(self, obj):
         if self.closed:
+            return
+        if self.limit is not None and self.backlog() > self.limit:
+            # It does not read what it gets: nothing more queues for it.
+            THROTTLED.say(("backlog", self.address), f"dropped a connection from {self.address}: more than "
+                                                     f"{self.limit // 1024} KiB unread")
+            self.close()
             return
         try:
             self.writer.write(json.dumps(obj, separators=(",", ":")).encode() + b"\n")
@@ -353,6 +428,9 @@ class Core:
         self.promoted = None           # (time, origin, revision) last promoted to graph.lkg.json
         self.sd = self.monitor = self.role = None
         self.saved_seq = 0             # the hub's seq in graph.json, where it goes on from
+        self.secret = config.get("secret")
+        # Values set while a revision is being applied: the new revision keeps the ones it has.
+        self.tracking, self.tracked = 0, {}
 
     # Files ------------------------------------------------------------------------------------
 
@@ -363,6 +441,24 @@ class Core:
             return role if role in ("left", "right", "mono") else "mono"
         except (OSError, ValueError, AttributeError):
             return "mono"
+
+    def tweeter_on(self):
+        """Whether this speaker's device.json turns the tweeter on (limits.tweeter "on"); a file
+        that cannot be read is speakerd's fail-safe, the tweeter muted."""
+        try:
+            with open(os.path.join(self.state_dir, "device.json")) as f:
+                limits = json.load(f).get("limits")
+            return isinstance(limits, dict) and limits.get("tweeter") == "on"
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    def tweeter_refusal(self, doc):
+        """Why this speaker must not apply `doc`: with its tweeter on, the tweeter rule
+        (tweeter_rule.py: only a crossover's high band reaches the tweeter). None when it may."""
+        if not self.tweeter_on():
+            return None
+        why = tweeter_rule.violation(doc)
+        return None if why is None else f"the tweeter is on here (device.json) and {why}"
 
     def read_layer(self, layer):
         """(document, time, origin) of a state layer, or None."""
@@ -383,7 +479,7 @@ class Core:
         if layer == "current" and good_int(seq, 0, SEQ_MASK):
             self.saved_seq = seq
         t, origin = doc.pop("time", ""), doc.pop("origin", "")
-        return doc, (t if isinstance(t, str) else ""), (origin if isinstance(origin, str) else "")
+        return doc, valid_time(t), (origin if isinstance(origin, str) else "")
 
     def load_at_start(self):
         """What this speaker plays until speakerd says: the first layer that reads."""
@@ -413,6 +509,26 @@ class Core:
         for node in doc.get("nodes", []):
             for pid, value in (node.get("params") or {}).items():
                 self.params[(node["uid"], pid)] = value
+        # A value that changed while this revision was applied: speakerd carried it over into the
+        # new graph, so the new revision keeps it too (when it has that parameter).
+        carried = [key for key in self.tracked if key in self.params and self.params[key] != self.tracked[key]]
+        for key in carried:
+            self.params[key] = self.tracked[key]
+        if carried:
+            log(f"revision {self.revision}: keeps {len(carried)} value(s) changed while it was applied")
+
+    def set_param(self, key, value):
+        self.params[key] = value
+        if self.tracking:
+            self.tracked[key] = value
+
+    def begin_tracking(self):
+        self.tracking += 1
+
+    def end_tracking(self):
+        self.tracking -= 1
+        if not self.tracking:
+            self.tracked = {}
 
     def node(self, uid):
         for node in self.doc.get("nodes", []):
@@ -543,21 +659,30 @@ class Speakerd:
         # starts again when the hub restarts, which speakerd would take for old values.
         self.send({"op": "param", "node": node, "id": pid, "value": value, "seq": 0, "origin": origin})
 
-    async def apply(self, revision, document):
-        """Hands a revision to speakerd: (True, None) once it plays, (False, reason) if not."""
-        if not self.connected:
-            return False, "speakerd is not running"
+    def send_apply(self, revision, document):
+        """Hands a revision to speakerd now, in order with the values around it (a value sent
+        after it is carried over into the new graph, one before it is the document's), and
+        returns a future of (True, None) once it plays or (False, reason). A future cancelled (a
+        timeout) is forgotten: speakerd's answer then comes as a late one."""
         future = asyncio.get_running_loop().create_future()
+        if not self.connected:
+            future.set_result((False, "speakerd is not running"))
+            return future
         self.pending.setdefault(revision, []).append(future)
         self.send({"op": "apply", "revision": revision, "document": document})
-        try:
-            return await future
-        finally:
+
+        def forget(done):
             futures = self.pending.get(revision, [])
-            if future in futures:
-                futures.remove(future)
+            if done in futures:
+                futures.remove(done)
             if not futures:
                 self.pending.pop(revision, None)
+        future.add_done_callback(forget)
+        return future
+
+    async def apply(self, revision, document):
+        """Hands a revision to speakerd: (True, None) once it plays, (False, reason) if not."""
+        return await self.send_apply(revision, document)
 
     async def run(self):
         path = self.core.socket_path
@@ -568,7 +693,7 @@ class Speakerd:
                 self.once.say("connect", f"speakerd: cannot connect to {path}: {e.strerror or e}: trying again every second")
                 await asyncio.sleep(RETRY)
                 continue
-            conn = Conn(reader, writer)
+            conn = Conn(reader, writer, PEER_WRITE_LIMIT)
             try:
                 hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
             except (asyncio.TimeoutError, ProtocolError, ConnectionError) as e:
@@ -591,12 +716,18 @@ class Speakerd:
             self.conn, self.connected = conn, True
             reconnect, self.ever_connected = self.ever_connected, True
             try:
-                self.core.role.on_speakerd(hello, reconnect)
+                try:
+                    self.core.role.on_speakerd(hello, reconnect)
+                except Exception as e:
+                    bad_message("speakerd", hello, e)
                 while True:
                     obj = await conn.read()
                     if obj is None:
                         break
-                    self.dispatch(obj)
+                    try:
+                        self.dispatch(obj)
+                    except Exception as e:
+                        bad_message("speakerd", obj, e)
             except ProtocolError as e:
                 log(f"speakerd: {e}: closing the connection")
             except ConnectionError:
@@ -628,16 +759,17 @@ class Speakerd:
             result = (True, None) if op == "applied" else (False, str(obj.get("reason") or "failed"))
             if op == "applied" and good_int(revision, 0, BIG):
                 self.layer, self.revision = "current", revision
-            futures = self.pending.get(revision)
+            futures = [f for f in self.pending.get(revision, []) if not f.done()]
             if futures:
                 for future in futures:
-                    if not future.done():
-                        future.set_result(result)
+                    future.set_result(result)
             else:
                 self.core.role.late_answer(revision, result)
             self.core.status_changed()
         elif op == "value":
             self.core.monitor.on_value(obj)
+        elif op == "error" and obj.get("about") == "subscribe":
+            self.core.monitor.on_error(obj)
         elif op == "error":
             THROTTLED.say(("speakerd-error", obj.get("about"), obj.get("node"), obj.get("id")),
                           f"speakerd: error: {obj.get('about', '?')}"
@@ -778,7 +910,7 @@ class Hub(Role):
         sd, core = self.core.sd, self.core
         own_address = core.listen if core.listen not in ("0.0.0.0", "::", "") else (conn.local_address if conn else None)
         own = {"name": core.name, "role": core.device_role, "address": own_address, "online": True,
-               "speakerd": sd.connected, "layer": sd.layer, "revision": sd.revision}
+               "speakerd": sd.version if sd.connected else None, "layer": sd.layer, "revision": sd.revision}
         return [own] + [dict(s) for _, s in sorted(self.speakers.items())]
 
     def gesture_list(self):
@@ -845,7 +977,7 @@ class Hub(Role):
         if not isinstance(origin, str) or not origin:
             origin = source.name if source is not None else "knob"
         self.seq = ((self.seq + 1) & SEQ_MASK) or 1
-        core.params[(node, pid)] = value
+        core.set_param((node, pid), value)
         core.sd.send_param(node, pid, value, origin)
         out = {"op": "param", "node": node, "id": pid, "value": value, "seq": self.seq, "origin": origin}
         datagram = None
@@ -902,27 +1034,37 @@ class Hub(Role):
 
     # Revisions ---------------------------------------------------------------------------------------------
 
-    async def apply_on(self, peer, revision, document, rev_time, rev_origin):
-        """(True, None) once agent `peer` says its speakerd plays `revision`, else (False, why)."""
-        if peer.conn.closed:
-            return False, "offline"
+    def apply_on(self, peer, revision, document, rev_time, rev_origin):
+        """Sends agent `peer` the revision now; returns what to await: (True, None) once it says
+        its speakerd plays it, else (False, why)."""
         future = asyncio.get_running_loop().create_future()
-        peer.pending[revision] = future
-        peer.conn.send({"op": "apply", "revision": revision, "document": document,
-                        "time": rev_time, "origin": rev_origin})
-        try:
-            return await asyncio.wait_for(asyncio.shield(future), APPLY_TIMEOUT)
-        except asyncio.TimeoutError:
-            return False, f"no answer within {APPLY_TIMEOUT:g} s"
-        finally:
-            if peer.pending.get(revision) is future:
-                del peer.pending[revision]
+        if peer.conn.closed:
+            future.set_result((False, "offline"))
+        else:
+            peer.pending[revision] = future
+            peer.conn.send({"op": "apply", "revision": revision, "document": document,
+                            "time": rev_time, "origin": rev_origin})
 
-    async def apply_here(self, revision, document):
-        try:
-            return await asyncio.wait_for(self.core.sd.apply(revision, document), APPLY_TIMEOUT)
-        except asyncio.TimeoutError:
-            return False, f"no answer within {APPLY_TIMEOUT:g} s"
+        async def answer():
+            try:
+                return await asyncio.wait_for(asyncio.shield(future), APPLY_TIMEOUT)
+            except asyncio.TimeoutError:
+                return False, f"no answer within {APPLY_TIMEOUT:g} s"
+            finally:
+                if peer.pending.get(revision) is future:
+                    del peer.pending[revision]
+        return answer()
+
+    def apply_here(self, revision, document):
+        """Sends this speaker's speakerd the revision now; returns what to await."""
+        future = self.core.sd.send_apply(revision, document)
+
+        async def answer():
+            try:
+                return await asyncio.wait_for(future, APPLY_TIMEOUT)
+            except asyncio.TimeoutError:
+                return False, f"no answer within {APPLY_TIMEOUT:g} s"
+        return answer()
 
     async def apply_everywhere(self, revision, document, rev_time, rev_origin, agents=None):
         """Applies on every speaker that is up, at once: {speaker name: (ok, why)}."""
@@ -955,7 +1097,10 @@ class Hub(Role):
             missing = sorted(plugins_of(document) - self.seen)
             if missing:
                 return refuse("no speaker has loaded " + ", ".join(missing))
-            rev_time = msg["time"] if isinstance(msg.get("time"), str) and TIME_FORMAT.match(msg["time"]) else now_iso()
+            why = core.tweeter_refusal(document)
+            if why is not None:
+                return refuse(f"{core.name}: {why}")
+            rev_time = valid_time(msg.get("time")) or now_iso()
             rev_origin = msg["origin"] if isinstance(msg.get("origin"), str) and msg["origin"] else controller.name
             doc = copy.deepcopy(document)
             doc["revision"] = revision
@@ -963,38 +1108,46 @@ class Hub(Role):
             doc.pop("origin", None)
             up = ([core.name] if core.sd.connected else []) + sorted(self.agents)
             log(f"revision {revision} from {rev_origin}: applying on {', '.join(up) or 'no speaker (none is up)'}")
-            results = await self.apply_everywhere(revision, doc, rev_time, rev_origin)
-            failed = {name: why for name, (ok, why) in results.items() if not ok}
-            if not failed:
-                core.set_current(doc, rev_time, rev_origin)
-                core.changed(urgent=True)
-                core.playing()
-                self.seen |= plugins_of(doc)
-                for name in results:
-                    if name in self.speakers:
-                        self.speakers[name].update(layer="current", revision=revision)
-                log(f"revision {revision}: applied on {', '.join(sorted(results)) or 'no speaker'}: current")
-                controller.conn.send({"op": "applied", "revision": revision})
-                self.broadcast_graph(base)
-                self.broadcast_state()
-                return None
-            refuse("; ".join(f"{name}: {why}" for name, why in sorted(failed.items())))
-            applied = sorted(name for name, (ok, _) in results.items() if ok)
-            if applied:
-                log(f"revision {revision}: rolling back to revision {core.revision} on {', '.join(applied)}")
-                back = core.document()
-                jobs = []
-                if core.name in applied:
-                    jobs.append((core.name, self.apply_here(core.revision, back)))
-                for name in applied:
-                    if name in self.agents:
-                        jobs.append((name, self.apply_on(self.agents[name], core.revision, back,
-                                                         core.rev_time, core.rev_origin)))
-                outcomes = await asyncio.gather(*(job for _, job in jobs))
-                for (name, _), (ok, why) in zip(jobs, outcomes):
-                    if not ok:
-                        log(f"revision {core.revision}: the roll back failed on {name}: {why}")
+            core.begin_tracking()
+            try:
+                return await self.finish_proposal(controller, refuse, base, revision, doc, rev_time, rev_origin)
+            finally:
+                core.end_tracking()
+
+    async def finish_proposal(self, controller, refuse, base, revision, doc, rev_time, rev_origin):
+        core = self.core
+        results = await self.apply_everywhere(revision, doc, rev_time, rev_origin)
+        failed = {name: why for name, (ok, why) in results.items() if not ok}
+        if not failed:
+            core.set_current(doc, rev_time, rev_origin)
+            core.changed(urgent=True)
+            core.playing()
+            self.seen |= plugins_of(doc)
+            for name in results:
+                if name in self.speakers:
+                    self.speakers[name].update(layer="current", revision=revision)
+            log(f"revision {revision}: applied on {', '.join(sorted(results)) or 'no speaker'}: current")
+            controller.conn.send({"op": "applied", "revision": revision})
+            self.broadcast_graph(base)
+            self.broadcast_state()
             return None
+        refuse("; ".join(f"{name}: {why}" for name, why in sorted(failed.items())))
+        applied = sorted(name for name, (ok, _) in results.items() if ok)
+        if applied:
+            log(f"revision {revision}: rolling back to revision {core.revision} on {', '.join(applied)}")
+            back = core.document()
+            jobs = []
+            if core.name in applied:
+                jobs.append((core.name, self.apply_here(core.revision, back)))
+            for name in applied:
+                if name in self.agents:
+                    jobs.append((name, self.apply_on(self.agents[name], core.revision, back,
+                                                     core.rev_time, core.rev_origin)))
+            outcomes = await asyncio.gather(*(job for _, job in jobs))
+            for (name, _), (ok, why) in zip(jobs, outcomes):
+                if not ok:
+                    log(f"revision {core.revision}: the roll back failed on {name}: {why}")
+        return None
 
     async def push_current_to_agents(self, why):
         async with self.lock:
@@ -1016,7 +1169,7 @@ class Hub(Role):
             if peer.conn.closed:
                 return
             a_rev = hello.get("revision") if good_int(hello.get("revision"), 0, BIG) else 0
-            a_time = hello.get("time") if isinstance(hello.get("time"), str) else ""
+            a_time = valid_time(hello.get("time"))
             a_origin = hello.get("origin") if isinstance(hello.get("origin"), str) else ""
             if (a_time, a_origin) > (core.rev_time, core.rev_origin) and await self.adopt(peer, a_rev):
                 return
@@ -1052,21 +1205,29 @@ class Hub(Role):
             peer.get_future = None
         document = graph.get("document")
         why = check_document(document)
+        if why is None and plugins_of(document) - self.seen:
+            why = "no speaker has loaded " + ", ".join(sorted(plugins_of(document) - self.seen))
+        if why is None:
+            why = core.tweeter_refusal(document)
         if why is not None:
-            log(f"agent {peer.name}: its revision does not parse ({why}): keeping revision {core.revision}")
+            log(f"agent {peer.name}: its revision is refused ({why}): keeping revision {core.revision}")
             return False
         revision = graph["revision"] if good_int(graph.get("revision"), 0, BIG) else document.get("revision", 0)
         doc = copy.deepcopy(document)
         doc["revision"] = revision
-        rev_time = graph["time"] if isinstance(graph.get("time"), str) else ""
+        rev_time = valid_time(graph.get("time"))
         rev_origin = graph["origin"] if isinstance(graph.get("origin"), str) else ""
         others = [p for p in self.agents.values() if p is not peer]
-        results = await self.apply_everywhere(revision, doc, rev_time, rev_origin, agents=others)
-        if not results.get(core.name, (True, None))[0]:
-            log(f"agent {peer.name}: revision {revision} failed on {core.name}: {results[core.name][1]}: "
-                f"keeping revision {core.revision}")
-            return False
-        core.set_current(doc, rev_time, rev_origin)
+        core.begin_tracking()
+        try:
+            results = await self.apply_everywhere(revision, doc, rev_time, rev_origin, agents=others)
+            if not results.get(core.name, (True, None))[0]:
+                log(f"agent {peer.name}: revision {revision} failed on {core.name}: {results[core.name][1]}: "
+                    f"keeping revision {core.revision}")
+                return False
+            core.set_current(doc, rev_time, rev_origin)
+        finally:
+            core.end_tracking()
         core.changed(urgent=True)
         core.playing()
         self.seen |= plugins_of(doc)
@@ -1094,21 +1255,21 @@ class Hub(Role):
             + (f" (osc port {peer.osc[1]})" if peer.osc else " (no osc_port: no OSC echoes)"))
         conn.send(self.state(conn))
         self.core.status_changed()
-        tasks = set()
         try:
             while True:
                 msg = await conn.read()
                 if msg is None:
                     break
                 op = msg.get("op")
-                if op == "param":
-                    self.param(msg, "control", peer)
-                elif op == "gesture":
-                    self.gesture(msg, "control", peer)
-                elif op == "graph":
-                    task = asyncio.get_running_loop().create_task(self.propose(peer, msg))
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
+                try:
+                    if op == "param":
+                        self.param(msg, "control", peer)
+                    elif op == "gesture":
+                        self.gesture(msg, "control", peer)
+                    elif op == "graph":
+                        background(self.propose(peer, msg), f"a proposal of {peer.name}")
+                except Exception as e:
+                    bad_message(f"controller {peer.name}", msg, e)
         finally:
             self.controllers.remove(peer)
             for (node, pid), g in list(self.gestures.items()):
@@ -1121,8 +1282,15 @@ class Hub(Role):
 
     async def serve_agent(self, conn, hello):
         peer = Peer(conn, hello, "agent")
+        conn.limit = PEER_WRITE_LIMIT
         old = self.agents.get(peer.name)
         if old is not None:
+            if self.core.secret is None:
+                # Without the pair's secret anybody can say they are the right speaker: the one
+                # connected stays.
+                log(f"agent {peer.name}: refused a second connection from {conn.address} (no secret to prove it)")
+                conn.send({"op": "error", "about": "hello", "reason": f"an agent called {peer.name} is connected"})
+                return
             log(f"agent {peer.name}: a new connection replaces the old one")
             old.conn.close()
         self.agents[peer.name] = peer
@@ -1137,27 +1305,10 @@ class Hub(Role):
                 msg = await conn.read()
                 if msg is None:
                     break
-                op = msg.get("op")
-                if op in ("applied", "failed"):
-                    revision = msg.get("revision")
-                    result = (True, None) if op == "applied" else (False, str(msg.get("reason") or "failed"))
-                    future = peer.pending.get(revision)
-                    if future is not None and not future.done():
-                        future.set_result(result)
-                    elif result[0] and revision != self.core.revision:
-                        log(f"agent {peer.name}: applied revision {revision} after it was given up")
-                        background(self.push_current_to_agents(f"{peer.name} applied revision {revision} late"))
-                elif op == "graph":
-                    if peer.get_future is not None and not peer.get_future.done():
-                        peer.get_future.set_result(msg)
-                elif op == "status":
-                    news = {k: msg.get(k) for k in ("speakerd", "layer", "revision")}
-                    if any(self.speakers[peer.name].get(k) != v for k, v in news.items()):
-                        self.speakers[peer.name].update(news)
-                        self.broadcast_state()
-                elif op == "error":
-                    self.bad.say(("agent-error", peer.name),
-                                 f"agent {peer.name}: error: {msg.get('about', '?')}: {msg.get('reason', '?')}")
+                try:
+                    self.agent_message(peer, msg)
+                except Exception as e:
+                    bad_message(f"agent {peer.name}", msg, e)
         finally:
             conn.close()
             for future in peer.pending.values():
@@ -1172,7 +1323,35 @@ class Hub(Role):
                     log(f"agent {peer.name} disconnected: offline")
                     self.broadcast_state()
 
+    def agent_message(self, peer, msg):
+        op = msg.get("op")
+        if op in ("applied", "failed"):
+            revision = msg.get("revision")
+            result = (True, None) if op == "applied" else (False, str(msg.get("reason") or "failed"))
+            future = peer.pending.get(revision)
+            if future is not None and not future.done():
+                future.set_result(result)
+            elif result[0] and revision != self.core.revision:
+                log(f"agent {peer.name}: applied revision {revision} after it was given up")
+                background(self.push_current_to_agents(f"{peer.name} applied revision {revision} late"))
+        elif op == "graph":
+            if peer.get_future is not None and not peer.get_future.done():
+                peer.get_future.set_result(msg)
+        elif op == "status":
+            news = {k: msg.get(k) for k in ("speakerd", "layer", "revision")}
+            if any(self.speakers[peer.name].get(k) != v for k, v in news.items()):
+                self.speakers[peer.name].update(news)
+                self.broadcast_state()
+        elif op == "error":
+            self.bad.say(("agent-error", peer.name),
+                         f"agent {peer.name}: error: {msg.get('about', '?')}: {msg.get('reason', '?')}")
+
     def datagram(self, data, address):
+        # OSC only from where an authenticated controller is connected.
+        if address[0] not in {c.conn.address for c in self.controllers}:
+            self.bad.say(("osc-who", address[0]), f"knobs: ignored a datagram from {address[0]}: no controller "
+                                                  "is connected from there")
+            return
         try:
             path, args = osc_decode(data)
         except ValueError as e:
@@ -1207,7 +1386,8 @@ class Agent(Role):
         the hub uses for the speakers of its state)."""
         if self.conn is not None:
             sd = self.core.sd
-            self.conn.send({"op": "status", "speakerd": sd.connected, "layer": sd.layer, "revision": sd.revision})
+            self.conn.send({"op": "status", "speakerd": sd.version if sd.connected else None, "layer": sd.layer,
+                            "revision": sd.revision})
 
     def on_speakerd(self, hello, reconnect):
         super().on_speakerd(hello, reconnect)
@@ -1239,12 +1419,16 @@ class Agent(Role):
         if not newer(seq, last) and not exact:
             return
         self.last_seq[(node, pid)] = seq
-        core.params[(node, pid)] = value
+        core.set_param((node, pid), value)
         origin = msg.get("origin") if isinstance(msg.get("origin"), str) else "hub"
         core.sd.send_param(node, pid, value, origin)
         core.changed()
 
     def datagram(self, data, address):
+        # OSC only from the hub this agent is connected to.
+        if self.conn is None or address[0] != self.conn.address:
+            THROTTLED.say(("osc-who", address[0]), f"knobs: ignored a datagram from {address[0]}: not the hub")
+            return
         try:
             path, args = osc_decode(data)
         except ValueError as e:
@@ -1255,20 +1439,38 @@ class Agent(Role):
             self.param({"node": args[0], "id": args[1], "value": float(args[2]), "seq": args[3] & SEQ_MASK,
                         "origin": args[4]}, "osc")
 
-    async def apply(self, conn, msg):
+    def start_apply(self, conn, msg):
+        """An apply from the hub: checked and sent to speakerd at once, before the messages after
+        it are read (a value the hub sent after it is carried over into the new graph by speakerd,
+        and kept by ampd); the answer is awaited on its own."""
         core = self.core
         revision, document = msg.get("revision"), msg.get("document")
         why = check_document(document) if good_int(revision, 0, BIG) else "no revision"
         if why is not None:
             conn.send({"op": "failed", "revision": revision, "reason": f"the document does not parse: {why}"})
             return
+        refusal = core.tweeter_refusal(document)
+        if refusal is not None:
+            log(f"revision {revision}: refused: {refusal}")
+            conn.send({"op": "failed", "revision": revision, "reason": refusal})
+            return
         doc = copy.deepcopy(document)
         doc["revision"] = revision
-        rev_time = msg["time"] if isinstance(msg.get("time"), str) else document.get("time", "")
+        rev_time = valid_time(msg.get("time") if "time" in msg else document.get("time"))
         rev_origin = msg["origin"] if isinstance(msg.get("origin"), str) else document.get("origin", "")
-        ok, reason = await core.sd.apply(revision, doc)
+        core.begin_tracking()
+        future = core.sd.send_apply(revision, doc)
+        background(self.finish_apply(conn, revision, doc, rev_time, rev_origin, future), "an apply")
+
+    async def finish_apply(self, conn, revision, doc, rev_time, rev_origin, future):
+        core = self.core
+        try:
+            ok, reason = await future
+            if ok:
+                core.set_current(doc, rev_time, rev_origin)
+        finally:
+            core.end_tracking()
         if ok:
-            core.set_current(doc, rev_time, rev_origin)
             core.changed(urgent=True)
             core.playing()
             log(f"revision {revision}: applied")
@@ -1293,16 +1495,19 @@ class Agent(Role):
                 self.once.say("connect", f"hub: cannot connect to {host}:{port}: {e.strerror or e}: trying again every second")
                 await asyncio.sleep(RETRY)
                 continue
-            conn = Conn(reader, writer)
-            conn.send({"op": "hello", "role": "agent", "name": core.name, "revision": core.revision,
-                       "time": core.rev_time, "origin": core.rev_origin, "protocol": PROTOCOL,
-                       "layer": core.sd.layer, "speakerd": core.sd.connected, "device_role": core.device_role,
-                       "osc_port": core.args.knob_port})
-            tasks = set()
+            conn = Conn(reader, writer, PEER_WRITE_LIMIT)
             try:
+                # The hub says hello first, with the nonce this agent proves the secret with.
                 hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
                 if hello is None or hello.get("op") != "hello" or hello.get("role") != "hub":
                     raise ProtocolError(f"the hub said {json.dumps(hello)[:200]}, not its hello")
+                mine = {"op": "hello", "role": "agent", "name": core.name, "revision": core.revision,
+                        "time": core.rev_time, "origin": core.rev_origin, "protocol": PROTOCOL,
+                        "layer": core.sd.layer, "speakerd": core.sd.version if core.sd.connected else None,
+                        "device_role": core.device_role, "osc_port": core.args.knob_port}
+                if core.secret is not None:
+                    mine["auth"] = auth_of(core.secret, str(hello.get("nonce", "")), "agent", core.name)
+                conn.send(mine)
                 self.once.reset()
                 self.hub_name = hello.get("name")
                 self.last_seq.clear()    # a new hub session: its seq may have started again
@@ -1315,18 +1520,19 @@ class Agent(Role):
                     if msg is None:
                         break
                     op = msg.get("op")
-                    if op == "param":
-                        self.param(msg, "control")
-                    elif op == "apply":
-                        task = asyncio.get_running_loop().create_task(self.apply(conn, msg))
-                        tasks.add(task)
-                        task.add_done_callback(tasks.discard)
-                    elif op == "get":
-                        conn.send({"op": "graph", "revision": core.revision, "time": core.rev_time,
-                                   "origin": core.rev_origin, "document": core.document()})
-                    elif op == "error":
-                        THROTTLED.say(("hub-error", msg.get("about")),
-                                      f"hub: error: {msg.get('about', '?')}: {msg.get('reason', '?')}")
+                    try:
+                        if op == "param":
+                            self.param(msg, "control")
+                        elif op == "apply":
+                            self.start_apply(conn, msg)
+                        elif op == "get":
+                            conn.send({"op": "graph", "revision": core.revision, "time": core.rev_time,
+                                       "origin": core.rev_origin, "document": core.document()})
+                        elif op == "error":
+                            THROTTLED.say(("hub-error", msg.get("about")),
+                                          f"hub: error: {msg.get('about', '?')}: {msg.get('reason', '?')}")
+                    except Exception as e:
+                        bad_message("the hub", msg, e)
             except asyncio.TimeoutError:
                 self.once.say("hello", f"hub: {host}:{port} said no hello within {HELLO_TIMEOUT:g} s: trying again every second")
             except ProtocolError as e:
@@ -1359,6 +1565,16 @@ class Monitor:
         self.clients = []
         self.latest = {}     # stream -> the newest value line from speakerd
         self.union = {}      # stream -> the rate speakerd was asked for
+
+    def on_error(self, obj):
+        """speakerd refused a subscription: every subscriber of that stream is told, and loses it."""
+        stream = obj.get("stream")
+        for client in self.clients:
+            if stream in client.subs:
+                client.conn.send({"op": "error", "about": "subscribe", "stream": stream, "reason": obj.get("reason")})
+                del client.subs[stream]
+                client.pumps.pop(stream).cancel()
+        self.update_union()
 
     def on_value(self, obj):
         stream = obj.get("stream")
@@ -1399,6 +1615,23 @@ class Monitor:
 
     async def serve(self, reader, writer):
         conn = Conn(reader, writer)
+        if len(self.clients) >= MAX_MONITOR_CLIENTS:
+            conn.send({"op": "error", "about": "hello", "reason": f"{MAX_MONITOR_CLIENTS} monitor clients already"})
+            conn.close()
+            return
+        # The speaker says hello first, with a nonce; the client proves the pair's secret.
+        nonce = secrets.token_hex(16)
+        conn.send({"op": "hello", "role": "speaker", "name": self.core.name, "nonce": nonce, "protocol": PROTOCOL})
+        try:
+            hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
+        except (asyncio.TimeoutError, ProtocolError, ConnectionError):
+            conn.close()
+            return
+        if hello is None or hello.get("op") != "hello" or not authenticated(self.core.secret, nonce, hello):
+            THROTTLED.say(("monitor-auth", conn.address), f"monitor: refused {conn.address}: no hello with the pair's secret")
+            conn.send({"op": "error", "about": "hello", "reason": "the first line is a hello with the pair's secret"})
+            conn.close()
+            return
         client = MonitorClient(conn)
         self.clients.append(client)
         try:
@@ -1406,23 +1639,10 @@ class Monitor:
                 msg = await conn.read()
                 if msg is None:
                     break
-                op, stream = msg.get("op"), msg.get("stream")
-                if op == "subscribe":
-                    if not isinstance(stream, str) or not STREAM.match(stream):
-                        conn.send({"op": "error", "about": "subscribe", "stream": stream,
-                                   "reason": "a stream is output/level or node/<uid>/mon_<id>"})
-                        continue
-                    rate = msg.get("rate_hz", 30)
-                    rate = max(min(float(rate), MAX_MONITOR_RATE), 0.1) if good_number(rate) and rate > 0 else 30.0
-                    fresh = stream not in client.subs
-                    client.subs[stream] = rate
-                    if fresh:
-                        client.pumps[stream] = asyncio.get_running_loop().create_task(self.pump(client, stream))
-                    self.update_union()
-                elif op == "unsubscribe":
-                    if client.subs.pop(stream, None) is not None:
-                        client.pumps.pop(stream).cancel()
-                        self.update_union()
+                try:
+                    self.request(client, msg)
+                except Exception as e:
+                    bad_message(f"monitor {conn.address}", msg, e)
         except (ProtocolError, ConnectionError):
             pass
         finally:
@@ -1431,6 +1651,30 @@ class Monitor:
             for task in client.pumps.values():
                 task.cancel()
             self.update_union()
+
+    def request(self, client, msg):
+        conn = client.conn
+        op, stream = msg.get("op"), msg.get("stream")
+        if op == "subscribe":
+            if not valid_stream(stream):
+                conn.send({"op": "error", "about": "subscribe", "stream": stream,
+                           "reason": "a stream is output/level or node/<uid>/mon_<id> (uid 16 or more)"})
+                return
+            if stream not in client.subs and len(client.subs) >= MAX_SUBSCRIPTIONS:
+                conn.send({"op": "error", "about": "subscribe", "stream": stream,
+                           "reason": f"at most {MAX_SUBSCRIPTIONS} subscriptions per client"})
+                return
+            rate = msg.get("rate_hz", 30)
+            rate = max(min(float(rate), MAX_MONITOR_RATE), 0.1) if good_number(rate) and rate > 0 else 30.0
+            fresh = stream not in client.subs
+            client.subs[stream] = rate
+            if fresh:
+                client.pumps[stream] = asyncio.get_running_loop().create_task(self.pump(client, stream))
+            self.update_union()
+        elif op == "unsubscribe":
+            if client.subs.pop(stream, None) is not None:
+                client.pumps.pop(stream).cancel()
+                self.update_union()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1441,7 +1685,10 @@ class Knobs(asyncio.DatagramProtocol):
         self.role = role
 
     def datagram_received(self, data, address):
-        self.role.datagram(data, address)
+        try:
+            self.role.datagram(data, address)
+        except Exception as e:
+            bad_message(f"knobs {address[0]}", {}, e)
 
     def error_received(self, exc):
         pass
@@ -1451,13 +1698,22 @@ async def control_connection(core, reader, writer):
     conn = Conn(reader, writer)
     try:
         if core.is_hub:
-            conn.send({"op": "hello", "role": "hub", "name": core.name, "revision": core.revision, "seq": core.role.seq,
-                       "protocol": PROTOCOL})
+            hub = core.role
+            if len(hub.controllers) + len(hub.agents) >= MAX_CONTROL_PEERS:
+                conn.send({"op": "error", "about": "hello", "reason": f"{MAX_CONTROL_PEERS} connections already"})
+                return
+            nonce = secrets.token_hex(16)
+            conn.send({"op": "hello", "role": "hub", "name": core.name, "revision": core.revision, "seq": hub.seq,
+                       "nonce": nonce, "protocol": PROTOCOL})
             hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
             if hello is None or hello.get("op") != "hello":
                 conn.send({"op": "error", "about": "hello", "reason": "the first line is a hello"})
                 return
-            await core.role.serve(conn, hello)
+            if not authenticated(core.secret, nonce, hello):
+                THROTTLED.say(("control-auth", conn.address), f"refused {conn.address}: no hello with the pair's secret")
+                conn.send({"op": "error", "about": "hello", "reason": "the hello does not prove the pair's secret"})
+                return
+            await hub.serve(conn, hello)
         else:
             conn.send({"op": "error", "about": "hello", "reason": f"{core.name} is not the hub: the hub is {core.hub_address}"})
     except (asyncio.TimeoutError, ProtocolError, ConnectionError):
@@ -1467,14 +1723,14 @@ async def control_connection(core, reader, writer):
 
 
 def read_config(path):
-    """ampd.json (docs/protocol.md): {"version": 1, "name", "hub", "listen", "hub_address"}."""
+    """ampd.json (docs/protocol.md): {"version": 1, "name", "hub", "listen", "hub_address", "secret"}."""
     with open(path) as f:
         config = json.load(f)
     if not isinstance(config, dict):
         raise ValueError("not a JSON object")
     if config.get("version", 1) != 1:
         raise ValueError("version: 1 is the only one")
-    unknown = sorted(set(config) - {"version", "name", "hub", "listen", "hub_address"})
+    unknown = sorted(set(config) - {"version", "name", "hub", "listen", "hub_address", "secret"})
     if unknown:
         raise ValueError("unknown key(s): " + ", ".join(unknown))
     if not isinstance(config.get("name"), str) or not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", config["name"]):
@@ -1488,6 +1744,9 @@ def read_config(path):
         raise ValueError("hub_address: an address or null")
     if not config["hub"] and not address:
         raise ValueError("hub_address: an agent needs the hub's address")
+    secret = config.get("secret")
+    if secret is not None and (not isinstance(secret, str) or not SECRET_FORMAT.fullmatch(secret)):
+        raise ValueError("secret: 16 to 256 printable characters, no space")
     return config
 
 
@@ -1506,6 +1765,8 @@ async def main_async(args, config):
 
     log(f"ampd {VERSION}: {core.name}, " + ("the hub" if core.is_hub else f"an agent of the hub at {core.hub_address}")
         + f", state dir {core.state_dir}, speakerd socket {core.socket_path}")
+    if core.secret is None:
+        log("*** no secret in ampd.json: anyone on the network may control this speaker ***")
     layer = core.load_at_start()
     if core.is_hub:
         core.role.seq = core.saved_seq
@@ -1588,7 +1849,8 @@ def main(argv=None):
         return 2
     if args.check_config:
         print(f"{config['name']}: " + ("the hub" if config["hub"] else f"an agent of the hub at {config['hub_address']}")
-              + f", listening on {config.get('listen', '0.0.0.0')}")
+              + f", listening on {config.get('listen', '0.0.0.0')}"
+              + (", with the pair's secret" if config.get("secret") else ", NO secret"))
         return 0
     if not args.state_dir:
         log("--state-dir is required")

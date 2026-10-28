@@ -25,7 +25,6 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck source=install-lib.sh
 . "$(dirname "$SELF")/install-lib.sh"
-HELPER="$FIRMWARE_DIR/speakerd/setup-helper.py"
 UNIT_SOURCE="$FIRMWARE_DIR/ampd/ampd.service"
 PYTHON_MIN=3.9
 
@@ -34,6 +33,7 @@ NAME=""
 ROLE=""
 HUB=""            # yes | no | "" (keep ampd.json's, else the left speaker is the hub)
 HUB_ADDRESS=""
+SECRET_FILE=""
 LISTEN=""
 SPEAKERD_TOO=0
 PURGE=0
@@ -42,6 +42,7 @@ NO_SYSTEMD=0
 NO_RESTART=0
 HOME_OVERRIDE=""
 WAIT=10
+BUNDLE_DIR=""
 
 usage() {
     awk 'NR>1 { if ($0 ~ /^#/) { sub(/^# ?/, ""); print } else exit }' "$SELF"
@@ -65,6 +66,11 @@ Options:
                           (a placeholder such as bpi-amp.local in examples; the board's own address
                           comes from the person installing, never from a tracked file)
   --listen <addr>         the address ampd listens on (default 0.0.0.0)
+  --secret-file <file>    the pair's secret: a file holding the same 16 to 256 printable characters
+                          (no space) on both speakers; required on a first install, kept after.
+                          Controllers prove it (firmware/CLAUDE.md, "ampd on a board"). Make one with
+                          python3 -c 'import secrets; print(secrets.token_hex(24))' > ampd.secret
+                          It goes into ampd.json (mode 600) and is never printed.
   --speakerd-too          check and a dry run: speakerd is installed in the same run (setup.sh),
                           so bin/ampd is not there yet
   --wait <seconds>        smoke: how long to wait for the connections (default $WAIT)
@@ -91,6 +97,7 @@ while [ $# -gt 0 ]; do
         --hub)           HUB=yes; shift ;;
         --agent)         HUB=no; shift ;;
         --hub-address)   HUB_ADDRESS="${2:?}"; shift 2 ;;
+        --secret-file)   SECRET_FILE="${2:?}"; shift 2 ;;
         --listen)        LISTEN="${2:?}"; shift 2 ;;
         --speakerd-too)  SPEAKERD_TOO=1; shift ;;
         --wait)          WAIT="${2:?}"; shift 2 ;;
@@ -99,7 +106,7 @@ while [ $# -gt 0 ]; do
         --no-restart)    NO_RESTART=1; shift ;;
         --no-systemd)    NO_SYSTEMD=1; shift ;;
         --home)          HOME_OVERRIDE="${2:?}"; shift 2 ;;
-        --bundle)        shift 2 ;;   # setup.sh passes it to every installer; ampd's program is speakerd's version's
+        --bundle)        BUNDLE_DIR="${2:?}"; shift 2 ;;   # setup.sh passes it; a relative --secret-file is in it
         -h | -help | --help) usage; exit 0 ;;
         *)               die "unknown option: $1 (try --help)" ;;
     esac
@@ -165,14 +172,35 @@ prepare_config() {
         address="${HUB_ADDRESS:-$(json_value "$CONFIG" 'd.get("hub_address")')}"
         [ -n "$address" ] || die "an agent needs the hub's address: --hub-address <the left speaker's address> (until mDNS finds the hub)"
     fi
-    python3 - "$WORK/ampd.json" "$name" "$hub" "$listen" "$address" <<'PY'
-import json, sys
-path, name, hub, listen, address = sys.argv[1:]
-config = {"version": 1, "name": name, "hub": hub == "yes", "listen": listen, "hub_address": address or None}
-with open(path, "w") as f:
+    if [ -n "$SECRET_FILE" ] && [ ! -f "$SECRET_FILE" ] && [ -n "$BUNDLE_DIR" ] && [ -f "$BUNDLE_DIR/$SECRET_FILE" ]; then
+        SECRET_FILE="$BUNDLE_DIR/$SECRET_FILE"
+    fi
+    [ -z "$SECRET_FILE" ] || [ -r "$SECRET_FILE" ] || die "cannot read the secret file $SECRET_FILE"
+    # The secret goes from its file (or the ampd.json there is) into ampd.json, never through a
+    # command line or the output.
+    python3 - "$WORK/ampd.json" "$name" "$hub" "$listen" "$address" "$SECRET_FILE" "$CONFIG" <<'PY' \
+        || die "ampd needs the pair's secret (see above): --secret-file FILE, the same file on both speakers"
+import json, os, re, sys
+path, name, hub, listen, address, secret_file, old = sys.argv[1:]
+secret = None
+if secret_file:
+    with open(secret_file) as f:
+        secret = f.read().strip()
+    if not re.fullmatch(r"[\x21-\x7e]{16,256}", secret):
+        sys.exit("err  the secret file must hold 16 to 256 printable characters, no space")
+elif os.path.exists(old):
+    with open(old) as f:
+        secret = json.load(f).get("secret")
+if not secret:
+    sys.exit("err  no secret: give --secret-file FILE (make one with: "
+             "python3 -c 'import secrets; print(secrets.token_hex(24))' > ampd.secret)")
+config = {"version": 1, "name": name, "hub": hub == "yes", "listen": listen, "hub_address": address or None,
+          "secret": secret}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     f.write(json.dumps(config, indent=2) + "\n")
 PY
-    CONFIG_SUMMARY="$name, $([ "$hub" = yes ] && echo "the hub" || echo "an agent of the hub at $address"), listening on $listen"
+    CONFIG_SUMMARY="$name, $([ "$hub" = yes ] && echo "the hub" || echo "an agent of the hub at $address"), listening on $listen, with the pair's secret"
 }
 
 check_program() {
@@ -222,7 +250,8 @@ do_install() {
     elif dry; then info "(dry-run) would write $CONFIG"
     else
         mkdir -p "$STATE"
-        python3 "$HELPER" write "$CONFIG" < "$WORK/ampd.json"
+        # It holds the pair's secret: only this user reads it.
+        cp "$WORK/ampd.json" "$CONFIG.tmp.$$" && chmod 600 "$CONFIG.tmp.$$" && mv -f "$CONFIG.tmp.$$" "$CONFIG"
         ok "Wrote $CONFIG"; changed=1
     fi
     if [ -f "$UNIT" ] && cmp -s "$UNIT_SOURCE" "$UNIT"; then ok "$UNIT is already the repository's"
@@ -263,7 +292,11 @@ read_status() {
 
 do_status() {
     echo "ampd on $(id -un)@$(hostname) (home $H)"
-    if [ -f "$CONFIG" ]; then echo "  ampd.json:"; sed 's/^/    /' "$CONFIG"; else echo "  ampd.json: none ($CONFIG)"; fi
+    if [ -f "$CONFIG" ]; then
+        echo "  ampd.json (the secret not shown):"
+        python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['secret']='(set)' if d.get('secret') else '*** none ***'; print(json.dumps(d, indent=2))" \
+            "$CONFIG" 2> /dev/null | sed 's/^/    /' || echo "    (not readable)"
+    else echo "  ampd.json: none ($CONFIG)"; fi
     if [ -x "$PROGRAM" ]; then echo "  program: $PROGRAM ($("$PROGRAM" --version 2>&1))"; else echo "  program: none ($PROGRAM)"; fi
     if [ -f "$UNIT" ]; then echo "  unit: $UNIT"; else echo "  unit: none"; fi
     if [ "$NO_SYSTEMD" -eq 0 ]; then

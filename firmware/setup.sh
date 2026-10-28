@@ -47,6 +47,7 @@ SNAPCAST_ARGS=()
 BASE_CONF=0
 RATE=""
 FACTORY=""
+SECRET_FILE=""
 PLUGINS=()
 ARCH=aarch64
 SPEAKERD_ARGS=()     # passed to speakerd-setup.sh install (and check)
@@ -102,6 +103,9 @@ Options:
   --hub | --agent             the hub (the default for role left) or an agent of it.
   --hub-address <addr>        an agent's hub, until mDNS finds it (required for a new agent).
   --listen <addr>             the address ampd listens on (default 0.0.0.0).
+  --secret-file <file>        the pair's secret (ampd-setup.sh --help), required on a first install. In
+                              target-remote mode a file on this machine (default \$AMPD_SECRET_FILE, from the
+                              environment or firmware/local.mk), copied with the bundle, never on a command line.
 
   --no-systemd, --home <dir>  for the virtual pair tests (see speakerd-setup.sh).
   -h, --help                  show this help.
@@ -141,6 +145,7 @@ while [ $# -gt 0 ]; do
         --name | --hub-address | --listen)
                            AMPD_ARGS+=("$1" "${2:?}"); remote "$1" "$2"; shift 2 ;;
         --hub | --agent)   AMPD_ARGS+=("$1"); remote "$1"; shift ;;
+        --secret-file)     SECRET_FILE="${2:?}"; shift 2 ;;
         --factory)         FACTORY="${2:?}"; shift 2 ;;
         --plugin)          PLUGINS+=("${2:?}"); shift 2 ;;
         --arch)            ARCH="${2:?}"; shift 2 ;;
@@ -182,6 +187,13 @@ if [ "$MODE" = target-remote ]; then
         cp "$FACTORY" "$tmp/bundle/extra/factory.json"
         REMOTE_ARGS+=(--factory extra/factory.json)
     fi
+    [ -n "$SECRET_FILE" ] || ! selected ampd || SECRET_FILE="${AMPD_SECRET_FILE:-$(local_mk_value AMPD_SECRET_FILE)}"
+    if [ -n "$SECRET_FILE" ]; then
+        [ -r "$SECRET_FILE" ] || die "cannot read the secret file $SECRET_FILE"
+        mkdir -p "$tmp/bundle/extra"
+        (umask 077 && cp "$SECRET_FILE" "$tmp/bundle/extra/ampd.secret")
+        REMOTE_ARGS+=(--secret-file extra/ampd.secret)
+    fi
     info "Setting up ${CHOSEN[*]} on $TARGET_HOST, bundle $(version_value "$tmp/bundle/VERSION" id)"
     remote_run "$TARGET_HOST" "$tmp/bundle" setup.sh --mode target "${REMOTE_ARGS[@]}"
     exit $?
@@ -201,6 +213,13 @@ if [ -n "$FACTORY" ]; then
     elif [ -n "$BUNDLE" ] && [ -f "$BUNDLE/$FACTORY" ]; then FACTORY="$BUNDLE/$FACTORY"
     else die "no factory graph $FACTORY"; fi
     SPEAKERD_ARGS+=(--factory "$FACTORY")
+fi
+
+if [ -n "$SECRET_FILE" ]; then
+    if [ -f "$SECRET_FILE" ]; then SECRET_FILE="$(cd "$(dirname "$SECRET_FILE")" && pwd)/$(basename "$SECRET_FILE")"
+    elif [ -n "$BUNDLE" ] && [ -f "$BUNDLE/$SECRET_FILE" ]; then SECRET_FILE="$BUNDLE/$SECRET_FILE"
+    else die "no secret file $SECRET_FILE"; fi
+    AMPD_ARGS+=(--secret-file "$SECRET_FILE")
 fi
 
 common=()

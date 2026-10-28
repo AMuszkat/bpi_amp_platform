@@ -7,6 +7,7 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
     setup-helper.py device FILE [--role R] [--amplifier NODE] [--woofer PORT] [--tweeter PORT]
                                 [--gain-db G --tweeter-limit muted|on] [--show | --check]
     setup-helper.py graph FILE [--allow-tweeter-without-crossover]
+                                                   the tweeter rule (tweeter_rule.py, beside it)
     setup-helper.py write FILE                     stdin to FILE, atomically
     setup-helper.py drivers PROFILER_OUTPUT DUMP   which node drives which, from pw-profiler
     setup-helper.py sink DUMP                      the live speakerd sink: the drop-in's? the default sink
@@ -21,6 +22,9 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tweeter_rule  # noqa: E402  (beside this file: the tweeter rule's one definition)
+
 ROLES = ("left", "right", "mono")
 # The keys speakerd knows. It rejects a device.json with any other key, or a key twice, and
 # then plays with its fail-safe defaults (mono, bpi-alsa-playback-pcm, -20 dB, tweeter muted).
@@ -31,7 +35,7 @@ TWEETER_LIMITS = ("muted", "on")
 # The amplifier's node name in the repository's pipewire.conf, and on the boards (the name
 # snapcast-setup.sh's client-rt.conf and speakerd's default use).
 KNOWN_AMPLIFIERS = ("bpi-alsa-playback-pcm", "alsa-playback-pcm")
-INPUT_NODE, OUTPUT_NODE, TWEETER_CHANNEL = 1, 2, 1
+INPUT_NODE, OUTPUT_NODE = tweeter_rule.INPUT_NODE, tweeter_rule.OUTPUT_NODE
 
 
 def fail(message):
@@ -324,17 +328,6 @@ def parse_options(args, with_value, flags=()):
 # ---------------------------------------------------------------------------------------------
 # Graph documents, version 1 (dsp/juce_apps/speakerd/README.md)
 
-def is_crossover(node):
-    """A crossover that filters: not bypassed, and not a control build (an editor with no DSP)."""
-    name = str((node.get("plugin") or {}).get("identifier", "")).rstrip("/").rsplit("/", 1)[-1].lower()
-    return name.startswith("crossover") and not name.endswith("_control") and not node.get("bypassed")
-
-
-# The crossover's outputs (dsp/juce_plugins/crossover/README.md): channel 0 is the low band
-# (the woofer's), channel 1 the high band. Only the high band may reach the tweeter.
-CROSSOVER_HIGH = 1
-
-
 def cmd_graph(args):
     path = args[0]
     allow = "--allow-tweeter-without-crossover" in args[1:]
@@ -355,45 +348,20 @@ def cmd_graph(args):
         if not isinstance(plugin, dict) or not plugin.get("format") or not plugin.get("identifier"):
             fail(f"{path}: node {uid} has no plugin format and identifier")
         by_uid[uid] = node
-    edges, feeders = {}, set()
     for c in connections:
         try:
-            src, dst = (c["src"]["node"], c["src"]["channel"]), (c["dst"]["node"], c["dst"]["channel"])
+            ends = (c["src"]["node"], c["src"]["channel"]), (c["dst"]["node"], c["dst"]["channel"])
         except (KeyError, TypeError):
             fail(f"{path}: a connection needs src and dst, each with node and channel: {c!r}")
-        for end in (src[0], dst[0]):
+        for end, _ in ends:
             if end not in (INPUT_NODE, OUTPUT_NODE) and end not in by_uid:
                 fail(f"{path}: a connection names node {end}, which is not in the document")
-        if dst == (OUTPUT_NODE, TWEETER_CHANNEL):
-            feeders.add(src)
-        else:
-            edges.setdefault(src, set()).add(dst[0])
-
-    def unsafe_outputs(uid):
-        """The outputs of a node that carry the stream unfiltered for a tweeter: all of them,
-        except a (not bypassed) crossover's high band."""
-        outputs = {s for s in list(edges) + list(feeders) if s[0] == uid}
-        if uid in by_uid and is_crossover(by_uid[uid]):
-            return {s for s in outputs if s[1] != CROSSOVER_HIGH}
-        return outputs
-
-    # Only a crossover's high band may feed the tweeter (README: "Only a crossover may feed the
-    # tweeter"): walk from the input along everything else, the low band included.
-    reached, todo, unsafe_out = {INPUT_NODE}, [INPUT_NODE], set()
-    while todo:
-        for out in unsafe_outputs(todo.pop()):
-            unsafe_out.add(out)
-            for nxt in edges.get(out, ()):
-                if nxt not in reached:
-                    reached.add(nxt)
-                    todo.append(nxt)
-    unsafe = sorted(f"{node}:{channel}" for node, channel in feeders & unsafe_out)
+    # The tweeter rule, defined once in tweeter_rule.py (ampd checks the same).
+    unsafe = tweeter_rule.unsafe_tweeter_feeds(doc)
     names = ", ".join(str(by_uid[u].get("name") or str(by_uid[u]["plugin"]["identifier"]).rsplit("/", 1)[-1])
                       for u in sorted(by_uid)) or "no plugin"
     if unsafe:
-        message = ("the stream reaches the tweeter other than through a crossover's high band (output "
-                   f"{', '.join(unsafe)}; a crossover's channel 0 is its low band): full range or the "
-                   "woofer's band on a tweeter can destroy it")
+        message = tweeter_rule.MESSAGE.format(outputs=", ".join(unsafe))
         if not allow:
             fail(f"{path}: {message}")
         print(f"warning={quote(message + ' (allowed by --allow-tweeter-without-crossover)')}")

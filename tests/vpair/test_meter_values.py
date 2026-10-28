@@ -10,12 +10,17 @@ client on each speaker's ampd (the monitor link, straight to that speaker) subsc
 `node/16/mon_levelDb` (its detector's level of the input), at 30 Hz. Each step is judged on the
 values that arrived from 0.8 s to 1.8 s into it (after the detector's ballistics), by their median.
 
+The tweeter is muted in device.json (a document that sends a plugin to the tweeter is refused
+with the tweeter on: the tweeter rule), so the tweeter's values are the floor. A second run makes
+the right speaker mono, whose Mine is (FL + FR) / 2.
+
 Pass when, on each speaker and at each step:
 
-- output/level's peaks are that speaker's side's level within 1 dB and its RMS values 3.01 dB
-  under it within 1 dB, for the woofer and the tweeter: the left speaker's values follow the
-  left channel and the right speaker's the right one, 12 dB apart (the Mine pin, and the levels
-  reported separately);
+- output/level's woofer peak is that speaker's Mine level within 1 dB and its RMS 3.01 dB under it
+  within 1 dB: the left speaker's values follow the left channel and the right speaker's the right
+  one, 12 dB apart (the Mine pin, and the levels reported separately); with the right speaker mono,
+  its values follow (FL + FR) / 2, 4.08 dB under the left channel; the muted tweeter's peak and RMS
+  are under -100 dBFS;
 - node/16/mon_levelDb is the input level as loudness's detector measures it within 1 dB. The
   detector is JUCE's BallisticsFilter in RMS mode with loudness's default 100 ms attack and 300 ms
   release; with an attack shorter than the release it reads a steady sine above its RMS (by about
@@ -76,13 +81,14 @@ def scalar(v):
 
 
 class MeterValues(unittest.TestCase):
-    def test_levels_on_each_speaker(self):
+    def measure(self, roles, expected):
+        """Plays the stepped stereo tone on both speakers (`roles` their device roles) and returns
+        the failures: `expected[name]` is each step's level of what that speaker's Mine carries."""
         require_speakerd_local_link(self)
         tmp = Path(tempfile.mkdtemp(prefix="vpair-meter-"))
         self.addCleanup(shutil.rmtree, tmp, True)
-        steps = {"left": LEFT_STEPS, "right": [level + RIGHT_OFFSET for level in LEFT_STEPS]}
-        stereo = np.stack([stepped(steps["left"]), stepped(steps["right"])], axis=1)
-        with SpeakerPair(tmp, {"left": DOCUMENT, "right": DOCUMENT}, [built("loudness", "headless")]) as pair:
+        stereo = np.stack([stepped(LEFT_STEPS), stepped([level + RIGHT_OFFSET for level in LEFT_STEPS])], axis=1)
+        with SpeakerPair(tmp, {"left": DOCUMENT, "right": DOCUMENT}, [built("loudness", "headless")], roles=roles) as pair:
             clients = {name: MonitorClient(ADDRESS[name]) for name in ("left", "right")}
             try:
                 for client in clients.values():
@@ -99,31 +105,45 @@ class MeterValues(unittest.TestCase):
             finally:
                 for client in clients.values():
                     client.close()
-            offset = detector_offset_db()
-            print(f"\n  loudness's detector reads a steady 1 kHz sine {offset:+.2f} dB from its peak "
-                  f"({offset + 3.01:+.2f} dB from its RMS)", end="")
-            failures = []
-            for name, client in clients.items():
-                for k, level in enumerate(steps[name]):
-                    a = started[name] + LEAD + k * STEP + 0.8
-                    b = a + 1.0
-                    values = [v["v"] for t, v in client.of("output/level") if a <= t <= b]
-                    monitor = [scalar(v["v"]) for t, v in client.of("node/16/mon_levelDb") if a <= t <= b]
-                    if not values or not monitor:
-                        failures.append(f"{name}, step {k + 1}: no value arrived from {a - started[name]:.1f} to "
-                                        f"{b - started[name]:.1f} s (output/level {len(values)}, mon_levelDb {len(monitor)}; "
-                                        f"errors {client.errors})")
-                        continue
-                    wp, wr, tp, tr = np.median(np.array(values, dtype=float), axis=0)
-                    m = float(np.median(monitor))
-                    print(f"\n  {name}, step {k + 1} at {level:g} dBFS: woofer {wp:.2f} / {wr:.2f}, tweeter {tp:.2f} / "
-                          f"{tr:.2f} dBFS (peak / RMS), mon_levelDb {m:.2f} ({len(values)} values)", end="")
-                    for what, got, want in (("woofer peak", wp, level), ("woofer RMS", wr, level - 3.01),
-                                            ("tweeter peak", tp, level), ("tweeter RMS", tr, level - 3.01),
-                                            ("mon_levelDb", m, level + offset)):
-                        if abs(got - want) > 1.0:
-                            failures.append(f"{name}, step {k + 1}: {what} {got:.2f}, not {want:.2f} within 1 dB")
-            self.assertEqual(failures, [], "\n".join(failures))
+        offset = detector_offset_db()
+        print(f"\n  loudness's detector reads a steady 1 kHz sine {offset:+.2f} dB from its peak "
+              f"({offset + 3.01:+.2f} dB from its RMS)", end="")
+        failures = []
+        for name, client in clients.items():
+            for k, level in enumerate(expected[name]):
+                a = started[name] + LEAD + k * STEP + 0.8
+                b = a + 1.0
+                values = [v["v"] for t, v in client.of("output/level") if a <= t <= b]
+                monitor = [scalar(v["v"]) for t, v in client.of("node/16/mon_levelDb") if a <= t <= b]
+                if not values or not monitor:
+                    failures.append(f"{name}, step {k + 1}: no value arrived from {a - started[name]:.1f} to "
+                                    f"{b - started[name]:.1f} s (output/level {len(values)}, mon_levelDb {len(monitor)}; "
+                                    f"errors {client.errors})")
+                    continue
+                wp, wr, tp, tr = np.median(np.array(values, dtype=float), axis=0)
+                m = float(np.median(monitor))
+                print(f"\n  {name} ({roles[name]}), step {k + 1} at {level:.2f} dBFS: woofer {wp:.2f} / {wr:.2f}, "
+                      f"tweeter {tp:.2f} / {tr:.2f} dBFS (peak / RMS), mon_levelDb {m:.2f} ({len(values)} values)", end="")
+                for what, got, want in (("woofer peak", wp, level), ("woofer RMS", wr, level - 3.01),
+                                        ("mon_levelDb", m, level + offset)):
+                    if abs(got - want) > 1.0:
+                        failures.append(f"{name}, step {k + 1}: {what} {got:.2f}, not {want:.2f} within 1 dB")
+                # The tweeter is muted (device.json): what the amplifier gets there is the floor.
+                if max(tp, tr) > -100.0:
+                    failures.append(f"{name}, step {k + 1}: the muted tweeter reads {tp:.2f} / {tr:.2f} dBFS")
+        return failures
+
+    def test_levels_on_each_speaker(self):
+        expected = {"left": LEFT_STEPS, "right": [level + RIGHT_OFFSET for level in LEFT_STEPS]}
+        failures = self.measure({"left": "left", "right": "right"}, expected)
+        self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_the_mono_role(self):
+        # Mine on a mono speaker is (FL + FR) / 2: in phase, the right channel 12 dB under the left.
+        mix = 20 * np.log10((1 + 10 ** (RIGHT_OFFSET / 20)) / 2)
+        expected = {"left": LEFT_STEPS, "right": [level + mix for level in LEFT_STEPS]}
+        failures = self.measure({"left": "left", "right": "mono"}, expected)
+        self.assertEqual(failures, [], "\n".join(failures))
 
 
 if __name__ == "__main__":

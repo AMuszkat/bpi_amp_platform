@@ -43,6 +43,22 @@ Pass when:
   rejected; keys ampd does not know (a node's "ui") reach both speakerds and the state as they
   were; the hub goes on from its seq after a restart, says it in its hello, and the agent applies
   its values again;
+- the pair's secret: a controller or a monitor client whose hello does not prove it (HMAC of the
+  hub's nonce) gets an error and nothing else; OSC from an address with no authenticated controller
+  is ignored, and said; an agent that proves it replaces a connected one of its name, and without
+  a secret in ampd.json a second "right" is refused and the connected agent stays;
+- limits: a document with more than 64 nodes or 512 connections is rejected; a 400-digit number
+  is answered with an error and the next value goes through; a stream that is not exactly
+  output/level or node/<16 and up>/mon_<1 to 64 characters> is refused, the 33rd subscription of
+  a client is refused, and speakerd's refusal of a subscription reaches the subscriber;
+- a revision time that is not protocol.md's format counts as no time (not newer);
+- a value set while a revision applies (the right's speakerd takes 1.5 s) is kept by the new
+  revision: in the graph sent to the controllers, both graph.json, every controller's values, and
+  given again to both speakerds when they restart;
+- the tweeter rule: with the right's tweeter on (device.json), a revision feeding the tweeter
+  straight is failed by the right, never reaches its speakerd, is rejected with "right: the tweeter
+  is on here (device.json) and ..." and rolled back on the left; with the hub's on, it is rejected
+  before any speaker gets it;
 - a line that is not JSON closes the connection; an unknown op is ignored.
 
     python3 -m unittest -v tests.vpair.test_ampd_protocol
@@ -53,12 +69,13 @@ import os
 import shutil
 import socket
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 
-from harness import (ADDRESS, KNOB_PORT, Ampd, Controller, MonitorClient, StandInPair, StandInSpeakerd,
-                     graph_document, lv2_uri, osc_encode, revision_document, state_dir)
+from harness import (ADDRESS, KNOB_PORT, TWEETER_MUTED, Ampd, Controller, MonitorClient, StandInPair, StandInSpeakerd,
+                     ampd_auth, graph_document, lv2_uri, osc_encode, revision_document, state_dir)
 
 HEADLESS = lv2_uri("loudness_headless")
 PARAMS = {"mode": "Force 1", "s0_e0_gain": 0.0, "s0_e1_gain": 0.0}
@@ -125,8 +142,10 @@ class Protocol(unittest.TestCase):
                 self.assertEqual(params_seen(pair.sd[name], -7.25), [], f"a refused value reached {name}'s speakerd")
 
             # The agent orders by the hub's seq: older values and seq 0 do nothing.
+            # The agent takes OSC from its hub's address only: this socket stands on it.
             agent = (ADDRESS["right"], KNOB_PORT)
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.bind((ADDRESS["left"], 0))
             for seq, value in ((1000, 11.0), (999, 12.0), (0, 13.0), (1001, 14.0)):
                 udp.sendto(osc_encode("/bpi/param", "isfis", 16, "s0_e0_gain", value, seq, "hub"), agent)
                 time.sleep(0.05)
@@ -292,7 +311,7 @@ class Protocol(unittest.TestCase):
         run = self.tmp / "run"
         run.mkdir()
         env = dict(os.environ, XDG_RUNTIME_DIR=str(run))
-        state = state_dir(self.tmp / "state", role="left", current=revision_document(DOCUMENT, 2))
+        state = state_dir(self.tmp / "state", role="left", current=revision_document(DOCUMENT, 2), limits=TWEETER_MUTED)
         with StandInSpeakerd(env, state) as sd:
             # speakerd loaded revision 2 as its current layer; graph.json has moved on to 3.
             (state / "graph.json").write_text(json.dumps(revision_document(DOCUMENT, 3)))
@@ -410,13 +429,157 @@ class Protocol(unittest.TestCase):
             with Controller("ctl-b") as b:
                 self.assertEqual(b.state["document"]["nodes"][1]["ui"], {"x": 120, "y": 40})
 
+    def test_the_pairs_secret(self):
+        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:
+            # A controller and a monitor client that cannot prove the secret are refused.
+            wrong = Controller("ctl-wrong", secret="not-the-pairs-secret-at-all", expect_state=False)
+            error = wrong.wait(lambda m: m["op"] == "error", what="the refusal")
+            self.assertEqual(error["about"], "hello")
+            self.assertFalse([m for m in wrong.messages if m["op"] == "state"])
+            wrong.close()
+            with MonitorClient(ADDRESS["left"], secret="not-the-pairs-secret-at-all") as meter:
+                deadline = time.monotonic() + 3
+                while not meter.errors and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual([e["about"] for e in meter.errors], ["hello"])
+            # OSC only from where an authenticated controller is connected (ctl-a, 127.0.0.1).
+            stranger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            stranger.bind(("127.0.0.5", 0))
+            stranger.sendto(osc_encode("/bpi/param", "isfis", 16, "s0_e0_gain", 9.5, 0, "stranger"), (ADDRESS["left"], KNOB_PORT))
+            stranger.close()
+            a.osc_param(16, "s0_e0_gain", 2.5)
+            pair.sd["left"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == 2.5, what="ctl-a's value")
+            self.assertEqual(params_seen(pair.sd["left"], 9.5), [], "OSC from an unauthenticated address was applied")
+            pair.ampd["left"].wait_for("knobs: ignored a datagram from 127.0.0.5")
+
+            # A second agent called right, with the secret, replaces the first (a restart of its ampd).
+            conn = socket.create_connection((ADDRESS["left"], 7450), timeout=5)
+            f = conn.makefile("rb")
+            hub = json.loads(f.readline())
+            conn.sendall(json.dumps({"op": "hello", "role": "agent", "name": "right", "revision": 3, "protocol": 1,
+                                     "auth": ampd_auth(hub["nonce"], "agent", "right")}).encode() + b"\n")
+            pair.ampd["left"].wait_for("agent right: a new connection replaces the old one")
+            f.close()
+            conn.close()
+
+    def test_without_a_secret_an_agent_is_not_displaced(self):
+        with StandInPair(self.tmp, documents(), secret=None) as pair:
+            pair.ampd["left"].wait_for("*** no secret in ampd.json")
+            conn = socket.create_connection((ADDRESS["left"], 7450), timeout=5)
+            f = conn.makefile("rb")
+            json.loads(f.readline())
+            conn.sendall(b'{"op":"hello","role":"agent","name":"right","revision":3,"protocol":1}\n')
+            error = json.loads(f.readline())
+            self.assertEqual(error["op"], "error")
+            self.assertIn("an agent called right is connected", error["reason"])
+            f.close()
+            conn.close()
+            time.sleep(0.3)
+            self.assertFalse(pair.ampd["left"].lines_starting("agent right: a new connection replaces"))
+            self.assertTrue(pair.ampd["right"].status()["hub"]["connected"])
+
+    def test_limits_and_bad_values(self):
+        with StandInPair(self.tmp, documents(), control={"left": {"refuse_streams": ["node/17/mon_levelDb"]}}) as pair, \
+                Controller("ctl-a") as a:
+            big = with_node(DOCUMENT)
+            big["nodes"] += [{"uid": 100 + i, "plugin": big["nodes"][0]["plugin"]} for i in range(63)]
+            answer = a.propose(big)
+            self.assertEqual(answer["op"], "rejected")
+            self.assertIn("at most 64", answer["reason"])
+            many = with_node(DOCUMENT)
+            many["connections"] = many["connections"] * 200
+            answer = a.propose(many)
+            self.assertIn("at most 512", answer["reason"])
+            # A 400-digit number is no value, and ends nothing.
+            mark = a.mark()
+            a.send({"op": "param", "node": 16, "id": "s0_e0_gain", "value": int("9" * 400), "seq": 0, "origin": "ctl-a"})
+            self.assertEqual(a.wait(lambda m: m["op"] == "error", after=mark)["about"], "param")
+            a.param(16, "s0_e0_gain", 1.75)
+            pair.sd["left"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == 1.75, what="the next value")
+            with MonitorClient(ADDRESS["left"]) as meter:
+                for stream in ("node/3/mon_levelDb", "node/16/mon_" + "x" * 65, "output/levels", "output/level\n"):
+                    meter.subscribe(stream)
+                meter.subscribe("node/17/mon_levelDb")             # the stand-in refuses it: relayed
+                for k in range(40):
+                    meter.subscribe(f"node/{20 + k}/mon_x")
+                deadline = time.monotonic() + 5
+                while len(meter.errors) < 13 and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                refused = sorted({e["stream"] for e in meter.errors})
+                print(f"\n  refused subscriptions: {len(meter.errors)}")
+                for stream in ("node/3/mon_levelDb", "output/levels", "output/level\n", "node/17/mon_levelDb"):
+                    self.assertIn(stream, refused)
+                self.assertTrue([e for e in meter.errors if "at most 32" in e["reason"]], meter.errors)
+
+    def test_times_are_checked(self):
+        garbage = revision_document(with_node(DOCUMENT), 9, origin="zzz", rev_time="9999-99-99 not a time")
+        with StandInPair(self.tmp, documents(3, right=garbage)) as pair:
+            pair.ampd["left"].wait_for("agent right: plays revision 9, not revision 3")
+            self.assertFalse(pair.ampd["left"].lines_starting("agent right: revision 9 is newer"))
+
+    def test_values_set_while_a_revision_applies(self):
+        with StandInPair(self.tmp, documents(), control={"right": {"delay": 1.5}}) as pair, \
+                Controller("ctl-a") as a, Controller("ctl-b") as b:
+            proposal = threading.Thread(target=lambda: self.__dict__.setdefault("answer", b.propose(with_node(DOCUMENT))))
+            proposal.start()
+            pair.ampd["left"].wait_for("revision 4 from ctl-b: applying on")
+            a.gesture(16, "s0_e0_gain", "begin")
+            for value in (1.0, 2.0, 3.0):
+                a.osc_param(16, "s0_e0_gain", value)
+                time.sleep(0.05)
+            a.param(16, "s0_e0_gain", 7.25)                    # the last value, while revision 4 applies
+            a.gesture(16, "s0_e0_gain", "end")
+            proposal.join(timeout=20)
+            self.assertEqual(self.answer["op"], "applied", self.answer)
+            pair.ampd["left"].wait_for("revision 4: keeps 1 value(s) changed while it was applied")
+            graph = b.wait(lambda m: m["op"] == "graph" and m["revision"] == 4, what="the graph of revision 4")
+            self.assertEqual(graph["document"]["nodes"][0]["params"]["s0_e0_gain"], 7.25)
+            time.sleep(1.2)
+            for name in ("left", "right"):
+                saved = json.loads((pair.state[name] / "graph.json").read_text())
+                self.assertEqual((saved["revision"], saved["nodes"][0]["params"]["s0_e0_gain"]), (4, 7.25), name)
+            for c in (a, b):
+                self.assertEqual(c.values()[(16, "s0_e0_gain")], 7.25, c.name)
+            with Controller("ctl-c") as c:
+                self.assertEqual(c.values()[(16, "s0_e0_gain")], 7.25)
+            # A speakerd restart gets 7.25 again, not revision 4's 0.
+            for name in ("left", "right"):
+                sd = pair.restart_speakerd(name)
+                sd.wait_event(lambda e: e.get("op") == "param" and e.get("id") == "s0_e0_gain", what="the value again")
+                self.assertEqual([e["value"] for e in sd.events("param", "in") if e["id"] == "s0_e0_gain"], [7.25], name)
+
+    def test_the_tweeter_rule(self):
+        direct = {"format": "speakerd-graph", "version": 1, "nodes": [],
+                  "connections": [{"src": {"node": 1, "channel": 2}, "dst": {"node": 2, "channel": 1}}]}
+        on = {"gain_db": 0, "tweeter": "on"}
+        # The agent's tweeter on: it fails the revision, the hub rejects it and rolls the left back.
+        with StandInPair(self.tmp / "agent", documents(), limits={"right": on}) as pair, Controller("ctl-a") as a:
+            answer = a.propose(direct)
+            print(f"\n  the right's tweeter on: {answer['reason']}")
+            self.assertEqual(answer["op"], "rejected")
+            self.assertTrue(answer["reason"].startswith("right: the tweeter is on here (device.json) and the stream "
+                                                        "reaches the tweeter other than through a crossover's high band"))
+            self.assertEqual(pair.sd["right"].events("apply", "in"), [], "the right's speakerd got the revision")
+            pair.sd["left"].wait_event(lambda e: e.get("op") == "apply" and len(pair.sd["left"].events("apply", "in")) == 2,
+                                       what="the roll back on the left")
+            self.assertEqual([e["revision"] for e in pair.sd["left"].events("apply", "in")], [4, 3])
+        # The hub's tweeter on: rejected before anything is applied.
+        with StandInPair(self.tmp / "hub", documents(), limits={"left": on}) as pair, Controller("ctl-a") as a:
+            answer = a.propose(direct)
+            self.assertEqual(answer["op"], "rejected")
+            self.assertTrue(answer["reason"].startswith("left: the tweeter is on here"), answer["reason"])
+            for name in ("left", "right"):
+                self.assertEqual(pair.sd[name].events("apply", "in"), [])
+
     def test_bad_lines(self):
         with StandInPair(self.tmp, documents()):
             for line in (b'{"op": "nonsense", "x": 1}\n', b"not json\n"):
                 conn = socket.create_connection((ADDRESS["left"], 7450), timeout=5)
                 f = conn.makefile("rb")
-                self.assertEqual(json.loads(f.readline())["op"], "hello")
-                conn.sendall(b'{"op":"hello","role":"controller","name":"bad","protocol":1}\n')
+                hub = json.loads(f.readline())
+                self.assertEqual(hub["op"], "hello")
+                conn.sendall(json.dumps({"op": "hello", "role": "controller", "name": "bad", "protocol": 1,
+                                         "auth": ampd_auth(hub["nonce"], "controller", "bad")}).encode() + b"\n")
                 self.assertEqual(json.loads(f.readline())["op"], "state")
                 conn.sendall(line)
                 conn.settimeout(1.0)

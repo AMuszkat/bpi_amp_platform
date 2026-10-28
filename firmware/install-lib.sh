@@ -155,7 +155,7 @@ copy_installers() {
     local to="$1"
     mkdir -p "$to/speakerd" "$to/ampd" "$to/pipewire/pipewire.conf.d"
     cp -p "$FIRMWARE_DIR"/{setup.sh,install-lib.sh,speakerd-setup.sh,snapcast-setup.sh,ampd-setup.sh} "$to/"
-    cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py} "$to/speakerd/"
+    cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py,tweeter_rule.py} "$to/speakerd/"
     cp -p "$FIRMWARE_DIR"/ampd/{ampd.py,ampd.service} "$to/ampd/"
     cp -p "$FIRMWARE_DIR/pipewire/pipewire.conf" "$to/pipewire/"
     cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf.d/*.conf "$to/pipewire/pipewire.conf.d/"

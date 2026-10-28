@@ -9,11 +9,18 @@ speakerd that does exactly what it is told, including failing.
   (graph.json, graph.lkg.json, factory.json), else passthrough, and greets each client with
   {"op":"hello","role":"speakerd","version":...,"revision":...,"layer":...,"protocol":1}.
 - One client at a time: a second gets {"op":"error","reason":"busy"} and is closed.
-- `apply` is answered `applied` after `delay` seconds, or `failed` with the reason in the control
-  file's "fail" ({"<revision>": "<reason>"}), or not at all for a revision in its "silent".
-- `param` is recorded; a node the current document lacks gets an error.
-- `subscribe` makes values at the rate asked: output/level is the control file's "level" (four
-  numbers, default [-12, -15, -120, -120]), node/<uid>/<mon_id> its "monitors"[stream] (a number).
+- Applies are queued and answered in order, as speakerd's are (docs/protocol.md, clarification
+  18): `applied` after `delay` seconds, or `failed` with the reason in the control file's "fail"
+  ({"<revision>": "<reason>"}), or not at all for a revision in its "silent".
+- `param` is recorded, and answered with `{"op":"error","about":"param",...}` as speakerd answers
+  (clarification 15): a node the current document lacks, a `mon_` ID, a value that is neither a
+  number, a text nor true/false, or a value the control file's "invalid" lists
+  ({"<node>/<id>": [values]}).
+- `subscribe` makes values at the rate asked (60 at most, 0 or less refused): output/level is the
+  control file's "level" (four numbers, default [-12, -15, -120, -120]), node/<uid>/<mon_id> its
+  "monitors"[stream] (a number), and nothing while the current document has no node <uid>
+  (clarification 19: the stream is kept and starts when a revision has it). A name that is no
+  stream, or one in the control file's "refuse_streams", is answered with an error.
 - `status` is answered with the hello's fields.
 - Every line it reads and the hellos it sends go to the events file, one JSON object per line
   with "dir" ("in" or "out") and "t" (time.monotonic()), for the test to read.
@@ -24,6 +31,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -79,11 +87,18 @@ class StandIn:
             while stream in subs:
                 control = self.control()
                 if stream == "output/level":
-                    v = control.get("level", [-12.0, -15.0, -120.0, -120.0])
-                else:
-                    v = control.get("monitors", {}).get(stream, -30.0)
-                send({"op": "value", "stream": stream, "t": time.monotonic(), "v": v})
+                    send({"op": "value", "stream": stream, "t": time.monotonic(),
+                          "v": control.get("level", [-12.0, -15.0, -120.0, -120.0])})
+                elif int(stream.split("/")[1]) in {n.get("uid") for n in self.doc.get("nodes", [])}:
+                    send({"op": "value", "stream": stream, "t": time.monotonic(),
+                          "v": control.get("monitors", {}).get(stream, -30.0)})
                 await asyncio.sleep(1.0 / subs[stream])
+
+        applies = asyncio.Queue()
+
+        async def apply_in_order():
+            while True:
+                await answer_apply(await applies.get())
 
         async def answer_apply(msg):
             control = self.control()
@@ -102,6 +117,7 @@ class StandIn:
 
         send(self.hello())
         self.record("out", self.hello())
+        in_order = asyncio.get_running_loop().create_task(apply_in_order())
         try:
             while True:
                 line = await reader.readline()
@@ -111,16 +127,28 @@ class StandIn:
                 self.record("in", msg)
                 op = msg.get("op")
                 if op == "apply":
-                    asyncio.get_running_loop().create_task(answer_apply(msg))
+                    applies.put_nowait(msg)
                 elif op == "param":
                     uids = {n.get("uid") for n in self.doc.get("nodes", [])}
-                    if msg.get("node") not in uids:
+                    value, pid = msg.get("value"), str(msg.get("id"))
+                    invalid = self.control().get("invalid", {}).get(f"{msg.get('node')}/{pid}", [])
+                    reason = ("no such node" if msg.get("node") not in uids
+                              else "a monitor is never set" if pid.startswith("mon_")
+                              else "not a value" if not isinstance(value, (int, float, str, bool))
+                              else "not a value of this parameter" if value in invalid else None)
+                    if reason:
                         send({"op": "error", "about": "param", "node": msg.get("node"), "id": msg.get("id"),
-                              "reason": "no such node"})
+                              "reason": reason})
                 elif op == "subscribe":
-                    stream = msg.get("stream")
+                    stream, rate = msg.get("stream"), msg.get("rate_hz", 30)
+                    is_stream = isinstance(stream, str) and (stream == "output/level" or re.fullmatch(
+                        r"node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}", stream))
+                    if not is_stream or stream in self.control().get("refuse_streams", []) \
+                            or not isinstance(rate, (int, float)) or rate <= 0:
+                        send({"op": "error", "about": "subscribe", "stream": stream, "reason": "no such stream"})
+                        continue
                     fresh = stream not in subs
-                    subs[stream] = max(0.1, min(float(msg.get("rate_hz", 30)), 60.0))
+                    subs[stream] = min(float(rate), 60.0)
                     if fresh:
                         producers[stream] = asyncio.get_running_loop().create_task(produce(stream))
                 elif op == "unsubscribe":
@@ -132,6 +160,7 @@ class StandIn:
             pass
         finally:
             subs.clear()
+            in_order.cancel()
             for task in producers.values():
                 task.cancel()
             self.busy = False

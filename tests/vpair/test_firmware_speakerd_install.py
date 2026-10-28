@@ -232,6 +232,9 @@ class Setup(unittest.TestCase):
                    "STUB_DIR": str(cls.tmp / "stub")}
         cls.root = stub_build_root(cls.tmp / "build")
         cls.bundle = cls.make_bundle("one", ["loudness:headless"])
+        # The pair's secret, for the whole architecture (setup.sh's ampd component needs it).
+        cls.secret_file = cls.tmp / "ampd.secret"
+        cls.secret_file.write_text("the-pairs-test-secret-0123456789\n")
         cls.factory = cls.tmp / "factory.json"
         cls.factory.write_text(json.dumps(DOCUMENT, indent=2))
 
@@ -789,7 +792,8 @@ class Install(Setup):
         unit = home / ".config/systemd/user/snapclient.service"
         unit.parent.mkdir(parents=True)
         unit.write_text("[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=client-rt.conf\nExecStart=/usr/bin/snapclient\n")
-        args = ["--home", home, "--no-systemd", "--bundle", self.bundle, "--role", "left", "--amplifier", "amplifier"]
+        args = ["--home", home, "--no-systemd", "--bundle", self.bundle, "--role", "left", "--amplifier", "amplifier",
+                "--secret-file", self.secret_file]
         before = tree(home)
 
         firmware("setup.sh", *args, "--dry-run", env=self.env)
@@ -901,7 +905,7 @@ class Systemd(Setup):
         unit.parent.mkdir(parents=True)
         unit.write_text("[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=client-rt.conf\n")
         result = firmware("setup.sh", "--home", home, "--bundle", self.bundle, "--role", "left",
-                          "--amplifier", "amplifier", env=env, check=False)
+                          "--amplifier", "amplifier", "--secret-file", self.secret_file, env=env, check=False)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("could not restart PipeWire", result.stdout)
         self.assertFalse((home / ".config/pipewire/client-rt.conf").exists(), "snapclient was routed all the same")
@@ -920,7 +924,8 @@ class Systemd(Setup):
                 unit.parent.mkdir(parents=True)
                 unit.write_text("[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=client-rt.conf\n")
                 host = self.plugin_host()
-                args = ["--home", home, "--bundle", self.bundle, "--role", "left", "--amplifier", "amplifier", *only]
+                args = ["--home", home, "--bundle", self.bundle, "--role", "left", "--amplifier", "amplifier",
+                        "--secret-file", self.secret_file, *only]
                 refused = firmware("setup.sh", *args, env=env, check=False)
                 self.assertNotEqual(refused.returncode, 0, refused.stdout)
                 self.assertIn(f"{TEST_PLUGIN_HOST} runs (pid {host.pid})", refused.stdout)

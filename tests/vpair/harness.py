@@ -618,6 +618,10 @@ def with_plugin(document, plugin_uri):
 
 
 NO_LIMITS = {"gain_db": 0, "tweeter": "on"}
+# No output limit, the tweeter muted: what a board has once a person lifted the gain but not yet the
+# tweeter. The step 3 scenarios run so (their documents send a plugin to both amplifier channels,
+# which ampd refuses with the tweeter on: the tweeter rule); test_tweeter_rule turns it on.
+TWEETER_MUTED = {"gain_db": 0, "tweeter": "muted"}
 
 
 def state_dir(path, role="left", amplifier="amplifier", current=None, lkg=None, factory=None,
@@ -1072,11 +1076,24 @@ def osc_decode(data):
     return _ampd_module().osc_decode(data)
 
 
-def ampd_config(state, name, hub, listen, hub_address=None):
-    """Writes ampd.json into `state` (as the installer does) and returns its path."""
+# The pair's secret in the tests' ampd.json (the installer writes the real one from a file a person
+# keeps; it never appears in a tracked file). Controllers and monitor clients prove it.
+TEST_SECRET = "vpair-test-secret-not-a-real-one"
+
+
+def ampd_auth(nonce, role, name, secret=TEST_SECRET):
+    """What a peer answers a hello's nonce with (firmware/ampd/ampd.py, auth_of)."""
+    return _ampd_module().auth_of(secret, nonce, role, name)
+
+
+def ampd_config(state, name, hub, listen, hub_address=None, secret=TEST_SECRET):
+    """Writes ampd.json into `state` (as the installer does) and returns its path; `secret` None
+    leaves the secret out."""
     path = Path(state) / "ampd.json"
-    path.write_text(json.dumps({"version": 1, "name": name, "hub": hub, "listen": listen,
-                                "hub_address": hub_address}, indent=2))
+    config = {"version": 1, "name": name, "hub": hub, "listen": listen, "hub_address": hub_address}
+    if secret is not None:
+        config["secret"] = secret
+    path.write_text(json.dumps(config, indent=2))
     return path
 
 
@@ -1199,12 +1216,12 @@ class Ampd(LoggedProcess):
     and checks it exits with status 0 having said `stopping`."""
 
     def __init__(self, env, state, name, hub=None, listen=None, hub_address=None, args=(), wait_for="listening on ",
-                 timeout=15):
+                 timeout=15, secret=TEST_SECRET):
         hub = (name == "left") if hub is None else hub
         listen = listen or ADDRESS.get(name, "127.0.0.1")
         hub_address = hub_address or (None if hub else ADDRESS["left"])
         self.state, self.name = Path(state), name
-        self.config = ampd_config(state, name, hub, listen, hub_address)
+        self.config = ampd_config(state, name, hub, listen, hub_address, secret)
         self.listen, self.hub = listen, hub
         self.runtime = Path(env["XDG_RUNTIME_DIR"]) / "ampd"
         super().__init__([sys.executable, AMPD, "--config", self.config, "--state-dir", state, *args], dict(env),
@@ -1282,7 +1299,8 @@ class Controller:
     gets is kept with the time it arrived (time.monotonic()), `via` "control" or "osc"; `params`
     is what it knows of each parameter, newest seq wins, from the state and the echoes."""
 
-    def __init__(self, name, hub=ADDRESS["left"], port=CONTROL_PORT, knob_port=KNOB_PORT, osc=True, timeout=10):
+    def __init__(self, name, hub=ADDRESS["left"], port=CONTROL_PORT, knob_port=KNOB_PORT, osc=True, timeout=10,
+                 secret=TEST_SECRET, expect_state=True):
         self.name, self.hub, self.knob_port = name, hub, knob_port
         _ampd_module()      # its OSC encoder, loaded now: not in the time of a first send
         self.messages, self._changed = [], threading.Condition()
@@ -1308,12 +1326,15 @@ class Controller:
             self._threads.append(threading.Thread(target=self._read_udp, daemon=True))
         for thread in self._threads:
             thread.start()
+        # The hub says hello first, with a nonce; the controller proves the pair's secret with it.
+        self.hub_hello = self.wait(lambda m: m["op"] == "hello", timeout, "the hub's hello")
         hello = {"op": "hello", "role": "controller", "name": name, "protocol": 1}
+        if secret is not None:
+            hello["auth"] = ampd_auth(str(self.hub_hello.get("nonce", "")), "controller", name, secret)
         if osc:
             hello["osc_port"] = self.udp.getsockname()[1]
         self.send(hello)
-        self.hub_hello = self.wait(lambda m: m["op"] == "hello", timeout, "the hub's hello")
-        self.state = self.wait(lambda m: m["op"] == "state", timeout, "the state")
+        self.state = self.wait(lambda m: m["op"] == "state", timeout, "the state") if expect_state else None
 
     def _keep(self, obj, via):
         obj = dict(obj, via=via, arrived=time.monotonic())
@@ -1462,8 +1483,9 @@ class MonitorClient:
     to one speaker's ampd. With `reconnect`, it connects again every 0.1 s when the link drops and
     subscribes again, as an open window does. `values` is every value with its arrival time."""
 
-    def __init__(self, address, port=MONITOR_PORT, reconnect=False, timeout=10):
+    def __init__(self, address, port=MONITOR_PORT, reconnect=False, timeout=10, secret=TEST_SECRET, name="vpair-monitor"):
         self.address, self.port, self.reconnect = address, port, reconnect
+        self.secret, self.name, self._file = secret, name, None
         self.subs, self.values, self.errors = {}, [], []
         self.connects, self.closed, self.sock = 0, False, None
         self._changed = threading.Condition()
@@ -1477,14 +1499,21 @@ class MonitorClient:
         while not self.closed:
             try:
                 sock = socket.create_connection((self.address, self.port), timeout=1)
+                sock.settimeout(5)
+                file = sock.makefile("rb")
+                hello = json.loads(file.readline())      # the speaker's, with its nonce
                 sock.settimeout(None)
+                mine = {"op": "hello", "role": "controller", "name": self.name, "protocol": 1}
+                if self.secret is not None:
+                    mine["auth"] = ampd_auth(str(hello.get("nonce", "")), "controller", self.name, self.secret)
+                sock.sendall(json.dumps(mine).encode() + b"\n")
                 with self._lock:
-                    self.sock = sock
+                    self.sock, self._file = sock, file
                     self.connects += 1
                     for stream, rate in self.subs.items():
                         sock.sendall(json.dumps({"op": "subscribe", "stream": stream, "rate_hz": rate}).encode() + b"\n")
                 return True
-            except OSError:
+            except (OSError, ValueError):
                 if time.monotonic() > deadline:
                     raise AssertionError(f"cannot connect to the monitor link at {self.address}:{self.port}")
                 time.sleep(0.1)
@@ -1493,7 +1522,7 @@ class MonitorClient:
     def _run(self):
         while not self.closed:
             try:
-                for line in self.sock.makefile("rb"):
+                for line in self._file:
                     obj = json.loads(line)
                     with self._changed:
                         if obj.get("op") == "value":
@@ -1647,8 +1676,9 @@ class StandInPair:
     revision_document() makes them). Entering waits until the agent has said hello to the hub
     and the hub has caught it up."""
 
-    def __init__(self, tmp, documents, ampd_args=(), control=None):
+    def __init__(self, tmp, documents, ampd_args=(), control=None, limits=None, secret=TEST_SECRET):
         self.tmp, self.documents, self.ampd_args = Path(tmp), documents, ampd_args
+        self.limits, self.secret = limits or {}, secret
         self.control = control or {}
         self.env, self.state, self.sd, self.ampd = {}, {}, {}, {}
         self._stack = None
@@ -1661,7 +1691,8 @@ class StandInPair:
                 run = self.tmp / name / "run"
                 run.mkdir(parents=True, exist_ok=True)
                 self.env[name] = dict(os.environ, XDG_RUNTIME_DIR=str(run))
-                self.state[name] = state_dir(self.tmp / name / "state", role=name, current=self.documents.get(name))
+                self.state[name] = state_dir(self.tmp / name / "state", role=name, current=self.documents.get(name),
+                                             limits=self.limits.get(name, TWEETER_MUTED))
                 self.sd[name] = self._stack.enter_context(
                     StandInSpeakerd(self.env[name], self.state[name], self.control.get(name)))
             for name in ("left", "right"):
@@ -1674,7 +1705,7 @@ class StandInPair:
         return self
 
     def start_ampd(self, name, args=()):
-        self.ampd[name] = Ampd(self.env[name], self.state[name], name, args=[*self.ampd_args, *args])
+        self.ampd[name] = Ampd(self.env[name], self.state[name], name, args=[*self.ampd_args, *args], secret=self.secret)
         self._stack.enter_context(self.ampd[name])
         return self.ampd[name]
 
@@ -1714,8 +1745,9 @@ class SpeakerPair:
     the right an agent on 127.0.1.2. Entering waits until each speakerd plays and the hub has
     caught the agent up. `setup` is Pair's (another speaker.conf)."""
 
-    def __init__(self, tmp, documents, bundles, setup=None, ampd_args=(), roles=None, device=None):
+    def __init__(self, tmp, documents, bundles, setup=None, ampd_args=(), roles=None, limits=None):
         self.tmp, self.documents, self.bundles = Path(tmp), documents, bundles
+        self.limits = limits or {}
         self.setup, self.ampd_args = setup, ampd_args
         self.roles = roles or {"left": "left", "right": "right"}
         self.state, self.speakerd, self.ampd = {}, {}, {}
@@ -1727,7 +1759,8 @@ class SpeakerPair:
         try:
             self.pair = self._stack.enter_context(Pair(self.setup))
             for name in ("left", "right"):
-                self.state[name] = state_dir(self.tmp / name, role=self.roles[name], current=self.documents[name])
+                self.state[name] = state_dir(self.tmp / name, role=self.roles[name], current=self.documents[name],
+                                             limits=self.limits.get(name, TWEETER_MUTED))
                 self.start_speakerd(name)
             for name in ("left", "right"):
                 self.start_ampd(name)

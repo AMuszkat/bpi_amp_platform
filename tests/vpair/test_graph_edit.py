@@ -51,7 +51,7 @@ from pathlib import Path
 
 import numpy as np
 
-from harness import (RATE, Ampd, Controller, Pair, Player, SpeakerPair, Speakerd, StandInSpeakerd, TimedRecorder,
+from harness import (RATE, TWEETER_MUTED, Ampd, Controller, Pair, Player, SpeakerPair, Speakerd, StandInSpeakerd, TimedRecorder,
                      block_levels, built, graph_document, high_band, longest_run, lv2_uri, require_speakerd_local_link,
                      revision_document, rms_dbfs, state_dir, tone)
 
@@ -159,8 +159,9 @@ class GraphEdit(unittest.TestCase):
 
     def test_a_revision_the_right_fails_is_rolled_back_on_the_left(self):
         with Pair() as pair:
-            left_state = state_dir(self.tmp / "left", role="left", current=DOCUMENT)
-            right_state = state_dir(self.tmp / "right", role="right", current=DOCUMENT)
+            # The tweeter muted, as the other step 3 scenarios run (the document feeds it straight).
+            left_state = state_dir(self.tmp / "left", role="left", current=DOCUMENT, limits=TWEETER_MUTED)
+            right_state = state_dir(self.tmp / "right", role="right", current=DOCUMENT, limits=TWEETER_MUTED)
             reason = "loudness_headless did not load"
             with Speakerd(pair["left"], left_state, bundles=[built("loudness", "headless")]), \
                     StandInSpeakerd(pair["right"].env, right_state, {"fail": {"2": reason}}), \
