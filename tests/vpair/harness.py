@@ -443,10 +443,21 @@ class Player:
 
 
 class Pair:
-    """Brings the virtual pair up for a `with` block and down afterwards."""
+    """Brings the virtual pair up for a `with` block and down afterwards.
+
+    `setup` gives a speaker its own start: {"left": {"speaker_conf": path, "dropins": folder}}
+    starts the left speaker's PipeWire from `path` instead of speaker.conf, with the drop-ins
+    of `folder` (as a board loads ~/.config/pipewire/pipewire.conf.d)."""
+
+    def __init__(self, setup=None):
+        self.setup = dict(setup or {})
 
     def __enter__(self):
-        self._up()
+        if self.setup:
+            for name in ("left", "right"):
+                self._up(name)
+        else:
+            self._up()
         self.speakers = {name: Speaker(name) for name in ("left", "right")}
         return self
 
@@ -456,8 +467,17 @@ class Pair:
     def _up(self, *names):
         """vpair.sh up; when a speaker does not come up, takes the pair down again and fails
         with what vpair.sh and the speakers' logs said."""
+        env = dict(os.environ)
+        env.pop("VPAIR_SPEAKER_CONF", None)
+        env.pop("VPAIR_PIPEWIRE_DROPINS", None)
+        if len(names) == 1:
+            setup = self.setup.get(names[0], {})
+            if setup.get("speaker_conf"):
+                env["VPAIR_SPEAKER_CONF"] = str(setup["speaker_conf"])
+            if setup.get("dropins"):
+                env["VPAIR_PIPEWIRE_DROPINS"] = str(setup["dropins"])
         result = subprocess.run([str(VPAIR), "up", *names], capture_output=True, text=True,
-                                timeout=60)
+                                timeout=60, env=env)
         if result.returncode == 0:
             return
         logs = []
@@ -472,8 +492,10 @@ class Pair:
         """Takes one speaker down: its PipeWire, WirePlumber and D-Bus session."""
         subprocess.run([str(VPAIR), "down", name], check=True, capture_output=True, timeout=30)
 
-    def up(self, name):
-        """Brings one speaker (back) up, and returns it."""
+    def up(self, name, **setup):
+        """Brings one speaker (back) up, and returns it; `setup` as for Pair()."""
+        if setup:
+            self.setup[name] = setup
         self._up(name)
         self.speakers[name] = Speaker(name)
         return self.speakers[name]
@@ -554,15 +576,29 @@ def with_plugin(document, plugin_uri):
     return copy
 
 
-def state_dir(path, role="left", amplifier="amplifier", current=None, lkg=None, factory=None):
+NO_LIMITS = {"gain_db": 0, "tweeter": "on"}
+
+
+def state_dir(path, role="left", amplifier="amplifier", current=None, lkg=None, factory=None,
+              limits=NO_LIMITS, device=None):
     """Fills `path` as speakerd's state directory and returns it: device.json, and the state
     layers graph.json (`current`), graph.lkg.json (`lkg`) and factory.json (`factory`). A
     layer is a document (dict, written as JSON), text (written as it is, for a broken file),
-    or None (no file)."""
+    or None (no file).
+
+    device.json says its `limits` explicitly, by default none (0 dB, tweeter on): a device.json
+    without them plays capped (speakerd fails closed). `limits=None` leaves them out. `device`
+    replaces the whole file: a dict, text (written as it is), or False for no file."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    (path / "device.json").write_text(json.dumps(
-        {"version": 1, "role": role, "amplifier": {"node": amplifier}}, indent=2))
+    if device is None:
+        device = {"version": 1, "role": role, "amplifier": {"node": amplifier}}
+        if limits is not None:
+            device["limits"] = limits
+    if device is False:
+        (path / "device.json").unlink(missing_ok=True)
+    else:
+        (path / "device.json").write_text(device if isinstance(device, str) else json.dumps(device, indent=2))
     for name, layer in (("graph.json", current), ("graph.lkg.json", lkg),
                         ("factory.json", factory)):
         if layer is None:
@@ -745,3 +781,199 @@ def render(state, samples, bundles=(), args=(), timeout=120):
             raise AssertionError(f"the render failed with status {result.returncode}\n"
                                  f"  command: {' '.join(command)}\n  its output:\n{result.stdout}")
         return _read_wav(out), result.stdout
+
+
+# ---------------------------------------------------------------------------------------------
+# The board side: firmware/'s installers, the systemd unit they install, who drives the graph
+
+FIRMWARE = ROOT / "firmware"
+
+
+def firmware(script, *args, env=None, timeout=120, check=True):
+    """Runs a firmware/ script (speakerd-setup.sh, setup.sh, snapcast-setup.sh) and returns the
+    CompletedProcess, stdout and stderr together. Fails with its output when `check` and it
+    fails."""
+    result = subprocess.run(["bash", str(FIRMWARE / script), *map(str, args)],
+                            env=dict(os.environ, **(env or {})), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            timeout=timeout)
+    if check and result.returncode != 0:
+        raise AssertionError(f"firmware/{script} {' '.join(map(str, args))} exited with status "
+                             f"{result.returncode}:\n{result.stdout}")
+    return result
+
+
+_stub = {}
+
+
+def stub_speakerd():
+    """tests/vpair/stub_speakerd.c, compiled once per test process: an ELF stand-in for speakerd
+    that does what its STUB_DIR/fate file says (see the file)."""
+    if "path" not in _stub:
+        out = Path(tempfile.mkdtemp(prefix="vpair-stub-")) / "speakerd"
+        subprocess.run(["cc", "-O1", "-Wall", "-o", str(out), str(HERE / "stub_speakerd.c")],
+                       check=True, capture_output=True, text=True)
+        _stub["path"] = out
+    return _stub["path"]
+
+
+def drivers(speaker, seconds=1.5):
+    """Who drives the graph of a speaker, from pw-profiler (PipeWire 0.3.65's pw-dump does not
+    say, and its pw-top has no batch mode): ({driver node names}, {follower node names}), the
+    nodes that ran in the seconds watched. Needs the profiler module (speaker.conf loads it)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = subprocess.run(["timeout", "-s", "INT", str(seconds), "pw-profiler", "-o",
+                              str(Path(tmp) / "profiler.log")], cwd=tmp, env=speaker.env,
+                             capture_output=True, text=True).stdout
+    names = {}
+    for obj in json.loads(speaker.run("pw-dump")):
+        if obj.get("type") == "PipeWire:Interface:Node":
+            names[obj["id"]] = (obj.get("info") or {}).get("props", {}).get("node.name", f"id {obj['id']}")
+    found = lambda kind: {names.get(int(i), f"id {i}") for i in
+                          [line.split()[2] for line in out.splitlines() if line.startswith(f"logging {kind} ")]}
+    return found("driver"), found("follower"), out
+
+
+class UserUnit:
+    """A systemd user unit run as systemd runs it, as far as a test can without systemd (the
+    container has none): the unit file's Environment= and UnsetEnvironment= on top of the
+    speaker's environment, ExecStart= started, and when it has ended ExecStopPost= run with
+    the variables systemd sets for it, SERVICE_RESULT, EXIT_CODE and EXIT_STATUS. %h is
+    `home`, %t the speaker's XDG_RUNTIME_DIR. It reads the real unit file and runs the real
+    programs; it does not restart anything itself: would_restart() says whether systemd would,
+    from Restart=, RestartPreventExitStatus= and RestartForceExitStatus=."""
+
+    CLEAN_SIGNALS = {"HUP", "INT", "TERM", "PIPE"}
+
+    def __init__(self, path, home, speaker, env=None):
+        self.path, self.home, self.speaker = Path(path), Path(home), speaker
+        self.extra_env = dict(env or {})
+        self.service = {}
+        section = None
+        for raw in self.path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            if line.startswith("["):
+                section = line.strip("[]")
+                continue
+            key, _, value = line.partition("=")
+            if section == "Service":
+                self.service.setdefault(key.strip(), []).append(value.strip())
+
+    def expand(self, value):
+        return (value.replace("%h", str(self.home))
+                .replace("%t", self.speaker.env["XDG_RUNTIME_DIR"]).replace("%%", "%"))
+
+    def environment(self):
+        env = dict(self.speaker.env, HOME=str(self.home), **self.extra_env)
+        for assignment in self.service.get("Environment", []):
+            for item in assignment.split():
+                key, _, value = item.partition("=")
+                env[key] = self.expand(value)
+        for names in self.service.get("UnsetEnvironment", []):
+            for name in names.split():
+                env.pop(name, None)
+        return env
+
+    def command(self, key):
+        value = self.expand(self.service[key][0])
+        return value.lstrip("-").split()
+
+    def start(self, env=None, log_path=None):
+        """Starts ExecStart; its output is also appended to `log_path`, line by line, when
+        given (what journalctl would show)."""
+        return UnitRun(self, dict(self.environment(), **(env or {})), log_path)
+
+    def would_restart(self, result):
+        """Whether systemd restarts the service after `result` (UnitRun.finish's)."""
+        def tokens(key):
+            return {t.removeprefix("SIG") for v in self.service.get(key, []) for t in v.split()}
+        status = result["EXIT_STATUS"]
+        if status in tokens("RestartForceExitStatus"):
+            return True
+        if status in tokens("RestartPreventExitStatus"):
+            return False
+        restart = self.service.get("Restart", ["no"])[0]
+        clean = result["SERVICE_RESULT"] == "success"
+        return {"no": False, "always": True, "on-failure": not clean}.get(restart, False)
+
+
+class UnitRun:
+    """One start of a UserUnit: its ExecStart running, its output (stdout and stderr) as lines."""
+
+    def __init__(self, unit, env, log_path=None):
+        self.unit, self.env = unit, env
+        self.log_path = Path(log_path) if log_path else None
+        self.lines, self._changed = [], threading.Condition()
+        self.process = subprocess.Popen(unit.command("ExecStart"), env=env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                        bufsize=1)
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+
+    def _read(self):
+        log = open(self.log_path, "a") if self.log_path else None
+        for line in self.process.stdout:
+            with self._changed:
+                self.lines.append(line.rstrip("\n"))
+                if log:
+                    log.write(line)
+                    log.flush()
+                self._changed.notify_all()
+        if log:
+            log.close()
+        with self._changed:
+            self._changed.notify_all()
+
+    def log(self):
+        with self._changed:
+            return "\n".join(self.lines)
+
+    def wait_for(self, text, timeout=30):
+        """Waits for a line starting with `text`, and returns it; fails with the output on a
+        timeout or when the process exits first."""
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while True:
+                for line in self.lines:
+                    if line.startswith(text):
+                        return line
+                if self.process.poll() is not None and not self._reader.is_alive():
+                    raise AssertionError(f"the unit's process exited ({self.process.returncode}) "
+                                         f"before it said '{text}':\n{self.log()}")
+                if time.monotonic() > deadline:
+                    raise AssertionError(f"the unit did not say '{text}' within {timeout} s:\n{self.log()}")
+                self._changed.wait(0.2)
+
+    def signal(self, sig):
+        if self.process.poll() is None:
+            self.process.send_signal(sig)
+
+    def finish(self, timeout=15, core_dumped=False):
+        """Waits for ExecStart's process to end (SIGKILL after `timeout`), then runs ExecStopPost
+        with SERVICE_RESULT, EXIT_CODE and EXIT_STATUS as systemd sets them, and returns those
+        (and "stop_post", its output)."""
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+            raise AssertionError(f"the unit's process did not end within {timeout} s:\n{self.log()}")
+        self._reader.join(timeout=5)
+        self.process.stdout.close()
+        code = self.process.returncode
+        if code >= 0:
+            result = {"EXIT_CODE": "exited", "EXIT_STATUS": str(code),
+                      "SERVICE_RESULT": "success" if code == 0 else "exit-code"}
+        else:
+            name = signal.Signals(-code).name.removeprefix("SIG")
+            clean = name in UserUnit.CLEAN_SIGNALS
+            result = {"EXIT_CODE": "dumped" if core_dumped else "killed", "EXIT_STATUS": name,
+                      "SERVICE_RESULT": "success" if clean else ("core-dump" if core_dumped else "signal")}
+        post = subprocess.run(self.unit.command("ExecStopPost"), env=dict(self.env, **result),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        result["stop_post"] = post.stdout + post.stderr
+        with self._changed:
+            self.lines += result["stop_post"].splitlines()
+        return result

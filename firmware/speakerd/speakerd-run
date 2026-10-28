@@ -1,0 +1,214 @@
+#!/bin/bash
+# speakerd-run: how systemd starts speakerd on a speaker (speakerd.service; firmware/CLAUDE.md,
+# "speakerd on a board").
+#
+#     speakerd-run                  ExecStart: picks the layer, records the start, execs speakerd
+#     speakerd-run --record-exit    ExecStopPost: records how speakerd ended, from systemd's
+#                                   $SERVICE_RESULT, $EXIT_CODE and $EXIT_STATUS
+#     speakerd-run --status         says what the history says: the layer it runs from or the
+#                                   next start would use, and the recent failures
+#
+# speakerd writes no file, so it keeps no count of its own crashes: whoever restarts it says
+# where to start. This script does, from a history of starts and exits in
+# $SPEAKERD_RUNTIME_DIR/history (a tmpfs, $XDG_RUNTIME_DIR/speakerd: forgotten at reboot).
+# One event per line:
+#
+#     start <epoch seconds> <layer>
+#     exit <epoch seconds> <class> <detail>
+#
+# with <class> one of clean, crash, pipewire, badcmd, stop-timeout, other. The next start:
+#
+#     the last exit was a crash (or no exit was recorded after the last start):
+#         last-known-good; factory once three crashes fell within 60 s; passthrough once three
+#         starts on factory (or passthrough) crashed within 60 s. Never a layer above the one
+#         that crashed.
+#     the last exit was PipeWire trouble (exit 3): the same layer as the last start.
+#     anything else (nothing yet since boot, a clean stop, exit 2): current.
+#
+# When the last start failed and five or more did (crash or exit 3) within 60 s, it waits
+# $SPEAKERD_BACKOFF seconds (default 5) before the start, so a speaker that cannot play does not spin; the unit
+# has no start limit, so it never gives up for good. It never starts speakerd while an
+# AudioPluginHost runs: two plugin hosts would feed the amplifier at once. It waits for that
+# one to exit, and says so.
+#
+# speakerd runs from the version this script belongs to (<version>/bin/speakerd), with every
+# LV2 bundle of <version>/lv2 named on its command line.
+#
+# Environment (the unit sets them): SPEAKERD_STATE_DIR (required), SPEAKERD_RUNTIME_DIR
+# (default $XDG_RUNTIME_DIR/speakerd), SPEAKERD_BACKOFF, HOME (an empty directory).
+
+set -u
+
+WINDOW=60            # seconds in which crashes are counted
+CRASHES_TO_FACTORY=3
+CRASHES_ON_FACTORY_TO_PASSTHROUGH=3
+FAILURES_TO_BACKOFF=5
+HISTORY_LINES=200
+PLUGIN_HOST_POLL=2
+
+log() { printf 'speakerd-run: %s\n' "$*" >&2; }
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+version_dir="$(dirname "$(dirname "$self")")"
+run_dir="${SPEAKERD_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/speakerd}"
+history="$run_dir/history"
+
+now() { printf '%(%s)T' -1; }
+
+depth() {
+    case "$1" in
+        current) echo 0 ;; last-known-good) echo 1 ;; factory) echo 2 ;; passthrough) echo 3 ;; *) echo 0 ;;
+    esac
+}
+layer_at() { local layers=(current last-known-good factory passthrough); echo "${layers[$1]}"; }
+
+# Reads the history. Sets NEXT_LAYER and NEXT_REASON (where the next start goes, and why),
+# FAILED_RECENTLY (starts that failed within the window), CRASHES_RECENTLY, and RUNNING,
+# LAST_LAYER and LAST_START (the last start, and whether it has no exit yet). $1 says what a
+# last start with no exit means: "crash" for the start after it (its end was never
+# recorded), "running" for a look at a speakerd that runs.
+choose_layer() {
+    local open="${1:-crash}" kind t a _rest
+    local start_layer="" start_time="" ended=1 last_exit="" crashes=0 factory_crashes=0 failed=0
+    local limit=$(( $(now) - WINDOW )) d
+    NEXT_REASON=""
+    note_end() {   # $1 = class, $2 = when
+        last_exit="$1"; ended=1
+        [ "$2" -ge "$limit" ] 2> /dev/null || return 0
+        case "$1" in
+            crash)
+                crashes=$((crashes + 1)); failed=$((failed + 1))
+                [ "$(depth "$start_layer")" -ge 2 ] && factory_crashes=$((factory_crashes + 1)) ;;
+            pipewire) failed=$((failed + 1)) ;;
+        esac
+        return 0
+    }
+    if [ -f "$history" ]; then
+        while read -r kind t a _rest; do
+            case "$kind" in
+                start)
+                    # A start right after a start: the earlier one's end was never recorded.
+                    [ -n "$start_layer" ] && [ $ended = 0 ] && note_end crash "$t"
+                    start_layer="$a"; start_time="$t"; ended=0 ;;
+                exit) note_end "$a" "$t" ;;
+            esac
+        done < "$history"
+    fi
+    RUNNING=0; LAST_LAYER="$start_layer"; LAST_START="$start_time"
+    if [ -n "$start_layer" ] && [ $ended = 0 ]; then
+        if [ "$open" = running ]; then
+            RUNNING=1
+        else
+            note_end crash "$(now)"
+            NEXT_REASON="the last start ($start_layer) has no exit recorded, counted as a crash; "
+        fi
+    fi
+    FAILED_RECENTLY=$failed; CRASHES_RECENTLY=$crashes; LAST_EXIT="$last_exit"
+    case "$last_exit" in
+        crash)
+            d=1
+            [ "$crashes" -ge "$CRASHES_TO_FACTORY" ] && d=2
+            [ "$factory_crashes" -ge "$CRASHES_ON_FACTORY_TO_PASSTHROUGH" ] && d=3
+            # Never a layer above the one that crashed.
+            [ "$(depth "$start_layer")" -gt "$d" ] && d="$(depth "$start_layer")"
+            NEXT_REASON+="after a crash: $crashes within ${WINDOW} s, $factory_crashes of them on factory or passthrough" ;;
+        pipewire)
+            d="$(depth "$start_layer")"
+            NEXT_REASON+="the same layer again after PipeWire trouble (exit 3)" ;;
+        "")
+            d=0; NEXT_REASON+="no exit recorded since boot" ;;
+        *)
+            d=0; NEXT_REASON+="the last exit was $last_exit" ;;
+    esac
+    NEXT_LAYER="$(layer_at "$d")"
+}
+
+record() {
+    mkdir -p "$run_dir" || return 1
+    printf '%s\n' "$*" >> "$history"
+    # Keep the history short.
+    if [ "$(wc -l < "$history")" -gt "$HISTORY_LINES" ]; then
+        tail -n "$HISTORY_LINES" "$history" > "$history.tmp" && mv -f "$history.tmp" "$history"
+    fi
+}
+
+# The PIDs of running AudioPluginHost processes (any user), by command name.
+plugin_host_pids() {
+    local f comm pid stat pids=()
+    for f in /proc/[0-9]*/comm; do
+        { read -r comm < "$f"; } 2> /dev/null || continue   # it may have exited since the glob
+        [ "$comm" = AudioPluginHost ] || continue
+        pid="${f#/proc/}"; pid="${pid%/comm}"
+        # A zombie (state Z) has exited already: it plays nothing.
+        { stat="$(< "/proc/$pid/stat")"; } 2> /dev/null || continue
+        stat="${stat##*) }"; [ "${stat%% *}" != Z ] || continue
+        pids+=("$pid")
+    done
+    echo "${pids[*]}"
+}
+
+record_exit() {
+    local result="${SERVICE_RESULT:-}" code="${EXIT_CODE:-}" status="${EXIT_STATUS:-}" class
+    case "$code:$status" in
+        exited:0)                              class=clean ;;
+        exited:2)                              class=badcmd ;;
+        exited:3)                              class=pipewire ;;
+        exited:*)                              class=crash ;;
+        killed:TERM | killed:INT | killed:HUP) class=clean ;;
+        killed:* | dumped:*)                   class=crash ;;
+        *)                                     class=other ;;
+    esac
+    case "$result" in
+        timeout)  class=stop-timeout ;;   # SIGKILLed by systemd after a stop that took too long
+        oom-kill) class=crash ;;
+    esac
+    record "exit $(now) $class ${code:-none}:${status:-none}:${result:-none}"
+    choose_layer
+    log "speakerd ended: $class (${code:-no process}${status:+ $status}${result:+, $result}); the next start uses $NEXT_LAYER: $NEXT_REASON"
+}
+
+start() {
+    : "${SPEAKERD_STATE_DIR:?speakerd-run: SPEAKERD_STATE_DIR is not set (see speakerd.service)}"
+    local binary="$version_dir/bin/speakerd" b bundles=() pids said=0
+    if [ ! -x "$binary" ]; then
+        log "no speakerd at $binary"
+        exit 2
+    fi
+    [ -d "$SPEAKERD_STATE_DIR" ] || { log "no state directory $SPEAKERD_STATE_DIR"; exit 2; }
+    [ -e "${HOME:-/nonexistent}/.lv2" ] && log "warning: HOME ($HOME) has a .lv2 folder, which may shadow the bundles"
+
+    while pids="$(plugin_host_pids)"; [ -n "$pids" ]; do
+        [ $said = 1 ] || log "*** AudioPluginHost runs (pid $pids): two plugin hosts would feed the amplifier at once. Not starting speakerd until it has exited. ***"
+        said=1
+        sleep "$PLUGIN_HOST_POLL"
+    done
+    [ $said = 0 ] || log "AudioPluginHost has exited: starting speakerd"
+
+    choose_layer
+    if [ "$FAILED_RECENTLY" -ge "$FAILURES_TO_BACKOFF" ] && { [ "$LAST_EXIT" = crash ] || [ "$LAST_EXIT" = pipewire ]; }; then
+        log "$FAILED_RECENTLY starts failed within ${WINDOW} s: waiting ${SPEAKERD_BACKOFF:-5} s before the next"
+        sleep "${SPEAKERD_BACKOFF:-5}"
+    fi
+    for b in "$version_dir"/lv2/*.lv2; do
+        [ -d "$b" ] && bundles+=(--lv2-bundle "$b")
+    done
+    record "start $(now) $NEXT_LAYER" || log "warning: cannot record the start in $history"
+    log "starting speakerd $(basename "$version_dir") from layer $NEXT_LAYER ($NEXT_REASON), with $(( ${#bundles[@]} / 2 )) LV2 bundle(s)"
+    exec "$binary" --state-dir "$SPEAKERD_STATE_DIR" --from "$NEXT_LAYER" "${bundles[@]}"
+}
+
+case "${1:-}" in
+    "")            start ;;
+    --record-exit) record_exit ;;
+    --status)
+        choose_layer running
+        if [ "$RUNNING" = 1 ]; then
+            echo "running: started $(( $(now) - LAST_START )) s ago from layer $LAST_LAYER"
+        elif [ -n "$LAST_LAYER" ]; then
+            echo "stopped: last started from layer $LAST_LAYER; the next start uses $NEXT_LAYER ($NEXT_REASON)"
+        else
+            echo "no start recorded since boot"
+        fi
+        echo "failed starts within ${WINDOW} s: $FAILED_RECENTLY ($CRASHES_RECENTLY crashes)" ;;
+    *)             log "usage: speakerd-run [--record-exit | --status]"; exit 2 ;;
+esac

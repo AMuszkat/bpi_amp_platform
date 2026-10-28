@@ -1,0 +1,51 @@
+# speakerd, the headless plugin host of the BPI AMP Platform, as a systemd user service.
+#
+# Installed by firmware/speakerd-setup.sh as ~/.config/systemd/user/speakerd.service, in the
+# session of the user whose PipeWire drives the amplifier (with linger, so it starts at boot).
+# See firmware/CLAUDE.md, "speakerd on a board". It needs PipeWire and nothing else: no
+# network, no ampd, no controller.
+#
+# speakerd keeps no count of its own crashes (it writes no file), so speakerd-run does: it
+# picks the layer speakerd starts from (--from) from the starts and exits it recorded, in
+# $XDG_RUNTIME_DIR/speakerd/history. After a crash the next start is on last known good, after
+# three crashes within 60 s on factory, after three more on factory on passthrough; after
+# exit 3 (PipeWire trouble) on the same layer again; otherwise on current.
+
+[Unit]
+Description=speakerd, the headless plugin host (BPI AMP Platform)
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+# No start limit: systemd's would leave the speaker silent for good after a burst of failed
+# starts. speakerd-run steps down the layers instead, and waits a few seconds before each
+# start once five starts have failed within a minute, so a speaker that cannot play does not
+# spin.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=SPEAKERD_STATE_DIR=%h/.local/state/speakerd
+Environment=SPEAKERD_RUNTIME_DIR=%t/speakerd
+# An empty HOME: JUCE's LV2 host looks in ~/.lv2 before anything else, and an old bundle
+# copied there (build-podman.sh -install does that) would shadow the bundles speakerd-run
+# names on the command line.
+Environment=HOME=%h/.local/lib/speakerd/home
+# client-rt.conf is client.conf plus PipeWire's module-rt: the thread speakerd's graph runs on
+# gets real-time priority (through RTKit or RLIMIT_RTPRIO, when either allows it). With the
+# empty HOME it is the system's /etc or /usr/share/pipewire/client-rt.conf, never the
+# routing rules snapcast-setup.sh writes into ~/.config/pipewire/client-rt.conf.
+Environment=PIPEWIRE_CONFIG_NAME=client-rt.conf
+UnsetEnvironment=XDG_CONFIG_HOME
+ExecStart=%h/.local/lib/speakerd/current/bin/speakerd-run
+ExecStopPost=-%h/.local/lib/speakerd/current/bin/speakerd-run --record-exit
+# Restart after a crash or PipeWire trouble, within a second. Not after exit 2 (a bad command
+# line or bundle: a restart cannot fix it) or 203 (no program to run). SIGPIPE counts as
+# clean for systemd; for speakerd it is a crash.
+Restart=on-failure
+RestartSec=1
+RestartPreventExitStatus=2 203
+RestartForceExitStatus=SIGPIPE
+TimeoutStopSec=10
+SyslogIdentifier=speakerd
+
+[Install]
+WantedBy=default.target

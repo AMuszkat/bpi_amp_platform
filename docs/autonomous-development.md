@@ -89,7 +89,10 @@ PipeWire start after it, when the amplifier comes back, and with no network),
 `speakerd_restart` (stopped under a playing stream it leaves the amplifier silent and the
 stream on its sink, and the next one adopts both), `speakerd_second_instance` (a second one
 on the same PipeWire refuses) and `speakerd_quantum_change` (the quantum changes while a
-stream plays and the sound comes back each time). `tools/test.sh vpair` records the tests it
+stream plays and the sound comes back each time). `speakerd_device_limits` and
+`speakerd_import` check the output limits and the import of an AudioPluginHost session that a
+board needs, and three more test the board side of `firmware/` on the virtual speakers:
+`firmware_speakerd_install`, `speakerd_crash_restart` and `speakerd_installed` (rung 3 below). `tools/test.sh vpair` records the tests it
 skipped, and why, with the result. `ampd`, the Snapcast source and `tc netem` come next; the
 compose file comes with them, for CI.
 
@@ -113,6 +116,20 @@ the MAX98397 voltage sense capture that `ampScope` reads gives the output wavefo
 microphone, so a sweep sent through Snapcast can be compared with the expected crossover
 response on each driver. Until that capture path is confirmed on the hardware, the fallback
 is a USB audio interface wired to the amplifier outputs through a divider.
+
+**What exists today** for rung 3 is the way onto a board, not yet tried on one
+(`firmware/CLAUDE.md`). `firmware/setup.sh` installs a speaker's audio side by component, in
+boot order: the PipeWire drop-in with the persistent `speakerd` sink, snapclient routed into
+it, and `speakerd` (`ampd` comes with step 3). `firmware/speakerd-setup.sh` installs `speakerd`
+as a versioned systemd user service with rollback, capped on every install, whose wrapper
+restarts it on last known good after a crash and on factory after three. Both copy one bundle
+to the board and run their local mode there; they build nothing. `tools/board.sh`, the script
+of the coming `/board` skill, builds the aarch64 artifacts and deploys, runs a smoke test that
+makes no sound (it plays, capped, linked, clocked by the amplifier, no restart or xrun for a
+while), reads the journal and rolls back, and refuses while the lab is locked or rung 2 is
+not green for the commit. Their local mode is tested on the virtual pair; the remote mode is
+not, and the first deploy is a person's (section 8). The smoke test does not yet compare the
+amplifier telemetry with the expected response.
 
 ## 2. The rules an agent runs under
 
@@ -242,6 +259,11 @@ the architecture:
 | `speakerd_restart` | `speakerd` stopped while a stream plays leaves the amplifier silent and the stream on its sink, and a new `speakerd` adopts the sink under the running stream and plays the same sound |
 | `speakerd_second_instance` | a second `speakerd` on the same PipeWire says another one runs and exits, and the first plays on unaffected |
 | `speakerd_quantum_change` | with a stream playing, the quantum changes and comes back, and after each change the gain is the render's again, with nothing non-finite or above full scale reaching the amplifier |
+| `speakerd_device_limits` | with `device.json` limits of -20 dB and the tweeter muted, live and in the render, the tweeter is exact zeros and the woofer is the unlimited capture minus 20 dB; a +6 dBFS input or a +20 dB boost never puts a sample above -20 dBFS (-40 in passthrough); a `device.json` without limits, with a misspelt key, broken or missing says so and plays the same way capped |
+| `speakerd_import` | AudioPluginHost's example session, imported, renders sample for sample like the same settings given as parameters, also with `--prefer-headless`; malformed sessions and one that sends the input straight to the tweeter are refused, with nothing on stdout |
+| `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install, rolls back both ways, and refuses without a role, while an AudioPluginHost runs, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph that reaches the tweeter without a crossover |
+| `speakerd_crash_restart` | the installed unit starts speakerd on current, on last known good after a crash (a real speakerd killed by SIGSEGV), on factory after three crashes within 60 s, on passthrough after three more on factory, and never while an AudioPluginHost runs |
+| `speakerd_installed` | on a speaker set up like a board, the persistent `speakerd` sink exists before speakerd and never drives while the amplifier exists, speakerd plays through it with the tweeter at exact zeros and the woofer at the render minus 20 dB, the deployed bundle runs and not an older copy in `~/.lv2`, and the smoke test passes |
 | `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately |
 | `monitor_freshness` | with 5 % packet loss and 20 ms jitter, every frame drawn is less than 50 ms old at the 99th percentile, and the speaker never holds more than one pending frame per stream |
 | `scope_resolution` | a scope frame from the speaker is identical to the frame the complete build computes from the same Demo capture |

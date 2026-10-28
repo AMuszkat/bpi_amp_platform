@@ -6,10 +6,13 @@ Two virtual speakers, `left` and `right`, on one machine, for testing the remote
 
 Each virtual speaker has what a real one has around its audio path:
 
-- its own **PipeWire**, at the board's 48 kHz and quantum 1024 (`speaker.conf`);
+- its own **PipeWire**, at 48 kHz and quantum 1024 (`speaker.conf`), with the profiler module
+  as on the boards; a test may start a speaker from another configuration, and with a folder of
+  drop-ins, as a board loads `~/.config/pipewire/pipewire.conf.d`;
 - its own **WirePlumber**, which links streams to their targets as on the board;
 - its own **D-Bus session**, which WirePlumber needs;
-- an **amplifier**: a null sink with the two amplifier channels, woofer as FL and tweeter as FR.
+- an **amplifier**: a null sink with the two amplifier channels, woofer as FL and tweeter as FR,
+  at `priority.driver` 1000 like the board's ALSA sink in `firmware/pipewire/pipewire.conf`.
 
 What a test plays into a speaker reaches its amplifier; the harness records the amplifier's
 monitor, which is exactly what the MAX98397s would have received.
@@ -70,6 +73,20 @@ path must fit in 108 bytes.
 | `test_speakerd_restart.py` | speakerd stopped under a playing stream leaves the amplifier silent and the stream on its sink; the next one adopts it |
 | `test_speakerd_second_instance.py` | a second speakerd on the same PipeWire refuses, and the first plays on |
 | `test_speakerd_quantum_change.py` | the quantum changes while a stream plays, and the gain comes back each time |
+| `test_speakerd_device_limits.py` | device.json's limits, live and rendered, as a ceiling, and failing closed |
+| `test_speakerd_import.py` | an AudioPluginHost session imported renders like the same settings as parameters; unsafe sessions are refused |
+| `test_firmware_speakerd_install.py` | `firmware/speakerd-setup.sh`'s local mode: the layout, always capped, versions and rollback, the refusals |
+| `test_speakerd_crash_restart.py` | the installed unit's wrapper starts speakerd on the right layer after crashes |
+| `test_speakerd_installed.py` | a speaker set up like a board: the persistent sink, the amplifier drives, capped, the deployed bundle runs, smoke |
+| `stub_speakerd.c` | a stand-in speakerd that dies as it is told, for the installer and wrapper tests |
+
+## Before and after the speakerd that enforces the limits
+
+`test_speakerd_device_limits`, `test_speakerd_import`, `test_speakerd_installed` and the real
+speakerd's part of `test_speakerd_crash_restart` need the speakerd of the board readiness work
+(the limits, failing closed, `--version`, the import and its example session). Against an
+older speakerd they fail, each saying what it lacks: the installer refuses a speakerd older
+than `SPEAKERD_MIN_VERSION` (firmware/speakerd-setup.sh), which would ignore the cap.
 
 ## What the scenarios prove
 
@@ -88,6 +105,11 @@ the complete build of the plugin, which is what the plugin outside speakerd outp
 | `test_speakerd_restart` | speakerd stopped by SIGTERM while a stream plays exits with status 0 and "stopping" last; the amplifier is then silent for 1 s (woofer below -100 dBFS, tweeter all zeros) and the stream stays linked to the `speakerd` sink alone; a new speakerd says it uses the sink that exists and gives the render's gain within 0.05 dB, under the same stream |
 | `test_speakerd_second_instance` | a second speakerd on the same PipeWire says that another one runs (its `speakerd-dsp` exists), then `stopping`, and exits with status 3, and the first still gives the render's gain within 0.05 dB (not 6 dB more). It needs the refusal in speakerd, which came after step 2's first speakerd: against one without it, it fails, and says so |
 | `test_speakerd_quantum_change` | with a stream playing, the quantum forced to 256, 2048 and back to 1024: speakerd says each change (re-primed, or run as several blocks), the gain comes back to the render's within 0.05 dB on both channels after each, and the amplifier, recorded as floats throughout, holds no NaN, infinity or sample above full scale. The gap at a change is printed, not asserted: PipeWire 0.3.65 drops out or jumps at a quantum change by itself |
+| `test_speakerd_device_limits` | with limits -20 dB and the tweeter muted: the tweeter capture is exact zeros and the woofer's gain is the unlimited capture's minus 20 dB within 0.05 dB, live and in the render; a +6 dBFS input and a +20 dB boost document never put a woofer sample above -20 dBFS, live or rendered; passthrough peaks at no more than -40 dBFS and plays; a device.json without limits says it plays the fail-safe limits, one with a misspelt `limts`, one not JSON and a missing one say `device.json: FAILED`, and each plays the boost document with the tweeter at exact zeros and the woofer at no more than -20 dBFS |
+| `test_speakerd_import` | speakerd's example session imported (complete build, and with `--prefer-headless`) renders sample for sample like the same settings given as parameters; an empty file, text, XML that is not a FILTERGRAPH, a connection to output channel 2, and the input wired straight to the tweeter each exit 2 with nothing on stdout |
+| `test_firmware_speakerd_install` | the bundle step and `speakerd-setup.sh install --home --no-systemd` lay out exactly the documented tree (versions, `current`, an empty HOME, `device.json` with `limits` -20 dB and the tweeter muted, the unit and the drop-in byte for byte, ampd's layers untouched); a reinstall adds nothing and caps lifted limits again, keeping role, ports and other keys; rollback swaps `current` and `previous` both ways and `--keep` prunes the oldest; install refuses without `--role`, a speakerd that cannot say its version or is older than `SPEAKERD_MIN_VERSION` (rollback too), a device.json with a key speakerd does not know or a key twice, while a process called AudioPluginHost runs (and stops it with `--stop-plugin-host`), and a factory graph that reaches the tweeter without a crossover; smoke reports a `device.json: FAILED` line, fail-safe limits, `device: no limits` and no limits line as failures; `--import-filtergraph` installs speakerd's conversion, given the board's device.json (`--device`); the amplifier is found in a pw-dump (one ALSA sink, the two known names, refusals naming the sinks; the virtual amplifier's ports); `--route speakerd` is refused without the configured sink, uninstall routes snapclient back to `Ap.cap` first; `setup.sh` checks every component before it changes any and installs in boot order |
+| `test_speakerd_crash_restart` | the installed unit (no network unit, `Restart=on-failure`, 1 s, never after exit 2, no start limit, an empty HOME), run by `harness.UserUnit`: the real speakerd killed by SIGSEGV is restarted on `last-known-good`, after SIGTERM on `current`; with the stand-in, six crashes give current, last-known-good twice, factory three times (three within 60 s), then passthrough (three on factory), exit 3 keeps the layer, SIGTERM and exit 2 are not restarted, SIGPIPE and a core dump are crashes; crashes older than 60 s do not count towards factory; a start with no exit counts as a crash; a start after five failures waits and says so; no speakerd starts while an AudioPluginHost runs |
+| `test_speakerd_installed` | two versions installed, each speaker's PipeWire started with the installed drop-ins (the right one's amplifier without a priority): the `speakerd` sink exists before speakerd at `priority.driver` 0 and is the default sink; speakerd, started by the unit, adopts it and plays factory; `pw-profiler` shows the amplifier as the only driver with the sink, speakerd-dsp and the stream as followers; speakerd says `device: limits: output at -20 dB, tweeter muted`, the tweeter is all zeros and the woofer is the complete build's render minus 20 dB within 0.05 dB; the current version's bundle loads although a broken copy with its URI lies in the home's `~/.lv2` (with HOME there speakerd stops with status 2), and after a rollback the previous version's does; speakerd's HOME stays empty; `speakerd-setup.sh smoke` passes every check. Against a speakerd older than `SPEAKERD_MIN_VERSION` the install refuses it, and the module fails saying so |
 
 ## speakerd in a test
 
@@ -135,6 +157,35 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
 - A wait for a link, a port or a log line that times out says, in its failure, whether the
   speaker's PipeWire or WirePlumber has gone, with the end of its log (`speaker.health()`).
 
+## The board side in a test
+
+```python
+from harness import Pair, UserUnit, drivers, firmware, stub_speakerd
+
+firmware("speakerd-setup.sh", "install", "--bundle", b, "--home", home, "--no-systemd", "--role", "left")
+with Pair({"left": {"dropins": home / ".config/pipewire/pipewire.conf.d"}}) as pair:
+    unit = UserUnit(home / ".config/systemd/user/speakerd.service", home, pair["left"])
+    run = unit.start(log_path=log)           # ExecStart, with the unit's Environment=
+    run.wait_for("speakerd: playing: ")
+    found, followers, _ = drivers(pair["left"])   # who drives, from pw-profiler
+    run.signal(signal.SIGSEGV)
+    result = run.finish()                    # ExecStopPost with SERVICE_RESULT, EXIT_CODE, EXIT_STATUS
+    unit.would_restart(result)               # what systemd would do, from Restart=...
+```
+
+- `firmware(script, *args)` runs a `firmware/` script; `Pair(setup)` starts a speaker from
+  another PipeWire configuration (`speaker_conf`) or with a folder of drop-ins (`dropins`), as
+  `vpair.sh up` does with `VPAIR_SPEAKER_CONF` and `VPAIR_PIPEWIRE_DROPINS`.
+- `UserUnit` reads a real unit file and runs it as systemd would, as far as a test can: there is
+  no systemd in the container, so nothing restarts by itself.
+- `stub_speakerd()` compiles `stub_speakerd.c` (an ELF, which the installer's machine check
+  needs): it dies by the signal or exits with the code its `STUB_DIR/fate` says, prints
+  `STUB_IMPORT` for `--import-filtergraph`, and says `STUB_VERSION` for `--version` (without
+  it, it answers as a speakerd from before `--version`, which the installer refuses). The
+  installer tests use it, so that they test the installer whatever speakerd is built.
+- `state_dir()` writes `device.json` with `"limits": {"gain_db": 0, "tweeter": "on"}`: no limit,
+  said explicitly, because a device.json without limits plays capped.
+
 ## Worth knowing
 
 - **PipeWire needs its access module even with nothing to protect.** Without
@@ -159,6 +210,13 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
 - **PipeWire glitches on a quantum change by itself.** A tone played straight into the
   amplifier, quantum 1024 to 256 to 2048 to 1024, jumps by 0.6 to 0.9 of its amplitude at each
   change and drops out for 42 ms at the change to 2048, the same every time.
+- **A null sink is always a driver, and `priority.driver` is compared as if unsigned.**
+  `node.driver = false` on a `support.null-audio-sink` is ignored, and a sink at
+  `priority.driver = -1` drives an amplifier at 1. With equal priorities the node created first
+  drives. PipeWire 0.3.65's `pw-dump` does not say who drives and its `pw-top` has no batch mode:
+  `pw-profiler` prints `logging driver <id>` (`harness.drivers()`).
+- **A killed child is a zombie until its parent waits for it**, and `/proc/<pid>/comm` still
+  names it: the installer and speakerd-run skip processes in state Z.
 - **A recording often starts with a quantum or two of zeros**, before the first buffer reaches
   the recorder. The recorder is linked before anything is played, so a capture misses nothing.
 
