@@ -5,13 +5,17 @@
 #     tools/board.sh status                      what is installed and what runs (reads only: the
 #                                                board's installed speakerd-setup.sh status; nothing
 #                                                is copied to the board)
-#     tools/board.sh journal [-n N] [--follow]   journalctl --user -u speakerd on the board (reads only)
+#     tools/board.sh journal [-n N] [--follow] [--unit speakerd|ampd]
+#                                                journalctl --user -u speakerd (or ampd) on the board
+#                                                (reads only)
 #     tools/board.sh deploy [options]            builds the aarch64 artifacts, installs them capped
 #                                                (firmware/setup.sh --mode target-remote; default
 #                                                --only speakerd). Options: --role, --plugin,
-#                                                --factory, --import-filtergraph, --only, --skip;
-#                                                anything else is a person's, run directly
-#     tools/board.sh smoke [--window S]          checks, without a sound, that speakerd plays capped
+#                                                --factory, --import-filtergraph, --only, --skip, and
+#                                                ampd's --name, --hub, --agent, --hub-address,
+#                                                --listen; anything else is a person's, run directly
+#     tools/board.sh smoke [--window S]          checks, without a sound, that speakerd plays capped,
+#                                                and ampd when it is installed
 #     tools/board.sh rollback                    makes the previous speakerd current again
 #     tools/board.sh --dry-run <command> ...     says what it would run; builds and reaches nothing
 #
@@ -47,7 +51,7 @@ run() {
 }
 
 # --- The arguments, before anything else -------------------------------------------------------
-lines=200 follow=0 window="" plugins=() args=() components=0
+lines=200 follow=0 unit=speakerd window="" plugins=() args=() components=0
 case "$command" in
     status | rollback)
         [ $# -eq 0 ] || die "$command takes no arguments" ;;
@@ -56,10 +60,12 @@ case "$command" in
             case "$1" in
                 -n) lines="${2:?journal -n takes a number}"; shift 2 ;;
                 --follow | -f) follow=1; shift ;;
-                *) die "journal takes -n <lines> and --follow" ;;
+                --unit) unit="${2:?journal --unit takes speakerd or ampd}"; shift 2 ;;
+                *) die "journal takes -n <lines>, --follow and --unit speakerd|ampd" ;;
             esac
         done
-        [[ "$lines" =~ ^[0-9]{1,6}$ ]] || die "journal -n takes a whole number of lines, not '$lines'" ;;
+        [[ "$lines" =~ ^[0-9]{1,6}$ ]] || die "journal -n takes a whole number of lines, not '$lines'"
+        case "$unit" in speakerd | ampd) ;; *) die "journal --unit takes speakerd or ampd, not '$unit'" ;; esac ;;
     smoke)
         while [ $# -gt 0 ]; do
             case "$1" in
@@ -78,7 +84,10 @@ case "$command" in
                 --plugin) plugins+=("${2:?--plugin takes plugin[:build]}"); shift 2 ;;
                 --only | --skip) components=1; args+=("$1" "${2:?$1 takes components}"); shift 2 ;;
                 --role | --factory | --import-filtergraph) args+=("$1" "${2:?$1 takes a value}"); shift 2 ;;
-                *) die "deploy does not take $1: only --role, --plugin, --factory, --import-filtergraph, --only and --skip. Everything else is a person's, with firmware/setup.sh" ;;
+                # ampd's: who it is and where its hub is. None of them reaches the audio.
+                --name | --hub-address | --listen) args+=("$1" "${2:?$1 takes a value}"); shift 2 ;;
+                --hub | --agent) args+=("$1"); shift ;;
+                *) die "deploy does not take $1: only --role, --plugin, --factory, --import-filtergraph, --only, --skip, --name, --hub, --agent, --hub-address and --listen. Everything else is a person's, with firmware/setup.sh" ;;
             esac
         done
         [ ${#plugins[@]} -gt 0 ] || plugins=("${DEFAULT_PLUGINS[@]}")
@@ -106,7 +115,7 @@ case "$command" in
         run ssh -t -- "$TARGET" 'bash "$HOME/.local/lib/speakerd/current/setup/speakerd-setup.sh" status'
         ;;
     journal)
-        remote="journalctl --user -u speakerd.service -b --no-pager -n $(printf %q "$lines")"
+        remote="journalctl --user -u $unit.service -b --no-pager -n $(printf %q "$lines")"
         [ $follow = 0 ] || remote+=" --follow"
         run ssh -t -- "$TARGET" "$remote"
         ;;

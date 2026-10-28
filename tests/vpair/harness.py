@@ -131,6 +131,33 @@ def align(capture, reference):
     return int(np.argmax(correlation[:len(c)]))
 
 
+def block_levels(x, block, rate=RATE):
+    """The RMS level in dBFS of each block of `block` seconds of `x` (mono)."""
+    n = max(1, int(round(block * rate)))
+    count = len(x) // n
+    blocks = np.asarray(x[:count * n], dtype=np.float64).reshape(count, n)
+    return 10 * np.log10(np.maximum(np.mean(blocks ** 2, axis=1), 1e-24))
+
+
+def longest_run(mask):
+    """The length of the longest run of True in `mask`."""
+    best = run = 0
+    for value in mask:
+        run = run + 1 if value else 0
+        best = max(best, run)
+    return best
+
+
+def high_band(x, cutoff_hz=4000.0, rate=RATE):
+    """`x` (mono) above `cutoff_hz`, through an FFT filter with a raised-cosine edge one
+    kilohertz wide (so its impulse response is a few milliseconds long): where a click is, and
+    a tone below the edge is not."""
+    spectrum = np.fft.rfft(x)
+    f = np.fft.rfftfreq(len(x), 1.0 / rate)
+    edge = np.clip((f - (cutoff_hz - 1000.0)) / 1000.0, 0.0, 1.0)
+    return np.fft.irfft(spectrum * (0.5 - 0.5 * np.cos(np.pi * edge)), len(x))
+
+
 def _write_wav(path, samples, rate=RATE):
     """`samples` is mono, or (n, channels). Written as 32-bit integer PCM, or as 32-bit float
     when a sample is beyond full scale: pw-play and PipeWire carry a float WAV's samples above
@@ -523,6 +550,17 @@ def built(what, kind=None):
     and returns the program or the LV2 bundle. tools/build.sh is incremental, so this is fast
     when nothing changed."""
     key = (what, kind)
+    prebuilt = os.environ.get("VPAIR_PREBUILT")
+    if prebuilt and key not in _built:
+        # A build tree laid out like build/, made elsewhere (another branch's speakerd, say):
+        # used as it is, nothing is built.
+        target = what if kind in (None, "complete") else f"{what}_{kind}"
+        path = (Path(prebuilt) / what / f"{what}_artefacts" / "Release" / what if kind is None
+                else Path(prebuilt) / what / f"{target}_artefacts" / "Release" / "LV2" / f"{target}.lv2")
+        if not path.exists():
+            raise RuntimeError(f"VPAIR_PREBUILT={prebuilt} has no {path}")
+        print(f"(prebuilt {path})", file=sys.stderr, flush=True)
+        _built[key] = path
     if key not in _built:
         command = [str(ROOT / "tools" / "build.sh"), what] + ([kind] if kind else [])
         started = time.monotonic()
@@ -1219,7 +1257,8 @@ class StandInSpeakerd(LoggedProcess):
 
     def events(self, op=None, direction=None):
         out = []
-        for line in self.events_path.read_text().splitlines():
+        # Complete lines only: the stand-in may be in the middle of writing the last one.
+        for line in self.events_path.read_text().split("\n")[:-1]:
             event = json.loads(line)
             if (op is None or event.get("op") == op) and (direction is None or event["dir"] == direction):
                 out.append(event)
@@ -1245,6 +1284,7 @@ class Controller:
 
     def __init__(self, name, hub=ADDRESS["left"], port=CONTROL_PORT, knob_port=KNOB_PORT, osc=True, timeout=10):
         self.name, self.hub, self.knob_port = name, hub, knob_port
+        _ampd_module()      # its OSC encoder, loaded now: not in the time of a first send
         self.messages, self._changed = [], threading.Condition()
         self.params, self.gestures, self.closed = {}, {}, False
         self.udp = None
@@ -1281,6 +1321,8 @@ class Controller:
             self.messages.append(obj)
             op = obj.get("op")
             if op == "state":
+                # A full refresh (docs/protocol.md, clarification 2): what it knew goes.
+                self.params = {}
                 for node in obj["document"].get("nodes", []):
                     for pid, value in (node.get("params") or {}).items():
                         self.params[(node["uid"], pid)] = (obj.get("seq", 0), value)
@@ -1373,12 +1415,17 @@ class Controller:
         return answer
 
     def current_revision(self):
+        """The revision of the last state or graph it got."""
         with self._changed:
             revision = self.state["revision"]
             for message in self.messages:
-                if message["op"] == "graph":
+                if message["op"] in ("graph", "state"):
                     revision = message["revision"]
             return revision
+
+    def last_state(self):
+        with self._changed:
+            return [m for m in self.messages if m["op"] == "state"][-1]
 
     def values(self):
         """What it knows of each parameter: {(node, id): value}."""
@@ -1510,19 +1557,21 @@ class MonitorClient:
 
 class TimedRecorder:
     """pw-record of one node's monitor, as raw 32-bit floats on a pipe, each chunk stamped with
-    the time it arrived: sample_time(i) is when sample i was in the graph (time.monotonic()),
-    from the earliest arrivals (the lower envelope of arrival minus samples so far), which is
-    within a fraction of a millisecond of the cycle that produced it plus its delivery. Linked
-    before start() returns, like Recorder."""
+    the time it arrived (time.monotonic()). stop() gives t0: sample i was delivered at t0 + i /
+    RATE, from the 5th percentile of (arrival - samples so far / RATE) over the chunks, a lower
+    envelope that a late chunk or an early burst does not move. `latency` (samples) is what
+    pw-record asks for: its chunks are that long (by default it asks 100 ms and gets 1024).
+    Linked before start() returns, like Recorder."""
 
-    def __init__(self, speaker, target="amplifier", timeout=5.0):
-        self.speaker, self.target, self.timeout = speaker, target, timeout
+    def __init__(self, speaker, target="amplifier", timeout=5.0, latency=None):
+        self.speaker, self.target, self.timeout, self.latency = speaker, target, timeout, latency
         self.name = f"vpair-trecord-{os.getpid()}-{next(_names)}"
         self.chunks, self.stamps, self.process = [], [], None
 
     def start(self):
         self.process = subprocess.Popen(
             ["pw-record", "--target", self.target, "-P", "{ stream.capture.sink = true node.name = " + self.name + " }",
+             *(["--latency", str(self.latency)] if self.latency else []),
              "--rate", str(RATE), "--channels", "2", "--format", "f32", "-"],
             env=self.speaker.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             bufsize=0)
@@ -1557,7 +1606,8 @@ class TimedRecorder:
         self._thread.join(timeout=5)
         raw = b"".join(self.chunks)
         x = np.frombuffer(raw[:len(raw) // 8 * 8], dtype="<f4").reshape(-1, 2).astype(np.float64)
-        t0 = min(t - n / RATE for t, n in self.stamps) if self.stamps else None
+        offsets = sorted(t - n / RATE for t, n in self.stamps)
+        t0 = offsets[len(offsets) // 20] if offsets else None
         return x, t0
 
     def close(self):

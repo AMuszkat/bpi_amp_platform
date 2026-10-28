@@ -36,6 +36,12 @@ Pass when:
   times and holds the last value within 1.1 s of it; a new revision is written at once (within
   0.5 s); graph.lkg.json appears once the revision has played --lkg-after seconds (2 here), not
   before, and a speakerd restart starts that time again;
+- the clarified points (docs/protocol.md, "Clarifications"): every speaker in the state has its
+  monitor address; a speaker going off- or online brings every controller a whole state; the
+  proposer gets applied before the graph; a document whose own revision is not the proposal's is
+  rejected; keys ampd does not know (a node's "ui") reach both speakerds and the state as they
+  were; the hub goes on from its seq after a restart, says it in its hello, and the agent applies
+  its values again;
 - a line that is not JSON closes the connection; an unknown op is ignored.
 
     python3 -m unittest -v tests.vpair.test_ampd_protocol
@@ -82,6 +88,7 @@ class Protocol(unittest.TestCase):
 
     def test_parameters(self):
         with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a, Controller("ctl-b") as b:
+            self.assertEqual({s["name"]: s["address"] for s in a.state["speakers"]}, ADDRESS)
             sent = time.monotonic()
             a.osc_param(16, "s0_e0_gain", 4.5)
             for name in ("left", "right"):
@@ -130,15 +137,19 @@ class Protocol(unittest.TestCase):
         with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a, Controller("ctl-b") as b:
             for base, document, why in ((2, with_node(DOCUMENT), "stale"),
                                         (3, {"version": 1, "nodes": "no"}, "does not parse"),
-                                        (3, with_node(DOCUMENT, plugin=lv2_uri("nowhere")), "no speaker has loaded")):
+                                        (3, with_node(DOCUMENT, plugin=lv2_uri("nowhere")), "no speaker has loaded"),
+                                        (3, dict(with_node(DOCUMENT), revision=7), "is not the proposal's")):
                 answer = a.propose(document, base=base)
                 self.assertEqual(answer["op"], "rejected", answer)
                 self.assertIn(why, answer["reason"])
             for name in ("left", "right"):
                 self.assertEqual(pair.sd[name].events("apply", "in"), [], f"a rejected revision reached {name}")
 
+            mark = a.mark()
             answer = a.propose(with_node(DOCUMENT))
             self.assertEqual(answer["op"], "applied", answer)
+            ops = [m["op"] for m in a.messages[mark:] if m["op"] in ("applied", "graph")]
+            self.assertEqual(ops[:2], ["applied", "graph"], "the proposer gets applied first, then the graph")
             graph = b.wait(lambda m: m["op"] == "graph" and m["revision"] == 4, what="the graph of revision 4")
             self.assertEqual([n["uid"] for n in graph["document"]["nodes"]], [16, 17])
             for name in ("left", "right"):
@@ -179,8 +190,8 @@ class Protocol(unittest.TestCase):
             right = pair.ampd["right"]
             right.stop()
             pair.ampd["left"].wait_for("agent right disconnected: offline")
-            speakers = a.wait(lambda m: m["op"] == "speakers" and not m["speakers"][1]["online"], what="right offline")
-            self.assertEqual(speakers["speakers"][1]["name"], "right")
+            state = a.wait(lambda m: m["op"] == "state" and not m["speakers"][1]["online"], what="a state with right offline")
+            self.assertEqual(state["speakers"][1]["name"], "right")
             self.assertEqual(a.propose(with_node(DOCUMENT))["op"], "applied")
             a.param(16, "s0_e0_gain", -3.5)
             pair.sd["left"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == -3.5, what="the value")
@@ -195,7 +206,7 @@ class Protocol(unittest.TestCase):
             graph = json.loads((pair.state["right"] / "graph.json").read_text())
             self.assertEqual(graph["revision"], 4)
             self.assertEqual(graph["nodes"][0]["params"]["s0_e0_gain"], -3.5)
-            a.wait(lambda m: m["op"] == "speakers" and m["speakers"][1]["online"], what="right online again")
+            a.wait(lambda m: m["op"] == "state" and m["speakers"][1]["online"], what="a state with right online again")
 
     def test_the_hub_adopts_a_newer_revision(self):
         newer = revision_document(with_node(DOCUMENT), 9, origin="ctl-old", rev_time="2026-06-01T12:00:00Z")
@@ -210,7 +221,7 @@ class Protocol(unittest.TestCase):
             self.assertEqual((graph["revision"], graph["time"], graph["origin"]), (9, "2026-06-01T12:00:00Z", "ctl-old"))
 
     def test_gestures(self):
-        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a, Controller("ctl-b") as b:
+        with StandInPair(self.tmp, documents()), Controller("ctl-a") as a, Controller("ctl-b") as b:
             a.gesture(16, "s0_e0_gain", "begin")
             for via in ("control", "osc"):
                 got = b.wait(lambda m: m["op"] == "gesture" and m["via"] == via, what=f"the begin over {via}")
@@ -219,7 +230,7 @@ class Protocol(unittest.TestCase):
                 a.osc_param(16, "s0_e0_gain", value)
                 time.sleep(0.02)
             with Controller("ctl-mid") as mid:
-                self.assertEqual(mid.state["gestures"], [{"node": 16, "id": "s0_e0_gain", "origin": "ctl-a", "state": "begin"}])
+                self.assertEqual(mid.state["gestures"], [{"node": 16, "id": "s0_e0_gain", "origin": "ctl-a"}])
                 a.param(16, "s0_e0_gain", 3.0)
                 a.gesture(16, "s0_e0_gain", "end")
                 mid.wait(lambda m: m["op"] == "gesture" and m["state"] == "end", what="the end")
@@ -352,6 +363,37 @@ class Protocol(unittest.TestCase):
             print(f"  revision 4 promoted {promoted:.2f} s after the speakerd restart (--lkg-after 2)")
             self.assertGreaterEqual(promoted, 1.9)
             self.assertEqual(json.loads(lkg.read_text())["revision"], 4)
+
+    def test_the_hub_goes_on_from_its_seq(self):
+        with StandInPair(self.tmp, documents()) as pair:
+            with Controller("ctl-a") as a:
+                for value in (1.0, 2.0, 3.0):
+                    a.param(16, "s0_e0_gain", value)
+                last = a.wait(lambda m: m["op"] == "param" and m["value"] == 3.0 and m["via"] == "control")["seq"]
+            time.sleep(1.2)
+            pair.ampd["left"].stop()
+            pair.start_ampd("left")
+            pair.ampd["left"].wait_for("agent right: plays revision 3")
+            with Controller("ctl-b") as b:
+                print(f"\n  seq {last} before the hub restarted, {b.hub_hello['seq']} in its hello after")
+                self.assertGreaterEqual(b.hub_hello["seq"], last)
+                self.assertEqual(b.state["seq"], b.hub_hello["seq"])
+                b.param(16, "s0_e0_gain", 4.0)
+                self.assertEqual(b.wait(lambda m: m["op"] == "param" and m["value"] == 4.0)["seq"], last + 1)
+            pair.sd["right"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == 4.0,
+                                        what="the value after the hub's restart on the agent")
+
+    def test_unknown_keys_are_kept(self):
+        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:
+            doc = with_node(DOCUMENT)
+            doc["nodes"][1]["ui"] = {"x": 120, "y": 40}
+            doc["canvas"] = {"zoom": 1.5}
+            self.assertEqual(a.propose(doc)["op"], "applied")
+            for name in ("left", "right"):
+                applied = [e for e in pair.sd[name].events("apply", "in")][-1]["document"]
+                self.assertEqual((applied["nodes"][1]["ui"], applied["canvas"]), ({"x": 120, "y": 40}, {"zoom": 1.5}), name)
+            with Controller("ctl-b") as b:
+                self.assertEqual(b.state["document"]["nodes"][1]["ui"], {"x": 120, "y": 40})
 
     def test_bad_lines(self):
         with StandInPair(self.tmp, documents()):

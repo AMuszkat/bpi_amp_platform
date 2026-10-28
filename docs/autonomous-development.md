@@ -93,8 +93,23 @@ stream plays and the sound comes back each time). `speakerd_device_limits` and
 `speakerd_import` check the output limits and the import of an AudioPluginHost session that a
 board needs, and three more test the board side of `firmware/` on the virtual speakers:
 `firmware_speakerd_install`, `speakerd_crash_restart` and `speakerd_installed` (rung 3 below). `tools/test.sh vpair` records the tests it
-skipped, and why, with the result. `ampd`, the Snapcast source and `tc netem` come next; the
-compose file comes with them, for CI.
+skipped, and why, with the result.
+
+Step 3 adds `ampd` (`firmware/ampd/`) on each virtual speaker, next to its speakerd: the left is
+the hub on 127.0.1.1, the right its agent on 127.0.1.2 (one network namespace, two loopback
+addresses, the protocol's ports), and harness clients act as controllers (the control link and
+OSC) and as plugin windows (the monitor link). Six scenarios drive speakerd 0.3.0 and hear the
+result: `knob_latency` (an OSC value to the hub, heard on both speakers; the speakers' graphs run on
+independent clocks, so the 5 ms between the captures is checked at a quantum of 128, where it
+measures ampd and speakerd rather than the phase of two clocks, which can be a whole quantum, 21.3 ms,
+at the boards' 1024; there only the 60 ms is asserted), `graph_edit` (a revision adding a node and a
+connection, no gap longer than the fade, no click; a revision one speaker does not answer, or a
+stand-in speakerd fails, rolled back on the other), `hub_down`, `meter_values` (with the Mine pin and
+loudness's `mon_levelDb`), `ampd_restart` and `ampd_persistence`. Three run ampd against a stand-in
+speakerd that speaks only the local link (`tests/vpair/stand_in_speakerd.py`), so they test the
+hub's and the agent's logic with no audio: `ampd_protocol`, `two_controllers` and
+`firmware_ampd_install`. The Snapcast source and `tc netem` come next; the compose file comes with
+them, for CI.
 
 **Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
 complete, control and headless targets and checks that they fit together (same parameters,
@@ -255,7 +270,7 @@ the architecture:
 | Scenario | Pass when |
 |---|---|
 | `knob_latency` | a parameter sent to the hub is audible in both captures within 60 ms, and the two captures differ by less than 5 ms |
-| `graph_edit` | adding a node and a connection changes both captures in the same revision, with no gap longer than the fade and no click above a threshold |
+| `graph_edit` | adding a node and a connection changes both captures in the same revision, with no gap longer than the fade and no click above a threshold; a revision one speaker fails is rejected and rolled back on the other |
 | `graph_rejected` | a document naming a plugin missing on one speaker is refused and nothing changes |
 | `hub_down` | the right speaker keeps playing its revision when the left container is stopped, and switches to the L+R mix if configured |
 | `power_cut` | a speaker killed mid-write boots on last known good, and on factory after a corrupted factory-candidate |
@@ -273,12 +288,15 @@ the architecture:
 | `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install and every rollback, rolls back both ways, and refuses, before it changes anything, without a role, while an AudioPluginHost runs or anything would start one again at boot or login, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph (new or kept) that reaches the tweeter other than through a crossover's high band; `limits` turns the tweeter on only when no layer does; routing into `speakerd` needs a snapclient unit that reads client-rt.conf; uninstall stops snapclient when the routing it restores names a node the running PipeWire lacks; under systemd it fails unless `speakerd` runs and says exactly its limits after its start, also when `limits` or `rollback` restart a running one; setup.sh refuses to restart PipeWire under a running AudioPluginHost; the remote mode and the board script quote every argument |
 | `speakerd_crash_restart` | the installed unit starts speakerd on current, on last known good after a crash (a real speakerd killed by SIGSEGV), on factory after three crashes within 60 s, on passthrough after three more on factory, and never while an AudioPluginHost runs |
 | `speakerd_installed` | on a speaker set up like a board, the persistent `speakerd` sink exists before speakerd and never drives while the amplifier exists, speakerd plays through it with the tweeter at exact zeros and the woofer at the render minus 20 dB, the deployed bundle runs and not an older copy in `~/.lv2`, and the smoke test passes, and fails when the amplifier is the default sink; with a PipeWire that does not load the drop-in, nothing is routed into `speakerd` and smoke, `sink` and `install` refuse |
-| `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately |
+| `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately; with the Mine pin each speaker plays its own side, and loudness's `mon_levelDb` tracks the input level within 1 dB |
 | `monitor_freshness` | with 5 % packet loss and 20 ms jitter, every frame drawn is less than 50 ms old at the 99th percentile, and the speaker never holds more than one pending frame per stream |
 | `scope_resolution` | a scope frame from the speaker is identical to the frame the complete build computes from the same Demo capture |
 | `triggered_record` | under the same loss, a single-trigger record fetched by the controller is bit-identical to the speaker's ring buffer |
 | `monitor_rt_safety` | opening and closing 100 plugin windows during playback causes no xrun and no change in the null-sink capture |
 | `ampd_restart` | killing `ampd` leaves the audio capture uninterrupted, and open windows resubscribe within 2 s |
+| `ampd_persistence` | after parameter changes and a speakerd restart, speakerd boots on `graph.json` with the changed values (its render's gain within 0.05 dB), written at most once a second while values change; `graph.lkg.json` follows a revision that played `--lkg-after` seconds with no speakerd restart, and a restart starts that time again |
+| `ampd_protocol` | against stand-in speakerds, `ampd` does what `docs/protocol.md` says: parameters with the hub's seq to both speakers and every controller, errors for what it cannot address, revisions all or nothing with the roll back and the 10 s timeout, an offline speaker caught up, a newer agent revision adopted, gestures and their 5 s, the local link's busy, restart and fall back, the monitor union and per-client rates, persistence |
+| `firmware_ampd_install` | `ampd-setup.sh` and setup.sh's ampd component lay out the documented `ampd.json` and unit, refuse an agent with no hub address before any change, and status and smoke say whether ampd runs and is connected to speakerd and, on an agent, to the hub |
 
 Rung 3 adds one smoke test, not a copy of rung 2: deploy, play the sweep, compare the
 telemetry capture with the expected crossover response within a tolerance, and check `pw-top`

@@ -82,6 +82,16 @@ THROTTLED = Throttled()
 STOPPING = []      # set when ampd stops: the connections' ends are not news then
 
 
+BACKGROUND = set()   # tasks nobody awaits: kept here until they end (asyncio keeps only weak references)
+
+
+def background(coroutine):
+    task = asyncio.get_running_loop().create_task(coroutine)
+    BACKGROUND.add(task)
+    task.add_done_callback(BACKGROUND.discard)
+    return task
+
+
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -275,8 +285,9 @@ class Conn:
 
     def __init__(self, reader, writer):
         self.reader, self.writer = reader, writer
-        peer = writer.get_extra_info("peername")
+        peer, own = writer.get_extra_info("peername"), writer.get_extra_info("sockname")
         self.address = peer[0] if isinstance(peer, tuple) else None
+        self.local_address = own[0] if isinstance(own, tuple) else None
         self.closed = False
 
     async def read(self):
@@ -341,6 +352,7 @@ class Core:
         self.played_since = None       # since when the revision plays with no speakerd restart
         self.promoted = None           # (time, origin, revision) last promoted to graph.lkg.json
         self.sd = self.monitor = self.role = None
+        self.saved_seq = 0             # the hub's seq in graph.json, where it goes on from
 
     # Files ------------------------------------------------------------------------------------
 
@@ -367,6 +379,9 @@ class Core:
         if check_document(doc) is not None:
             return None
         doc.setdefault("revision", 0)
+        seq = doc.pop("seq", 0)
+        if layer == "current" and good_int(seq, 0, SEQ_MASK):
+            self.saved_seq = seq
         t, origin = doc.pop("time", ""), doc.pop("origin", "")
         return doc, (t if isinstance(t, str) else ""), (origin if isinstance(origin, str) else "")
 
@@ -391,8 +406,8 @@ class Core:
 
     def set_current(self, doc, rev_time, rev_origin):
         doc = copy.deepcopy(doc)
-        doc.pop("time", None)
-        doc.pop("origin", None)
+        for key in ("time", "origin", "seq"):
+            doc.pop(key, None)
         self.doc, self.rev_time, self.rev_origin = doc, rev_time or "", rev_origin or ""
         self.params = {}
         for node in doc.get("nodes", []):
@@ -416,6 +431,8 @@ class Core:
                 by_uid[uid].setdefault("params", {})[pid] = value
         if meta:
             doc["time"], doc["origin"] = self.rev_time, self.rev_origin
+            if self.is_hub:
+                doc["seq"] = self.role.seq     # the hub goes on from it after a restart
         return doc
 
     # Persistence ----------------------------------------------------------------------------------
@@ -713,38 +730,41 @@ class Hub(Role):
         super().on_speakerd(hello, reconnect)
         if self.core.sd.layer != "passthrough":
             self.seen |= plugins_of(self.core.doc)
-        self.broadcast_speakers()
+        self.broadcast_state()
 
     def on_speakerd_lost(self):
-        self.broadcast_speakers()
+        self.broadcast_state()
 
     def revision_followed(self):
         """The hub's speakerd plays another revision (it fell back): that is the pair's now."""
         self.broadcast_graph()
-        asyncio.get_running_loop().create_task(self.push_current_to_agents("the hub's speakerd fell back to it"))
+        background(self.push_current_to_agents("the hub's speakerd fell back to it"))
 
     def late_answer(self, revision, result):
         core = self.core
         if result[0] and revision != core.revision:
             log(f"speakerd: applied revision {revision} after it was given up: applying revision {core.revision} again")
-            asyncio.get_running_loop().create_task(core.sd.apply(core.revision, core.document()))
+            background(core.sd.apply(core.revision, core.document()))
 
     # State -----------------------------------------------------------------------------------------
 
-    def speaker_list(self):
-        sd = self.core.sd
-        own = {"name": self.core.name, "role": self.core.device_role, "online": True, "speakerd": sd.connected,
-               "layer": sd.layer, "revision": sd.revision}
+    def speaker_list(self, conn=None):
+        """The speakers, the hub first. Each has the address its monitor link is reached at: the
+        agent's from its connection, the hub's own from its configuration, or, when it listens on
+        every address, the one `conn` (a controller's connection) reached it at."""
+        sd, core = self.core.sd, self.core
+        own_address = core.listen if core.listen not in ("0.0.0.0", "::", "") else (conn.local_address if conn else None)
+        own = {"name": core.name, "role": core.device_role, "address": own_address, "online": True,
+               "speakerd": sd.connected, "layer": sd.layer, "revision": sd.revision}
         return [own] + [dict(s) for _, s in sorted(self.speakers.items())]
 
     def gesture_list(self):
-        return [{"node": node, "id": pid, "origin": g["origin"], "state": "begin"}
-                for (node, pid), g in self.gestures.items()]
+        return [{"node": node, "id": pid, "origin": g["origin"]} for (node, pid), g in self.gestures.items()]
 
-    def state(self):
+    def state(self, conn=None):
         core = self.core
         return {"op": "state", "revision": core.revision, "seq": self.seq, "time": core.rev_time,
-                "origin": core.rev_origin, "document": core.document(), "speakers": self.speaker_list(),
+                "origin": core.rev_origin, "document": core.document(), "speakers": self.speaker_list(conn),
                 "gestures": self.gesture_list()}
 
     def broadcast_graph(self, base=None):
@@ -754,12 +774,11 @@ class Hub(Role):
         for controller in self.controllers:
             controller.conn.send(message)
 
-    def broadcast_speakers(self):
-        """Not in protocol 1's examples: controllers learn of a speaker going on- or offline
-        (an op older controllers ignore)."""
-        message = {"op": "speakers", "speakers": self.speaker_list()}
+    def broadcast_state(self):
+        """A speaker came online, went offline or changed layer, or the hub adopted a revision:
+        every controller gets the whole state again (docs/protocol.md, clarification 2)."""
         for controller in self.controllers:
-            controller.conn.send(message)
+            controller.conn.send(self.state(controller.conn))
         self.core.status_changed()
 
     def status(self):
@@ -908,6 +927,8 @@ class Hub(Role):
             why = check_document(document)
             if why is not None:
                 return refuse(f"the document does not parse: {why}")
+            if document.get("revision", revision) != revision:
+                return refuse(f"the document's revision ({document.get('revision')}) is not the proposal's ({revision})")
             missing = sorted(plugins_of(document) - self.seen)
             if missing:
                 return refuse("no speaker has loaded " + ", ".join(missing))
@@ -932,7 +953,7 @@ class Hub(Role):
                 log(f"revision {revision}: applied on {', '.join(sorted(results)) or 'no speaker'}: current")
                 controller.conn.send({"op": "applied", "revision": revision})
                 self.broadcast_graph(base)
-                self.broadcast_speakers()
+                self.broadcast_state()
                 return None
             refuse("; ".join(f"{name}: {why}" for name, why in sorted(failed.items())))
             applied = sorted(name for name, (ok, _) in results.items() if ok)
@@ -963,7 +984,7 @@ class Hub(Role):
                     self.all_params(peer)
                 else:
                     log(f"agent {peer.name}: revision {core.revision} failed: {reason}")
-            self.broadcast_speakers()
+            self.broadcast_state()
 
     async def sync_agent(self, peer, hello):
         """An agent (re)connected: catch it up, or adopt its revision when it is newer."""
@@ -983,14 +1004,14 @@ class Hub(Role):
                 if not ok:
                     log(f"agent {peer.name}: revision {core.revision} failed there: {why}")
                     self.speakers.get(peer.name, {}).update(layer="failed")
-                    self.broadcast_speakers()
+                    self.broadcast_state()
                     return
                 self.seen |= plugins_of(core.doc)
                 self.speakers.get(peer.name, {}).update(layer="current", revision=core.revision)
             else:
                 log(f"agent {peer.name}: plays revision {core.revision}: sending {len(core.params)} parameter(s)")
             self.all_params(peer)
-            self.broadcast_speakers()
+            self.broadcast_state()
 
     async def adopt(self, peer, a_rev):
         """The agent's revision is newer (it changed while the hub was off): the hub takes it and
@@ -1029,7 +1050,7 @@ class Hub(Role):
         self.speakers.get(peer.name, {}).update(layer="current", revision=revision)
         log(f"revision {revision} of {peer.name} adopted: current")
         self.broadcast_graph()
-        self.broadcast_speakers()
+        self.broadcast_state()
         return True
 
     # Connections ---------------------------------------------------------------------------------------------
@@ -1048,7 +1069,7 @@ class Hub(Role):
         self.controllers.append(peer)
         log(f"controller {peer.name} connected from {conn.address}"
             + (f" (osc port {peer.osc[1]})" if peer.osc else " (no osc_port: no OSC echoes)"))
-        conn.send(self.state())
+        conn.send(self.state(conn))
         self.core.status_changed()
         tasks = set()
         try:
@@ -1082,12 +1103,12 @@ class Hub(Role):
             log(f"agent {peer.name}: a new connection replaces the old one")
             old.conn.close()
         self.agents[peer.name] = peer
-        self.speakers[peer.name] = {"name": peer.name, "role": hello.get("device_role", "unknown"), "online": True,
-                                    "speakerd": hello.get("speakerd"), "layer": hello.get("layer"),
-                                    "revision": hello.get("revision")}
+        self.speakers[peer.name] = {"name": peer.name, "role": hello.get("device_role", "unknown"),
+                                    "address": conn.address, "online": True, "speakerd": hello.get("speakerd"),
+                                    "layer": hello.get("layer"), "revision": hello.get("revision")}
         log(f"agent {peer.name} connected from {conn.address}: revision {hello.get('revision')} "
             f"({hello.get('time') or 'no time'}, {hello.get('origin') or 'no origin'}), layer {hello.get('layer')}")
-        sync = asyncio.get_running_loop().create_task(self.sync_agent(peer, hello))
+        background(self.sync_agent(peer, hello))
         try:
             while True:
                 msg = await conn.read()
@@ -1102,14 +1123,15 @@ class Hub(Role):
                         future.set_result(result)
                     elif result[0] and revision != self.core.revision:
                         log(f"agent {peer.name}: applied revision {revision} after it was given up")
-                        asyncio.get_running_loop().create_task(
-                            self.push_current_to_agents(f"{peer.name} applied revision {revision} late"))
+                        background(self.push_current_to_agents(f"{peer.name} applied revision {revision} late"))
                 elif op == "graph":
                     if peer.get_future is not None and not peer.get_future.done():
                         peer.get_future.set_result(msg)
                 elif op == "status":
-                    self.speakers[peer.name].update({k: msg.get(k) for k in ("speakerd", "layer", "revision")})
-                    self.broadcast_speakers()
+                    news = {k: msg.get(k) for k in ("speakerd", "layer", "revision")}
+                    if any(self.speakers[peer.name].get(k) != v for k, v in news.items()):
+                        self.speakers[peer.name].update(news)
+                        self.broadcast_state()
                 elif op == "error":
                     self.bad.say(("agent-error", peer.name),
                                  f"agent {peer.name}: error: {msg.get('about', '?')}: {msg.get('reason', '?')}")
@@ -1125,7 +1147,7 @@ class Hub(Role):
                 self.speakers[peer.name]["online"] = False
                 if not STOPPING:
                     log(f"agent {peer.name} disconnected: offline")
-                    self.broadcast_speakers()
+                    self.broadcast_state()
 
     def datagram(self, data, address):
         try:
@@ -1403,7 +1425,8 @@ async def control_connection(core, reader, writer):
     conn = Conn(reader, writer)
     try:
         if core.is_hub:
-            conn.send({"op": "hello", "role": "hub", "name": core.name, "revision": core.revision, "protocol": PROTOCOL})
+            conn.send({"op": "hello", "role": "hub", "name": core.name, "revision": core.revision, "seq": core.role.seq,
+                       "protocol": PROTOCOL})
             hello = await asyncio.wait_for(conn.read(), HELLO_TIMEOUT)
             if hello is None or hello.get("op") != "hello":
                 conn.send({"op": "error", "about": "hello", "reason": "the first line is a hello"})
@@ -1458,6 +1481,8 @@ async def main_async(args, config):
     log(f"ampd {VERSION}: {core.name}, " + ("the hub" if core.is_hub else f"an agent of the hub at {core.hub_address}")
         + f", state dir {core.state_dir}, speakerd socket {core.socket_path}")
     layer = core.load_at_start()
+    if core.is_hub:
+        core.role.seq = core.saved_seq
     log(f"starts on revision {core.revision} from {layer}"
         + (f" ({core.rev_time}, {core.rev_origin})" if core.rev_time else ""))
     handlers = set()
