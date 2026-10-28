@@ -8,12 +8,14 @@
 namespace speakerd
 {
     /** The output limits (device.json "limits"), as the audio thread applies them to every
-        cycle after the fade and before the absolute cap: both amplifier channels times `gain`,
-        and the tweeter exact zeros if `tweeterMuted`. The default limits nothing. */
+        cycle after the fade: both amplifier channels times `gain`, the tweeter exact zeros if
+        `tweeterMuted`, and then every sample clamped to +-`gain`, a ceiling, so a stream above
+        full scale or a graph that boosts never gets past it. No member has a default: whoever
+        makes an Engine says what its limits are; no limit at all is { 1.0f, false }. */
     struct OutputLimits
     {
-        float gain = 1.0f;          // 0 <= gain <= 1
-        bool tweeterMuted = false;
+        float gain;           // 0 <= gain <= 1
+        bool tweeterMuted;
     };
 
     /*  The running graph, and the one place the audio thread enters it.
@@ -36,8 +38,8 @@ namespace speakerd
         0), calls AudioProcessorGraph::processBlock in blocks of the size the graph is primed
         for, ramps the fade, applies the output limits of device.json (a fixed gain, the tweeter
         muted: constants, fixed when the engine is made), caps the two amplifier channels (NaN
-        and infinity become 0, the rest is clamped to +-1.0) and copies them out. No allocation,
-        no lock of its own, no syscall.
+        and infinity become 0, the rest is clamped to the ceiling, +-the limits' gain, at most
+        +-1.0) and copies them out. No allocation, no lock of its own, no syscall.
 
         The locks JUCE takes on the audio thread, and why none of them waits:
         - the graph takes each processor's callback lock around its processBlock; speakerd never
@@ -87,7 +89,7 @@ namespace speakerd
             this, the document's values are in force from the first audible sample. */
         static constexpr double settleSeconds = 1.0;
 
-        /** The largest sample speakerd sends to an amplifier. */
+        /** The largest sample speakerd sends to an amplifier, whatever the limits. */
         static constexpr float outputLimit = 1.0f;
 
         /** A quantum this many times the primed block size, or more, that lasts this long, is
@@ -96,7 +98,7 @@ namespace speakerd
         static constexpr double upwardPrimeSeconds = 2.0;
 
         /** `limits` are constants for the engine's life (see OutputLimits). */
-        explicit Engine (OutputLimits limits = {}) : outputLimits (limits) {}
+        explicit Engine (OutputLimits limits);
         ~Engine();
 
         //==============================================================================
@@ -169,7 +171,10 @@ namespace speakerd
         static void settle (juce::AudioProcessorGraph&, double sampleRate, int blockSize,
                             juce::AudioBuffer<float>& scratch, juce::MidiBuffer&);
 
-        const OutputLimits outputLimits;
+        // The output limits: constants, only read by the audio thread.
+        const float outputGain;       // 0 .. 1
+        const float outputCeiling;    // min (outputGain, outputLimit)
+        const bool tweeterMuted;
 
         std::atomic<int> owner { nobody };
 

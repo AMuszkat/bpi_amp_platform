@@ -11,7 +11,8 @@ tools/build.sh <app>                                               # dsp/juce_ap
 tools/build.sh <plugin|app> aarch64 [complete|control|headless|all] # the board, into build/aarch64/<what>/
 ```
 
-The builds run in the development container when Podman is installed
+Anything after the target kind is refused (`tools/build.sh loudness headless aarch64` is an
+error, not an x86_64 build). The builds run in the development container when Podman is installed
 (`tools/container.sh`; `BPI_CONTAINER=0` builds natively), against the JUCE install in
 `JUCE_INSTALL_DIR`, by default `build/juce-install` of the main checkout, which the first
 build makes. Plugins without `TARGETS` build only their complete target (`all` is then just

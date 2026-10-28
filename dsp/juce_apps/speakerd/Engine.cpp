@@ -6,6 +6,21 @@
 
 namespace speakerd
 {
+    namespace
+    {
+        float validGain (float gain) noexcept
+        {
+            return samples::isFinite (gain) ? juce::jlimit (0.0f, 1.0f, gain) : 0.0f;
+        }
+    }
+
+    Engine::Engine (OutputLimits limits)
+        : outputGain (validGain (limits.gain)),
+          outputCeiling (juce::jmin (validGain (limits.gain), outputLimit)),
+          tweeterMuted (limits.tweeterMuted)
+    {
+    }
+
     Engine::~Engine()
     {
         // The audio thread is gone by now (the PipeWire node is destroyed first). Take the graph
@@ -394,21 +409,26 @@ namespace speakerd
             }
         }
 
-        // The output limits of device.json, before the cap: constants, read here only.
-        if (outputLimits.gain < 1.0f)
+        // The output limits of device.json: constants, read here only. The gain, the tweeter
+        // muted, then the cap at the ceiling (the gain), whatever the graph did.
+        if (outputCeiling <= 0.0f)
         {
-            juce::FloatVectorOperations::multiply (woofer, outputLimits.gain, numSamples);
+            juce::FloatVectorOperations::clear (woofer, numSamples);
+            juce::FloatVectorOperations::clear (tweeter, numSamples);
+        }
+        else if (outputGain < 1.0f)
+        {
+            juce::FloatVectorOperations::multiply (woofer, outputGain, numSamples);
 
-            if (! outputLimits.tweeterMuted)
-                juce::FloatVectorOperations::multiply (tweeter, outputLimits.gain, numSamples);
+            if (! tweeterMuted)
+                juce::FloatVectorOperations::multiply (tweeter, outputGain, numSamples);
         }
 
-        if (outputLimits.tweeterMuted)
+        if (tweeterMuted)
             juce::FloatVectorOperations::clear (tweeter, numSamples);   // exact zeros
 
-        // The absolute cap, whatever the graph did.
-        samples::cap (woofer, numSamples, outputLimit);
-        samples::cap (tweeter, numSamples, outputLimit);
+        samples::cap (woofer, numSamples, outputCeiling);
+        samples::cap (tweeter, numSamples, outputCeiling);
 
         if (! fadingIn && fadePosition == 0)
             fadedSerial.store (serial, std::memory_order_release);

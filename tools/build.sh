@@ -7,13 +7,23 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-what="${1:?usage: $0 <plugin|app> [aarch64] [complete|control|headless|all]}"
+usage="usage: $0 <plugin|app> [aarch64] [complete|control|headless|all]"
+what="${1:?$usage}"
 kind="${2:-all}"
 arch=x86_64
+max_args=2
 if [ "$kind" = aarch64 ]; then
     arch=aarch64
     kind="${3:-all}"
+    max_args=3
 fi
+# Nothing else: "loudness headless aarch64" must not quietly build for x86_64.
+if [ $# -gt $max_args ]; then
+    echo "unexpected argument(s) after '${*:1:$max_args}': ${*:$((max_args + 1))}" >&2
+    echo "$usage" >&2
+    exit 2
+fi
+case "$kind" in complete | control | headless | all) ;; *) echo "unknown target kind '$kind'" >&2; echo "$usage" >&2; exit 2 ;; esac
 
 . tools/container.sh
 container_or_native "$0" "$@"
