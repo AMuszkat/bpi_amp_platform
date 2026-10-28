@@ -79,6 +79,16 @@ path must fit in 108 bytes.
 | `test_speakerd_crash_restart.py` | the installed unit's wrapper starts speakerd on the right layer after crashes |
 | `test_speakerd_installed.py` | a speaker set up like a board: the persistent sink, the amplifier drives, capped, the deployed bundle runs, smoke; and a PipeWire that does not load the drop-in, where nothing is routed into speakerd |
 | `stub_speakerd.c` | a stand-in speakerd that dies as it is told, for the installer and wrapper tests |
+| `stand_in_speakerd.py` | a stand-in speakerd that speaks only the local link of `docs/protocol.md` and answers as a test tells it, failing included: for ampd's tests that need no audio |
+| `test_ampd_protocol.py` | ampd, hub and agent, does what `docs/protocol.md` says, against stand-in speakerds |
+| `test_two_controllers.py` | two controllers' interleaved changes end in the hub's state; a controller connecting mid-drag sees the gesture |
+| `test_firmware_ampd_install.py` | `firmware/ampd-setup.sh` and setup.sh's ampd component: the layout, the refusals, the unit, status and smoke |
+| `test_knob_latency.py` | a parameter sent to the hub is heard on both speakers within 60 ms, less than 5 ms apart |
+| `test_graph_edit.py` | a new revision changes both captures with no gap or click; one a speaker fails is rolled back on the other |
+| `test_hub_down.py` | the right speaker plays on, unchanged, when the left stops |
+| `test_meter_values.py` | `output/level` and loudness's `mon_levelDb` track a stepped tone on each speaker; the Mine pin |
+| `test_ampd_restart.py` | killing ampd leaves the audio alone, and a subscriber gets values again within 2 s |
+| `test_ampd_persistence.py` | `graph.json` follows the values, speakerd boots on it, `graph.lkg.json` follows a revision that played long enough |
 
 ## Before and after the speakerd that enforces the limits
 
@@ -90,7 +100,7 @@ than `SPEAKERD_MIN_VERSION` (firmware/speakerd-setup.sh), which would ignore the
 
 ## What the scenarios prove
 
-Each module's docstring states its pass criteria exactly; this is the summary. All of them
+Each module's docstring states its pass criteria exactly; this is the summary. The speakerd ones
 run `speakerd` (`dsp/juce_apps/speakerd`) on a virtual speaker with an empty `HOME` and the
 bundles named on its command line, play into its `speakerd` sink and record the amplifier.
 The reference is speakerd's own offline render (`--render`) of the same document pointed at
@@ -110,6 +120,15 @@ the complete build of the plugin, which is what the plugin outside speakerd outp
 | `test_firmware_speakerd_install` | the bundle step and `speakerd-setup.sh install --home --no-systemd` lay out exactly the documented tree (versions, `current`, an empty HOME, `device.json` with `limits` -20 dB and the tweeter muted, the unit and the drop-in byte for byte, ampd's layers untouched); a reinstall adds nothing and caps lifted limits again, keeping role, ports and other keys; rollback swaps `current` and `previous` both ways, capping lifted limits again, and `--keep` prunes the oldest; VERSION records speakerd's whole `--version` line and the installed scripts are executable and run when called directly; one of `--amplifier`, `--woofer-port`, `--tweeter-port` changes only itself; install refuses without `--role` (a running plugin host stays running), a speakerd that cannot say its version, is older than `SPEAKERD_MIN_VERSION` (rollback too) or cannot be executed (noexec), a device.json with a key speakerd does not know or a key twice, while the stand-in plugin host runs (and stops it with `--stop-plugin-host`, only once every other check passed, disabling its user unit, which uninstall re-enables), while a desktop autostart or a profile line would start it again (naming each), and a factory graph, new or kept, in which anything but a crossover's high band reaches the tweeter; `limits` turns the tweeter on only when no layer (factory.json, ampd's graph.json) breaks that rule, and status marks one that does; `--allow-tweeter-without-crossover` is refused without `--home` and in the remote mode; a same-URI plugin in a system LV2 folder is named; smoke reports a `device.json: FAILED` line, either fail-safe suffix, `NO INPUT SINK CONFIGURED` and no limits line as failures, and always prints its summary; `--import-filtergraph` installs speakerd's conversion, given the device.json to be (`--device`); the amplifier is found in a pw-dump (one ALSA sink, the two known names, refusals naming the sinks; the virtual amplifier's ports); `--route speakerd` is refused without the configured sink, with a snapclient unit that does not read client-rt.conf and with `--no-client-rt`, keeps the routing there was, and uninstall puts it back exactly, and with a running PipeWire stops and disables snapclient when that routing's target is not there; `setup.sh` checks every component before it changes any (also refusing `--route plugin-host` with speakerd) and installs in boot order; under stand-in systemd, install fails unless speakerd runs and says exactly its limits after its start, `limits` and `rollback` pass on a speakerd that was running (whose `speakerd ended` line precedes the new start) and fail on a crash after it, and setup.sh stops on a failed PipeWire restart and, for the whole architecture and `--only pipewire` alike, refuses to restart PipeWire under the plugin host or stops it first with `--stop-plugin-host`; the remote mode, through a stand-in ssh that runs the board's side here as `nobody`, copies one bundle to `~/.cache`, runs check (with the artifacts) and the board-side dry run, delivers every argument as given (a path with spaces, a semicolon that runs nothing), cleans up, and refuses root, and applies the deploy gate itself (a scratch checkout: no git, no status, a red status, a dirty tree and a lab lock each refuse before ssh is called); the board script (`--dry-run`) refuses a `journal -n` that is not a number and a deploy option that is not an agent's, quotes journal's argument, and reads status from the board's installed script |
 | `test_speakerd_crash_restart` | the installed unit (no network unit, `Restart=on-failure`, 1 s, never after exit 2, no start limit, an empty HOME), run by `harness.UserUnit`: the real speakerd killed by SIGSEGV is restarted on `last-known-good`, after SIGTERM on `current`; with the stand-in, six crashes give current, last-known-good twice, factory three times (three within 60 s), then passthrough (three on factory), exit 3 keeps the layer, SIGTERM and exit 2 are not restarted, SIGPIPE and a core dump are crashes; crashes older than 60 s do not count towards factory; a start with no exit counts as a crash; a start after five failures waits and says so; no speakerd starts while an AudioPluginHost runs |
 | `test_speakerd_installed` | two versions installed, each speaker's PipeWire started with the installed drop-ins (the right one's amplifier without a priority): the `speakerd` sink exists before speakerd at `priority.driver` 0 and is the default sink; speakerd, started by the unit, adopts it and plays factory; `pw-profiler` shows the amplifier as the only driver with the sink, speakerd-dsp and the stream as followers; speakerd says `device: limits: output at -20 dB, tweeter muted`, the tweeter is all zeros and the woofer is the complete build's render minus 20 dB within 0.05 dB; the current version's bundle loads although a broken copy with its URI lies in the home's `~/.lv2` (with HOME there speakerd stops with status 2), and after a rollback the previous version's does; speakerd's HOME stays empty; `speakerd-setup.sh smoke` passes every check, the live sink's drop-in properties and the default sink included, and fails when WirePlumber is told to make the amplifier the default sink; `--route speakerd` routes; and with a PipeWire that does not load the drop-in, the route is refused both with no `speakerd` node and with the sink speakerd made itself, smoke fails on that sink, and `sink` and `install` refuse. Against a speakerd older than `SPEAKERD_MIN_VERSION` the install refuses it, and the module fails saying so |
+| `test_ampd_protocol` | against stand-in speakerds: a value sent over OSC reaches both speakerds (seq 0 on the local link) and every controller (with the hub's seq), over the control link too when it came that way; an unaddressable value or a monitor gets an error and reaches nothing; the agent ignores an older seq and seq 0; a stale, unparseable, unseen-plugin or wrongly numbered proposal is rejected with its reason and reaches nothing; a good one is applied on both, the proposer gets `applied` before the `graph`; one the right fails is rejected with "right: <reason>" and rolled back on the left; one it does not answer is rejected after 10 s and its late answer brings the current revision back; an offline agent is caught up (revision, values, graph.json) and controllers get a whole state when it goes and comes; a newer agent revision is adopted; gestures relayed, seen in the state mid-drag, ended after 5 s with no end (4.5 to 6 s after the dragger's last value); speakerd busy, restarted (values again), fallen back (followed) and on an outdated current layer (given the revision); monitoring: the union at the highest rate (60 at most), each client at its own rate within 30 %, unsubscribes; graph.json written at most 4 times in 3 s of 25 values a second and within 1.1 s of the last, at once for a revision; graph.lkg.json after --lkg-after, a speakerd restart starting it again; every speaker's address in the state; unknown document keys kept; the hub's seq goes on after a restart; a line that is not JSON closes the link |
+| `test_two_controllers` | against stand-in speakerds: two controllers drag (OSC at 50 a second, the last value over the control link) different and the same parameters, interleaved, and end with the same values as the hub's state, the right's graph.json and what each stand-in speakerd was last given; one connecting mid-drag finds the gesture in its state and gets its end |
+| `test_firmware_ampd_install` | ampd comes with speakerd's version (bin/ampd byte for byte); `ampd-setup.sh install` refuses before speakerd, an agent without a hub address, `--hub-address` on the hub and a bad name, writing nothing; writes exactly the documented ampd.json for left and right and the unit byte for byte; the unit is after speakerd, with no network unit, restarts on failure in 1 s, not after exit 2, no start limit; under stand-in systemd install fails unless ampd says it listens; setup.sh refuses an agent without a hub address before any change and installs ampd after speakerd; from the installed unit, smoke passes on hub and agent and fails, saying why, with the hub or ampd stopped; speakerd's status shows ampd's, rollback restarts ampd, uninstall removes its unit and keeps ampd.json |
+| `test_knob_latency` | at quantum 128, five changes sent over OSC to the hub each change both captures within 60 ms of the send (never before it) and less than 5 ms apart; at the boards' 1024, within 60 ms (the gap between the speakers is printed: two independent graph clocks can be up to a quantum apart) |
+| `test_graph_edit` | a revision adding a node and a connection changes both captures by more than 6 dB, with no run of 1 ms blocks 40 dB down longer than 30 ms and nothing above 4 kHz louder than -40 dB under the tone; a revision the right does not answer (its ampd stopped) is rejected with "right: no answer within 10 s", heard on the left and rolled back there within 0.5 dB, and the right comes back to the current revision when it answers late; one a stand-in right fails is rejected with its reason and rolled back on the real left within 0.5 dB |
+| `test_hub_down` | with the whole left speaker stopped, the right's level stays within 0.05 dB, no 10 ms block drops 1 dB or is zeros, its ampd says it lost the hub and runs on, its speakerd plays on, and it stays on revision 2; the L+R mix is skipped (not in device.json yet) |
+| `test_meter_values` | with the Mine pin, a stepped stereo 1 kHz tone (right 12 dB under left): each speaker's `output/level` peaks are its own side's level and its RMS 3.01 dB under, within 1 dB, woofer and tweeter, and `node/16/mon_levelDb` is that side's level as loudness's detector measures it (JUCE's BallisticsFilter, computed in the test) within 1 dB |
+| `test_ampd_restart` | each ampd (hub, then agent) killed and started again 1 s later: the subscriber has values again within 2 s of the kill, the agent is back on the hub, and no 10 ms block of either capture moves 0.5 dB or is zeros |
+| `test_ampd_persistence` | during a 2 s drag graph.json is replaced at most 3 times, and holds the last value on both speakers 1.2 s later; speakerd restarted with ampd stopped boots on graph.json and gives its render's gain within 0.05 dB, 3 dB or more from revision 1's original; graph.lkg.json follows after --lkg-after (4 s), and a speakerd restart starts that time again |
 
 ## speakerd in a test
 
@@ -194,6 +213,57 @@ with Pair({"left": {"dropins": home / ".config/pipewire/pipewire.conf.d"}}) as p
 - `state_dir()` writes `device.json` with `"limits": {"gain_db": 0, "tweeter": "on"}`: no limit,
   said explicitly, because a device.json without limits plays capped.
 
+## ampd in a test
+
+```python
+from harness import (ADDRESS, Controller, MonitorClient, SpeakerPair, StandInPair, TimedRecorder,
+                     built, graph_document, lv2_uri, revision_document)
+
+document = revision_document(graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1"}), 1)
+with SpeakerPair(tmp, {"left": document, "right": document}, [built("loudness", "headless")]) as pair, \
+        Controller("ctl-test") as ctl, MonitorClient(ADDRESS["right"]) as meter:
+    ctl.osc_param(16, "s0_e0_gain", 6.0)          # a moving knob; ctl.param() over the control link
+    answer = ctl.propose(new_document)             # {"op": "applied"} or {"op": "rejected", "reason": ...}
+    meter.subscribe("output/level", 30)
+    t, value = meter.wait_value("output/level")
+```
+
+- `SpeakerPair(tmp, documents, bundles)` brings the pair up as step 3 runs it: on each speaker its
+  PipeWire, speakerd (from `documents[name]` as graph.json) and ampd, the left the hub on 127.0.1.1,
+  the right an agent on 127.0.1.2 (the speakers share one network namespace; any 127.x address is
+  the loopback), and waits until each speakerd plays and the hub has caught the agent up.
+  `pair.speakerd[name]`, `pair.ampd[name]`, `pair.state[name]`, `pair.graph(name)` (its graph.json),
+  `pair.start_speakerd(name)` and `pair.start_ampd(name)` after a stop or a kill.
+- `StandInPair(tmp, documents)` is the same with stand-in speakerds and no PipeWire: the protocol
+  alone. `pair.sd[name].set_control({"fail": {"5": "why"}, "delay": 11.0})` makes it fail or delay an
+  apply; `pair.sd[name].events(op, "in")` is what ampd sent it.
+- `Ampd(env, state, name, args=...)` runs `firmware/ampd/ampd.py` with the speaker's environment
+  (its own `XDG_RUNTIME_DIR`, so the default speakerd socket is that speaker's); it writes ampd.json
+  into the state directory, waits for `listening on`, and at the end checks `stopping` was its last
+  line. `wait_for()`, `mark()`, `stop()`, `kill()` (SIGKILL), `signal()`, `status()` (its status.json)
+  as for `Speakerd`.
+- `Controller(name)` is a controller: the control link (hello, state) and an OSC socket for the knobs
+  and the hub's echoes; every message is kept with its arrival time and `via`; `values()` is what it
+  knows of each parameter (newer seq wins; for one seq, the control link's exact copy). `MonitorClient`
+  subscribes on one speaker's monitor link, and with `reconnect=True` connects and subscribes again
+  as an open plugin window does.
+- `TimedRecorder(speaker, latency=quantum)` records a node's monitor as floats on a pipe and knows
+  when each sample was in the graph (`stop()` gives the samples and `t0`): what `knob_latency` measures
+  latency with.
+- `speaker_conf_with(path, default_clock_quantum=128)` is speaker.conf with a property changed, for
+  `Pair({"left": {"speaker_conf": path}, ...})`.
+- `VPAIR_PREBUILT=<build tree>` makes `built()` use a build tree laid out like `build/` (another
+  branch's speakerd and plugins, say) and build nothing.
+
+## Before and after step 3's speakerd
+
+`test_knob_latency`, `test_graph_edit`, `test_hub_down`, `test_meter_values`, `test_ampd_restart` and
+`test_ampd_persistence` drive step 3's speakerd (0.3.0: the local socket, the Mine pin, the monitor
+thread), and `test_meter_values` also loudness's `mon_` monitors. Against an older speakerd they fail
+at once, saying so (`harness.require_speakerd_local_link`). `test_ampd_protocol`,
+`test_two_controllers` and `test_firmware_ampd_install` need neither: they run ampd against stand-in
+speakerds.
+
 ## Worth knowing
 
 - **PipeWire needs its access module even with nothing to protect.** Without
@@ -230,6 +300,7 @@ with Pair({"left": {"dropins": home / ".config/pipewire/pipewire.conf.d"}}) as p
 
 ## Next
 
-`ampd` on each speaker, a Snapcast source feeding both, `tc netem` between them for packet
-loss, and the rest of the acceptance scenarios of `docs/autonomous-development.md` (knob
-latency, graph edits, hub down, monitoring under loss, and the others).
+A Snapcast source feeding both speakers, `tc netem` between them for packet loss, the
+controller's scripted mode as a client, and the rest of the acceptance scenarios of
+`docs/autonomous-development.md` (graph_rejected and catalogue with step 4's catalogue, power_cut,
+monitoring under loss, frames and records).

@@ -15,6 +15,9 @@
 #   ~/.config/systemd/user/speakerd.service
 #   ~/.config/pipewire/pipewire.conf.d/60-speakerd-sink.conf    the persistent speakerd sink
 #
+# A version also holds ampd (bin/ampd), which ampd-setup.sh runs as its own service; status,
+# smoke, rollback and uninstall include it when it is installed.
+#
 # Every install caps the output: device.json gets "limits": output at -20 dB, tweeter muted.
 # Only the limits action lifts the cap, with a person at the speaker after a smoke test.
 # install refuses everything it can refuse before it changes anything.
@@ -299,6 +302,7 @@ RUNTIME="$XDG_RUNTIME_DIR/speakerd"
 PLUGIN_HOST_UNITS="$STATE/plugin-host-units"
 DROPIN_SOURCE="$FIRMWARE_DIR/pipewire/pipewire.conf.d/60-speakerd-sink.conf"
 UNIT_SOURCE="$FIRMWARE_DIR/speakerd/speakerd.service"
+AMPD_UNIT="$H/.config/systemd/user/ampd.service"
 
 if [ -n "$FACTORY" ] && [ ! -f "$FACTORY" ]; then
     if [ -n "$BUNDLE" ] && [ -f "$BUNDLE/$FACTORY" ]; then FACTORY="$BUNDLE/$FACTORY"; else die "no factory graph $FACTORY"; fi
@@ -310,6 +314,15 @@ trap 'rm -rf "$WORK"' EXIT
 # Helpers
 # ----------------------------------------------------------------------------
 helper() { python3 "$HELPER" "$@"; }
+
+# ampd (ampd-setup.sh), with this run's test hooks; installed when its unit or ampd.json is.
+ampd_installed() { [ -f "$AMPD_UNIT" ] || [ -f "$STATE/ampd.json" ]; }
+ampd_setup() {
+    local hooks=()
+    [ "$NO_SYSTEMD" -eq 0 ] || hooks+=(--no-systemd)
+    [ -z "$HOME_OVERRIDE" ] || hooks+=(--home "$H")
+    bash "$FIRMWARE_DIR/ampd-setup.sh" "$@" "${hooks[@]}"
+}
 
 # systemctl --user, unless --no-systemd.
 sc() {
@@ -797,20 +810,18 @@ install_version() {
     fi
     if dry; then info "(dry-run) would install version $BUNDLE_ID in $dst"; return 0; fi
     tmpdst="$LIB/.$BUNDLE_ID.tmp.$$"
-    rm -rf "$tmpdst"; mkdir -p "$tmpdst/bin" "$tmpdst/setup/speakerd" "$tmpdst/setup/pipewire/pipewire.conf.d"
+    rm -rf "$tmpdst"; mkdir -p "$tmpdst/bin"
     cp -p "$BUNDLE/bin/speakerd" "$tmpdst/bin/speakerd"
     cp -p "$FIRMWARE_DIR/speakerd/speakerd-run" "$tmpdst/bin/speakerd-run"
-    chmod 755 "$tmpdst/bin/speakerd" "$tmpdst/bin/speakerd-run"
+    # ampd, the network agent, comes with the version: a rollback takes both back together.
+    cp -p "$FIRMWARE_DIR/ampd/ampd.py" "$tmpdst/bin/ampd"
+    chmod 755 "$tmpdst/bin/speakerd" "$tmpdst/bin/speakerd-run" "$tmpdst/bin/ampd"
     if [ -d "$BUNDLE/lv2" ]; then cp -a "$BUNDLE/lv2" "$tmpdst/lv2"; else mkdir -p "$tmpdst/lv2"; fi
     cp -p "$BUNDLE/VERSION" "$tmpdst/VERSION"
     { echo "speakerd_version=$BUNDLE_SPEAKERD_VERSION"; echo "speakerd_build=$BUNDLE_SPEAKERD_BUILD"; } >> "$tmpdst/VERSION"
     # This installer, so that status, rollback and uninstall work on the board without a bundle.
-    cp -p "$FIRMWARE_DIR"/{setup.sh,install-lib.sh,speakerd-setup.sh,snapcast-setup.sh} "$tmpdst/setup/"
-    cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py} "$tmpdst/setup/speakerd/"
-    cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf "$tmpdst/setup/pipewire/"
-    cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf.d/*.conf "$tmpdst/setup/pipewire/pipewire.conf.d/"
-    # firmware/CLAUDE.md calls these directly: executable, whatever the copy they came from kept.
-    chmod 755 "$tmpdst"/setup/{setup.sh,speakerd-setup.sh,snapcast-setup.sh} "$tmpdst"/setup/speakerd/{speakerd-run,setup-helper.py}
+    # firmware/CLAUDE.md calls its scripts directly: executable, whatever the copy they came from kept.
+    copy_installers "$tmpdst/setup"
     rm -rf "$dst"; mv "$tmpdst" "$dst"
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUNDLE_ID" >> "$LIB/installed.log"
     ok "Installed version $BUNDLE_ID in $dst"
@@ -1051,6 +1062,7 @@ do_status() {
     local pids; pids="$(plugin_host_pids)"
     [ -z "$pids" ] || echo "  *** $PLUGIN_HOST runs: pid $pids ***"
     plugin_host_autostarts | sed "s/^/  $PLUGIN_HOST starts from: /"
+    if ampd_installed; then ampd_setup status | sed 's/^/  /'; fi
 }
 
 do_rollback() {
@@ -1080,6 +1092,10 @@ do_rollback() {
         sc restart speakerd.service || die "could not restart speakerd"
         ok "speakerd restarted"
         check_started "$restarted"
+        # ampd is the version's too.
+        if [ -f "$AMPD_UNIT" ]; then
+            if sc restart ampd.service; then ok "ampd restarted"; else warn "could not restart ampd"; fi
+        fi
     fi
 }
 
@@ -1164,6 +1180,10 @@ do_uninstall() {
         info "(dry-run) would stop and disable speakerd, remove $UNIT, $DROPIN and $LIB$([ "$PURGE" = 1 ] && echo " and $STATE")"
         reenable_plugin_host
         return 0
+    fi
+    # ampd's program is in the versions that go: its service goes first.
+    if [ -f "$AMPD_UNIT" ]; then
+        if [ "$PURGE" -eq 1 ]; then ampd_setup uninstall --purge; else ampd_setup uninstall; fi
     fi
     sc stop speakerd.service 2> /dev/null || true
     sc disable speakerd.service 2> /dev/null || true
@@ -1403,6 +1423,12 @@ do_smoke() {
     if grep -qi 'xrun' <<< "$after"; then failed "xruns while watched: $(grep -i -m3 'xrun' <<< "$after" | tr '\n' ';')"
     else pass "no xrun in ${WINDOW} s"; fi
     if grep -qE '^speakerd: (lost PipeWire|stopping)' <<< "$after"; then failed "speakerd stopped or lost PipeWire while watched"; fi
+
+    # ampd, when it is installed: running, connected to speakerd, an agent to the hub.
+    if ampd_installed; then
+        if ampd_setup smoke | sed 's/^/  /'; [ "${PIPESTATUS[0]}" -eq 0 ]; then pass "ampd (above)"
+        else failed "ampd (above)"; fi
+    fi
 
     echo "smoke: $SMOKE_FAILS failed, $SMOKE_WARNS warning(s)"
     [ "$SMOKE_FAILS" -eq 0 ]

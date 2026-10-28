@@ -24,8 +24,10 @@ import atexit
 import itertools
 import json
 import os
+import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -127,6 +129,33 @@ def align(capture, reference):
     n = 1 << int(np.ceil(np.log2(len(c) + len(r))))
     correlation = np.fft.irfft(np.fft.rfft(c, n) * np.conj(np.fft.rfft(r, n)), n)
     return int(np.argmax(correlation[:len(c)]))
+
+
+def block_levels(x, block, rate=RATE):
+    """The RMS level in dBFS of each block of `block` seconds of `x` (mono)."""
+    n = max(1, int(round(block * rate)))
+    count = len(x) // n
+    blocks = np.asarray(x[:count * n], dtype=np.float64).reshape(count, n)
+    return 10 * np.log10(np.maximum(np.mean(blocks ** 2, axis=1), 1e-24))
+
+
+def longest_run(mask):
+    """The length of the longest run of True in `mask`."""
+    best = run = 0
+    for value in mask:
+        run = run + 1 if value else 0
+        best = max(best, run)
+    return best
+
+
+def high_band(x, cutoff_hz=4000.0, rate=RATE):
+    """`x` (mono) above `cutoff_hz`, through an FFT filter with a raised-cosine edge one
+    kilohertz wide (so its impulse response is a few milliseconds long): where a click is, and
+    a tone below the edge is not."""
+    spectrum = np.fft.rfft(x)
+    f = np.fft.rfftfreq(len(x), 1.0 / rate)
+    edge = np.clip((f - (cutoff_hz - 1000.0)) / 1000.0, 0.0, 1.0)
+    return np.fft.irfft(spectrum * (0.5 - 0.5 * np.cos(np.pi * edge)), len(x))
 
 
 def _write_wav(path, samples, rate=RATE):
@@ -521,6 +550,17 @@ def built(what, kind=None):
     and returns the program or the LV2 bundle. tools/build.sh is incremental, so this is fast
     when nothing changed."""
     key = (what, kind)
+    prebuilt = os.environ.get("VPAIR_PREBUILT")
+    if prebuilt and key not in _built:
+        # A build tree laid out like build/, made elsewhere (another branch's speakerd, say):
+        # used as it is, nothing is built.
+        target = what if kind in (None, "complete") else f"{what}_{kind}"
+        path = (Path(prebuilt) / what / f"{what}_artefacts" / "Release" / what if kind is None
+                else Path(prebuilt) / what / f"{target}_artefacts" / "Release" / "LV2" / f"{target}.lv2")
+        if not path.exists():
+            raise RuntimeError(f"VPAIR_PREBUILT={prebuilt} has no {path}")
+        print(f"(prebuilt {path})", file=sys.stderr, flush=True)
+        _built[key] = path
     if key not in _built:
         command = [str(ROOT / "tools" / "build.sh"), what] + ([kind] if kind else [])
         started = time.monotonic()
@@ -992,9 +1032,728 @@ class UnitRun:
             clean = name in UserUnit.CLEAN_SIGNALS
             result = {"EXIT_CODE": "dumped" if core_dumped else "killed", "EXIT_STATUS": name,
                       "SERVICE_RESULT": "success" if clean else ("core-dump" if core_dumped else "signal")}
-        post = subprocess.run(self.unit.command("ExecStopPost"), env=dict(self.env, **result),
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
-        result["stop_post"] = post.stdout + post.stderr
+        result["stop_post"] = ""
+        if "ExecStopPost" in self.unit.service:
+            post = subprocess.run(self.unit.command("ExecStopPost"), env=dict(self.env, **result),
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+            result["stop_post"] = post.stdout + post.stderr
         with self._changed:
             self.lines += result["stop_post"].splitlines()
         return result
+
+
+# ---------------------------------------------------------------------------------------------
+# ampd, controllers and monitor subscribers (step 3: docs/protocol.md)
+
+AMPD = FIRMWARE / "ampd" / "ampd.py"
+STAND_IN = HERE / "stand_in_speakerd.py"
+# The two virtual speakers share one network namespace: each ampd listens on its own loopback
+# address, with the protocol's ports (docs/protocol.md, "Framing and addresses").
+ADDRESS = {"left": "127.0.1.1", "right": "127.0.1.2"}
+CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
+
+
+def _ampd_module():
+    """firmware/ampd/ampd.py as a module, for its OSC encoder and decoder."""
+    if "module" not in _stub:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ampd_under_test", AMPD)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _stub["module"] = module
+    return _stub["module"]
+
+
+def osc_encode(address, tags, *args):
+    return _ampd_module().osc_encode(address, tags, *args)
+
+
+def osc_decode(data):
+    return _ampd_module().osc_decode(data)
+
+
+def ampd_config(state, name, hub, listen, hub_address=None):
+    """Writes ampd.json into `state` (as the installer does) and returns its path."""
+    path = Path(state) / "ampd.json"
+    path.write_text(json.dumps({"version": 1, "name": name, "hub": hub, "listen": listen,
+                                "hub_address": hub_address}, indent=2))
+    return path
+
+
+class LoggedProcess:
+    """A program run for a `with` block with its output read line by line: `prefix` is how its
+    own lines start ("ampd: "). wait_for(), mark(), stop() as for Speakerd."""
+
+    def __init__(self, command, env, prefix, wait_for=None, timeout=30, what="the program", exit_status=0):
+        self.command, self.env, self.prefix = [str(c) for c in command], env, prefix
+        self.first_wait, self.first_timeout, self.what = wait_for, timeout, what
+        self.exit_status = exit_status
+        self.lines, self.process, self._changed = [], None, threading.Condition()
+
+    def _read(self):
+        for line in self.process.stdout:
+            with self._changed:
+                self.lines.append(line.rstrip("\n"))
+                self._changed.notify_all()
+        with self._changed:
+            self._changed.notify_all()
+
+    def log(self):
+        with self._changed:
+            return "\n".join(self.lines)
+
+    def mark(self):
+        with self._changed:
+            return len(self.lines)
+
+    def lines_starting(self, text, after=0):
+        with self._changed:
+            return [line for line in self.lines[after:] if line.startswith(self.prefix + text)]
+
+    def wait_for(self, text, timeout=30, after=0, required=True):
+        texts = (text,) if isinstance(text, str) else tuple(text)
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while True:
+                for line in self.lines[after:]:
+                    if any(line.startswith(self.prefix + t) for t in texts):
+                        return line
+                if self.process.poll() is not None and not self._reader.is_alive():
+                    raise AssertionError(self.report(f"{self.what} exited with status {self.process.returncode} "
+                                                     f"before it said {' or '.join(map(repr, texts))}"))
+                if time.monotonic() > deadline:
+                    if not required:
+                        return None
+                    raise AssertionError(self.report(f"{self.what} did not say {' or '.join(map(repr, texts))} "
+                                                     f"within {timeout} s"))
+                self._changed.wait(0.2)
+
+    def report(self, what):
+        return f"{what}\n  command: {' '.join(self.command)}\n  its output:\n" + "\n".join("    " + l for l in self.lines)
+
+    def start(self):
+        self.process = subprocess.Popen(self.command, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+        try:
+            if self.first_wait:
+                self.wait_for(self.first_wait, self.first_timeout)
+        except BaseException:
+            self.kill()
+            raise
+        return self
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.process is None:
+            return False
+        if self.process.poll() is None:
+            status = self.stop()
+            if exc_type is None and status != self.exit_status:
+                raise AssertionError(self.report(f"{self.what} exited with status {status}, not {self.exit_status}"))
+        elif not self.process.stdout.closed:
+            self._closed()
+        return False
+
+    def running(self):
+        return self.process is not None and self.process.poll() is None
+
+    def stop(self, timeout=10):
+        if self.process.poll() is None:
+            self.process.send_signal(signal.SIGTERM)
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+            raise AssertionError(self.report(f"{self.what} did not stop within {timeout} s of SIGTERM"))
+        self._closed()
+        return self.process.returncode
+
+    def kill(self):
+        """SIGKILL, as a crash would: nothing is flushed, nothing said."""
+        if self.process is not None and self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=5)
+        if self.process is not None:
+            self._closed()
+
+    def signal(self, sig):
+        if self.process.poll() is None:
+            self.process.send_signal(sig)
+
+    def _closed(self):
+        self._reader.join(timeout=5)
+        if not self._reader.is_alive():
+            self.process.stdout.close()
+
+
+class Ampd(LoggedProcess):
+    """ampd (firmware/ampd/ampd.py) for one speaker, for a `with` block: `env` is the speaker's
+    (speaker.env: its own XDG_RUNTIME_DIR, so the default speakerd socket is that speaker's), its
+    ampd.json is written into `state`. The left speaker is the hub on 127.0.1.1, the right an
+    agent on 127.0.1.2. Entering waits for the `listening on` line; leaving stops it with SIGTERM
+    and checks it exits with status 0 having said `stopping`."""
+
+    def __init__(self, env, state, name, hub=None, listen=None, hub_address=None, args=(), wait_for="listening on ",
+                 timeout=15):
+        hub = (name == "left") if hub is None else hub
+        listen = listen or ADDRESS.get(name, "127.0.0.1")
+        hub_address = hub_address or (None if hub else ADDRESS["left"])
+        self.state, self.name = Path(state), name
+        self.config = ampd_config(state, name, hub, listen, hub_address)
+        self.listen, self.hub = listen, hub
+        self.runtime = Path(env["XDG_RUNTIME_DIR"]) / "ampd"
+        super().__init__([sys.executable, AMPD, "--config", self.config, "--state-dir", state, *args], dict(env),
+                         "ampd: ", wait_for, timeout, f"ampd ({name})")
+
+    def __exit__(self, exc_type, exc, tb):
+        super().__exit__(exc_type, exc, tb)
+        if exc_type is None and self.process is not None and self.process.returncode == 0:
+            own = [line for line in self.lines if line.startswith("ampd: ")]
+            if not own or own[-1] != "ampd: stopping":
+                raise AssertionError(self.report(f"{self.what} did not say 'stopping' last"))
+        return False
+
+    def status(self):
+        """$XDG_RUNTIME_DIR/ampd/status.json, or {} when there is none."""
+        try:
+            return json.loads((self.runtime / "status.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def wait_status(self, predicate, timeout=10, what="the status"):
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.status()
+            if predicate(status):
+                return status
+            if time.monotonic() > deadline:
+                raise AssertionError(self.report(f"{self.what}: {what} not reached within {timeout} s: {status}"))
+            time.sleep(0.05)
+
+
+class StandInSpeakerd(LoggedProcess):
+    """tests/vpair/stand_in_speakerd.py on `env`'s socket ($XDG_RUNTIME_DIR/speakerd/control.sock):
+    the local link of a speakerd, no audio. set_control() tells it what to fail; events() is
+    every line it read ("in") and the answers it sent ("out")."""
+
+    def __init__(self, env, state, control=None):
+        run = Path(env["XDG_RUNTIME_DIR"]) / "speakerd"
+        self.socket = run / "control.sock"
+        self.events_path = Path(state) / ".stand-in-events.jsonl"
+        self.control_path = Path(state) / ".stand-in-control.json"
+        self.events_path.write_text("")
+        self.set_control(control or {})
+        super().__init__([sys.executable, STAND_IN, "--socket", self.socket, "--state-dir", state,
+                          "--events", self.events_path, "--control", self.control_path], dict(env),
+                         "stand-in speakerd: ", "layer ", 10, "the stand-in speakerd")
+
+    def set_control(self, control):
+        self.control_path.write_text(json.dumps(control))
+
+    def events(self, op=None, direction=None):
+        out = []
+        # Complete lines only: the stand-in may be in the middle of writing the last one.
+        for line in self.events_path.read_text().split("\n")[:-1]:
+            event = json.loads(line)
+            if (op is None or event.get("op") == op) and (direction is None or event["dir"] == direction):
+                out.append(event)
+        return out
+
+    def wait_event(self, predicate, timeout=10, what="an event"):
+        deadline = time.monotonic() + timeout
+        while True:
+            for event in self.events():
+                if predicate(event):
+                    return event
+            if time.monotonic() > deadline:
+                raise AssertionError(f"the stand-in speakerd saw no {what} within {timeout} s; it saw:\n"
+                                     + "\n".join(json.dumps(e)[:300] for e in self.events()))
+            time.sleep(0.02)
+
+
+class Controller:
+    """A harness client acting as a controller (docs/protocol.md): the control link to the hub,
+    with hello and state, and an OSC socket for the knobs and the hub's echoes. Every message it
+    gets is kept with the time it arrived (time.monotonic()), `via` "control" or "osc"; `params`
+    is what it knows of each parameter, newest seq wins, from the state and the echoes."""
+
+    def __init__(self, name, hub=ADDRESS["left"], port=CONTROL_PORT, knob_port=KNOB_PORT, osc=True, timeout=10):
+        self.name, self.hub, self.knob_port = name, hub, knob_port
+        _ampd_module()      # its OSC encoder, loaded now: not in the time of a first send
+        self.messages, self._changed = [], threading.Condition()
+        self.params, self.gestures, self.closed = {}, {}, False
+        self.udp = None
+        if osc:
+            self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp.bind(("127.0.0.1", 0))
+            self.udp.settimeout(0.2)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                self.tcp = socket.create_connection((hub, port), timeout=2)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise AssertionError(f"controller {name}: cannot connect to the hub at {hub}:{port}")
+                time.sleep(0.1)
+        self.tcp.settimeout(None)
+        self._file = self.tcp.makefile("rb")
+        self._threads = [threading.Thread(target=self._read_tcp, daemon=True)]
+        if osc:
+            self._threads.append(threading.Thread(target=self._read_udp, daemon=True))
+        for thread in self._threads:
+            thread.start()
+        hello = {"op": "hello", "role": "controller", "name": name, "protocol": 1}
+        if osc:
+            hello["osc_port"] = self.udp.getsockname()[1]
+        self.send(hello)
+        self.hub_hello = self.wait(lambda m: m["op"] == "hello", timeout, "the hub's hello")
+        self.state = self.wait(lambda m: m["op"] == "state", timeout, "the state")
+
+    def _keep(self, obj, via):
+        obj = dict(obj, via=via, arrived=time.monotonic())
+        with self._changed:
+            self.messages.append(obj)
+            op = obj.get("op")
+            if op == "state":
+                # A full refresh (docs/protocol.md, clarification 2): what it knew goes.
+                self.params = {}
+                for node in obj["document"].get("nodes", []):
+                    for pid, value in (node.get("params") or {}).items():
+                        self.params[(node["uid"], pid)] = (obj.get("seq", 0), value)
+                self.gestures = {(g["node"], g["id"]): g["origin"] for g in obj.get("gestures", [])}
+            elif op == "param":
+                key = (obj["node"], obj["id"])
+                seq = obj.get("seq", 0)
+                known = self.params.get(key, (None, None))[0]
+                # Newer wins; for one seq, the control link's copy (exact) over OSC's (a float32).
+                if known is None or 0 < ((seq - known) & 0xFFFFFFFF) < 0x80000000 or (seq == known and via == "control"):
+                    self.params[key] = (seq, obj["value"])
+            elif op == "gesture":
+                key = (obj["node"], obj["id"])
+                if obj["state"] == "begin":
+                    self.gestures[key] = obj["origin"]
+                else:
+                    self.gestures.pop(key, None)
+            self._changed.notify_all()
+
+    def _read_tcp(self):
+        try:
+            for line in self._file:
+                self._keep(json.loads(line), "control")
+        except (OSError, ValueError):
+            pass
+        with self._changed:
+            self.closed = True
+            self._changed.notify_all()
+
+    def _read_udp(self):
+        while not self.closed:
+            try:
+                data, _ = self.udp.recvfrom(65536)
+            except OSError:
+                continue
+            path, args = osc_decode(data)
+            if path == "/bpi/param":
+                self._keep({"op": "param", "node": args[0], "id": args[1], "value": args[2], "seq": args[3],
+                            "origin": args[4]}, "osc")
+            elif path == "/bpi/gesture":
+                self._keep({"op": "gesture", "node": args[0], "id": args[1], "state": args[2], "origin": args[3]}, "osc")
+
+    def send(self, obj):
+        self.tcp.sendall(json.dumps(obj).encode() + b"\n")
+
+    def param(self, node, pid, value):
+        """A typed value, or the last of a gesture: over the control link."""
+        self.send({"op": "param", "node": node, "id": pid, "value": value, "seq": 0, "origin": self.name})
+
+    def osc_param(self, node, pid, value):
+        """A moving knob: OSC to the hub's knob port."""
+        sock = self.udp or socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(osc_encode("/bpi/param", "isfis", node, pid, float(value), 0, self.name), (self.hub, self.knob_port))
+
+    def gesture(self, node, pid, state, osc=False):
+        if osc:
+            self.udp.sendto(osc_encode("/bpi/gesture", "isss", node, pid, state, self.name), (self.hub, self.knob_port))
+        else:
+            self.send({"op": "gesture", "node": node, "id": pid, "state": state, "origin": self.name})
+
+    def mark(self):
+        with self._changed:
+            return len(self.messages)
+
+    def wait(self, predicate, timeout=10, what="a message", after=0):
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while True:
+                for message in self.messages[after:]:
+                    if predicate(message):
+                        return message
+                if time.monotonic() > deadline or self.closed:
+                    raise AssertionError(f"controller {self.name}: {what} did not come within {timeout} s"
+                                         + (" (the hub closed the connection)" if self.closed else "")
+                                         + "; it got:\n" + "\n".join(json.dumps(m)[:300] for m in self.messages[-20:]))
+                self._changed.wait(0.1)
+
+    def propose(self, document, base=None, timeout=30):
+        """A revision, base + 1 of the current one (or of `base`); returns the hub's answer,
+        applied or rejected."""
+        base = self.current_revision() if base is None else base
+        after = self.mark()
+        self.send({"op": "graph", "revision": base + 1, "base": base, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                   "origin": self.name, "document": document})
+        answer = self.wait(lambda m: m["op"] in ("applied", "rejected") and m.get("revision") == base + 1, timeout,
+                           f"the answer to revision {base + 1}", after)
+        if answer["op"] == "applied":
+            self.wait(lambda m: m["op"] == "graph" and m.get("revision") == base + 1, timeout,
+                      f"the graph of revision {base + 1}", after)
+        return answer
+
+    def current_revision(self):
+        """The revision of the last state or graph it got."""
+        with self._changed:
+            revision = self.state["revision"]
+            for message in self.messages:
+                if message["op"] in ("graph", "state"):
+                    revision = message["revision"]
+            return revision
+
+    def last_state(self):
+        with self._changed:
+            return [m for m in self.messages if m["op"] == "state"][-1]
+
+    def values(self):
+        """What it knows of each parameter: {(node, id): value}."""
+        with self._changed:
+            return {key: value for key, (_, value) in self.params.items()}
+
+    def close(self):
+        """Ends both links; the reading threads end with them."""
+        self.closed = True
+        try:
+            self.tcp.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        for thread in self._threads:
+            thread.join(timeout=5)
+        self._file.close()
+        for sock in (self.tcp, self.udp):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+class MonitorClient:
+    """A monitor subscriber, as a plugin window (docs/protocol.md, "Monitoring"): the monitor link
+    to one speaker's ampd. With `reconnect`, it connects again every 0.1 s when the link drops and
+    subscribes again, as an open window does. `values` is every value with its arrival time."""
+
+    def __init__(self, address, port=MONITOR_PORT, reconnect=False, timeout=10):
+        self.address, self.port, self.reconnect = address, port, reconnect
+        self.subs, self.values, self.errors = {}, [], []
+        self.connects, self.closed, self.sock = 0, False, None
+        self._changed = threading.Condition()
+        self._lock = threading.Lock()
+        self._connect(timeout)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _connect(self, timeout):
+        deadline = time.monotonic() + timeout
+        while not self.closed:
+            try:
+                sock = socket.create_connection((self.address, self.port), timeout=1)
+                sock.settimeout(None)
+                with self._lock:
+                    self.sock = sock
+                    self.connects += 1
+                    for stream, rate in self.subs.items():
+                        sock.sendall(json.dumps({"op": "subscribe", "stream": stream, "rate_hz": rate}).encode() + b"\n")
+                return True
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise AssertionError(f"cannot connect to the monitor link at {self.address}:{self.port}")
+                time.sleep(0.1)
+        return False
+
+    def _run(self):
+        while not self.closed:
+            try:
+                for line in self.sock.makefile("rb"):
+                    obj = json.loads(line)
+                    with self._changed:
+                        if obj.get("op") == "value":
+                            self.values.append((time.monotonic(), obj))
+                        elif obj.get("op") == "error":
+                            self.errors.append(obj)
+                        self._changed.notify_all()
+            except (OSError, ValueError):
+                pass
+            if self.closed or not self.reconnect:
+                break
+            time.sleep(0.1)
+            try:
+                self._connect(timeout=3600)
+            except AssertionError:
+                break
+
+    def subscribe(self, stream, rate_hz=30):
+        with self._lock:
+            self.subs[stream] = rate_hz
+            self.sock.sendall(json.dumps({"op": "subscribe", "stream": stream, "rate_hz": rate_hz}).encode() + b"\n")
+
+    def unsubscribe(self, stream):
+        with self._lock:
+            self.subs.pop(stream, None)
+            self.sock.sendall(json.dumps({"op": "unsubscribe", "stream": stream}).encode() + b"\n")
+
+    def of(self, stream, since=None):
+        """[(arrival, value line)] of a stream, those that arrived after `since`."""
+        with self._changed:
+            return [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)]
+
+    def wait_value(self, stream, since=None, timeout=10):
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while True:
+                found = [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)]
+                if found:
+                    return found[0]
+                if time.monotonic() > deadline:
+                    raise AssertionError(f"no value of {stream} from {self.address} within {timeout} s"
+                                         + (f"; errors: {self.errors}" if self.errors else ""))
+                self._changed.wait(0.05)
+
+    def close(self):
+        self.closed = True
+        if self.sock is not None:
+            try:
+                self.sock.shutdown(2)
+                self.sock.close()
+            except OSError:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+class TimedRecorder:
+    """pw-record of one node's monitor, as raw 32-bit floats on a pipe, each chunk stamped with
+    the time it arrived (time.monotonic()). stop() gives t0: sample i was delivered at t0 + i /
+    RATE, from the 5th percentile of (arrival - samples so far / RATE) over the chunks, a lower
+    envelope that a late chunk or an early burst does not move. `latency` (samples) is what
+    pw-record asks for: its chunks are that long (by default it asks 100 ms and gets 1024).
+    Linked before start() returns, like Recorder."""
+
+    def __init__(self, speaker, target="amplifier", timeout=5.0, latency=None):
+        self.speaker, self.target, self.timeout, self.latency = speaker, target, timeout, latency
+        self.name = f"vpair-trecord-{os.getpid()}-{next(_names)}"
+        self.chunks, self.stamps, self.process = [], [], None
+
+    def start(self):
+        self.process = subprocess.Popen(
+            ["pw-record", "--target", self.target, "-P", "{ stream.capture.sink = true node.name = " + self.name + " }",
+             *(["--latency", str(self.latency)] if self.latency else []),
+             "--rate", str(RATE), "--channels", "2", "--format", "f32", "-"],
+            env=self.speaker.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            bufsize=0)
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+        try:
+            self.speaker.wait_for_links({(f"{self.target}:monitor_{c}", f"{self.name}:input_{c}") for c in ("FL", "FR")},
+                                        self.timeout, f"the timed recorder of {self.target}", self.process)
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def _read(self):
+        total = 0
+        fd = self.process.stdout.fileno()
+        while True:
+            data = os.read(fd, 1 << 16)
+            if not data:
+                break
+            now = time.monotonic()
+            self.chunks.append(data)
+            total += len(data)
+            self.stamps.append((now, total // 8))
+
+    def stop(self):
+        """Ends the recording; returns (samples (n, 2), t0): sample i was in the graph at
+        t0 + i / RATE."""
+        if self.process.poll() is None:
+            self.process.terminate()
+        self.process.wait(timeout=5)
+        self._thread.join(timeout=5)
+        raw = b"".join(self.chunks)
+        x = np.frombuffer(raw[:len(raw) // 8 * 8], dtype="<f4").reshape(-1, 2).astype(np.float64)
+        offsets = sorted(t - n / RATE for t, n in self.stamps)
+        t0 = offsets[len(offsets) // 20] if offsets else None
+        return x, t0
+
+    def close(self):
+        if self.process is not None and self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=5)
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+def speaker_conf_with(path, **properties):
+    """A copy of speaker.conf with some of its context.properties changed (for example
+    default_clock_quantum=128 writes default.clock.quantum = 128), written to `path`."""
+    text = (HERE / "speaker.conf").read_text()
+    for key, value in properties.items():
+        name = key.replace("_", ".")
+        text, n = re.subn(rf"(?m)^(\s*){re.escape(name)}(\s*)=.*$", rf"\g<1>{name}\g<2>= {value}", text)
+        if n != 1:
+            raise ValueError(f"speaker.conf has no single {name}")
+    Path(path).write_text(text)
+    return Path(path)
+
+
+def revision_document(document, revision, origin="vpair", rev_time="2026-01-01T00:00:00Z"):
+    """`document` as ampd keeps it in graph.json: its revision, time and origin."""
+    return dict(json.loads(json.dumps(document)), revision=revision, time=rev_time, origin=origin)
+
+
+class StandInPair:
+    """The hub (left) and an agent (right), each ampd on a stand-in speakerd: the protocol with no
+    PipeWire and no audio. `documents` gives each speaker's graph.json ({"left": doc, ...}, as
+    revision_document() makes them). Entering waits until the agent has said hello to the hub
+    and the hub has caught it up."""
+
+    def __init__(self, tmp, documents, ampd_args=(), control=None):
+        self.tmp, self.documents, self.ampd_args = Path(tmp), documents, ampd_args
+        self.control = control or {}
+        self.env, self.state, self.sd, self.ampd = {}, {}, {}, {}
+        self._stack = None
+
+    def __enter__(self):
+        import contextlib
+        self._stack = contextlib.ExitStack().__enter__()
+        try:
+            for name in ("left", "right"):
+                run = self.tmp / name / "run"
+                run.mkdir(parents=True, exist_ok=True)
+                self.env[name] = dict(os.environ, XDG_RUNTIME_DIR=str(run))
+                self.state[name] = state_dir(self.tmp / name / "state", role=name, current=self.documents.get(name))
+                self.sd[name] = self._stack.enter_context(
+                    StandInSpeakerd(self.env[name], self.state[name], self.control.get(name)))
+            for name in ("left", "right"):
+                self.start_ampd(name)
+            self.ampd["right"].wait_for("hub: connected")
+            self.ampd["left"].wait_for(("agent right: plays revision", "agent right: revision"))
+        except BaseException:
+            self._stack.__exit__(*sys.exc_info())
+            raise
+        return self
+
+    def start_ampd(self, name, args=()):
+        self.ampd[name] = Ampd(self.env[name], self.state[name], name, args=[*self.ampd_args, *args])
+        self._stack.enter_context(self.ampd[name])
+        return self.ampd[name]
+
+    def restart_speakerd(self, name):
+        self.sd[name].stop()
+        self.sd[name] = self._stack.enter_context(StandInSpeakerd(self.env[name], self.state[name],
+                                                                  json.loads(self.sd[name].control_path.read_text())))
+        return self.sd[name]
+
+    def __exit__(self, *exc):
+        return self._stack.__exit__(*exc)
+
+
+SPEAKERD_SOCKET_VERSION = "0.3.0"
+
+
+def speakerd_version():
+    """speakerd's version, from `speakerd --version` ("0.2.1")."""
+    out = subprocess.run([str(built("speakerd")), "--version"], capture_output=True, text=True, timeout=30,
+                         env=dict(os.environ, HOME=tempfile.gettempdir())).stdout
+    found = re.search(r"(\d+\.\d+\.\d+)", out)
+    return found.group(1) if found else "0"
+
+
+def require_speakerd_local_link(test):
+    """Fails `test` (a unittest.TestCase) with the reason when the built speakerd has no local
+    socket: step 3's speakerd (0.3.0, host-dev's) is what these scenarios drive."""
+    version = speakerd_version()
+    if tuple(map(int, version.split("."))) < tuple(map(int, SPEAKERD_SOCKET_VERSION.split("."))):
+        test.fail(f"speakerd {version} has no local socket to ampd: step 3's scenarios need speakerd "
+                  f"{SPEAKERD_SOCKET_VERSION} or later (docs/protocol.md). Until it is merged, this scenario fails.")
+
+
+class SpeakerPair:
+    """The virtual pair as step 3 runs it: on each speaker its PipeWire, speakerd (from
+    `documents[name]` as graph.json, with `bundles`) and ampd; the left is the hub on 127.0.1.1,
+    the right an agent on 127.0.1.2. Entering waits until each speakerd plays and the hub has
+    caught the agent up. `setup` is Pair's (another speaker.conf)."""
+
+    def __init__(self, tmp, documents, bundles, setup=None, ampd_args=(), roles=None, device=None):
+        self.tmp, self.documents, self.bundles = Path(tmp), documents, bundles
+        self.setup, self.ampd_args = setup, ampd_args
+        self.roles = roles or {"left": "left", "right": "right"}
+        self.state, self.speakerd, self.ampd = {}, {}, {}
+        self._stack = None
+
+    def __enter__(self):
+        import contextlib
+        self._stack = contextlib.ExitStack().__enter__()
+        try:
+            self.pair = self._stack.enter_context(Pair(self.setup))
+            for name in ("left", "right"):
+                self.state[name] = state_dir(self.tmp / name, role=self.roles[name], current=self.documents[name])
+                self.start_speakerd(name)
+            for name in ("left", "right"):
+                self.start_ampd(name)
+            self.ampd["right"].wait_for("hub: connected")
+            self.ampd["left"].wait_for(("agent right: plays revision", "agent right: revision"))
+        except BaseException:
+            self._stack.__exit__(*sys.exc_info())
+            raise
+        return self
+
+    def __getitem__(self, name):
+        return self.pair[name]
+
+    def start_speakerd(self, name, wait_for="playing: "):
+        self.speakerd[name] = Speakerd(self.pair[name], self.state[name], bundles=self.bundles, wait_for=wait_for)
+        self._stack.enter_context(self.speakerd[name])
+        return self.speakerd[name]
+
+    def start_ampd(self, name, args=()):
+        self.ampd[name] = Ampd(self.pair[name].env, self.state[name], name, args=[*self.ampd_args, *args])
+        self._stack.enter_context(self.ampd[name])
+        return self.ampd[name]
+
+    def graph(self, name):
+        """The speaker's graph.json, as ampd wrote it."""
+        return json.loads((self.state[name] / "graph.json").read_text())
+
+    def __exit__(self, *exc):
+        return self._stack.__exit__(*exc)

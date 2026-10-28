@@ -13,7 +13,7 @@
 #     VERSION                 id, git commit, dirty or not, when, architecture, contents
 #     bin/speakerd            the program (with artifacts only)
 #     lv2/<target>.lv2/       the plugin bundles speakerd is given (with artifacts only)
-#     firmware/...            the installers and the files they install
+#     firmware/...            the installers and the files they install, ampd among them
 #     extra/...               files named on the command line (--factory)
 #
 # Nothing here builds anything: make_bundle says which tools/build.sh command makes what is
@@ -129,12 +129,7 @@ make_bundle() {
         [ "$arch" = native ] || [ "$machine" = "$arch" ] || die "$(artifact_path "$arch" speakerd) is $machine, not $arch"
     fi
 
-    mkdir -p "$out/firmware/speakerd" "$out/firmware/pipewire/pipewire.conf.d"
-    cp -p "$FIRMWARE_DIR"/{setup.sh,install-lib.sh,speakerd-setup.sh,snapcast-setup.sh} "$out/firmware/"
-    cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py} "$out/firmware/speakerd/"
-    cp -p "$FIRMWARE_DIR/pipewire/pipewire.conf" "$out/firmware/pipewire/"
-    cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf.d/*.conf "$out/firmware/pipewire/pipewire.conf.d/"
-    chmod 755 "$out"/firmware/{setup.sh,speakerd-setup.sh,snapcast-setup.sh} "$out"/firmware/speakerd/{speakerd-run,setup-helper.py}
+    copy_installers "$out/firmware"
 
     commit="$(git -C "$repo" rev-parse HEAD 2> /dev/null || echo unknown)"
     dirty=no; [ -z "$(git -C "$repo" status --porcelain 2> /dev/null)" ] || dirty=yes
@@ -152,6 +147,19 @@ make_bundle() {
     else
         { echo "id=none"; echo "commit=$commit"; echo "dirty=$dirty"; } > "$out/VERSION"
     fi
+}
+
+# The installers and the files they install (firmware/ of a bundle, setup/ of an installed
+# version), into $1: the scripts made executable, since they are called directly.
+copy_installers() {
+    local to="$1"
+    mkdir -p "$to/speakerd" "$to/ampd" "$to/pipewire/pipewire.conf.d"
+    cp -p "$FIRMWARE_DIR"/{setup.sh,install-lib.sh,speakerd-setup.sh,snapcast-setup.sh,ampd-setup.sh} "$to/"
+    cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py} "$to/speakerd/"
+    cp -p "$FIRMWARE_DIR"/ampd/{ampd.py,ampd.service} "$to/ampd/"
+    cp -p "$FIRMWARE_DIR/pipewire/pipewire.conf" "$to/pipewire/"
+    cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf.d/*.conf "$to/pipewire/pipewire.conf.d/"
+    chmod 755 "$to"/{setup.sh,speakerd-setup.sh,snapcast-setup.sh,ampd-setup.sh} "$to"/speakerd/{speakerd-run,setup-helper.py} "$to/ampd/ampd.py"
 }
 
 # A key of a bundle's VERSION file.

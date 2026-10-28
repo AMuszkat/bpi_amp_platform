@@ -1,0 +1,30 @@
+# ampd, the speaker's network agent (and the hub on the left speaker), as a systemd user service.
+#
+# Installed by firmware/ampd-setup.sh as ~/.config/systemd/user/ampd.service, in the session of
+# the audio user, next to speakerd.service. See firmware/CLAUDE.md, "ampd". ampd comes with
+# speakerd's installed version (bin/ampd), so a rollback of speakerd rolls ampd back with it.
+#
+# The speaker plays without it: speakerd starts first, needs no network and no ampd, and keeps
+# playing when ampd stops or restarts. ampd needs no network unit either: it listens on its
+# configured address and, as an agent, connects to the hub every second until it answers.
+
+[Unit]
+Description=ampd, the speaker's network agent (BPI AMP Platform)
+After=speakerd.service
+# No start limit, as for speakerd: a burst of failures must not leave the speaker unreachable
+# for good. A restart costs nothing audible.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/speakerd/current/bin/ampd --config %h/.local/state/speakerd/ampd.json --state-dir %h/.local/state/speakerd
+# Restart after a crash or a port in use (exit 3) within a second; not after exit 2, a bad
+# command line or ampd.json, which a restart cannot fix.
+Restart=on-failure
+RestartSec=1
+RestartPreventExitStatus=2 203
+TimeoutStopSec=10
+SyslogIdentifier=ampd
+
+[Install]
+WantedBy=default.target
