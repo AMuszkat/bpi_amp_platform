@@ -2,6 +2,7 @@
 
 #include "DeviceConfig.h"
 #include "GraphDocument.h"
+#include "TimedNode.h"
 
 #include <juce_audio_processors_headless/juce_audio_processors_headless.h>
 
@@ -19,6 +20,7 @@ namespace speakerd
     struct BuiltGraph
     {
         std::unique_ptr<juce::AudioProcessorGraph> graph;
+        std::vector<TimedNode*> timedNodes;     // the plugin nodes, owned by the graph
         int pluginNodes = 0;
         juce::StringArray warnings;
     };

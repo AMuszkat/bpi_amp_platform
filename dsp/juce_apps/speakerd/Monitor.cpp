@@ -4,6 +4,7 @@
 #include "Engine.h"
 #include "LocalLink.h"
 #include "Log.h"
+#include "TimedNode.h"
 
 #include <cmath>
 #include <cstdio>
@@ -15,6 +16,7 @@ namespace speakerd
     namespace
     {
         constexpr auto levelStream = "output/level";
+        constexpr auto timingStream = "speakerd/timing";
 
         juce::String number (double value, const char* format)
         {
@@ -77,6 +79,10 @@ namespace speakerd
         {
             stream.level = true;
         }
+        else if (name == timingStream)
+        {
+            stream.timing = true;
+        }
         else if (std::regex_match (text, match, nodeStream))
         {
             stream.node = (juce::uint32) std::stoul (match[1].str());
@@ -84,15 +90,15 @@ namespace speakerd
         }
         else
         {
-            return juce::Result::fail ("no stream \"" + name + "\": a stream is output/level or node/<uid>/<mon_id>, "
+            return juce::Result::fail ("no stream \"" + name + "\": a stream is output/level, speakerd/timing or node/<uid>/<mon_id>, "
                                        "with a plugin uid (16 or more) and a monitor's ID (mon_ and up to 64 of "
                                        "A-Z, a-z, 0-9, _)");
         }
 
-        if (! (rateHz >= minRateHz))
-            return juce::Result::fail ("rate_hz must be at least " + rateText (minRateHz));
+        if (! (rateHz >= minRateHz && rateHz <= maxRateHz))
+            return juce::Result::fail ("rate_hz must be from " + rateText (minRateHz) + " to " + rateText (maxRateHz));
 
-        stream.rateHz = juce::jmin (maxRateHz, rateHz);
+        stream.rateHz = rateHz;
         stream.due = Clock::now();
         stream.cyclesAtLastValue = engine.getCycles();
         {
@@ -106,6 +112,9 @@ namespace speakerd
 
             if (stream.level && streams.count (name) == 0)
                 levelRestart = true;
+
+            if (stream.timing && streams.count (name) == 0)
+                timingSinceValue = {};
 
             if (const auto it = streams.find (name); it != streams.end())
                 stream.due = it->second.due;     // a new rate from the next value on
@@ -200,19 +209,117 @@ namespace speakerd
         return "{\"op\":\"value\",\"stream\":\"output/level\",\"t\":" + t + ",\"v\":" + v + "}";
     }
 
+    juce::var Monitor::timingValue (const TimingStats& stats) const
+    {
+        auto v = stats.toVar();
+
+        if (auto* o = v.getDynamicObject())
+        {
+            o->setProperty ("cycles_total", cyclesTotal);
+            o->setProperty ("late_total", lateTotal);
+            o->setProperty ("jumps_total", jumpsTotal);
+            o->setProperty ("dropped_total", (juce::int64) engine.getTimingDropped());
+        }
+
+        return v;
+    }
+
+    juce::var Monitor::timingStatus()
+    {
+        const std::lock_guard<std::mutex> guard (lock);
+        TimingStats minute;
+
+        for (const auto& second : lastMinute)
+            minute.merge (second);
+
+        auto v = timingValue (minute);
+
+        if (auto* o = v.getDynamicObject())
+            o->setProperty ("seconds", (int) lastMinute.size());
+
+        return v;
+    }
+
+    void Monitor::drainTiming (Clock::time_point now)
+    {
+        const bool watched = streams.count (timingStream) > 0;
+
+        engine.drainTiming ([&] (const TimingRecord& r)
+        {
+            // The names of the graph that ran, from Control, once per graph. Until Control has
+            // them (the first cycles of a new graph), the nodes are left out.
+            if (r.graphRan && (! namesKnown || r.graphSerial != namesSerial))
+            {
+                namesKnown = control.timedNodes (r.graphSerial, names);
+                namesSerial = r.graphSerial;
+            }
+
+            const auto* known = r.graphRan && namesKnown && r.graphSerial == namesSerial ? &names : nullptr;
+            timingThisSecond.add (r, known);
+
+            if (watched)
+                timingSinceValue.add (r, known);
+
+            ++cyclesTotal;
+            lateTotal += r.cycleNs > r.budgetNs ? 1 : 0;
+            jumpsTotal += r.positionJump ? 1 : 0;
+        });
+
+        if (now - secondStarted < std::chrono::seconds (1))
+            return;
+
+        // A second is over: kept for the last minute, said when something went late.
+        const auto& second = timingThisSecond;
+
+        if (second.late > 0 || second.jumps > 0)
+            log ("timing: in the last second " + juce::String (second.late) + " late cycle(s), the longest at "
+                 + juce::String (100.0 * second.cycle.max, 1) + " % of its cycle; " + juce::String (second.jumps)
+                 + " position jump(s)");
+
+        lastMinute.push_back (second);
+
+        while ((int) lastMinute.size() > timingLogSeconds)
+            lastMinute.pop_front();
+
+        timingThisSecond = {};
+        secondStarted = now;
+
+        if (now - lastSummary >= std::chrono::seconds (timingLogSeconds))
+        {
+            TimingStats minute;
+
+            for (const auto& s : lastMinute)
+                minute.merge (s);
+
+            log ("timing: last " + juce::String ((int) lastMinute.size()) + " s: " + minute.describe());
+            lastSummary = now;
+        }
+    }
+
     void Monitor::run()
     {
+        // What one read of the monitored clock costs, here: a few tens of nanoseconds from the
+        // vDSO; hundreds, or more, would mean a syscall on the audio thread.
+        {
+            constexpr int reads = 100000;
+            const auto start = nowNs();
+            juce::int64 sink = 0;
+
+            for (int i = 0; i < reads; ++i)
+                sink += nowNs() & 1;
+
+            const auto perRead = (double) (nowNs() - start) / reads;
+            log ("timing: a clock read costs " + juce::String (perRead, 1) + " ns" + (sink < 0 ? " " : ""));
+        }
+
         std::unique_lock<std::mutex> guard (lock);
+        secondStarted = lastSummary = Clock::now();
 
         while (! stopping)
         {
-            if (streams.empty())
-            {
-                changed.wait (guard);
-                continue;
-            }
-
             const auto now = Clock::now();
+            drainTiming (now);
+
             const bool level = streams.count (levelStream) > 0;
 
             if (level)
@@ -220,7 +327,7 @@ namespace speakerd
 
             const auto t = number (std::chrono::duration<double> (now.time_since_epoch()).count(), "%.6f");
             std::vector<juce::String> lines;
-            auto next = now + std::chrono::hours (1);
+            auto next = now + std::chrono::duration_cast<Clock::duration> (std::chrono::duration<double> (timingDrainSeconds));
 
             for (auto& [name, stream] : streams)
             {
@@ -236,6 +343,15 @@ namespace speakerd
                     {
                         if (levelSamples > 0)
                             lines.push_back (levelLine (t));
+                    }
+                    else if (stream.timing)
+                    {
+                        // Nothing when no audio cycle ran in the period.
+                        if (timingSinceValue.cycles > 0)
+                            lines.push_back ("{\"op\":\"value\",\"stream\":\"speakerd/timing\",\"t\":" + t + ",\"v\":"
+                                             + juce::JSON::toString (timingValue (timingSinceValue), true) + "}");
+
+                        timingSinceValue = {};
                     }
                     else if (double value = 0.0; engine.getCycles() != stream.cyclesAtLastValue
                                                  && control.readMonitor (stream.node, stream.id, value))

@@ -23,13 +23,17 @@ namespace speakerd
         static constexpr juce::uint32 firstPluginNode = 16;
 
         /** Bounds on a document: what a speaker's graph may hold, and what speakerd reads. A
-            node's own state is at most lv2state::maxStateBytes (16 MB); all of them together at
-            most maxStateBytesTotal; a layer file at most maxDocumentBytes of text (the local
-            link's longest line, which bounds an apply, is the same). */
+            document is at most maxDocumentBytes of text: a layer file, and an apply, whose line on
+            the local link is at most as long. The states are base64 in it, 4 characters for every
+            3 bytes, so their total is capped where it still fits with room to spare: 16 MiB of
+            states is 21.3 MiB of base64, and the cap of one state (lv2state::maxStateBytes) is
+            the same 16 MiB. A larger cap could never be reached through 32 MiB of text. */
         static constexpr int maxPluginNodes = 64;
         static constexpr int maxConnections = 512;
-        static constexpr size_t maxStateBytesTotal = 24u * 1024u * 1024u;
         static constexpr juce::int64 maxDocumentBytes = 32 * 1024 * 1024;
+        static constexpr size_t maxStateBytesTotal = 16u * 1024u * 1024u;
+        static_assert ((juce::int64) (maxStateBytesTotal + 2) / 3 * 4 < maxDocumentBytes,
+                       "the states' cap must fit in a document as base64");
 
         static constexpr int inputChannels  = 3;   // FL, FR, and Mine: the speaker's own channel, by its role
         static constexpr int outputChannels = 2;

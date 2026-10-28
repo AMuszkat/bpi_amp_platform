@@ -503,11 +503,13 @@ namespace
         }
 
         // The local link to ampd, and the monitor thread behind it. speakerd plays whether or not
-        // they start, and whether or not anybody connects.
+        // they start, and whether or not anybody connects. The monitor thread runs in any case:
+        // it keeps and logs the timing.
         LocalLink link (control);
         Monitor monitor (engine, control, link);
         control.setLink (&link);
         control.setMonitor (&monitor);
+        monitor.start();
         bool linkUp = false;
 
         if (options.noControlSocket)
@@ -525,7 +527,6 @@ namespace
         }
         else
         {
-            monitor.start();
             linkUp = true;
             log ("local link: listening on " + path);
         }
@@ -539,10 +540,9 @@ namespace
 
         // Nothing arrives once speakerd stops: the link closes, then the monitor thread ends.
         if (linkUp)
-        {
             link.stop();
-            monitor.stop();
-        }
+
+        monitor.stop();
 
         control.setMonitor (nullptr);
         control.setLink (nullptr);
@@ -574,7 +574,8 @@ namespace
                                             maxBlock, options.firstLayer);
 
         Engine engine (outputLimitsOf (device), device.role);
-        engine.install ({ std::move (layer.built.graph), nullptr }, rate, maxBlock, options.block, false);
+        engine.install ({ std::move (layer.built.graph), nullptr, std::move (layer.built.timedNodes) }, rate, maxBlock,
+                        options.block, false);
 
         if (const auto rendered = render::run (engine, *input, options.renderOut, options.block); rendered.failed())
         {

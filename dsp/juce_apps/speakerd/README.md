@@ -351,9 +351,10 @@ virtual pair may route a plugin to both channels, to measure both, with
 | `nodes` | the plugin nodes (may be empty), at most 64 |
 | `connections` | per-channel connections (may be empty), at most 512 |
 
-A layer file is at most 32 MiB (the local link's longest line, which bounds an `apply`, is the
-same), and the plugins' states together at most 24 MiB (each at most 16 MB); a document beyond
-any bound fails, with the reason.
+A document is at most 32 MiB of text, as a layer file and as an `apply` (the local link's longest
+line), and the plugins' states together at most 16 MiB, which is also the cap of one state: 16 MiB
+of states is 21.3 MiB of base64, which fits in a document with room for the rest, where a larger
+cap could never be reached. A document beyond any bound fails, with the reason.
 
 **Node uids.** 1 is the input node, the stream: output channel 0 is FL, 1 is FR, 2 is
 [Mine](#the-mine-channel) (from 0.3.0; an older speakerd fails a document that uses it). 2 is
@@ -483,7 +484,7 @@ version 1; this is what speakerd does with it. A Unix stream socket, by default
 | Message | When |
 |---|---|
 | `{"op":"hello","role":"speakerd","version":"0.3.0 (<commit>)","revision":8,"layer":"current","protocol":1}` | first, on every connection, also after a reconnect |
-| the same fields with `"op":"status"` | the answer to `{"op":"status"}` |
+| the same fields with `"op":"status"`, and `"timing"` | the answer to `{"op":"status"}`; `timing` is the last minute's ([Timing](#timing)) |
 | `{"op":"applied","revision":8}` | an `apply` built, swapped in, and the audio thread has run a cycle of it (or 200 ms went by with no cycle: nothing is linked) |
 | `{"op":"failed","revision":8,"reason":"..."}` | an `apply` that did not load; the graph that played plays on, untouched |
 | `{"op":"error","about":"param","node":16,"id":"gain","reason":"..."}` | a `param` that cannot be applied (below) |
@@ -517,7 +518,9 @@ so it is in force from that cycle (no ramp from speakerd: whatever smoothing the
   parameter ignored for its `seq` is not answered.
 - **While a revision is being built**, a parameter goes to the graph that plays, and is applied
   again to the new graph once it is swapped in, if that graph has the same node and ID: it
-  arrived after the `apply`, so it is newer than the document.
+  arrived after the `apply`, so it is newer than the document. speakerd keeps only the newest
+  value of each parameter for that, so what it keeps is bounded by the parameters there are,
+  however many arrive while a revision builds.
 
 **`{"op":"apply","revision":8,"document":{...}}`**: a graph revision. The document is a [graph
 document](#the-graph-document-version-1); its `revision` may be left out (the apply's is used)
@@ -548,15 +551,16 @@ with no subscription the thread sleeps.
 |---|---|
 | `output/level` | `[woofer_peak, woofer_rms, tweeter_peak, tweeter_rms]` in dBFS, of what the amplifier got since the previous value: after the fade, the limits of `device.json` and the caps, exactly the samples handed to PipeWire. RMS is the plain root mean square (a full-scale sine is 0 dBFS peak, -3.01 dBFS RMS). Silence, and anything below, is -120. Two decimals |
 | `node/<uid>/<mon_id>` | the value the hosted plugin last reported for its parameter `<mon_id>` (an ID that starts with `mon_`), in the plugin's own units, as a number |
+| `speakerd/timing` | what the audio cycles since the previous value cost: an object, see [Timing](#timing) |
 
-- **Rates.** Each stream is sampled at its own `rate_hz` (default 30, from 0.1 to 60; above 60
-  is 60, below 0.1 is refused). Subscribing again changes the rate. **A period in which no audio
-  cycle ran sends nothing**, for either kind of stream (nothing was measured, and a plugin's
-  monitor only moves while it processes), so at the speaker's quantum (1024 at 48 kHz, 46.9
-  cycles a second) 60 Hz gives about 47 values a second.
-- **Names.** Exactly `^output/level$` and
+- **Rates.** Each stream is sampled at its own `rate_hz` (default 30), from 0.1 to 60 Hz; a rate
+  outside that is refused with an `error`. Subscribing again changes the rate. **A period in
+  which no audio cycle ran sends nothing**, for every stream (nothing was measured, and a
+  plugin's monitor only moves while it processes), so at the speaker's quantum (1024 at 48 kHz,
+  46.9 cycles a second) 60 Hz gives about 47 values a second.
+- **Names.** Exactly `^output/level$`, `^speakerd/timing$` and
   `^node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}$` (a plugin uid, 16 and up,
-  and a monitor's ID), as `ampd` checks them; anything else is answered with an `error`.
+  and a monitor's ID); anything else is answered with an `error`.
 - **`t`** is speakerd's monotonic clock (`CLOCK_MONOTONIC`), in seconds, six decimals.
 - **Subscriptions belong to the connection**: they end when it closes, and `ampd` subscribes
   again after it reconnects. A `node/...` stream the running graph does not have sends nothing
@@ -582,6 +586,72 @@ with no subscription the thread sleeps.
   (`sendValueChangedMessageToListeners`, under the parameter's `listenerLock`), so speakerd
   registers no listener on a hosted parameter and reads monitors with `getValue()` on the
   monitor thread.
+
+## Timing
+
+speakerd measures what its audio thread spends, so that a speaker reports how close it runs to
+its limit, with or without a controller: per plugin node, for the whole graph and for the whole
+cycle, and the cycles that took too long.
+
+- **What is measured.** Per audio cycle: the time in each plugin node's `processBlock` (every
+  plugin node is a `TimedNode`, a wrapper around the hosted instance that forwards exactly what
+  the graph asks of a node, see `TimedNode.h`), the time in `AudioProcessorGraph::processBlock`
+  (`graph`: the nodes and the graph's own copying), and the time in all of `Engine::process`
+  (`cycle`: the copies, the Mine channel, the fades, the limits, the caps, the level meter
+  too). Each is a fraction of the cycle's **budget**, its length in time: quantum / rate, 21.3
+  ms at 1024 samples and 48 kHz.
+- **Late cycles.** A cycle whose processing (`cycle`) took longer than its budget. It is late for
+  sure; PipeWire runs speakerd as one node of a graph whose whole cycle must fit the budget, so a
+  cycle can also be too late for the amplifier with less.
+- **Position jumps, for xruns.** PipeWire 0.3.65 tells a filter nothing about xruns
+  (`spa_io_clock` has no xrun count, and `pw_filter` no xrun event). It gives each cycle the
+  driver's position, though, and a cycle whose position does not follow on from the last one's
+  (`position != last position + last quantum`) is counted as a position jump: a cycle the driver
+  skipped (an xrun), or another driver (the amplifier went away and the sink drives). On the
+  virtual pair every run of late cycles came with position jumps.
+- **The cost on the audio thread:** 4 + 2 per node reads of the monotonic clock per cycle, the
+  times copied into a record and the record into a lock-free ring of 512 cycles (no allocation,
+  no lock, no syscall), whether or not anybody watches: 277 ns per cycle with one node, 364 ns
+  with two, 902 ns with eight on x86_64 (0.0017 % of a 1024-sample cycle with two), 1.1 us with two
+  and 2.7 us with eight under qemu-aarch64 emulation. A clock read is `clock_gettime
+  (CLOCK_MONOTONIC)` through glibc, which takes it from the vDSO (the boards' glibc 2.36 looks
+  up `__kernel_clock_gettime` on aarch64): 44.6 ns on x86_64, and no system time for 2 million
+  reads. At start speakerd logs what one read costs on the machine it runs on: tens of
+  nanoseconds is the vDSO; several hundreds or more would mean a syscall, which a board whose
+  kernel does not let user space read its timer would show.
+- **Where the numbers go.** The monitor thread drains the ring at least every 50 ms, always:
+  - the stream `speakerd/timing`, for a subscriber, each value covering the cycles since the
+    previous one;
+  - `status`, under `timing`: the last minute (its complete seconds, `seconds`);
+  - the log: once a minute, `timing: last 60 s: ...`; and at most once a second, in a second with
+    a late cycle or a position jump, `timing: in the last second ...` (Log lines).
+
+The object, in `speakerd/timing` values and `status`:
+
+```json
+{"cycles": 47, "late": 0, "jumps": 0,
+ "cycle": {"mean": 0.001765, "max": 0.003544}, "graph": {"mean": 0.001572, "max": 0.003237},
+ "nodes": [{"uid": 16, "name": "loudness_headless", "mean": 0.0009778, "max": 0.001554}],
+ "cycles_total": 2810, "late_total": 0, "jumps_total": 1, "dropped_total": 0}
+```
+
+| Key | |
+|---|---|
+| `cycles`, `late`, `jumps` | the cycles the value covers, how many were late, how many came after a position jump |
+| `cycle`, `graph`, `nodes[].mean` | the time spent over the budget, summed over the cycles: a mean load, 0.5 is half the cycle |
+| `cycle`, `graph`, `nodes[].max` | the largest single cycle's fraction; above 1 is late |
+| `nodes` | the plugin nodes of the running graph, by uid, with the plugin's name; a node is counted from the first cycle speakerd knows its graph's names (the first cycles of a new graph may be left out of `nodes`, never out of `cycle`) |
+| `cycles_total`, `late_total`, `jumps_total` | since speakerd started: counters that only grow, to compare before and after something |
+| `dropped_total` | cycles whose record did not fit in the ring (the monitor thread was behind): not counted anywhere |
+| `seconds` | `status` only: how many complete seconds the last minute holds (fewer just after start) |
+
+**Late cycles during a measurement.** To know whether anything ran late during a window, read
+`late_total` (and `jumps_total`) before and after it, from `status` or from `speakerd/timing`
+values: a difference is the late cycles (position jumps) in between. The values of a period are
+in the next value, at most 1/rate after it, and `status` lags by up to one second (complete
+seconds only): wait that long after the window. Without the local link, the log line
+`timing: in the last second <k> late cycle(s), ...` names every second with one, at most a second
+after it.
 
 ## The render mode
 
@@ -616,18 +686,25 @@ build outputs: the reference a live capture is compared with.
   store and a flag, no listener and no lock, and the plugin gets it as a `patch:Set` in that very
   `processBlock`. The inbox is swapped with its graph; a graph and its inbox are deleted only
   after the tables the link and monitor threads use point at the new graph.
-- **Three locks JUCE takes on the audio thread, and why none of them waits.** (1) JUCE's graph
-  takes each processor's callback lock around its `processBlock`; speakerd never takes those
-  locks from another thread while the graph runs. (2) The graph hands its render sequence over
-  under a `SpinLock` that the audio thread only try-locks. (3) JUCE's LV2 hosting, when a plugin
-  echoes a parameter on its atom output (`patch:Set`), sets the hosted parameter on the audio
-  thread (`processAtomPort` -> `PatchSetCallback` -> `setDenormalisedValueWithoutTriggeringUpdate`),
+- **The locks taken on the audio thread, and why none of them waits.** (1) JUCE's graph takes
+  each node's callback lock around its `processBlock`, and the node (`TimedNode`, see Timing)
+  takes its hosted instance's callback lock inside; speakerd never takes either from another
+  thread while the graph runs. (2) The graph hands its render sequence over under a `SpinLock`
+  that the audio thread only try-locks. (3) JUCE's LV2 hosting, when a plugin echoes a parameter
+  on its atom output (`patch:Set`), sets the hosted parameter on the audio thread
+  (`processAtomPort` -> `PatchSetCallback` -> `setDenormalisedValueWithoutTriggeringUpdate`),
   which takes that parameter's `listenerLock` (`juce_AudioProcessorParameter.cpp`,
   `sendValueChangedMessageToListeners`); a `StateChanged` atom calls `updateHostDisplay`, which
   takes the processor's `listenerLock`. The message thread takes the same parameter lock when
   it sets a value. So nobody sets a running graph's parameters on the message thread: values
   from a document are set on a graph that is not running yet, and changes from the local link
   are applied on the audio thread, from the inbox, with `setValue`, which takes no lock.
+  (4) Inside the hosted plugin's `run()`, which is speakerd's audio thread, a headless plugin
+  that publishes a monitor (`loudness`'s `monitors::publish`) calls
+  `sendValueChangedMessageToListeners` on its own `mon_` parameter, which takes that
+  parameter's `listenerLock`, in the plugin; nothing else takes it while it runs (the plugin's
+  own wrapper is its only listener, and speakerd adds none). Every one of them is a lock only
+  the audio thread takes while the graph runs, so it never waits.
 - **Absolute caps.** NaN and infinity in the stream become 0 before any plugin sees them (so
   they cannot stick in a filter's state). After the graph, the fade and the limits' gain, NaN
   and infinity become 0 and every sample is clamped to the ceiling: plus or minus the limits'
@@ -713,6 +790,9 @@ stable.
 | `apply: revision <n>: FAILED: <reason>; <layer> plays on` | it did not load (`<layer>` as in the `playing:` line); `failed` was answered. An `apply` refused at once says `apply: revision <n>: FAILED: <reason>` (`apply: FAILED: <reason>` when it has no revision) |
 | `monitor: subscribed <stream> at <rate> Hz`, `monitor: unsubscribed <stream>` | a subscription began (or changed rate), or ended |
 | `monitor: the client went: <k> subscription(s) ended` | the connection closed with subscriptions |
+| `timing: a clock read costs <x> ns` | at start: what one read of the monotonic clock costs here (tens of ns: the vDSO) |
+| `timing: in the last second <k> late cycle(s), the longest at <x> % of its cycle; <j> position jump(s)` | at most once a second, in a second with a late cycle or a position jump |
+| `timing: last <n> s: node <uid> (<name>) mean <x> % max <y> %; ...; graph mean ... max ...; cycle mean ... max ...; <c> cycles, <l> late, <j> position jump(s)` | once a minute |
 | `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after another speakerd was found or a sink or filter could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0). Nothing is logged after it; speakerd makes no new link once it has said it, and the output fades out through the links it has |
 | `render: <n> samples at <rate> Hz in blocks of <b>, layer <layer>, written to <path>` | the render is done |
 | `render: <reason>` | the render failed; exit status 4 follows |
@@ -817,12 +897,14 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `Main.cpp` | command line, signals, the live mode and its controller timer, the render mode |
 | `LocalLink.*` | the local link's socket and its thread: one client, JSON lines, a send buffer |
 | `Control.*` | what arrives over the local link: parameters (lookup, `seq`, the inbox), revisions (the queue, build, swap, answer), status |
-| `Monitor.*` | the monitor thread: subscriptions, `output/level`, the plugins' `mon_` values |
+| `Monitor.*` | the monitor thread: subscriptions, `output/level`, the plugins' `mon_` values, `speakerd/timing`, the timing's minute and its log lines |
 | `StateLayers.*` | the boot order: the first layer that loads, or passthrough |
 | `GraphDocument.*` | the graph document, version 1: parsing and checks |
 | `GraphBuilder.*` | the document as an `AudioProcessorGraph`, the way `PluginGraph::restoreFromXml` does it; the passthrough graph |
 | `LV2State.*` | the plugin's own state into and out of the hosted build's LV2 state |
-| `Engine.*` | the running graph, the audio-thread entry point, the Mine channel, the parameter inbox, the level ring, the fades, the hand-over between the threads, settling, priming |
+| `Engine.*` | the running graph, the audio-thread entry point, the Mine channel, the parameter inbox, the level ring, the timing ring, the fades, the hand-over between the threads, settling, priming |
+| `TimedNode.*` | a plugin node: the hosted instance, forwarded as the graph needs, with its processing time |
+| `Timing.*` | the timing statistics: means, maxima, late cycles, position jumps |
 | `Samples.h` | the absolute caps: NaN and infinity to 0, clamping |
 | `PipeWireNode.*` | the input sink, the `pw_filter` node, and the links |
 | `Render.*` | the offline render |

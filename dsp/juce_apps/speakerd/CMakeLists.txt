@@ -53,6 +53,8 @@ target_sources(speakerd
         Engine.cpp
         Monitor.cpp
         PipeWireNode.cpp
+        TimedNode.cpp
+        Timing.cpp
         Render.cpp
         StateLayers.cpp)
 
@@ -99,6 +101,7 @@ target_sources(speakerd-make-filtergraph
     PRIVATE
         examples/MakeFiltergraph.cpp
         GraphBuilder.cpp
+        TimedNode.cpp
         GraphDocument.cpp
         LV2State.cpp)
 
