@@ -156,6 +156,15 @@ A **stream** is `output/level` or `node/<uid>/<mon_id>`:
 - `output/level`: what the amplifier gets, after the limits: `[woofer_peak, woofer_rms,
   tweeter_peak, tweeter_rms]` in dBFS, over the last period, built into `speakerd` for any graph.
 - `node/<uid>/<mon_id>`: a plugin's monitor, the value of its `mon_` parameter.
+- `speakerd/timing`: what the audio cycles since the previous value cost, built into
+  `speakerd`. `v` is an object:
+  `{"cycles":47,"late":0,"jumps":0,"cycle":{"mean":..,"max":..},"graph":{"mean":..,"max":..},"nodes":[{"uid":16,"name":"loudness_headless","mean":..,"max":..}],"cycles_total":..,"late_total":..,"jumps_total":..,"dropped_total":..}`.
+  `mean` and `max` are the average and the largest single cycle's processing time as a
+  fraction of the cycle's length (quantum / rate); `late` counts cycles whose processing took
+  longer than their length; `jumps` counts cycles whose driver position does not follow on from
+  the previous one (an xrun, or another driver); the `*_total` counters run since `speakerd`
+  started; `dropped_total` counts cycles not recorded. `status` carries the same object over
+  the last minute, with `"seconds"`.
 
 On the monitor link, straight to the speaker whose values are wanted:
 
