@@ -575,8 +575,9 @@ with no subscription the thread sleeps.
   is never reported, and speakerd reads the default for ever (checked on the virtual pair with a
   throwaway plugin: `setValue` from `processBlock` stayed at -120, `setValueNotifyingHost` read
   -20 for a -20 dBFS input). `loudness` reports its monitors (`mon_levelDb`, `mon_activeSetting`)
-  from a low-priority notifier thread of its own, about every 16 ms, so a monitor's value reaches
-  speakerd about 16 ms plus one cycle after it changes, and only while the plugin processes.
+  from inside its audio cycle, when a value moved (at most about 60 times a second, and once a
+  second anyway): `setValue`, then the listeners, under the monitor's own uncontended lock. The
+  host has the value at the end of that same cycle, and only while the plugin processes.
   On speakerd's side JUCE's LV2 hosting handles each `patch:Set` on the audio thread
   (`sendValueChangedMessageToListeners`, under the parameter's `listenerLock`), so speakerd
   registers no listener on a hosted parameter and reads monitors with `getValue()` on the

@@ -650,8 +650,9 @@ parameter whose ID starts with `mon_`; JUCE's LV2 hosting keeps the value the pl
 reported in an atomic, which the monitor thread reads. **The plugin must report it through the
 parameter's listeners** (`setValueNotifyingHost`): JUCE's LV2 wrapper sends the host only the
 parameters its listener heard change, so a value written with plain `setValue` never leaves the
-plugin (`loudness` notifies them from a low-priority thread of its own, about every 16 ms). Checked in the pinned JUCE (`juce_audio_plugin_client_LV2.cpp`, `ParameterStorage`) and
-on the virtual pair with a throwaway plugin.
+plugin. `loudness` notifies them from inside its audio cycle when a value moved, so the host has
+the value at the end of that cycle. Checked in the pinned JUCE (`juce_audio_plugin_client_LV2.cpp`,
+`ParameterStorage`) and on the virtual pair with a throwaway plugin.
 
 **What a plugin declares.** A plugin's monitors are parameters whose IDs start with `mon_`
 ([protocol.md](protocol.md), "How a plugin publishes a monitor"), in all three builds,
