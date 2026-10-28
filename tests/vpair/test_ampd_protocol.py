@@ -27,7 +27,8 @@ Pass when:
   after 5 s (not before 4.5 s), sent to every controller with the dragger's origin;
 - the local link: a speakerd that is busy with another client is tried again every second; a
   speakerd that restarts under ampd gets every value again; a speakerd that comes back on
-  another layer and revision is followed (ampd takes that layer's document and says so);
+  another layer and revision is followed (ampd takes that layer's document and says so); a
+  speakerd whose current layer is an older revision than ampd's gets ampd's;
 - monitoring: two subscribers of one stream make one subscription to speakerd at the higher rate
   (100 Hz asked is 60), each gets values at its own rate (within 30 %), the rate falls back when
   the faster one leaves and an unsubscribe goes to speakerd when the last one does; a stream that
@@ -48,6 +49,7 @@ Pass when:
 """
 
 import json
+import os
 import shutil
 import socket
 import tempfile
@@ -55,8 +57,8 @@ import time
 import unittest
 from pathlib import Path
 
-from harness import (ADDRESS, KNOB_PORT, Controller, MonitorClient, StandInPair, graph_document, lv2_uri,
-                     osc_encode, revision_document)
+from harness import (ADDRESS, KNOB_PORT, Ampd, Controller, MonitorClient, StandInPair, StandInSpeakerd,
+                     graph_document, lv2_uri, osc_encode, revision_document, state_dir)
 
 HEADLESS = lv2_uri("loudness_headless")
 PARAMS = {"mode": "Force 1", "s0_e0_gain": 0.0, "s0_e1_gain": 0.0}
@@ -285,6 +287,19 @@ class Protocol(unittest.TestCase):
             self.assertEqual(line, "ampd: speakerd: plays layer last-known-good, revision 2, not revision 3: following it")
             # It says hello to the hub again, which sends it revision 3 back.
             pair.ampd["left"].wait_for("agent right: plays revision 2, not revision 3")
+
+    def test_an_outdated_current_layer_gets_the_revision(self):
+        run = self.tmp / "run"
+        run.mkdir()
+        env = dict(os.environ, XDG_RUNTIME_DIR=str(run))
+        state = state_dir(self.tmp / "state", role="left", current=revision_document(DOCUMENT, 2))
+        with StandInSpeakerd(env, state) as sd:
+            # speakerd loaded revision 2 as its current layer; graph.json has moved on to 3.
+            (state / "graph.json").write_text(json.dumps(revision_document(DOCUMENT, 3)))
+            with Ampd(env, state, "left") as hub:
+                hub.wait_for("speakerd: plays revision 2 of the current layer, not revision 3: applying revision 3")
+                sd.wait_event(lambda e: e.get("op") == "apply" and e["revision"] == 3, what="revision 3")
+                hub.wait_for("revision 3: applied")
 
     def test_monitoring(self):
         with StandInPair(self.tmp, documents()) as pair:

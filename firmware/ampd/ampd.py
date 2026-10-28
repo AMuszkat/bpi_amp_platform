@@ -664,7 +664,13 @@ class Role:
         sd.hello(hello)
         log(f"speakerd: connected: {sd.version}, layer {sd.layer}, revision {sd.revision}")
         followed = False
-        if sd.revision != core.revision or (sd.layer == "passthrough" and core.doc.get("nodes")):
+        if sd.layer == "current" and sd.revision != core.revision:
+            # Not a fall back: speakerd plays a graph.json older than ampd's (it ran on while ampd
+            # wrote a newer one with the link down). It gets ampd's revision.
+            log(f"speakerd: plays revision {sd.revision} of the current layer, not revision {core.revision}: "
+                f"applying revision {core.revision}")
+            background(self.apply_current())
+        elif sd.revision != core.revision or (sd.layer == "passthrough" and core.doc.get("nodes")):
             found = core.read_layer(sd.layer)
             if found is not None and found[0].get("revision", 0) == sd.revision:
                 log(f"speakerd: plays layer {sd.layer}, revision {sd.revision}, not revision {core.revision}: following it")
@@ -681,6 +687,20 @@ class Role:
         if followed:
             self.revision_followed()
         core.status_changed()
+
+    async def apply_current(self):
+        core = self.core
+        ok, why = await core.sd.apply(core.revision, core.document())
+        if ok:
+            core.playing()
+            log(f"revision {core.revision}: applied")
+        else:
+            log(f"revision {core.revision}: failed: {why}")
+        self.on_applied_locally()
+        core.status_changed()
+
+    def on_applied_locally(self):
+        pass
 
     def on_speakerd_lost(self):
         pass
@@ -733,6 +753,9 @@ class Hub(Role):
         self.broadcast_state()
 
     def on_speakerd_lost(self):
+        self.broadcast_state()
+
+    def on_applied_locally(self):
         self.broadcast_state()
 
     def revision_followed(self):
@@ -1191,6 +1214,9 @@ class Agent(Role):
         self.report()
 
     def on_speakerd_lost(self):
+        self.report()
+
+    def on_applied_locally(self):
         self.report()
 
     def revision_followed(self):
