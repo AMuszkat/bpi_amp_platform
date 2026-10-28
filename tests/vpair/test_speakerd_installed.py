@@ -35,9 +35,9 @@ Pass when:
 - snapcast-setup.sh --route speakerd finds the drop-in's sink in the running PipeWire and routes;
 - with a PipeWire that does NOT load the drop-in (the file installed, the speaker started without
   it): the route into speakerd is refused and client-rt.conf left as it was, both with no
-  speakerd sink at all and with the sink speakerd made itself (which it says it made); smoke
-  fails on the sink that is not the drop-in's; and `sink` and `install` refuse, saying nothing may
-  be routed into speakerd.
+  speakerd sink at all and with the sink speakerd made itself (which it says it made, `*** NO
+  INPUT SINK CONFIGURED`); smoke fails on the sink that is not the drop-in's and on that line; and
+  `sink` and `install` refuse, saying nothing may be routed into speakerd.
 
 The installer installs only a speakerd that enforces device.json's limits (SPEAKERD_MIN_VERSION
 in firmware/speakerd-setup.sh), which came after commit 2cb3278: against an older one the
@@ -318,6 +318,7 @@ class DropInNotLoaded(unittest.TestCase):
         try:
             run.wait_for("speakerd: playing: ")
             self.assertIn("speakerd: pipewire: created the input sink 'speakerd'", run.log())
+            self.assertIn("speakerd: *** NO INPUT SINK CONFIGURED", run.log())
 
             said = self.route()
             print(f"\n  speakerd's own sink: {said.strip().splitlines()[-1]}")
@@ -327,6 +328,7 @@ class DropInNotLoaded(unittest.TestCase):
                              "--window", "0", env=self.env, check=False)
             self.assertNotEqual(smoke.returncode, 0, smoke.stdout)
             self.assertIn("FAIL the speakerd sink is not the drop-in's", smoke.stdout)
+            self.assertIn("FAIL *** NO INPUT SINK CONFIGURED", smoke.stdout)
 
             for action in (["sink"], ["install", "--bundle", self.bundle]):
                 refused = firmware("speakerd-setup.sh", *action, "--home", self.user_home, "--no-systemd",
