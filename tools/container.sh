@@ -88,7 +88,7 @@ container_exec() {
 
     local flags=(-i) var dir="$PWD" main
     [ -t 0 ] && [ -t 1 ] && flags+=(-t)
-    for var in TERM JUCE_INSTALL_DIR BUILD_DIR VPAIR_DIR $(compgen -e | grep '^BPI_' || true); do
+    for var in TERM JUCE_INSTALL_DIR BUILD_DIR $(compgen -e | grep -E '^(BPI|VPAIR)_' || true); do
         [ -n "${!var:-}" ] && flags+=(-e "$var=${!var}")
     done
     main="$(main_checkout)"

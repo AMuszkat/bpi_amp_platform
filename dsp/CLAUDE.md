@@ -78,7 +78,10 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   (`juce_plugins/build-podman/`) are shared; per-plugin output is in
   `<plugin>/build-podman/`. `tools/build-aarch64.sh`, `build-native-linux.sh` and
   `build-linux-vm.sh` are the non-container alternatives. Never copy build scripts into a
-  plugin folder again.
+  plugin folder again. For the remote plugin host, the repository root's
+  `tools/build.sh <plugin|app> aarch64 [target]` cross-compiles any target (headless included)
+  and `speakerd` in the same image into `build/aarch64/`, which is what the board installer
+  (`firmware/speakerd-setup.sh`) deploys.
 - **Plugin CMake:** each `CMakeLists.txt` is one `speaker_add_plugin()` call
   (`juce_plugins/cmake/SpeakerPlugin.cmake`). The folder name must equal the target name.
   The build script discovers plugins by that call and reads `INPUTS`/`OUTPUTS` and the LV2

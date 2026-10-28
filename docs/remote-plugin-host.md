@@ -369,6 +369,18 @@ speaker in place of AudioPluginHost:
   tweeter, a control build that passes it through), fails with the reason. Rendered, an imported
   session gives exactly what the same settings given as parameter values give, so "the same
   sound as today" is a document `speakerd` can play.
+- **Installed on a board by `firmware/`.** `firmware/speakerd-setup.sh` installs a bundle (the
+  aarch64 `speakerd`, the plugins, the installer) into a versioned folder of the audio user's
+  home with a `current` and a `previous` link for rollback, runs `speakerd` as a systemd user
+  unit with an empty `HOME` (so no old `~/.lv2` copy can shadow the deployed plugins), always
+  writes `device.json` capped, refuses a `speakerd` older than 0.2.0 or a running
+  AudioPluginHost, and turns the board's session into the factory layer with the import above.
+  The unit's wrapper (`firmware/speakerd/speakerd-run`) keeps the crash history and picks the
+  layer (section 8). A PipeWire drop-in defines the persistent `speakerd` sink, with
+  `priority.driver = 0` so the amplifier, not a timer, clocks the graph, and snapclient is routed
+  into it. `firmware/setup.sh` installs the whole audio side in boot order (PipeWire
+  configuration, snapclient, `speakerd`; `ampd` from step 3), and `tools/board.sh` is the gated
+  path an agent uses to reach a board (the `/board` skill).
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it advertises the speaker over mDNS, receives
@@ -821,7 +833,7 @@ are reachable without the controller app:
 | Hub (left speaker off) | The right speaker keeps its revision. With `partner-lost = sum` in its device file it switches to an L+R mix, so a single speaker still plays the whole song. |
 | Right speaker off | The hub keeps working, the app shows the speaker as offline, changes queue and are applied when it returns. |
 | Both speakers rebooted, out of sync | The hub's revision wins when they meet. If the right speaker is newer (it was changed while the left was off), the hub adopts it, because revisions carry a timestamp and an origin. |
-| A graph that crashes `speakerd` | systemd restarts it on last known good within a second. After three crashes in a minute it starts on factory and tells the hub. `speakerd` writes no file, so it keeps no count of its own crashes: whoever restarts it starts it with `--from last-known-good` or `--from factory`. |
+| A graph that crashes `speakerd` | systemd restarts it on last known good within a second. After three crashes in a minute it starts on factory and tells the hub; after three more on factory, on passthrough. `speakerd` writes no file, so it keeps no count of its own crashes: the unit's wrapper (`firmware/speakerd/speakerd-run`) does, and starts it with `--from last-known-good`, `--from factory` or `--from passthrough`. |
 | `ampd` restarts | Audio keeps playing. Control and monitoring pause for about a second; open plugin windows resubscribe on their own. |
 
 **One dependency to keep in mind.** The requirement covers the control side. On the audio
@@ -876,6 +888,7 @@ and the woofer never exceeds -20 dBFS, even for an input above full scale
 (`test_passthrough_safety`); and it plays whatever starts first and survives the amplifier
 going away (`test_speakerd_start_order`).
 `speakerd` now builds for the boards (aarch64), caps its output from `device.json` and imports
-the AudioPluginHost session a board plays today (section 2). Before it runs on a board it still
-needs a persistent `speakerd` sink in the board's PipeWire configuration and a systemd unit that
-restarts it on an older layer after a crash, both in `firmware/`.
+the AudioPluginHost session a board plays today (section 2), and `firmware/` installs it with
+its persistent sink, its systemd unit and its crash rule, capped (section 2, "Installed on a
+board"). What remains before step 3 is the first deploy to a real board, which stays with a
+person ([autonomous-development.md](autonomous-development.md), section 8).

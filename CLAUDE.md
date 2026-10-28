@@ -13,7 +13,7 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
 | Path | What | Guidance |
 |---|---|---|
 | `hardware/` | KiCad projects: the carrier board and the amplifier board | `README.md` |
-| `firmware/` | Device tree, kernel config, amplifier drivers, PipeWire config, board setup scripts; later `ampd` | `firmware/CLAUDE.md` |
+| `firmware/` | Device tree, kernel config, amplifier drivers, PipeWire config, board setup scripts, the installers of `speakerd` and of the whole audio side (`setup.sh`); later `ampd` | `firmware/CLAUDE.md` |
 | `dsp/` | Measurement and tuning tools, the JUCE plugins, `plugin-check`, `speakerd` (the headless plugin host); later the controller app (formerly the `bpi_amp_dsp_tuning` repository) | `dsp/CLAUDE.md` |
 | `docs/` | The remote plugin host design (`remote-plugin-host.md`) and how to develop it autonomously (`autonomous-development.md`) | |
 | `tests/vpair/` | Two virtual speakers on one machine, for developing the remote plugin host without boards | `tests/vpair/README.md` |
@@ -70,7 +70,8 @@ needs a change outside its files says so and stops.
   on a bench.
 - **Skills**: `/build` (a plugin or app, x86_64 or aarch64), `/test` (`unit` = plugin-check,
   `vpair` = the virtual pair, `all`; writes the status file), `/vpair` (operate the virtual
-  pair), `/pw-inspect` (a PipeWire graph, summarised), `/juce` (JUCE knowledge). Their
+  pair), `/pw-inspect` (a PipeWire graph, summarised), `/board` (a real board: status,
+  journal, deploy capped, smoke, rollback; gated), `/juce` (JUCE knowledge). Their
   scripts are in `tools/`, work without Claude, and run in the development container
   (below).
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
@@ -101,6 +102,8 @@ own path, so worktrees can run the virtual pair at the same time.
 sessions) or the packages are installed (CI): the package list is the one in
 `.github/workflows/ci.yml`.
 
-The board builds are unchanged: `dsp/juce_plugins/tools/build-podman.sh` cross-compiles the
-plugins in the same image, `firmware/Makefile` the kernel side. See
-`docs/autonomous-development.md` for the three test rungs and what each one proves.
+For the boards, `tools/build.sh <plugin|app> aarch64 [target]` cross-compiles in the same
+container into `build/aarch64/`; that is what `firmware/speakerd-setup.sh` and `/board deploy`
+install. `dsp/juce_plugins/tools/build-podman.sh` keeps its own flows (complete builds deployed
+to `~/.lv2`, the local AudioPluginHost debug loop), and `firmware/Makefile` builds the kernel
+side. See `docs/autonomous-development.md` for the three test rungs and what each one proves.
