@@ -117,6 +117,7 @@ DOCUMENT = graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1", "s0_
 CAPPED = {"gain_db": -20.0, "tweeter": "muted"}
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
 LIMITS = "speakerd: device: limits: output at -20 dB, tweeter muted"
+AMPD_LISTENING = "ampd: listening on 0.0.0.0: control 7450, knobs 7451, monitor 7452"
 
 # Stand-ins for systemctl, journalctl and loginctl (by the name they are called), for the
 # installers' systemd path: each call is recorded in $FAKE_SYSTEMD/calls; is-active answers
@@ -911,7 +912,9 @@ class Systemd(Setup):
         # and the pipewire component alone.
         for name, only in (("all", []), ("pipewire", ["--only", "pipewire"])):
             with self.subTest(name):
-                d, env = self.systemd(f"plugin-host-first-{name}", journal=["speakerd-run: starting speakerd", LIMITS])
+                # The whole architecture ends with ampd, which must say it listens.
+                d, env = self.systemd(f"plugin-host-first-{name}", journal=["speakerd-run: starting speakerd", LIMITS,
+                                                                            AMPD_LISTENING])
                 home = self.fresh_home(f"home-plugin-host-first-{name}")
                 unit = home / ".config/systemd/user/snapclient.service"
                 unit.parent.mkdir(parents=True)

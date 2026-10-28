@@ -10,7 +10,8 @@
 #              repository's pipewire.conf, and with --rate its sample rate
 #   snapcast   snapclient, routed into the speakerd sink (snapcast-setup.sh --route speakerd)
 #   speakerd   the headless plugin host (speakerd-setup.sh install), its output capped
-#   ampd       the speaker's network agent: not yet (step 3 of docs/remote-plugin-host.md)
+#   ampd       the speaker's network agent, and the hub on the left speaker (ampd-setup.sh install):
+#              ampd.json and its unit; its program comes with speakerd's version
 #
 # Each component is checked before any is changed. It builds nothing: the remote mode copies
 # one bundle (the aarch64 builds and these installers) to the board and runs this script's
@@ -49,6 +50,7 @@ FACTORY=""
 PLUGINS=()
 ARCH=aarch64
 SPEAKERD_ARGS=()     # passed to speakerd-setup.sh install (and check)
+AMPD_ARGS=()         # passed to ampd-setup.sh install (and check)
 REMOTE_ARGS=()       # passed to this script on the board
 
 usage() {
@@ -95,6 +97,12 @@ Options:
   --arch <aarch64|native>     target-remote: the build tree the bundle comes from (default aarch64).
   --bundle <dir>              target: the bundle (default: the folder above this script, when it is one).
 
+  ampd (see ampd-setup.sh --help):
+  --name <name>               this speaker's name (default: device.json's role).
+  --hub | --agent             the hub (the default for role left) or an agent of it.
+  --hub-address <addr>        an agent's hub, until mDNS finds it (required for a new agent).
+  --listen <addr>             the address ampd listens on (default 0.0.0.0).
+
   --no-systemd, --home <dir>  for the virtual pair tests (see speakerd-setup.sh).
   -h, --help                  show this help.
 
@@ -126,9 +134,13 @@ while [ $# -gt 0 ]; do
         --route)           ROUTE="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --server-ip)       SERVER_IP="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --snapcast-arg)    SNAPCAST_ARGS+=("${2:?}"); remote "$1" "$2"; shift 2 ;;
-        --role | --amplifier | --woofer-port | --tweeter-port | --import-filtergraph)
+        --role)            SPEAKERD_ARGS+=("$1" "${2:?}"); AMPD_ARGS+=("$1" "$2"); remote "$1" "$2"; shift 2 ;;
+        --amplifier | --woofer-port | --tweeter-port | --import-filtergraph)
                            SPEAKERD_ARGS+=("$1" "${2:?}"); remote "$1" "$2"; shift 2 ;;
         --stop-plugin-host) SPEAKERD_ARGS+=("$1"); remote "$1"; shift ;;
+        --name | --hub-address | --listen)
+                           AMPD_ARGS+=("$1" "${2:?}"); remote "$1" "$2"; shift 2 ;;
+        --hub | --agent)   AMPD_ARGS+=("$1"); remote "$1"; shift ;;
         --factory)         FACTORY="${2:?}"; shift 2 ;;
         --plugin)          PLUGINS+=("${2:?}"); shift 2 ;;
         --arch)            ARCH="${2:?}"; shift 2 ;;
@@ -198,6 +210,7 @@ test_hooks=()
 [ "$NO_SYSTEMD" -eq 0 ] || test_hooks+=(--no-systemd)
 [ -z "$HOME_OVERRIDE" ] || test_hooks+=(--home "$H")
 speakerd_setup() { bash "$FIRMWARE_DIR/speakerd-setup.sh" "$@" ${BUNDLE:+--bundle "$BUNDLE"} "${common[@]}" "${test_hooks[@]}"; }
+ampd_setup() { bash "$FIRMWARE_DIR/ampd-setup.sh" "$@" "${common[@]}" "${test_hooks[@]}"; }
 snapcast_setup() {
     local extra=()
     [ "$DRY_RUN" -eq 0 ] || extra+=(--dry-run)
@@ -258,6 +271,12 @@ if selected speakerd; then
     info "Checking speakerd"
     [ -n "$BUNDLE" ] || die "speakerd needs a bundle (--bundle, or run the setup.sh of an unpacked bundle): nothing was changed"
     speakerd_setup check "${SPEAKERD_ARGS[@]}" || die "speakerd cannot be installed (see above): nothing was changed"
+fi
+if selected ampd; then
+    info "Checking ampd"
+    ampd_check=(check "${AMPD_ARGS[@]}")
+    if selected speakerd; then ampd_check+=(--speakerd-too); fi
+    ampd_setup "${ampd_check[@]}" || die "ampd cannot be installed (see above): nothing was changed"
 fi
 if selected snapcast; then
     if [ "$ROUTE" = speakerd ] && ! selected pipewire && [ ! -f "$DROPIN" ]; then
@@ -328,7 +347,9 @@ for c in "${CHOSEN[@]}"; do
             speakerd_setup install "${SPEAKERD_ARGS[@]}"
             ;;
         ampd)
-            info "ampd: not yet. It is step 3 of docs/remote-plugin-host.md; speakerd plays without it."
+            info "ampd: the network agent, after speakerd (the speaker plays without it)"
+            if selected speakerd; then ampd_setup install "${AMPD_ARGS[@]}" --speakerd-too
+            else ampd_setup install "${AMPD_ARGS[@]}"; fi
             ;;
     esac
 done
