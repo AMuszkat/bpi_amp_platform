@@ -22,6 +22,7 @@ Then route the work:
 | changes several areas, or a protocol shared between them | `orchestrator`, which splits it across the area agents in parallel worktrees |
 | "is it green?", before a review or a pull request | `verifier` |
 | before merging | `reviewer` |
+| where the system spends its time, what (if anything) to make faster | `optimiser`, which measures and proposes; the area agents implement |
 | anything on a real board | `board-ops`, and only after the verifier says both rungs are green |
 
 The agent definitions are in `.claude/agents/`; each one's description says what it is for,

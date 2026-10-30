@@ -50,6 +50,7 @@ task would change:
 | more than one of the above, or a protocol they share | `orchestrator`, which runs the area agents in parallel worktrees and merges |
 | running the tests, "is it green?" | `verifier` |
 | before a pull request is merged | `reviewer` |
+| where the time and the margins go, what (if anything) to make faster | `optimiser`, which measures and proposes; the area agents implement |
 | a real board | `board-ops`, only after the verifier reports both rungs green |
 
 A single-area task goes straight to its agent; the orchestrator is for work that has to be
@@ -78,8 +79,8 @@ needs a change outside its files says so and stops.
   scripts are in `tools/`, work without Claude, and run in the development container
   (below).
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
-  `controller-dev`, `board-dev`, `verifier`, `reviewer`, `board-ops`, each limited to its
-  area and tools as the document's table says.
+  `controller-dev`, `board-dev`, `verifier`, `reviewer`, `board-ops`, `optimiser`, each
+  limited to its area and tools as the document's table says.
 - **CI** (`.github/workflows/ci.yml`) runs rungs 1 and 2 on pull requests and on `develop`.
 
 ## Developing the remote plugin host

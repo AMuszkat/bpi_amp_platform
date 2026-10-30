@@ -172,7 +172,7 @@ forgotten and hooks cannot.
 
 ## 3. The agents
 
-One orchestrator and six specialists. Each has the tools it needs and nothing else; the
+One orchestrator and eight specialists. Each has the tools it needs and nothing else; the
 "tools" column is what its `.claude/agents/<name>.md` definition grants.
 
 <!-- diagram: agents -->
@@ -187,6 +187,7 @@ flowchart TB
     ver --> rev["reviewer<br/>reads the diff against the rules:<br/>RT safety, private data, API drift<br/>between control and headless"]
     rev --> ops["board-ops<br/>rung 3 only: deploy, smoke test,<br/>journal, pw-top, roll back"]
     rev -.-> orch
+    opt["optimiser<br/>measures rungs 1 and 2, proposes<br/>ranked changes, edits nothing"] -. "proposals" .-> orch
 ```
 
 | Agent | Area | Tools | Never does |
@@ -199,9 +200,13 @@ flowchart TB
 | `verifier` | all | Bash for rungs 1 and 2, Read | edits source |
 | `reviewer` | all | Read, Grep, Glob | edits source, runs anything |
 | `board-ops` | `firmware/` | the board skill only | edits source, runs on a locked lab |
+| `optimiser` | all | Read, Grep, Glob, Bash for rungs 1 and 2 | edits source, records a test status, touches a board |
 
-All eight definitions are in `.claude/agents/`, with these tool grants and rules;
-`board-ops` works only through the `/board` skill (`tools/board.sh`).
+All nine definitions are in `.claude/agents/`, with these tool grants and rules;
+`board-ops` works only through the `/board` skill (`tools/board.sh`). The `optimiser`
+implements nothing: it measures where the time and the margins go and returns ranked
+proposals, each with its evidence, owner and the scenario that would prove it, for the
+orchestrator or an area agent to take up, or the finding that nothing is worth changing.
 
 The split between `plugin-dev`, `host-dev` and `controller-dev` follows the three build
 targets. They work in separate git worktrees so that the orchestrator can run them in
