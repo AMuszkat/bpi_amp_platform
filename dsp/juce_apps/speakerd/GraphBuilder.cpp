@@ -1,6 +1,7 @@
 #include "GraphBuilder.h"
 
 #include "LV2State.h"
+#include "Log.h"
 #include "Samples.h"
 #include "TimedNode.h"
 
@@ -258,6 +259,11 @@ namespace speakerd
             if (format == nullptr)
                 return juce::Result::fail (where + ": plugin format \"" + node.format + "\" is not hosted (speakerd hosts LV2)");
 
+            // JUCE's LV2 hosting loads a bundle named by its path into lilv's world, as it does a
+            // --lv2-bundle; the map of bundles follows it.
+            if (bundles != nullptr && node.format == "LV2" && juce::File::isAbsolutePath (node.identifier))
+                bundles->loadBundle (juce::File (node.identifier));
+
             juce::OwnedArray<juce::PluginDescription> found;
             format->findAllTypesForFile (found, node.identifier);
 
@@ -271,6 +277,11 @@ namespace speakerd
 
             if (instance == nullptr)
                 return juce::Result::fail (where + ": " + node.identifier + " did not instantiate: " + error);
+
+            // Which build the node runs: the URI JUCE found (a document may name a bundle's
+            // path), its version and source, and the bundle it came from. Never a failure.
+            if (bundles != nullptr && node.format == "LV2")
+                log ("plugin node " + juce::String (node.uid) + ": " + bundles->describe (found.getFirst()->fileOrIdentifier));
 
             instance->enableAllBuses();
 
