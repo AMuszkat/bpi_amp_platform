@@ -22,6 +22,48 @@ It wraps `juce_add_plugin` and fixes what must be the same everywhere:
 - `JUCE_WEB_BROWSER=0`, `JUCE_USE_CURL=0` (re-enabling either also needs `NEEDS_WEB_BROWSER`
   / `NEEDS_CURL TRUE` in `juce_add_plugin`), `JUCE_VST3_CAN_REPLACE_VST2=0`.
 
+## Adding a file to a plugin bundle: before JUCE's copy step
+
+`buildinfo.ttl` (the version and source identity, `juce_plugins/README.md`) is written into
+every LV2 bundle after JUCE has built it. JUCE's LV2 wrapper has no hook for extra metadata, so
+it is a `POST_BUILD` step on `<target>_LV2`, and the order of `POST_BUILD` steps is the order
+in which they were added (`extras/Build/CMake/JUCEUtils.cmake`):
+
+1. `juce_add_plugin()` adds, per format, the manifest helper: for LV2, `juce_lv2_helper`, which
+   rewrites (truncates) `manifest.ttl`, `dsp.ttl` and `ui.ttl` at every link
+   (`_juce_set_plugin_target_properties`; the writer is `writeManifestTtl` in
+   `juce_audio_plugin_client_LV2.cpp`, whose prefix block always declares `rdfs:`).
+2. At its very end, if `COPY_PLUGIN_AFTER_BUILD` is set, it calls
+   `juce_enable_copy_plugin_step()`, which adds the copy of the whole bundle into
+   `JUCE_LV2_COPY_DIR` (`~/.lv2`, or a cross build's `copied/lv2`, `tools/build.sh`) with
+   `copyDir.cmake` (remove the old copy, then install the bundle).
+
+A step added after `juce_add_plugin()` returns would run after the copy, and the copy would lack
+the file. So `speaker_add_plugin()` passes `COPY_PLUGIN_AFTER_BUILD FALSE`, adds its step, and
+then calls `juce_enable_copy_plugin_step(<target>)` itself, which is what `docs/CMake API.md`
+recommends for "extra build steps (such as signing or modifying the plugin bundle)". The
+bundle's path is the `JUCE_PLUGIN_ARTEFACT_FILE` property of `<target>_LV2` (not of the
+shared-code target). The VST3 manifest step is unaffected: it is added during
+`juce_add_plugin()`, and `juce_enable_vst3_manifest_step` refuses only to run after a copy
+step that is already there.
+
+Because the helper rewrites `manifest.ttl` whenever the plugin is linked, a line appended to
+it (`rdfs:seeAlso <buildinfo.ttl>`) must be appended after every helper run, and checked for
+so that a rerun never adds it twice.
+
+**Data that must reach the binary.** A plugin is a static shared-code library
+(`<target>`) linked into one module per format (`<target>_LV2`, `<target>_VST3`, listed in
+the `JUCE_ACTIVE_PLUGIN_TARGETS` property). An object in that archive that nothing references
+is never linked. The build-info string is therefore a generated source added to each format
+target (an object on the link line is always linked), with `__attribute__ ((used))` so that
+LTO keeps it although nothing reads it. Check with `strings <binary> | grep bpi-build-info`.
+
+**`include_guard(GLOBAL)` and variables.** A helper file included once per build with a global
+guard defines its functions for everyone, but its variables (`SPEAKER_LV2_URI_BASE`) only in
+the directory that included it first: a second plugin added to the same build (the controller
+adds plugins with `add_subdirectory`) would see none of them. `SpeakerPlugin.cmake` uses
+`include_guard(DIRECTORY)`.
+
 ## `-flto=auto` instead of `juce_recommended_lto_flags`
 
 For GCC/Clang `juce::juce_recommended_lto_flags` passes a bare `-flto`, which runs the LTO

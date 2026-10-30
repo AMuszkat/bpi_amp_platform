@@ -8,7 +8,10 @@ for the boards, caps its output from `device.json` and imports a board's AudioPl
 Step 3: `ampd` (`firmware/ampd`) is the network agent and the hub, the controller app
 (`dsp/juce_apps/controller`) is the plugin host GUI, and they speak [protocol.md](protocol.md)
 (version 1, authenticated). The virtual pair in `tests/vpair/` checks all of it on every run,
-the real controller against the real pair included. Section 10 is the software architecture one
+the real controller against the real pair included. Every target of every plugin embeds its
+plugin's version and source identity, in its binary and in its LV2 bundle's `buildinfo.ttl`, and
+`speakerd` logs them for each node it runs (section 7); firConv and crossover share one block
+FIR from `dsp/juce_plugins/shared/` (section 10.2). Section 10 is the software architecture one
 level below this document's system view. Step 4 onwards is still a proposal.*
 
 A stereo set made of this platform is two complete boards, each running the same JUCE
@@ -807,9 +810,62 @@ replaced by 1 or 2) and their own LV2 URI (`.../loudness_control`, `.../loudness
 a host never confuses them with the complete plugin. Plugins that do not list `TARGETS` build
 exactly as before, and `tools/build-podman.sh` keeps building the complete target only.
 
-Every target will embed a **version hash** of the source tree (not built yet); the catalogue
-carries it, and the hub only applies a graph when control and headless hashes agree, so a GUI
-can never show a parameter, or wait for a monitor stream, that the speaker does not have.
+**Versions and source identities.** Every target of every plugin (complete, control and
+headless, x86_64 and aarch64) embeds two things at build time, without any plugin source
+having to change (`dsp/juce_plugins/README.md`, "Versions and source identity"):
+
+- its plugin's **version**, the `project(... VERSION MAJOR.MINOR.PATCH)` of its
+  `CMakeLists.txt`;
+- its plugin's **source identity**, 12 hex characters over the inputs the plugin is compiled
+  from, in this order: its own folder, each shared source folder it declares (`SHARED`,
+  section 10.2), `dsp/juce_plugins/cmake`, and the pinned JUCE commit (the submodule's gitlink).
+  For firConv, from the repository root:
+
+  ```bash
+  git rev-parse HEAD:dsp/juce_plugins/firConv HEAD:dsp/juce_plugins/shared/blockfir \
+                HEAD:dsp/juce_plugins/cmake HEAD:dsp/juce_plugins/JUCE \
+      | git hash-object --stdin | cut -c1-12
+  ```
+
+  with `-dirty` appended when `git status --porcelain` over the same paths prints anything
+  (untracked files included), and `unknown` without git or outside a repository (as in
+  `tools/build-podman.sh`'s container, which mounts only `dsp/juce_plugins/`). On a clean tree
+  it is reproducible from git alone, also in a git worktree.
+
+`dsp/juce_plugins/cmake/SourceId.cmake` is the one implementation: the build runs it at every
+build, without a reconfigure, and rewrites the generated `SpeakerBuildInfo.h` only when the
+identity changes. The version and the identity are readable in three places: in the binary,
+as the string `bpi-build-info: <URI> version <version> source <source-id>` of every LV2 and
+VST3 `.so`; in every LV2 bundle, as `buildinfo.ttl` next to `manifest.ttl`, which names it
+(`rdfs:seeAlso`), written before JUCE copies the bundle into `~/.lv2`:
+
+```turtle
+@prefix bpi: <https://github.com/AMuszkat/bpi_amp_dsp_tuning#> .
+
+<https://github.com/AMuszkat/bpi_amp_dsp_tuning/firConv>
+    bpi:version "0.0.2" ;
+    bpi:sourceId "0123456789ab" .
+```
+
+and in `speakerd`'s log, one line per plugin node whenever it builds a graph (section 10.3).
+The controller, which compiles the control builds' sources in, carries none yet.
+
+**The version rule.** A plugin's version goes up whenever its sources (its folder, or a shared
+folder it declares) change: the **patch** for a change that keeps the interface (parameter
+IDs, ranges, defaults, monitors, state format) and changes the processing, output differences
+within a stated tolerance included, or fixes a bug; the **minor** for an interface change that
+keeps old saved states loadable; the **major** for one that breaks them. A change to
+`dsp/juce_plugins/cmake` or to the JUCE pin changes every source identity and no version.
+`dsp/juce_plugins/tools/plugin-versions.sh list` prints every plugin's version and source
+identity, as a build made at that moment embeds them; `plugin-versions.sh check [REF]` fails
+(exit status 1) when a plugin whose sources differ between `git merge-base HEAD REF` (REF
+defaults to `origin/develop`) and the working tree has not raised its version.
+
+Step 4's catalogue carries them, and the hub only applies a graph when control and headless
+hashes agree, so a GUI can never show a parameter, or wait for a monitor stream, that the
+speaker does not have. Step 4 decides whether that compares the source identity or an
+interface hash, because a processing-only change such as P1 (the shared block FIR of section
+10.2, a patch) must not force controllers to be rebuilt.
 
 **What `plugin-check` verifies.** `dsp/juce_apps/plugin-check/run.sh loudness` builds the three
 targets and loads them through JUCE's LV2 hosting. It checks that they expose the same 38
@@ -1126,6 +1182,28 @@ agree only because they compile the same `PluginProcessor`. `plugin-check`
 their parameter tables and state round trips, renders the complete and headless builds on the
 same signal, and reads the monitors through `<plugin>/plugin-check.monitors.h`.
 
+**Shared source folders.** Code that several plugins compile lives in
+`dsp/juce_plugins/shared/<name>/`, header-only, and a plugin names the folders it compiles with
+`SHARED <name>` in its `speaker_add_plugin()` call, which puts each on the include path of all
+its targets and makes it an input of the plugin's source identity (section 7): a change in a
+shared folder changes the identity of every plugin that declares it, and asks each of them for
+a new version. The first is `shared/blockfir`, P1: `BlockFir.h`, the direct-form FIR that
+firConv (its 61-tap pre-LP and 2001-tap inverse) and crossover (its two 259-tap bands) compile
+in place of `juce::dsp::FIR::Filter`. It computes 16 outputs per pass over the taps with GCC
+vector types, each output's taps added in ascending order as `FIR::Filter` does, from a linear
+history allocated in `prepareToPlay`, and processes a block longer than the prepared size in
+chunks. On x86_64 it is bit-identical to `FIR::Filter`; on aarch64 every tap is one fused
+multiply-add, while `FIR::Filter` mixes fused and unfused taps from sample to sample, so the
+FIRs' outputs differ by at most -131 dB re their peak (crossover's output by -129 dB).
+firConv's output on aarch64 moves by up to -59 dB re peak, below 50 Hz: its float32 high-pass
+biquads, with poles close to z = 1, turn any rounding change before them, even of one ulp,
+into a difference at the level of their own low-frequency rounding noise, as they did before
+(today's aarch64 build differs from the x86_64 one as much). Its test,
+`dsp/juce_plugins/tests/blockfir` (rung 1, outside every plugin's identity), builds it with the
+plugins' flags and checks it bit for bit against a reference whose arithmetic is written out,
+on x86_64 and on aarch64 under qemu. Both plugins went from 0.0.1 to 0.0.2: a patch, the
+processing changed and the interface did not.
+
 Two things cross the plugin boundary at run time, both through JUCE's LV2 hosting inside
 `speakerd`: parameter values go **in** as `patch:Set` atoms, applied inside the plugin's `run()`;
 monitor values come **out** on the plugin's atom output, once the wrapper's listener heard the
@@ -1204,6 +1282,24 @@ loop thread never touches the graph; it tells the engine whether every link is a
 output gate) and tells the main thread when the quantum or the rate changed, so the graph is
 primed anew before the audio thread sees the new block size. The limits of `device.json` are
 constants of the engine, read once at start; no message changes them.
+
+**Which build each node runs.** Each time a layer, an `apply` or the render builds a graph,
+`speakerd` logs one line per plugin node, on the main thread, never on the audio thread, with
+the version and the source identity of section 7 read from the bundle's `buildinfo.ttl`:
+
+```
+plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>
+```
+
+JUCE's LV2 hosting never reads a version, so `speakerd` finds the bundle itself, in the order
+lilv does: the default paths, then the `--lv2-bundle`s. A bundle without an identity is logged
+as one, with the reason:
+
+```
+plugin node <uid>: <URI>, no build identity (an older build), bundle <bundle dir>
+plugin node <uid>: <URI>, no build identity (buildinfo.ttl unreadable), bundle <bundle dir>
+plugin node <uid>: <URI>, no build identity (bundle not found)
+```
 
 ### 10.4 ampd: one event loop, two roles
 
@@ -1420,6 +1516,8 @@ Each rule is enforced at the lowest layer that can hold it, so that nothing abov
 | Piece | Path |
 |---|---|
 | DSP cores, the three plugin targets, `speaker_add_plugin()`, `Monitors.h` | `dsp/juce_plugins/` |
+| shared source folders of the plugins (the block FIR of firConv and crossover) and their tests | `dsp/juce_plugins/shared/`, `dsp/juce_plugins/tests/` |
+| the version and source identity of every plugin; the version rule's check | `dsp/juce_plugins/cmake/SourceId.cmake`, `dsp/juce_plugins/tools/plugin-versions.sh` |
 | `plugin-check`, `speakerd`, the controller app (JUCE applications, one build system) | `dsp/juce_apps/` |
 | `ampd`, its systemd unit | `firmware/ampd/` |
 | `speakerd`'s unit, `speakerd-run`, the installer's JSON helper, the tweeter rule | `firmware/speakerd/` |

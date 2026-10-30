@@ -17,6 +17,13 @@ rc=0
 
 record() { [ $record = 0 ] || tools/status.py set "$@"; }
 
+# The version and source identity in the LV2 bundles plugin-check built for plugin $1
+# (dsp/juce_plugins/tests/buildinfo).
+check_build_info() {
+    dsp/juce_plugins/tests/buildinfo/check.sh "$1" \
+        "${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}/$1-builds/plugin/"*_artefacts/Release/LV2/*.lv2
+}
+
 run_unit() {
     local plugins=() p
     for f in dsp/juce_plugins/*/CMakeLists.txt; do
@@ -32,10 +39,20 @@ run_unit() {
     local failed=0
     for p in "${plugins[@]}"; do
         echo "=== /test unit: $p"
-        if dsp/juce_apps/plugin-check/run.sh "$p"; then echo "unit: $p passed"; else echo "unit: $p FAILED"; failed=1; fi
+        # plugin-check, then the version and source identity in the bundles it built.
+        if dsp/juce_apps/plugin-check/run.sh "$p" && check_build_info "$p"; then
+            echo "unit: $p passed"
+        else
+            echo "unit: $p FAILED"; failed=1
+        fi
     done
-    # The controller's bridge against its fake hub (dsp/juce_apps/controller/tests).
     local checked="${plugins[*]}"
+    # The shared block FIR of firConv and crossover, bit for bit on x86_64 and on aarch64
+    # under qemu (dsp/juce_plugins/tests/blockfir).
+    echo "=== /test unit: blockfir"
+    if dsp/juce_plugins/tests/blockfir/run.sh; then echo "unit: blockfir passed"; else echo "unit: blockfir FAILED"; failed=1; fi
+    checked+=" blockfir"
+    # The controller's bridge against its fake hub (dsp/juce_apps/controller/tests).
     if [ -f dsp/juce_apps/controller/CMakeLists.txt ]; then
         echo "=== /test unit: controller"
         if tools/build.sh controller && dsp/juce_apps/controller/tests/run.sh; then

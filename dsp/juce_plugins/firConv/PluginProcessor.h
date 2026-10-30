@@ -3,6 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
+#include "BlockFir.h"   // dsp/juce_plugins/shared/blockfir (SHARED in CMakeLists.txt)
+
 #include <array>
 #include <limits>
 
@@ -81,10 +83,12 @@ private:
     // The pre-HP is a Butterworth high-pass: a single high-order direct-form IIR is numerically
     // unstable in float32 at its low cutoff (poles cluster near z=1 -> the recursion overflows),
     // so it is exported as second-order sections (HPreHpSos) and run here as a cascade of biquads.
+    // The FIRs are the shared block FIR (BlockFir.h), which processes a block longer than the
+    // prepared size in chunks of it.
     juce::dsp::Gain<float>        gain;
-    juce::dsp::FIR::Filter<float> preLp;   // HPreLpTaps  (remez low-pass, HF band-limit)
+    speaker::BlockFir             preLp;   // HPreLpTaps  (remez low-pass, HF band-limit)
     juce::OwnedArray<juce::dsp::IIR::Filter<float>> preHpSections;  // HPreHpSos (LF band-limit)
-    juce::dsp::FIR::Filter<float> inv;     // InvFilter   (least-squares magnitude inverse)
+    speaker::BlockFir             inv;     // InvFilter   (least-squares magnitude inverse)
 
     // Build the pre-HP biquad cascade from a flat SOS array laid out 6 floats per section
     // ([b0,b1,b2,a0,a1,a2], the layout scipy.signal.butter(..., output='sos') emits).

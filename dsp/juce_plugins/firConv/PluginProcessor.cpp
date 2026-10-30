@@ -111,15 +111,14 @@ void PluginProcessor::changeProgramName (int, const juce::String&)
 //==============================================================================
 void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
 {
-    // Everything is allocated here. The filters below work sample by sample, so a block of
-    // any size is processed without allocating; a host that prepares before it has a device
-    // (sample rate or block size 0) gets sane values.
+    // Everything is allocated here. The gain and the biquads work sample by sample and the
+    // FIRs in chunks of the prepared size, so a block of any size is processed without
+    // allocating; a host that prepares before it has a device (sample rate or block size 0)
+    // gets sane values.
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
     spec.maximumBlockSize = (juce::uint32) (samplesPerBlock > 0 ? samplesPerBlock : 512);
     spec.numChannels = 1; // mono in/out
-
-    using FirCoeffs = juce::dsp::FIR::Coefficients<float>;
 
     // Gain: the "gain" parameter, applied at the next block.
     gain.prepare(spec);
@@ -127,17 +126,13 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     appliedGainDb = std::numeric_limits<float>::quiet_NaN();
 
     // Pre-LP FIR (remez low-pass): rolls the correction off above the driver's usable band.
-    preLp.coefficients = FirCoeffs::Ptr(
-        new FirCoeffs(HPreLpTaps, (int) (sizeof(HPreLpTaps) / sizeof(HPreLpTaps[0]))));
-    preLp.prepare(spec);
+    preLp.prepare (HPreLpTaps, (int) (sizeof(HPreLpTaps) / sizeof(HPreLpTaps[0])), (int) spec.maximumBlockSize);
 
     // Pre-HP: Butterworth high-pass, applied as a cascade of biquads (float32-stable).
     loadSosCascade(HPreHpSos, (int) (sizeof(HPreHpSos) / sizeof(HPreHpSos[0])), spec);
 
     // Inverse FIR (least-squares magnitude inverse of the summed driver response).
-    inv.coefficients = FirCoeffs::Ptr(
-        new FirCoeffs(InvFilter, (int) (sizeof(InvFilter) / sizeof(InvFilter[0]))));
-    inv.prepare(spec);
+    inv.prepare (InvFilter, (int) (sizeof(InvFilter) / sizeof(InvFilter[0])), (int) spec.maximumBlockSize);
 
     reset();
 }
@@ -212,15 +207,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     if (buffer.getNumChannels() == 0)
         return;
 
-    // Mono processing: gain -> pre-LP (FIR) -> pre-HP (IIR biquad cascade) -> inverse (FIR).
+    // Mono processing: gain -> pre-LP (FIR) -> pre-HP (IIR biquad cascade) -> inverse (FIR),
+    // in place on channel 0.
     auto inoutBlock = juce::dsp::AudioBlock<float> (buffer).getSubsetChannelBlock (0, 1);
     juce::dsp::ProcessContextReplacing<float> context (inoutBlock);
+    float* const samples = buffer.getWritePointer (0);
+    const int numSamples = buffer.getNumSamples();
 
     gain.process (context);
-    preLp.process (context);
+    preLp.process (samples, samples, numSamples);
     for (auto* f : preHpSections)
         f->process (context);
-    inv.process (context);
+    inv.process (samples, samples, numSamples);
 }
 
 //==============================================================================

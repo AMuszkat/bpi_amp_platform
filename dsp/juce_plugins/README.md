@@ -17,9 +17,15 @@ tools for the rest of the audio chain.
 ```
 juce_plugins/
 ├── cmake/SpeakerPlugin.cmake   speaker_add_plugin(): identity, formats, flags, LTO for every plugin
+├── cmake/SourceId.cmake        the version and source identity every target embeds (below)
+├── shared/<name>/              source folders several plugins compile (SHARED), e.g. blockfir/
+├── tests/                      tests of shared code, outside every plugin's identity
+│   ├── blockfir/                 the block FIR, bit for bit on x86_64 and aarch64 (rung 1)
+│   └── buildinfo/                a built bundle carries the identity of its sources (rung 1)
 ├── tools/                      the build system, shared by every plugin
 │   ├── build-podman.sh           recommended: containerised cross-build, deploy, local debug
 │   ├── common.sh                 config loading + plugin discovery used by the scripts
+│   ├── plugin-versions.sh        every plugin's version and source identity; the version rule
 │   ├── Containerfile             the builder image (Debian bookworm + aarch64 cross toolchain),
 │   │                             also the repository's development container (tools/container.sh)
 │   ├── toolchain-aarch64-linux.cmake
@@ -35,9 +41,11 @@ juce_plugins/
 └── pluginHost/                 gitignored: the AudioPluginHost built by -setup-host
 ```
 
-A plugin is any folder here whose `CMakeLists.txt` calls `speaker_add_plugin()`. The build
-scripts find plugins by that call, and read the channel counts and the LV2 URI from it, so
-**adding a plugin needs no change to the tooling**. See [Adding a plugin](#adding-a-plugin).
+A plugin is any folder here whose `CMakeLists.txt` calls `speaker_add_plugin()` at the start
+of a line. The build scripts find plugins by that call, and read the channel counts and the LV2
+URI from it, so **adding a plugin needs no change to the tooling**. See
+[Adding a plugin](#adding-a-plugin). `shared/`, `tests/`, `cmake/` and `tools/` have no such
+`CMakeLists.txt`, so nothing takes them for plugins.
 
 ## Building
 
@@ -130,6 +138,9 @@ Gotchas, all handled or explained by the script. Details in
        SOURCES PluginProcessor.cpp PluginEditor.cpp
        MODULES juce_dsp)     # beyond juce_audio_utils/processors, gui_basics/extra
    ```
+   `VERSION` must be `MAJOR.MINOR.PATCH`, written out (see
+   [Versions and source identity](#versions-and-source-identity)); a plugin that compiles a
+   shared folder adds `SHARED <name>`.
 2. `tools/build-podman.sh myPlugin`. That's all.
 
 The folder name is the target, product, binary and URI name. The LV2 URI becomes
@@ -175,6 +186,127 @@ category output meter. The complete and headless builds publish them from the au
 that wrapper does not report them to the host); in the control build the plugin's getters read
 them. `loudness/Monitors.h` has the helpers, and
 `<plugin>/plugin-check.monitors.h` names the getters for plugin-check.
+
+## Shared source folders
+
+Code that several plugins compile lives in `shared/<name>/`, header-only, and a plugin names
+the folders it uses:
+
+```cmake
+speaker_add_plugin(firConv
+    ...
+    SHARED  blockfir)
+```
+
+`SHARED` puts each folder on the include path of every target of the plugin (only the folders
+it names) and makes it an input of the plugin's source identity, so a change in it changes the
+identity of every plugin that compiles it, and `plugin-versions.sh check` asks each of them for
+a new version. Tests of shared code go in `tests/`, outside every plugin's identity.
+
+| Folder | What | Compiled into |
+|---|---|---|
+| `shared/blockfir` | `BlockFir.h`: a direct-form FIR that computes 16 outputs per pass over its taps with GCC vector types, each output's taps added in ascending order as `juce::dsp::FIR::Filter` does; a linear history allocated in `prepare()`, longer blocks in chunks. Bit-identical to `FIR::Filter` on x86_64; on aarch64 every tap is a fused multiply-add, within -131 dB of `FIR::Filter`'s output (which mixes fused and unfused taps) | `firConv` (pre-LP, inverse), `crossover` (both bands) |
+
+`tests/blockfir/run.sh` (part of `tools/test.sh unit`) builds its test with the plugins' flags
+for x86_64 and for aarch64 and runs both, the aarch64 build under `qemu-aarch64-static`: (a) bit
+for bit against a reference FIR whose arithmetic is written out (`std::fma` per tap where the
+kernel fuses, a rounded multiply and add where it does not, never reordered), in blocks of 1024,
+of random sizes, longer than the prepared size, in place and after `reset()`; (b) against
+`juce::dsp::FIR::Filter`, the worst difference below -120 dB re the output's peak. Without the
+aarch64 toolchain or qemu it fails and names the packages (`g++-aarch64-linux-gnu`,
+`qemu-user-static`). `run.sh --time` prints the cost of each filter. Why the rounding differs on
+aarch64: [`simd-on-aarch64-gcc.md`](../docs/juce-knowledge/dsp/simd-on-aarch64-gcc.md),
+[`fir-filter-rounding.md`](../docs/juce-knowledge/dsp/fir-filter-rounding.md).
+
+## Versions and source identity
+
+Every plugin has a **version**, its `project(... VERSION MAJOR.MINOR.PATCH)`, and a **source
+identity**, 12 hex characters over the inputs it is compiled from. All its targets (complete,
+control, headless; x86_64 and aarch64) embed both, without any plugin source having to change.
+
+**The source identity** is computed over, in this order: the plugin's own folder, each shared
+folder it declares (`SHARED`, in declared order), `cmake/`, and the pinned JUCE commit (the
+submodule's gitlink). From the repository root, for firConv:
+
+```bash
+git rev-parse HEAD:dsp/juce_plugins/firConv HEAD:dsp/juce_plugins/shared/blockfir \
+              HEAD:dsp/juce_plugins/cmake HEAD:dsp/juce_plugins/JUCE \
+    | git hash-object --stdin | cut -c1-12
+```
+
+with `-dirty` appended when `git status --porcelain -- <the same paths>` prints anything
+(tracked changes, staged or not, and untracked files that are not ignored), and `unknown`
+without git, outside a repository, or in one without a commit. A folder that is not committed
+yet counts as the empty tree (`git hash-object -t tree /dev/null`), and is dirty. On a clean
+tree the identity is reproducible from git alone. It follows the tree, not a commit: a commit
+that touches none of a plugin's inputs leaves its identity as it was. It works in a git worktree
+(the gitlink is read from HEAD's tree, so an uninitialised submodule changes nothing).
+`tools/build-podman.sh` mounts only `juce_plugins/` into its container, where git finds no
+repository: its bundles say `unknown`.
+
+`cmake/SourceId.cmake` is the one implementation, used by the build and by
+`plugin-versions.sh`. The build recomputes it at every build, without a reconfigure (a custom
+target, `<plugin>_build_info`), and rewrites the generated header only when it changes, so an
+unchanged identity recompiles nothing. Where it ends up:
+
+| Where | What |
+|---|---|
+| `SpeakerBuildInfo.h`, generated, on every target's include path | `SPEAKER_PLUGIN_NAME`, `SPEAKER_PLUGIN_VERSION`, `SPEAKER_PLUGIN_SOURCE_ID` |
+| every LV2 and VST3 binary | the string `bpi-build-info: <LV2 URI> version <version> source <source-id>` (`strings libfirConv.so \| grep bpi-build-info`) |
+| every LV2 bundle, next to `manifest.ttl` | `buildinfo.ttl`, below, and one line at the end of `manifest.ttl`: `<URI> rdfs:seeAlso <buildinfo.ttl> .` |
+| `speakerd`'s log | `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` for each plugin node, read from the bundle's `buildinfo.ttl` |
+
+```turtle
+@prefix bpi: <https://github.com/AMuszkat/bpi_amp_dsp_tuning#> .
+
+<https://github.com/AMuszkat/bpi_amp_dsp_tuning/firConv>
+    bpi:version "0.0.2" ;
+    bpi:sourceId "0123456789ab" .
+```
+
+The subject is the target's own LV2 URI (`.../loudness_headless` for the headless build), the
+`bpi:` namespace is `SPEAKER_LV2_URI_BASE` with `#`. The file is written by a `POST_BUILD` step
+after JUCE's `juce_lv2_helper` has written the bundle's `.ttl` files and before JUCE copies the
+bundle (into `~/.lv2`, or a cross build's `copied/lv2`), so the copy has it too
+([cmake-reference.md](../docs/juce-knowledge/build-system/cmake-reference.md)).
+`tests/buildinfo/check.sh` (rung 1, on the bundles plugin-check builds) checks that a bundle's
+`buildinfo.ttl`, manifest line and binary agree with `plugin-versions.sh list`. The controller,
+which compiles `loudness_control`'s sources in (`../juce_apps/controller/ControlPlugins.cmake`),
+does not compile the generated source and carries no plugin identity.
+
+**The version rule.** A plugin's version goes up whenever its sources change (its folder or a
+shared folder it declares):
+
+| Change | Raise |
+|---|---|
+| keeps the interface (parameter IDs, ranges, defaults, monitors, state format) and changes the processing (output differences within a stated tolerance included), or fixes a bug | **patch** (0.0.1 -> 0.0.2) |
+| changes the interface and keeps old saved states loadable | **minor** (0.0.2 -> 0.1.0) |
+| changes the interface and breaks old saved states | **major** (0.1.0 -> 1.0.0) |
+
+A change only to `cmake/` or to the JUCE pin changes every identity but no version. The
+P1 block FIR is a patch: firConv and crossover 0.0.1 -> 0.0.2, the same parameters and state,
+their output bit-identical on x86_64; on aarch64 crossover's within -129 dB re peak, and
+firConv's within -59 dB re peak below 50 Hz, the rounding noise of its high-pass biquads,
+which any one-ulp change before them moves that much ([`firConv/README.md`](firConv/README.md)).
+
+**`tools/plugin-versions.sh`** (bash; git, coreutils and cmake; any directory, natively or in
+the development container):
+
+```bash
+tools/plugin-versions.sh list           # "<plugin> <version> <source-id>", one line per plugin
+tools/plugin-versions.sh check [REF]    # the version rule against git merge-base HEAD REF
+```
+
+`list` prints what a build made at that moment would embed, sorted by name, and nothing else.
+`check` compares every plugin's sources (its folder and its `SHARED` folders, not `cmake/` or
+the JUCE pin) between `git merge-base HEAD REF` (REF defaults to `origin/develop`) and the
+working tree, tracked changes and untracked files included, and prints one line per plugin:
+`<plugin> unchanged <version>`, `<plugin> changed, raised <old> -> <new>`,
+`<plugin> changed, NOT raised <old> -> <new>`, or `<plugin> new <version>` for one absent at the
+base. Exit status 0 when every changed plugin raised its version, 1 when one did not, 2 on a
+usage or git error. The version and `SHARED` are read from the text of the plugin's
+`CMakeLists.txt`, so both must be written out literally; the configure step fails when that
+reading disagrees with CMake's.
 
 ## JUCE
 
