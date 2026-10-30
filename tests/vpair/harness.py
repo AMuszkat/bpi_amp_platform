@@ -837,6 +837,117 @@ def render(state, samples, bundles=(), args=(), timeout=120, allow_tweeter=True)
         return _read_wav(out), result.stdout
 
 
+class SpeakerdLink:
+    """A client of a real speakerd's local link (docs/protocol.md; speakerd's README, "The local
+    link"), as ampd is one, for a test that runs no ampd: it connects to the speaker's
+    $XDG_RUNTIME_DIR/speakerd/control.sock (retrying until speakerd listens), reads the hello,
+    and keeps every line it gets with its arrival time (time.monotonic()). speakerd takes one
+    client at a time, so not on a speaker where an ampd runs.
+
+        with SpeakerdLink(pair["left"]) as link:
+            link.subscribe("speakerd/timing", 2)
+            answer = link.apply(document, revision=2)       # {"op": "applied", ...} or "failed"
+            timing = link.values("speakerd/timing", since=start, until=end)
+    """
+
+    def __init__(self, speaker, timeout=10.0, path=None):
+        self.path = Path(path) if path else Path(speaker.env["XDG_RUNTIME_DIR"]) / "speakerd" / "control.sock"
+        self.messages, self.closed = [], False
+        self._changed = threading.Condition()
+        deadline = time.monotonic() + timeout
+        while True:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.connect(str(self.path))
+                break
+            except OSError as e:
+                sock.close()
+                if time.monotonic() > deadline:
+                    raise AssertionError(f"cannot connect to speakerd's local link at {self.path} within "
+                                         f"{timeout} s: {e}")
+                time.sleep(0.1)
+        self.sock = sock
+        self._file = sock.makefile("rb")
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+        self.hello = self.wait(lambda m: m.get("op") == "hello", timeout, "speakerd's hello")
+
+    def _read(self):
+        try:
+            for line in self._file:
+                obj = json.loads(line)
+                with self._changed:
+                    self.messages.append((time.monotonic(), obj))
+                    self._changed.notify_all()
+        except (OSError, ValueError):
+            pass
+        with self._changed:
+            self.closed = True
+            self._changed.notify_all()
+
+    def send(self, obj):
+        self.sock.sendall(json.dumps(obj).encode() + b"\n")
+
+    def mark(self):
+        """The number of lines so far, for wait(..., after=)."""
+        with self._changed:
+            return len(self.messages)
+
+    def wait(self, predicate, timeout=10, what="a message", after=0):
+        """The first line from line `after` on for which `predicate` holds; fails, with the last
+        lines it got, on a timeout or when speakerd closes the link first."""
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while True:
+                for _, obj in self.messages[after:]:
+                    if isinstance(obj, dict) and predicate(obj):
+                        return obj
+                if time.monotonic() > deadline or self.closed:
+                    raise AssertionError(f"speakerd's local link: {what} did not come within {timeout} s"
+                                         + (" (speakerd closed the link)" if self.closed else "") + "; it got:\n"
+                                         + "\n".join(json.dumps(obj)[:300] for _, obj in self.messages[-20:]))
+                self._changed.wait(0.1)
+
+    def subscribe(self, stream, rate_hz=30):
+        self.send({"op": "subscribe", "stream": stream, "rate_hz": rate_hz})
+
+    def values(self, stream, since=None, until=None):
+        """[(arrival, v)] of a subscribed stream, those that arrived after `since` and not after
+        `until`."""
+        with self._changed:
+            return [(t, obj["v"]) for t, obj in self.messages
+                    if isinstance(obj, dict) and obj.get("op") == "value" and obj.get("stream") == stream
+                    and (since is None or t > since) and (until is None or t <= until)]
+
+    def apply(self, document, revision, timeout=30):
+        """An `apply` of `document` as `revision`; returns speakerd's answer, applied or failed."""
+        after = self.mark()
+        self.send({"op": "apply", "revision": revision, "document": dict(document, revision=revision)})
+        return self.wait(lambda m: m.get("op") in ("applied", "failed") and m.get("revision") == revision, timeout,
+                         f"the answer to the apply of revision {revision}", after)
+
+    def status(self, timeout=10):
+        after = self.mark()
+        self.send({"op": "status"})
+        return self.wait(lambda m: m.get("op") == "status", timeout, "the answer to status", after)
+
+    def close(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self._thread.join(timeout=5)
+        self._file.close()
+        self.sock.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 # ---------------------------------------------------------------------------------------------
 # The board side: firmware/'s installers, the systemd unit they install, who drives the graph
 

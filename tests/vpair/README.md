@@ -31,8 +31,9 @@ test does not fail the run, but a pass with skips says so: `test_no_network` ski
 `unshare -rn` is refused, as on GitHub's runners.
 
 A scenario that runs speakerd builds what it needs first, once per test run:
-`tools/build.sh speakerd`, and loudness's `headless` and `complete` builds (and
-`tools/build.sh controller` for `test_controller_end_to_end`). The builds are
+`tools/build.sh speakerd`, and the plugin builds it plays: loudness's `headless` and
+`complete`, the complete builds of firConv and the crossover (and `tools/build.sh controller`
+for `test_controller_end_to_end`). The builds are
 incremental, so this takes about a second when nothing changed, and the first run of a fresh
 checkout takes the minutes of a full build.
 
@@ -95,6 +96,8 @@ path must fit in 108 bytes.
 | `test_drag_during_revision.py` | a value set while a revision applies is kept, everywhere, and after a speakerd restart |
 | `test_ampd_persistence.py` | `graph.json` follows the values, speakerd boots on it, `graph.lkg.json` follows a revision that played long enough |
 | `test_controller_end_to_end.py` | the real controller in its script test mode against the real pair: connect, knob, edits, a refusal, monitors, another secret, and its GUI under Xvfb |
+| `test_chain_cost.py` | the board's chain (loudness, firConv, the crossover) at quantum 1024: what each FIR plugin costs speakerd's audio thread, by speakerd's own timing |
+| `test_plugin_identity.py` | each plugin bundle's `buildinfo.ttl` (version and source id, as `plugin-versions.sh list` says), and speakerd's line for each plugin node, live and rendered; an older build and a broken `buildinfo.ttl` |
 
 ## Before and after the speakerd that enforces the limits
 
@@ -103,6 +106,15 @@ speakerd's part of `test_speakerd_crash_restart` need the speakerd of the board 
 (the limits, failing closed, `--version`, the import and its example session). Against an
 older speakerd they fail, each saying what it lacks: the installer refuses a speakerd older
 than `SPEAKERD_MIN_VERSION` (firmware/speakerd-setup.sh), which would ignore the cap.
+
+## Before and after the build identity
+
+`test_chain_cost` and `test_plugin_identity` prove phase A of the plugins (the block FIR that
+firConv and the crossover share, the plugins' version and source id in `buildinfo.ttl`,
+`plugin-versions.sh`) and of speakerd (its `plugin node` lines). Against the plugins and speakerd
+from before it they fail, each saying what it lacks: firConv and the crossover over their limits
+(15.1 % and 3.8 % of the cycle), no `plugin-versions.sh`, no `buildinfo.ttl`, no `plugin node`
+line.
 
 ## What the scenarios prove
 
@@ -138,6 +150,8 @@ the complete build of the plugin, which is what the plugin outside speakerd outp
 | `test_speakerd_tweeter_rule` | speakerd run as on a board (allow_tweeter=False) with the tweeter on: a graph.json sending loudness to both channels fails with "the stream reaches the tweeter ... (output 16:0;" and graph.lkg.json plays, its render's level within 0.05 dB on both channels; an apply of it on the local link is answered `failed` with that reason and the capture goes on (level within 0.05 dB, no 10 ms block 0.5 dB off); and 15 documents (straight from FL and from Mine, a low band, a bypassed crossover, a control build, plugins before and after the bands, both bands or the high band to both channels, crossovers in series, several paths, an unreached plugin) get the same verdict and the same named outputs from `firmware/speakerd/tweeter_rule.py` and speakerd's render |
 | `test_drag_during_revision` | while controller B's revision 2 applies (the right's ampd held 1.5 s), controller A drags node 16's gain and ends at +6 dB: the graph sent, both graph.json, A, B and a later controller have +6 dB, and after the left's speakerd restarts its 200 Hz gain is its graph.json's render within 0.05 dB, 3 dB or more from B's document's |
 | `test_controller_end_to_end` | the real controller (`tools/build.sh controller`, its script test mode, `--trace`) against the real pair (the Mine pin through loudness, a stereo 200 Hz tone, left -20 and right -32 dBFS, the tweeter muted): (a) synced and proven on revision 1 with the hub's document on its canvas, both speakers online on layer current, both monitor links connected; no `error` reaches it, ampd ignores, drops or refuses nothing, one control connection, no OSC echo dropped; (b) nine `set`s (+12 / 0 dB, 1.2 s apart) echoed, each heard on both captures within 60 ms of its line (knob_latency's onset() and set-asides, at least 5 measured), both graph.json at the last value within 2 s; a 1 s `drag` to 3.5 dB heard on both through at least 10 intermediate 20 ms blocks, then at the render's 200 Hz level within 0.1 dB, its value echoed, in both graph.json, the hub's state and the controller; (c) `add loudness` applied (both graph.json have the node, its headless URI, 35 parameters), a `set` of its mode echoed, `disconnect 16:0 2:0` applied and heard (no woofer sample above -100 dBFS), two `connect-pins` putting the new node in the woofer's path applied and heard (the render's level within 0.1 dB), revision 5 in both graph.json, its state the hub's; with the right's device.json saying the tweeter is on, `connect-pins 1:0 2:1` rejected with "right: the tweeter is on here (device.json)", undone in it, rolled back on the left, both graph.json on revision 5, its state the hub's; (d) `open 16`: 8 `mon_levelDb` values from the left, then (`monitor-speaker 16 right`) from the right, each side's level as loudness's detector reads it (BallisticsFilter, computed here for 200 Hz) within 1 dB, the subscription moved; `output/level` woofer peak each side's level and RMS 3.01 dB under within 1 dB, 12 dB apart within 1 dB, tweeters under -100 dBFS; (e) another secret: not proven, not synced, the refusal in `refused`, revision 0, no plugin node, `refused <address>: its hello does not prove the pair's secret` in the hub's log, neither secret printed; (f) `--gui` under Xvfb and openbox (`harness.VirtualDisplay`), the tone stepping -30 / -12 dBFS: synced, both monitor links feeding levels above -60 dBFS, the window's `mon_levelDb` spanning more than 6 dB, `build/e2e-controller/controller-juce.png` and `controller-screen.png` written, neither one flat colour |
+| `test_chain_cost` | speakerd on the left speaker plays the board's chain from graph.json (the Mine pin -> `loudness_headless` 16 -> `firConv` 17 -> `crossover` 18, its low band to the woofer and its high band to the tweeter; the tweeter on, without --allow-tweeter-without-crossover) at 48 kHz and quantum 1024, stereo noise at -26 dBFS RMS playing; a client of its local link (`harness.SpeakerdLink`) subscribes to `speakerd/timing` and `output/level` at 2 Hz and, after 5 s, adds up a 20 s window, each value weighted by its cycles: firConv's mean share of the cycle is under 5 % and the crossover's under 1.5 % (juce::dsp::FIR::Filter: 15.1 % and 3.8 % here, x86_64; the block FIR about 1.0 % and 0.27 %); the window holds at least 80 % of 937.5 cycles, each node measured in 80 % of them, no quantum change, the woofer's median RMS above -60 dBFS. Each node's mean and max, the graph's, the cycle's, the cycles, late cycles, position jumps and dropped records are printed, and in the failure; late cycles are not asserted (they measure a runner's scheduler, not the chain) |
+| `test_plugin_identity` | `dsp/juce_plugins/tools/plugin-versions.sh list` exits 0 with one `<plugin> <version> <source-id>` line per plugin folder that calls `speaker_add_plugin()` and nothing else, each version its CMakeLists.txt's `project(... VERSION)`; `loudness_headless`, `loudness`, `firConv` and `crossover` each have `buildinfo.ttl` exactly as the module's docstring shows it (its `bpi:version` and `bpi:sourceId`, a final newline or not) with the listed version and source id, and a manifest that names it only in its last line, `<URI> rdfs:seeAlso <buildinfo.ttl> .`, or not at all; live on both speakers, speakerd says `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` exactly once for each of 16, 17 and 18 at start (the bundle the one given, a trailing `/` allowed) and once each again at an apply of revision 2 on the left's local link, and its render once each; a copy of firConv's bundle without buildinfo.ttl or the manifest line naming it, and one with buildinfo.ttl cut off inside its version, each given alone, render Mine -> firConv -> woofer from layer current, sample for sample as the original bundle (whose woofer peaks above -60 dBFS), and say `plugin node 17: <URI>, no build identity (an older build), bundle <the copy>` and `... (buildinfo.ttl unreadable), bundle <the copy>` |
 | `test_ampd_persistence` | during a 2 s drag graph.json is replaced at most 3 times, and holds the last value on both speakers 1.2 s later; speakerd restarted with ampd stopped boots on graph.json and gives its render's gain within 0.05 dB, 3 dB or more from revision 1's original; graph.lkg.json follows after --lkg-after (4 s), and a speakerd restart starts that time again |
 
 ## speakerd in a test
@@ -185,6 +199,10 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
   `speaker.set_quantum(n)` forces a speaker's quantum, and `set_quantum(0)` lets it go.
 - A wait for a link, a port or a log line that times out says, in its failure, whether the
   speaker's PipeWire or WirePlumber has gone, with the end of its log (`speaker.health()`).
+- `SpeakerdLink(speaker)` is a client of a real speakerd's local link where no ampd runs (speakerd
+  takes one client at a time): `subscribe(stream, rate_hz)`, `values(stream, since=, until=)` (the
+  values that arrived in a window, by `time.monotonic()`), `apply(document, revision)` (its answer,
+  `applied` or `failed`) and `status()`.
 
 ## The board side in a test
 

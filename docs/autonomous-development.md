@@ -113,12 +113,22 @@ test mode, `harness.ScriptedController`) against the real pair, with nothing of 
 between: `controller_end_to_end` (it connects with the pair's secret and gets the hub's state, its
 knob is heard on both speakers within 60 ms, its edits are applied on both and heard, a revision one
 speaker refuses is undone in it, its plugin window's monitors and the speakers panel's levels come
-from the chosen speaker, another secret is refused, and its GUI is captured under Xvfb). The
-Snapcast source and `tc netem` come next; the compose file comes with them, for CI.
+from the chosen speaker, another secret is refused, and its GUI is captured under Xvfb). Two
+measure the plugins on the board's own chain (the Mine pin through `loudness_headless`,
+`firConv` and the crossover, its bands to the woofer and the tweeter): `chain_cost` (speakerd's
+own timing of each node at quantum 1024 puts firConv under 5 % of the cycle on average and the
+crossover under 1.5 %) and `plugin_identity` (every bundle's `buildinfo.ttl` says its plugin's
+version and source id, as `plugin-versions.sh list` does, and speakerd says which build each node
+runs, live, at an apply and in the render; an older build, and a half-written `buildinfo.ttl`,
+play the same samples and are said to have no build identity). The Snapcast source and
+`tc netem` come next; the compose file comes with them, for CI.
 
 **Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
 complete, control and headless targets and checks that they fit together (same parameters,
-state that moves between them, identical sound).
+state that moves between them, identical sound). Beside it runs the block FIR test: the block
+FIR that firConv and the crossover share is bit for bit a reference FIR whose arithmetic the test
+spells out, on x86_64 and on aarch64 under `qemu-aarch64-static`, and within -120 dB of
+`juce::dsp::FIR::Filter` (section 5).
 
 **The development container** is the builder image itself. Besides the aarch64 toolchain
 it carries what rungs 1 and 2 need on x86_64: the PipeWire headers `speakerd` builds
@@ -274,6 +284,15 @@ flowchart LR
     unit --> sys --> hw
 ```
 
+Rung 1 (`tools/test.sh unit`) runs `plugin-check` on every plugin that declares its targets,
+the controller's bridge against its fake hub, and the block FIR test: the block FIR that firConv
+and the crossover share is bit for bit a reference FIR defined in the test, whose arithmetic is
+explicit (taps in ascending order, each multiply-add fused through `std::fma` on aarch64), on
+x86_64 and on aarch64 under `qemu-aarch64-static`, for the four real coefficient sets (firConv's
+pre-low-pass of 61 taps and inverse of 2001, the crossover's low and high bands of 259 each), in
+blocks of 1024 and of random sizes from 1 to 1024; and against `juce::dsp::FIR::Filter` on the
+same input and coefficients its worst difference is below -120 dB re the output's peak.
+
 The rung 2 scenarios, each a pytest module driving the harness, are the acceptance tests of
 the architecture:
 
@@ -311,6 +330,8 @@ the architecture:
 | `ampd_protocol` | against stand-in speakerds, `ampd` does what `docs/protocol.md` says: parameters with the hub's seq to both speakers and every controller, errors for what it cannot address, revisions all or nothing with the roll back and the 10 s timeout, an offline speaker caught up, a newer agent revision adopted, gestures and their 5 s, the local link's busy, restart and fall back, the monitor union and per-client rates, persistence; the pair's secret proven on every control and monitor hello, OSC only from authenticated addresses, the limits (document size, subscriptions, a huge number, exact stream names), values set during an apply kept, the tweeter rule on the hub and on an agent; the handshake proven both ways, an agent believing nothing from a hub that does not prove the secret, OSC only with a live controller's token from its address (others dropped and counted, a replayed token too), agents ignoring OSC; a line before the peer proved the secret, and on the monitor link, is at most 64 KiB (a 100 KiB hello closes the connection on the control and monitor links and at an agent, a 60 KiB one is welcomed); a legal 24 MiB document reaches a controller that does not read for a while, with the values after it (the 1 MiB limit counts what queues besides documents); the known answer of `tests/vpair/auth_vector.json` (client and server proof, K, OSC token) computed from protocol.md's definitions and by ampd's functions |
 | `controller_end_to_end` | the real controller (built by `tools/build.sh controller`, in its script test mode) against the real pair, both speakers with speakerd and ampd and the pair's secret, the Mine pin through loudness, a stereo 200 Hz tone 12 dB apart: (a) it connects with the secret file, is synced and proven on the hub's revision with the hub's document on its canvas, both speakers online on layer current, both monitor links connected, and nothing either side refused, ignored or answered with an error (its `--trace`, both ampd logs); (b) nine `set`s are echoed and each is heard on both speakers within 60 ms of the send (knob_latency's onset and set-asides, at least 5 measured), both graph.json hold the last value; a 1 s `drag` is heard on both through at least 10 intermediate 20 ms blocks and ends at the render's level within 0.1 dB, its value in both graph.json, the hub's state and the controller; (c) `add`, a `set` on the new node, `disconnect` and two `connect-pins` are applied (revisions 2 to 5) on both graph.json and heard (the woofers silent, then back at the render's level within 0.1 dB), and its state is the hub's; with the right's device.json turning the tweeter on, a straight connection to the tweeter is rejected with "right: the tweeter is on here (device.json)", undone in the controller, rolled back on the left, and its state is the hub's; (d) with a window open, `mon_levelDb` from the chosen speaker (left, then right) is loudness's detector model of that side within 1 dB and the subscription moves; `output/level` from each speaker is its own side's level within 1 dB, 12 dB apart, the muted tweeters under -100 dBFS; (e) with another secret it is refused (not proven, not synced, the refusal shown, no plugin node), the hub logs it, and no secret is printed; (f) one `--gui` run under Xvfb and openbox with a stepping tone: synced, both level bars fed, the loudness window's meter moving more than 6 dB, and its screenshot and the X screen written to `build/e2e-controller/` |
 | `firmware_ampd_install` | `ampd-setup.sh` and setup.sh's ampd component lay out the documented `ampd.json` (with the pair's secret, mode 600, never printed) and unit, refuse an agent with no hub address and a missing or malformed secret before any change (the secret file read as the controller reads it: exactly one trailing `\n` or `\r\n` dropped, nothing else), and status and smoke say whether ampd runs and is connected to speakerd and, on an agent, to the hub |
+| `chain_cost` | the board's chain (the Mine pin through `loudness_headless`, `firConv` and the crossover, its low band to the woofer and its high band to the tweeter) on a virtual speaker at its 48 kHz and quantum 1024, noise playing: over a 20 s window after 5 s of settling, `speakerd`'s own timing (`speakerd/timing` on the local link, each value weighted by its cycles) puts firConv's mean share of the cycle under 5 % and the crossover's under 1.5 %. With `juce::dsp::FIR::Filter` they cost 15.1 % and 3.8 % on x86_64, the shared block FIR about 1.0 % and 0.27 %: the limits are 3 and 2.5 times under the old cost and about five times over the new, so a slower or busier CI runner fails the old code by more and passes the new. The window must be a measurement (at least 80 % of its cycles, each node measured in 80 % of them, the quantum unchanged, the woofer above -60 dBFS); the maxima, late cycles and position jumps are printed, not asserted: they measure the machine's scheduler, not the chain |
+| `plugin_identity` | `plugin-versions.sh list` prints `<plugin> <version> <source-id>` once for each plugin and nothing else, each version its `project(... VERSION)`; the bundles of `loudness_headless`, `loudness`, `firConv` and `crossover` carry `buildinfo.ttl` exactly as specified with their plugin's version and source id (the manifest naming it only in its last line, or not at all); `speakerd` says `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` once for each node of the chain, the bundle the one it was given, on both speakers at start, again at an apply, and in the render; a copy of firConv's bundle without `buildinfo.ttl` (nor the manifest's line naming it), given alone, renders the original's samples from layer current and says `no build identity (an older build)`, and one with a half-written `buildinfo.ttl` renders the same samples and says `(buildinfo.ttl unreadable)` |
 
 Rung 3 adds one smoke test, not a copy of rung 2: deploy, play the sweep, compare the
 telemetry capture with the expected crossover response within a tolerance, and check `pw-top`
