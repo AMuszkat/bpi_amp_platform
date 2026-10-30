@@ -1,14 +1,15 @@
 # Remote plugin host: controlling the speakers like a plugin host
 
-*Design proposal. Steps 1 and 2 of the roadmap are implemented. Step 1: `loudness` builds as
+*Design document. Steps 1 to 3 of the roadmap are implemented. Step 1: `loudness` builds as
 complete, control and headless targets, checked by `dsp/juce_apps/plugin-check`. Step 2:
 `speakerd` (`dsp/juce_apps/speakerd`) runs the headless builds inside PipeWire, from the first
-state layer that loads, with no controller, and sounds like the complete build; the
-`tests/vpair/test_speakerd_*` and `test_passthrough_safety` scenarios check it on every run.
-For the boards, `speakerd` and the plugins cross-compile for aarch64, `device.json` can cap the
-output and mute the tweeter, and `speakerd --import-filtergraph` turns a board's AudioPluginHost
-session into a graph document (end of section 2).
-The virtual pair used for testing is in `tests/vpair/`. Everything else is still a proposal.*
+state layer that loads, with no controller, and sounds like the complete build; it cross-compiles
+for the boards, caps its output from `device.json` and imports a board's AudioPluginHost session.
+Step 3: `ampd` (`firmware/ampd`) is the network agent and the hub, the controller app
+(`dsp/juce_apps/controller`) is the plugin host GUI, and they speak [protocol.md](protocol.md)
+(version 1, authenticated). The virtual pair in `tests/vpair/` checks all of it on every run,
+the real controller against the real pair included. Section 10 is the software architecture one
+level below this document's system view. Step 4 onwards is still a proposal.*
 
 A stereo set made of this platform is two complete boards, each running the same JUCE
 plugins on its own copy of the audio graph. This document proposes how to tune and rewire
@@ -972,15 +973,460 @@ A web page keeps one job: a small status and preset page served by the hub, for 
 has nothing installed. It shows the chain, master volume, mute and presets. It does not try to
 be the plugin host.
 
-## 10. Where the code lives
+## 10. The software stack: modules, threads and how the layers talk
+
+Section 2 says what the three programs are and what each lacks on purpose. This section goes
+one level down: what each program is made of, which thread does what inside it, and every
+boundary between two pieces, with what crosses it, in which format, and what happens when the
+far side is gone. The READMEs of each program hold the details and the measurements; this is
+the map between them.
+
+**How to read the diagrams of this section.** Every box says what kind of thing it is, in the
+«guillemets» of its first line, and its shape says the same:
+
+| Kind | Shape | What it is |
+|---|---|---|
+| «process» | a frame when its insides are drawn, a double-sided box when not | a program running as one Linux process: `speakerd`, `ampd`, `pipewire`, the controller |
+| «module», «modules» | a plain box | a source module of ours, compiled into the process that contains it: a C++ class with its header and its `.cpp`, or a Python class; «modules» is a group of them, a layer |
+| «library» | rounded, dashed | third-party code linked into a process: JUCE's modules, libpipewire, Python's standard library |
+| «bundle» | rounded, solid | one of our LV2 plugin bundles, a shared library with its `.ttl` files, that `speakerd` loads into its own process at run time; or a control build, compiled into the controller |
+| «thread» | a hexagon | a thread of a process |
+| «structure» | a slanted box | a data structure in memory that two threads of one process share |
+| «files» | a cylinder | files on disk |
+| «units» | a plain box, yellow | systemd units |
+| «kernel», «device» | a plain box, green | below user space: drivers, and the hardware itself |
+
+Colour stays what it was in section 1: orange for control, blue for audio, green for hardware,
+grey for storage and hand-offs, yellow for the service manager. An arrow between two boxes of one
+process is a call. An arrow between two processes is a «socket», labelled with its port or its
+path, or a file that one writes and the other reads: no two processes share memory except
+`speakerd` and `pipewire`, which exchange audio buffers through PipeWire's shared memory.
+
+### 10.1 The stack, layer by layer
+
+<!-- diagram: stack -->
+```mermaid
+flowchart TB
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+    classDef sys fill:#f3f0d9,stroke:#9a8a2a,color:#1d1d1d
+    classDef lib fill:#f8f8f8,stroke:#8a8a8a,color:#1d1d1d,stroke-dasharray:5 3
+
+    subgraph DESK["«process» controller"]
+        direction TB
+        ui["«modules» UI layer<br/>MainHostWindow, GraphEditorPanel,<br/>PluginWindow, SpeakersPanel"]:::ctl
+        model["«modules» model layer<br/>PluginGraph, ControlPlugins"]:::ctl
+        bridge["«modules» bridge layer<br/>Bridge, Auth, GraphDocument,<br/>JsonLineLink, ScriptRunner"]:::ctl
+        cb("«bundle» control builds, compiled in<br/>loudness_control: the processor<br/>and the editor, no DSP"):::ctl
+        jucec("«library» JUCE 8<br/>gui_extra, audio_processors,<br/>osc, cryptography"):::lib
+        ui --> model --> bridge
+        model --> cb
+        ui --> jucec
+        bridge --> jucec
+    end
+
+    subgraph SPK["one speaker"]
+        direction TB
+        systemd[["«process» systemd --user<br/>starts and restarts the units,<br/>with linger: at boot, nobody logged in"]]:::sys
+        units["«units» speakerd.service, ampd.service,<br/>pipewire, wireplumber, snapclient"]:::sys
+        ampd[["«process» ampd<br/>python3 running ampd.py and tweeter_rule.py<br/>the standard library only"]]:::ctl
+        files[("«files» ~/.local/state/speakerd<br/>graph.json, graph.lkg.json, factory.json,<br/>ampd.json, device.json")]:::sto
+        subgraph SD["«process» speakerd"]
+            direction TB
+            sdm["«modules» Engine, Control, Monitor,<br/>GraphBuilder, StateLayers, PipeWireNode"]:::aud
+            jucesd("«library» JUCE 8<br/>audio_processors_headless with its LV2 hosting,<br/>audio_formats, events"):::lib
+            libpw("«library» libpipewire-0.3<br/>the pw_filter node, the registry,<br/>the real-time data thread"):::lib
+            lv2("«bundle» LV2 plugins, loaded at run time<br/>loudness_headless, crossover, firConv"):::aud
+            sdm --> jucesd --> lv2
+            sdm --> libpw
+        end
+        pw[["«process» pipewire<br/>the speakerd null sink from the drop-in,<br/>the ALSA sink of the amplifier, the links"]]:::aud
+        wp[["«process» wireplumber<br/>links players to sinks"]]:::aud
+        snap[["«process» snapclient<br/>plays the stream into the speakerd sink"]]:::aud
+        kern["«kernel» ALSA, the MAX98397 codec driver,<br/>the device tree"]:::hw
+        amp["«device» two MAX98397<br/>woofer and tweeter"]:::hw
+
+        systemd --> units
+        units -. "speakerd-run picks the layer" .-> sdm
+        units -. "starts" .-> ampd
+        ampd -- "«socket» Unix, JSON lines" --> sdm
+        ampd --> files
+        files -. "read at boot" .-> sdm
+        libpw -- "«socket» PipeWire protocol:<br/>node, ports, links" --> pw
+        libpw == "audio buffers,<br/>shared memory" ==> pw
+        wp -. "«socket» links" .-> pw
+        snap ==> pw
+        pw ==> kern ==> amp
+    end
+
+    bridge <-- "«socket» TCP 7450 control,<br/>UDP 7451 knobs" --> ampd
+    ampd -. "«socket» TCP 7452 monitor" .-> bridge
+```
+
+Six processes on a speaker, all in the audio user's systemd session, and one on the desktop,
+the controller: a JUCE application, drawn open like `speakerd`, the JUCE console application
+that hosts the plugins. In both, our own modules sit on libraries, and the plugins are not
+processes but bundles the process loads. The lines that leave a process are sockets; the lines
+inside it are calls.
+
+| Piece | Kind | Written in, built on | Needs | Never |
+|---|---|---|---|---|
+| the controller app | one process on the desktop, `controller`, a JUCE application | C++, JUCE 8 (`juce_gui_extra`, `juce_audio_processors`, `juce_osc`, `juce_cryptography`); no `juce_audio_devices` | the hub's address and the pair's secret | process audio, scan or load a plugin from disk, hold a graph of its own |
+| control builds | not a process: `loudness_control`, a plugin's processor and editor sources, compiled into the controller's binary | the same JUCE modules as the controller | nothing of the speaker | contain DSP (`processBlock` is empty) |
+| `ampd` | one process on each speaker: `python3` running `ampd.py` and `tweeter_rule.py`, as a systemd user unit | Python 3.9, the standard library only (a board has no pip) | `speakerd`'s socket, `ampd.json`; the hub's address when it is an agent | touch audio; change `device.json` |
+| `speakerd` | one process on each speaker, a JUCE console application, as a systemd user unit started through `speakerd-run` | C++, JUCE 8 (`juce_audio_processors_headless` with its LV2 hosting, `juce_audio_formats`) and libpipewire-0.3 | PipeWire and the bundles named on its command line | touch the network; write a file |
+| headless builds | not a process: LV2 bundles (`loudness_headless.lv2`: `libloudness_headless.so` and its `.ttl`), loaded into `speakerd`'s process at run time by JUCE's LV2 hosting; complete builds the same way, without a window | a plugin's processor and DSP sources, JUCE's LV2 wrapper | the host's `patch:Set` for parameters | open an editor (`hasEditor()` is false) |
+| the audio server | two processes, the distribution's, as systemd user units: `pipewire` (0.3.65, the graph and the devices) and `wireplumber` (0.4.13, the session manager that links players to sinks) | C | the drop-in that declares the `speakerd` sink | know anything about plugins |
+| the service manager | `systemd --user`, one process for the audio user's session, kept alive by linger | | linger for the audio user | keep a start limit |
+| kernel and hardware | ALSA, the MAX98397 codec driver, the device tree; the two amplifiers | `firmware/` | | |
+
+### 10.2 The plugins: one source tree, three targets
+
+A plugin is split into three groups of sources, and `speaker_add_plugin()`
+(`dsp/juce_plugins/cmake/SpeakerPlugin.cmake`) builds up to three targets from them:
+
+<!-- diagram: plugin-targets -->
+```mermaid
+flowchart LR
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+    classDef sys fill:#f3f0d9,stroke:#9a8a2a,color:#1d1d1d
+    classDef lib fill:#f8f8f8,stroke:#8a8a8a,color:#1d1d1d,stroke-dasharray:5 3
+
+    proc["«sources» SOURCES: PluginProcessor<br/>parameter layout, state, the mon_ monitors<br/>in every target"]:::sto
+    dsp["«sources» DSP: LoudnessDsp<br/>the processing"]:::sto
+    ed["«sources» EDITOR: PluginEditor, MorphPad<br/>the window"]:::sto
+    juce("«library» JUCE 8 and its LV2 wrapper<br/>audio_processors, gui_basics, gui_extra, audio_utils"):::lib
+    complete("«bundle» complete: loudness.lv2<br/>SPEAKER_COMPLETE=1<br/>the desktop plugin host, tuning"):::aud
+    headless("«bundle» headless: loudness_headless.lv2<br/>SPEAKER_HEADLESS=1<br/>loaded by speakerd on the speaker"):::aud
+    control("«bundle» control: loudness_control<br/>SPEAKER_CONTROL=1<br/>a library compiled into the controller"):::ctl
+
+    proc --> complete
+    dsp --> complete
+    ed --> complete
+    proc --> headless
+    dsp --> headless
+    proc --> control
+    ed --> control
+    juce -.-> complete
+    juce -.-> headless
+    juce -.-> control
+```
+
+What holds the three together is the **processor's contract**: the same parameters in the same
+order with the same IDs, ranges and units, the same saved state, and the same monitors (`mon_`
+parameters, declared last with `addParameter()`, never through the APVTS, `loudness/Monitors.h`).
+The control build in the controller and the headless build on the speaker never meet; they
+agree only because they compile the same `PluginProcessor`. `plugin-check`
+(`dsp/juce_apps/plugin-check`) is the test of that contract: it loads the three builds, compares
+their parameter tables and state round trips, renders the complete and headless builds on the
+same signal, and reads the monitors through `<plugin>/plugin-check.monitors.h`.
+
+Two things cross the plugin boundary at run time, both through JUCE's LV2 hosting inside
+`speakerd`: parameter values go **in** as `patch:Set` atoms, applied inside the plugin's `run()`;
+monitor values come **out** on the plugin's atom output, once the wrapper's listener heard the
+value move (`monitors::publish()`, the one lock allowed on the audio thread, `dsp/CLAUDE.md`).
+Audio goes in and out as the `AudioProcessorGraph`'s buffers. Nothing else does: a headless
+plugin knows no socket, no file and no clock.
+
+### 10.3 speakerd: modules and threads
+
+`speakerd` is one process with four threads, and its design is which thread may touch what.
+
+| Module | Job | Thread |
+|---|---|---|
+| `Main` | command line, signals, the live mode's controller timer, the render mode | main |
+| `StateLayers` | the boot order: `current`, `last-known-good`, `factory`, passthrough; the first that loads | main |
+| `GraphDocument` | the document, version 1: parsing, checks, the tweeter rule | main, link |
+| `GraphBuilder`, `LV2State` | the document as an `AudioProcessorGraph`: hosted instances, connections, the plugins' own state | main |
+| `Engine` | the running graph, the audio-thread entry point, the Mine channel, the parameter inbox, the level and timing rings, the fades, the hand-over | audio (process), main (swap) |
+| `TimedNode`, `Timing` | a hosted plugin as a graph node, with its processing time; the statistics | audio, monitor |
+| `PipeWireNode` | the `speakerd` input sink, the `speakerd-dsp` `pw_filter` node, the registry watch and the four links, the output gate | PipeWire loop |
+| `LocalLink` | the Unix socket: one client, JSON lines, a bounded send buffer | link |
+| `Control` | what arrives over the link: parameters (lookup, `seq`, the inbox), revisions (the apply queue, build, swap, answer), `status` | link (lookup), main (build) |
+| `Monitor` | subscriptions, `output/level`, the plugins' `mon_` values, `speakerd/timing` | monitor |
+| `DeviceConfig`, `Samples` | `device.json` with its limits; the absolute caps | main (read once), audio (apply) |
+| `Render`, `FilterGraph` | the offline render; an AudioPluginHost session as a document | main |
+
+<!-- diagram: speakerd-threads -->
+```mermaid
+flowchart LR
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+    classDef sys fill:#f3f0d9,stroke:#9a8a2a,color:#1d1d1d
+    classDef lib fill:#f8f8f8,stroke:#8a8a8a,color:#1d1d1d,stroke-dasharray:5 3
+    classDef rt fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+
+    link{{"«thread» link<br/>LocalLink's own: socket I/O, JSON,<br/>parameter lookup"}}:::aud
+    main{{"«thread» main<br/>JUCE's message loop: boot layers,<br/>build, settle, swap"}}:::aud
+    pwl{{"«thread» PipeWire loop<br/>libpipewire's, speakerd-pw: registry,<br/>links, node state"}}:::aud
+    mon{{"«thread» monitor<br/>Monitor's own: drains the rings,<br/>samples mon_, sends values"}}:::aud
+    audio{{"«thread» audio<br/>libpipewire's real-time data thread,<br/>in speakerd's process: Engine::process<br/>once per quantum"}}:::rt
+
+    inbox[/"«structure» parameter inbox<br/>lock-free: one slot per parameter,<br/>a queue of the slots with a new value"/]:::sto
+    queue[/"«structure» apply queue<br/>at most 8"/]:::sto
+    rg[/"«structure» running graph<br/>one atomic pointer,<br/>fade handshake by serial number"/]:::sto
+    rings[/"«structure» level ring, timing ring<br/>single producer, single consumer"/]:::sto
+    sendbuf[/"«structure» send buffer<br/>bounded: 64 MiB drops the client,<br/>256 KiB drops a value"/]:::sto
+
+    link -- "param" --> inbox --> audio
+    link -- "apply" --> queue --> main
+    main -- "built and settled beside" --> rg --> audio
+    audio --> rings --> mon
+    mon --> sendbuf --> link
+    main -- "applied, failed" --> sendbuf
+    pwl -- "links active: output gate" --> audio
+    pwl -- "quantum, rate" --> main
+```
+
+All five threads belong to `speakerd`'s one process. Two of them are made by libpipewire on
+`speakerd`'s behalf: the loop thread that talks to the `pipewire` daemon, and the real-time data
+thread on which PipeWire calls the filter's process function once per quantum, the audio thread
+(not a thread of the daemon: `client-rt.conf` is what asks the kernel for its real-time
+priority). The other three are `speakerd`'s own: the main thread, which runs JUCE's message
+loop, and one each for the local link and the monitor. The grey boxes are not threads but the
+structures the threads share.
+
+The rule behind the diagram: **the audio thread owns nothing it has to wait for.** Values reach
+it through the inbox (newest wins, never full, never lost), the graph through one atomic
+pointer after a fade handshake, and what it measures leaves through rings. It never allocates,
+never takes a lock that another thread holds while the graph runs, and makes no syscall but the
+timing's clock reads (the named exceptions, `dsp/CLAUDE.md`). Everything slow happens on the
+main thread beside the running graph: a new revision is built, primed at the quantum and settled
+on a second of computed silence, and only then swapped in under two 30 ms fades. The PipeWire
+loop thread never touches the graph; it tells the engine whether every link is active (the
+output gate) and tells the main thread when the quantum or the rate changed, so the graph is
+primed anew before the audio thread sees the new block size. The limits of `device.json` are
+constants of the engine, read once at start; no message changes them.
+
+### 10.4 ampd: one event loop, two roles
+
+`ampd` is one asyncio event loop on one thread, plus a one-thread executor that writes files,
+so a slow disk holds up no connection. Its classes:
+
+| Class | Job |
+|---|---|
+| `Core` | the configuration (`ampd.json`), the document and its revision, the layers on disk (`graph.json` at most once a second while values change, `graph.lkg.json` after 60 s without a restart, `factory.json` read only), the executor |
+| `Conn` | one JSON-lines connection, control, monitor or local: line limits, a bounded write buffer that counts documents apart from values |
+| `Handshakes`, `server_handshake()`, `proof()`, `osc_token()` | the authentication of docs/protocol.md: nonces, the two HMAC proofs, the session key, the OSC token |
+| `Speakerd` | the client of the local link: `hello` and `status`, `param`, `apply` with a future per revision (10 s), reconnecting every second |
+| `Role` | what both roles share: following `speakerd` when it says hello on another revision than ampd's (it fell back to a layer), re-sending values when it restarted on ampd's |
+| `Hub(Role)` | the left speaker: the controllers and agents as `Peer`s, the `seq` counter, echoes, gestures (5 s timeout), proposals one at a time, the catalogue of plugins some speaker has loaded (`seen`), `state` to every controller |
+| `Agent(Role)` | the right speaker: connects to the hub every second, forwards its `param` and `apply` to `speakerd`, reports `speakerd`'s layer and revision, ignores OSC |
+| `Monitor`, `MonitorClient` | the monitor link's server: the union of the clients' subscriptions is what `speakerd` is asked for; each value fans out to the clients that want it, each at its own rate; a client further than 256 KiB behind skips values |
+| `Knobs` | the UDP socket: OSC datagrams, checked for the token of an authenticated controller at that address |
+| `tweeter_rule` | the one Python definition of the tweeter rule, shared with the installer's `setup-helper.py` |
+
+What the hub does with a change decides the whole system's behaviour, so here it is in order.
+A **parameter** arrives from a controller (TCP, or OSC with a valid token); the hub stamps the
+next `seq`, applies it to its own document, sends it to its own `speakerd` over the local link
+and to every agent over TCP (agents get no OSC), echoes it to every controller (over OSC to the
+ones that gave an `osc_port`, with that connection's token), and schedules the persistence of
+`graph.json`. A **proposal** of a revision takes the hub's one revision lock; the hub checks that
+the base is its revision, that the document parses, that the tweeter rule holds, and that
+every plugin in it is in the catalogue; then it sends `apply` to its own `speakerd` and to every
+agent that is online, waits for their answers (10 s each), and answers `applied` when all of them
+did, or `rejected` with the first failure's reason, after sending the previous revision back to
+the speakers that had applied the new one. A speaker that was offline catches up when its agent
+reconnects: the hub sends it the current revision and its values.
+
+### 10.5 The controller: UI, model, bridge
+
+The controller keeps AudioPluginHost's shape and replaces its engine with the bridge. Three
+layers, every one on the message thread:
+
+<!-- diagram: controller-layers -->
+```mermaid
+flowchart TB
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+    classDef sys fill:#f3f0d9,stroke:#9a8a2a,color:#1d1d1d
+    classDef lib fill:#f8f8f8,stroke:#8a8a8a,color:#1d1d1d,stroke-dasharray:5 3
+
+    subgraph UI["«modules» UI layer"]
+        mw["«module» MainHostWindow<br/>menus, Connect to a Hub"]:::ctl
+        gep["«module» GraphEditorPanel<br/>canvas, pins, connectors, status bar"]:::ctl
+        pwin["«module» PluginWindow<br/>a control build's editor,<br/>the L / R monitor selector"]:::ctl
+        sp["«module» SpeakersPanel<br/>role, online, layer, level bars"]:::ctl
+    end
+    subgraph MODEL["«modules» model layer"]
+        pg["«module» PluginGraph<br/>AudioProcessorGraph as the canvas's model,<br/>node uids are the document's"]:::ctl
+        cp["«module» ControlPlugins<br/>the control builds compiled in,<br/>SpeakerIONode 1 and 2, PlaceholderNode,<br/>the test probe"]:::ctl
+        cb("«bundle» loudness_control<br/>the plugin's processor and editor"):::ctl
+    end
+    subgraph BRIDGE["«modules» bridge layer"]
+        gd["«module» GraphDocument<br/>the document as JSON,<br/>an edit applied to it"]:::ctl
+        br["«module» Bridge<br/>hello and state, parameters, echoes,<br/>gestures, proposals, subscriptions"]:::ctl
+        auth["«module» Auth<br/>HMAC-SHA256, proofs, the OSC token"]:::ctl
+    end
+    subgraph LINKS["«modules» sockets"]
+        cl{{"«module» JsonLineLink, control<br/>TCP 7450, «thread» its socket thread"}}:::aud
+        osc{{"«library» juce_osc sender and receiver<br/>UDP 7451, bound to the control link's address,<br/>«thread» the receiver's thread"}}:::lib
+        ml{{"«module» JsonLineLink, monitor<br/>TCP 7452, one per speaker,<br/>«thread» a socket thread each"}}:::aud
+    end
+
+    gep -- "edits" --> pg
+    pwin -- "parameter changes, gestures" --> pg
+    mw -- "connect" --> br
+    br -- "speakers, refusals" --> sp
+    pg -- "ChangeListener, parameter listeners" --> br
+    br -- "rebuilds the canvas from state,<br/>mon_ values into the control builds" --> pg
+    pg --> cp --> cb
+    br --> gd
+    br --> auth
+    br -- "send() queues a line,<br/>callbacks come back on the message thread" --> cl
+    br --> osc
+    br --> ml
+```
+
+The direction of the arrows is the point. An edit on the canvas changes `PluginGraph` first (the
+user sees it at once), `Bridge` hears the change and turns it into a proposal; the answer either
+keeps the canvas or puts it back to the accepted document. A `state` or `graph` from the hub goes
+the other way: `Bridge` rebuilds `PluginGraph` from the document, and the UI follows the model.
+The model therefore never holds a truth of its own: before the first `state` and while the hub
+is away, every edit is undone at once. The only threads besides the message thread are the
+links' socket threads: `JsonLineLink::send()` queues a line and wakes its thread, callbacks come
+back through an `AsyncUpdater`, so the knobs never wait for a peer. `ScriptRunner` is the test
+mode: the same bridge, driven by a file of commands instead of the mouse, printing one JSON line
+per step; the virtual pair's `test_controller_end_to_end` and the controller's own tests use it.
+
+### 10.6 Every boundary
+
+| Boundary | Transport | Who opens it, and retries | What crosses it | When the far side is gone |
+|---|---|---|---|---|
+| controller to hub, **control** | TCP 7450, JSON lines, both ends prove the secret | the controller, every second | `hello`/`welcome`, `state`; `param` (`seq` 0, the controller's `origin`), `gesture` `begin`/`end`, `graph` proposals; back: `applied`/`rejected`, echoes of `param`, `graph` and `state` of other controllers | edits are undone at once; the next connection takes the hub's `state`, pushes nothing |
+| controller to hub, **knobs** | UDP 7451, OSC `/bpi/param` `,isfiss`, the session's token last | the controller's socket, bound to the control link's local address | one datagram per value while a slider is held, at most 50 a second per parameter; echoes back to the controller's `osc_port` | a lost datagram is nothing: the gesture's last value goes over TCP |
+| controller to each speaker, **monitor** | TCP 7452, JSON lines, the speaker proves its name | the controller, one link per speaker, every second | `subscribe`/`unsubscribe` by stream name and rate; `value` with `t` and `v` | the speakers panel says so; the plugin windows keep their last values |
+| hub to agent | TCP 7450, the same link as a controller's, `role` agent, no OSC | the agent, every second | `param` stamped with the hub's `seq`, `apply` of a revision; back: the speaker's `hello`, layer, revision, `applied`/`failed` | the hub marks the speaker offline; revisions apply among the speakers that are up; the agent catches up on reconnection |
+| `ampd` to `speakerd`, **the local link** | Unix socket `$XDG_RUNTIME_DIR/speakerd/control.sock`, mode 0600, JSON lines, one client | `ampd`, every second; `speakerd` listens | `hello`, `status`; `param`, `apply`, `subscribe`; back: `applied`, `failed`, `value`, `error` | `ampd` gone: `speakerd` plays on, unchanged. `speakerd` gone: `ampd` reconnects and, on the hello, follows the revision it plays or re-sends the values |
+| `speakerd` to a plugin | in process: JUCE's LV2 hosting, `AudioProcessorGraph::processBlock` | `speakerd`, when a graph is built | audio buffers; parameters in as `patch:Set` inside `run()`; monitors out on the atom port | a bundle that does not load fails the layer or the `apply`; the old graph plays on |
+| `speakerd` to PipeWire | libpipewire: the `speakerd-dsp` `pw_filter` node, the registry, four links of its own; `client-rt.conf` for the real-time thread | `speakerd`, at start; relinks whenever the ports come back | the stream in from the `speakerd` sink's monitors, the two amplifier channels out; the quantum and rate | the amplifier away: the output gate holds 0 and the plugins run on; PipeWire away: exit 3, systemd restarts on the same layer |
+| players to the `speakerd` sink | a PipeWire stream (snapclient, `client-rt.conf`'s target) | WirePlumber links it | the stereo stream | nothing plays; `speakerd` keeps its node and its links |
+| PipeWire to the amplifier | the ALSA sink of the MAX98397 driver, `priority.driver` 1000: the hardware clock drives the graph | PipeWire | 48 kHz, quantum 1024 on the boards | |
+| systemd to `speakerd` | `speakerd.service`: `ExecStart` `speakerd-run`, `ExecStopPost` `speakerd-run --record-exit` | systemd, at boot with linger; `Restart=on-failure` in 1 s, no start limit | the layer to start from (`--from`), chosen from a history of starts and exits on tmpfs: a crash steps down a layer, exit 3 (PipeWire) stays, a clean stop goes back to `current` | |
+| `ampd` and `speakerd` to disk | `~/.local/state/speakerd/`: `graph.json`, `graph.lkg.json`, `factory.json`, `ampd.json`, `device.json`, written atomically | `ampd` writes the graph layers; the installer writes `device.json`, `factory.json` and `ampd.json`; `speakerd` only reads, at boot | the document, the role, the amplifier's ports, the limits, the secret | a layer that does not load is skipped for the next one |
+| the installer to a board | `ssh`/`scp` of a bundle; the installed `setup/` scripts run on the board | a person (`firmware/setup.sh --mode target-remote`), or `tools/board.sh` behind the deploy gate | one version under `~/.local/lib/speakerd/<id>/` (`bin/`, `lv2/`, `setup/`, `extra/`), the `current` and `previous` symlinks, the units, the drop-in | `rollback` switches the symlink back, capped |
+
+Two conventions make all of this one system. **Every TCP and Unix link speaks the same JSON
+lines** (one object per line, an `op` in each, unknown keys and ops ignored, 32 MiB closes the
+connection), so `ampd` reuses one `Conn` for three links and the controller one `JsonLineLink`
+for two, and a peer of a newer protocol can add a key without breaking an older one. **Every
+value of a parameter travels in the plugin's own units** (dB, Hz, a choice's index or text), as
+the document stores it; only `speakerd`'s link thread, at the last step, turns it into the
+hosted parameter's normalised value.
+
+### 10.7 Two flows, end to end
+
+A knob held in a plugin window of the controller, heard on both speakers:
+
+<!-- diagram: flow-knob -->
+```mermaid
+sequenceDiagram
+    participant E as «bundle» loudness_control, its editor
+    participant B as «module» Bridge, in the controller
+    participant H as «process» ampd left, the hub
+    participant SL as «process» speakerd left
+    participant A as «process» ampd right, an agent
+    participant SR as «process» speakerd right
+    E->>B: gesture begins, parameter listener
+    B->>H: TCP gesture begin
+    loop at most 50 a second per parameter
+        E->>B: value
+        B->>H: UDP /bpi/param with the token
+        H->>SL: local param, seq n
+        H->>A: TCP param, seq n
+        A->>SR: local param, seq n
+        H-->>B: UDP echo, seq n, ignored while the gesture is ours
+        Note over SL,SR: the link thread posts to the inbox,<br/>the audio thread sets the value<br/>at the top of its next cycle
+    end
+    E->>B: gesture ends
+    B->>H: TCP param, the last value, then gesture end
+    H->>SL: local param
+    H->>A: TCP param
+    H-->>B: TCP echo of the last value: the gesture is over
+    Note over H: graph.json at most once a second,<br/>graph.lkg.json after 60 s
+```
+
+A connection dragged on the canvas, applied on both speakers or on neither:
+
+<!-- diagram: flow-edit -->
+```mermaid
+sequenceDiagram
+    participant C as «modules» canvas and PluginGraph
+    participant B as «module» Bridge, in the controller
+    participant H as «process» ampd left, the hub
+    participant SL as «process» speakerd left
+    participant A as «process» ampd right, an agent
+    participant SR as «process» speakerd right
+    C->>B: the graph changed
+    B->>H: TCP graph, revision N+1, base N, the whole document
+    Note over H: one proposal at a time. Base is N,<br/>the document parses, the tweeter rule holds,<br/>every plugin is in the catalogue
+    H->>SL: local apply N+1
+    H->>A: TCP apply N+1
+    A->>SR: local apply N+1
+    Note over SL,SR: built beside the running graph, primed,<br/>settled on 1 s of silence,<br/>swapped under two 30 ms fades
+    SL-->>H: applied N+1
+    SR-->>A: applied N+1
+    A-->>H: applied N+1
+    H-->>B: applied N+1
+    H-->>A: TCP graph N+1 to other controllers and agents
+    Note over H: graph.json written
+    Note over C,B: on rejected, or no answer in 15 s,<br/>the canvas goes back to revision N<br/>and shows the reason
+```
+
+And the flow with nobody there, a speaker booting with no network: systemd starts
+`speakerd-run`, which reads the history of starts and exits and picks the layer; `speakerd`
+reads `device.json`, tries `graph.json`, then `graph.lkg.json`, then `factory.json`, then plays
+passthrough, applying the tweeter rule to each when the tweeter is on; it creates its node,
+links to the amplifier when its ports appear, and fades in once every link is active. `ampd`
+starts after it, connects to the socket, reads the `hello` and follows the revision `speakerd`
+plays. Nothing in that sequence waits for the network, the hub or the controller.
+
+### 10.8 Where safety lives
+
+Each rule is enforced at the lowest layer that can hold it, so that nothing above can undo it.
+
+- **The output cap and the tweeter mute** are `device.json`'s limits, applied by `speakerd`'s
+  engine on the audio thread as constants fixed at start, after the graph and the fades, with
+  NaN and infinity turned to 0 and every sample clamped to the ceiling. No message on any link
+  changes them; only the installer's `limits --person-present`, run by a person at the board,
+  rewrites the file and restarts `speakerd`.
+- **The tweeter rule** (only a crossover's high band reaches the tweeter while it is on) is
+  checked in three places that must agree: `speakerd` when it loads a layer or an `apply`
+  (C++, `GraphDocument`), the hub before it applies a proposal and the installer before it
+  writes a factory graph (both `firmware/speakerd/tweeter_rule.py`); the virtual pair checks the
+  two implementations against each other.
+- **The catalogue**: the hub refuses a revision naming a plugin no speaker has loaded, so a
+  revision is never applied on one speaker and failed on the other for a missing bundle.
+- **Authentication**: every TCP link starts with the two HMAC proofs of the pair's secret, every
+  OSC datagram carries the session's token, agents ignore OSC, and the secret itself is never
+  on a command line, in a log or in a tracked file.
+- **Real time**: the audio thread's isolation of section 10.3, and the two named exceptions.
+- **Loss of the layer above**: a plugin that fails to load leaves the old graph playing;
+  `speakerd` that crashes comes back on the next layer; `ampd` that is gone leaves `speakerd`
+  playing; a hub that is gone leaves the agents and both speakers playing; a controller that is
+  gone changes nothing. Each layer is built to be the last one standing.
+
+### 10.9 Where the code lives
 
 | Piece | Path |
 |---|---|
-| DSP cores, the three plugin targets, `speaker_add_plugin()` | `dsp/juce_plugins/` |
-| `plugin-check`, `speakerd`, and later the controller app (JUCE applications, same build system) | `dsp/juce_apps/` |
-| `ampd`, its systemd units, `device.json`, the factory graph, the web page | `firmware/ampd/` |
-| PipeWire configuration and board setup | `firmware/pipewire/`, `firmware/*.sh` |
-| The virtual pair and its tests | `tests/vpair/` |
+| DSP cores, the three plugin targets, `speaker_add_plugin()`, `Monitors.h` | `dsp/juce_plugins/` |
+| `plugin-check`, `speakerd`, the controller app (JUCE applications, one build system) | `dsp/juce_apps/` |
+| `ampd`, its systemd unit | `firmware/ampd/` |
+| `speakerd`'s unit, `speakerd-run`, the installer's JSON helper, the tweeter rule | `firmware/speakerd/` |
+| PipeWire configuration, the `speakerd` sink drop-in, the installers | `firmware/pipewire/`, `firmware/*.sh` |
+| the protocol between the three programs | `docs/protocol.md` |
+| the virtual pair, its harness and the scenarios | `tests/vpair/` |
+| builds, tests and the development container | `tools/` |
 
 Board addresses, user names and deploy targets stay in the gitignored `dsp/config/local.env`
 and `firmware/local.mk` files, as before.
@@ -1010,5 +1456,16 @@ going away (`test_speakerd_start_order`).
 `speakerd` now builds for the boards (aarch64), caps its output from `device.json` and imports
 the AudioPluginHost session a board plays today (section 2), and `firmware/` installs it with
 its persistent sink, its systemd unit and its crash rule, capped (section 2, "Installed on a
-board"). What remains before step 3 is the first deploy to a real board, which stays with a
-person ([autonomous-development.md](autonomous-development.md), section 8).
+board"). The first deploy to a real board stays with a person
+([autonomous-development.md](autonomous-development.md), section 8).
+
+Step 3 is done. On the virtual pair the real controller, in its script test mode, drives the
+real `ampd` and `speakerd` of both speakers (`test_controller_end_to_end`): a knob turned in the
+controller is heard on both speakers within the knob latency budget (`test_knob_latency`, 5 ms
+apart at quantum 128), a graph edit is applied on both or on neither and a rejection puts the
+canvas back (`test_graph_edit`, `test_drag_during_revision`), the meters match the recorded
+levels within 0.05 dB (`test_meter_values`), two controllers see each other's gestures
+(`test_two_controllers`), the hub's loss leaves both speakers playing (`test_hub_down`), and a
+wrong secret is refused at every link (`test_ampd_protocol`). `firmware/` installs `ampd` beside
+`speakerd`, and the second stage of the first deploy (firmware/CLAUDE.md) brings the controller
+to a real pair.
