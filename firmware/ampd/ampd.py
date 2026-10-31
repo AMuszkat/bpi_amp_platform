@@ -1718,13 +1718,17 @@ class Subscription:
     moment) still goes, and a client slower than the union, which gets one value in every few,
     keeps the part of a token it had left at the last value it got (with one token at most it
     would wait for whole numbers of the union's periods: 26 values a second for 45 asked, beside
-    a client of 60 Hz). On average it never gets more than its rate; nothing waits in it.
-    `sent` is the number of the last value it got (Monitor.on_value): it never gets one twice."""
+    a client of 60 Hz). It starts with one token, which the stored value takes (Monitor.request),
+    so a new subscription's next value comes a period after it; the slack builds up over time.
+    So in any T seconds it gets at most 2 + T x rate values (1 + T x rate from its start): its
+    rate on average, and after a pause (a full bucket) one value may come early. Nothing waits
+    in it. `sent` is the number of the last value it got (Monitor.on_value): it never gets one
+    twice."""
 
     __slots__ = ("rate", "tokens", "then", "sent")
 
     def __init__(self, rate, now):
-        self.rate, self.tokens, self.then, self.sent = rate, MONITOR_TOKENS, now, 0
+        self.rate, self.tokens, self.then, self.sent = rate, 1.0, now, 0
 
     def fill(self, now):
         self.tokens = min(MONITOR_TOKENS, self.tokens + (now - self.then) * self.rate)
@@ -1767,22 +1771,24 @@ class Monitor:
         (dispatch) of a stream some client subscribed to, that starts with its object and holds
         no NaN or Infinity (Python's json reads them, a controller does not: such a line is
         encoded again, which a value that is not a number fails), and at most 64 KiB long (the
-        longest line ampd reads on the monitor link). Otherwise no client gets it, and the
-        stream has no newest value until the next one."""
+        longest line ampd reads on the monitor link). A line longer than twice that is refused
+        before anything else, so that no huge line is encoded again on the loop (encoding it
+        compactly does not halve it: speakerd writes at most a space after a separator).
+        Otherwise no client gets it, and the stream has no newest value until the next one."""
         stream = obj.get("stream")
         if not isinstance(stream, str) or stream not in self.union:
             return       # nobody asked for it (speakerd has not read an unsubscribe yet)
+        if len(line) - 1 > 2 * HELLO_LINE_LIMIT:
+            self.not_relayed(stream, "huge", f"longer than {HELLO_LINE_LIMIT // 1024} KiB")
+            return
         if line[:1] != b"{" or b"NaN" in line or b"Infinity" in line:
             try:
                 line = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode() + b"\n"
             except ValueError:
-                self.latest.pop(stream, None)
-                THROTTLED.say(("monitor-value", "number"), f"speakerd: a value of {stream} that is not a number: not relayed")
+                self.not_relayed(stream, "number", "that is not a number")
                 return
         if len(line) - 1 > HELLO_LINE_LIMIT:
-            self.latest.pop(stream, None)
-            THROTTLED.say(("monitor-value", "long"), f"speakerd: a value of {stream} longer than "
-                                                     f"{HELLO_LINE_LIMIT // 1024} KiB: not relayed")
+            self.not_relayed(stream, "long", f"longer than {HELLO_LINE_LIMIT // 1024} KiB")
             return
         self.values += 1
         self.latest[stream] = (self.values, line)
@@ -1793,23 +1799,31 @@ class Monitor:
             self.flush_scheduled = True
             asyncio.get_running_loop().call_soon(self.flush)
 
+    def not_relayed(self, stream, why, text):
+        """A value of `stream` that no client may get: the stream has no newest value, and ampd
+        says so (at most every 10 s for each `why`)."""
+        self.latest.pop(stream, None)
+        THROTTLED.say(("monitor-value", why), f"speakerd: a value of {stream} {text}: not relayed")
+
     def flush(self):
         """Sends the newest line of each stream that got one since the last flush to each of its
-        subscribers whose bucket holds a token."""
+        subscribers whose bucket holds a token. A callback of the loop's: what breaks in one offer
+        (one client, one stream) is said here, since nobody else would, and the others go on."""
         self.flush_scheduled = False
         arrived, self.arrived = self.arrived, set()
         now = time.monotonic()
-        try:
-            for stream in arrived:
-                newest = self.latest.get(stream)
-                if newest is None:
-                    continue         # it left the union since, or speakerd went away
-                for client in self.clients:
-                    sub = client.subs.get(stream)
-                    if sub is not None:
+        for stream in arrived:
+            newest = self.latest.get(stream)
+            if newest is None:
+                continue         # it left the union since, or speakerd went away
+            for client in self.clients:
+                sub = client.subs.get(stream)
+                if sub is not None:
+                    try:
                         self.offer(client, sub, newest, now)
-        except Exception as e:      # a callback of the loop's: nobody else would say it
-            THROTTLED.say(("task", "monitor", type(e).__name__), f"monitor: {type(e).__name__}: {e}: carrying on")
+                    except Exception as e:
+                        THROTTLED.say(("task", "monitor", type(e).__name__),
+                                      f"monitor: {type(e).__name__}: {e}: carrying on")
 
     @staticmethod
     def offer(client, sub, newest, now):

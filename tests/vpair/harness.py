@@ -1740,16 +1740,19 @@ class MonitorClient:
         with self._changed:
             return [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)]
 
-    def wait_value(self, stream, since=None, timeout=10):
+    def wait_value(self, stream, since=None, timeout=10, where=None):
+        """The first (arrival, value line) of a stream that arrived after `since` and, with
+        `where`, for which where(value line) is true; AssertionError after `timeout` seconds."""
         deadline = time.monotonic() + timeout
         with self._changed:
             while True:
-                found = [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)]
+                found = [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)
+                         and (where is None or where(v))]
                 if found:
                     return found[0]
                 if time.monotonic() > deadline:
-                    raise AssertionError(f"no value of {stream} from {self.address} within {timeout} s"
-                                         + (f"; errors: {self.errors}" if self.errors else ""))
+                    raise AssertionError(f"no value of {stream}{' such as asked' if where else ''} from {self.address} "
+                                         f"within {timeout} s" + (f"; errors: {self.errors}" if self.errors else ""))
                 self._changed.wait(0.05)
 
     def close(self):

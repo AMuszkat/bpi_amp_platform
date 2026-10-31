@@ -10,10 +10,16 @@ period. On one speaker at a time, the hub's first and then the agent's, eight ha
 clients (plugin windows) connect to its ampd and subscribe to `output/level` at 20 Hz, the k-th
 1.5 k / 8 periods after the first: their phases (0, 3/16, 6/16, ... of the 50 ms period) all
 differ, and the subscriptions are spread over 1.3 periods, so a relay that sends each client's
-values on a clock of its own makes each value wait for that client's phase. From 1 s after the last
-subscription, every value that arrives in a 10 s window is measured. A value's **age** is its
-arrival at the client (`time.monotonic()` when the client has read its line) minus its `t`
-(speakerd's `CLOCK_MONOTONIC` when its monitor thread sampled it: one clock on one machine).
+values on a clock of its own makes each value wait for that client's phase. From 1 s after every
+client got its first value, every value that arrives in a 30 s window is measured. A value's
+**age** is its arrival at the client (`time.monotonic()` when the client has read its line) minus
+its `t` (speakerd's `CLOCK_MONOTONIC` when its monitor thread sampled it: one clock on one machine).
+
+Why 30 s: each flush sends one value to all eight clients, so a stall (speakerd's monitor thread,
+ampd's loop or the harness held up a moment, on a shared runner that also runs two PipeWire graphs)
+makes all eight late at once. The window's 4800 values are about 600 periods, and the 99th
+percentile stays under 5 ms with six of them stalled; a 10 s window tolerated two. Each speaker
+takes about 32 s, the scenario about 70 s with the pair's start (30 s before).
 
 Pass when, on each speaker:
 
@@ -51,7 +57,7 @@ STREAM = "output/level"
 CLIENTS = 8
 RATE_HZ = 20.0
 STAGGER = 1.5 / CLIENTS          # periods between two clients' subscriptions
-SETTLE, WINDOW = 1.0, 10.0       # seconds
+SETTLE, WINDOW = 1.0, 30.0       # seconds (WINDOW: the docstring's "Why 30 s")
 AGE_P99_MS = 5.0
 RATE_TOLERANCE = 0.3
 FREQ, LEVEL = 200.0, -20.0
