@@ -180,8 +180,9 @@ On the monitor link, straight to the speaker whose values are wanted:
   controller's, at the highest rate any asks for (at most 60 Hz). `speakerd`'s monitor thread
   (normal priority, never the audio thread) samples the streams subscribed to and sends `value`
   lines; nothing is produced for a stream nobody subscribed to.
-- `t` is `speakerd`'s monotonic clock in seconds. `ampd` keeps the newest value per stream and
-  controller, and sends it at that controller's rate: newest wins, nothing queues.
+- `t` is `speakerd`'s monotonic clock in seconds. `ampd` keeps the newest value per stream, and
+  sends each value as it arrives, at most at that controller's rate: newest wins, nothing
+  queues. A new subscription gets the stream's newest value at once.
 - A subscription ends when the controller unsubscribes or its connection closes.
 - Frames, records and credits are step 4.
 

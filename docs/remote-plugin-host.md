@@ -743,8 +743,14 @@ into a stopped capture uses the fetched record, so it shows the real samples.
 | `ampScope` record | about 5 MB | once, on stop or trigger | under a second to fetch |
 
 **Latency.** In steady state a frame reaches the window one Wi-Fi round trip after the
-speaker produced it, a few milliseconds. When a packet is lost, TCP retransmits it and that
-one frame arrives late; the next frame is fresh, because nothing queued behind it. Lowering
+speaker produced it, a few milliseconds. On the speaker nothing waits: `ampd` relays each
+value as it arrives from `speakerd`, at most at the window's rate, so a value leaves the
+speaker about a millisecond after `speakerd` sampled it (0.6 to 1.1 ms at the 99th percentile
+on the virtual pair, eight windows at 20 Hz: `monitor_fanout`, whose limit is 5 ms). Its first
+relay sent each window's values on a clock of that window's own, so a value waited for the
+window's turn, up to a whole period: about 50 ms at the 99th percentile at 20 Hz. When a
+packet is lost, TCP retransmits it and that one frame arrives late; the next frame is fresh,
+because nothing queued behind it. Lowering
 the minimum retransmit timeout on the speaker for the controller's subnet (`ip route ...
 rto_min 20ms`) keeps the worst case near 20 ms instead of Linux's default 200 ms. No jitter
 buffer is used: an instrument should show the latest state, not an evenly delayed one.
@@ -1337,7 +1343,7 @@ so a slow disk holds up no connection. Its classes:
 | `Role` | what both roles share: following `speakerd` when it says hello on another revision than ampd's (it fell back to a layer), re-sending values when it restarted on ampd's |
 | `Hub(Role)` | the left speaker: the controllers and agents as `Peer`s, the `seq` counter, echoes, gestures (5 s timeout), proposals one at a time, the catalogue of plugins some speaker has loaded (`seen`), `state` to every controller |
 | `Agent(Role)` | the right speaker: connects to the hub every second, forwards its `param` and `apply` to `speakerd`, reports `speakerd`'s layer and revision, ignores OSC |
-| `Monitor`, `MonitorClient` | the monitor link's server: the union of the clients' subscriptions is what `speakerd` is asked for; each value fans out to the clients that want it, each at its own rate; a client further than 256 KiB behind skips values |
+| `Monitor`, `MonitorClient`, `Subscription` | the monitor link's server: the union of the clients' subscriptions, at the highest rate any asked, is what `speakerd` is asked for. It keeps the newest line of each stream as `speakerd` sent it (a value of a subscribed stream, at most 64 KiB, nothing else), and flushes once per pass of the event loop, so of the lines read at once only the newest of each stream goes out: as it came, never encoded again, to each subscriber whose token bucket (one per client and stream, filling at its rate, holding at most two tokens) has one. A new subscription gets the newest value at once; a client further than 256 KiB behind skips values; no task or timer per client |
 | `Knobs` | the UDP socket: OSC datagrams, checked for the token of an authenticated controller at that address |
 | `tweeter_rule` | the one Python definition of the tweeter rule, shared with the installer's `setup-helper.py` |
 

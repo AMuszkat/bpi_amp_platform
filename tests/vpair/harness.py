@@ -1659,12 +1659,13 @@ class MonitorRefused(AssertionError):
 class MonitorClient:
     """A monitor subscriber, as a plugin window (docs/protocol.md, "Monitoring"): the monitor link
     to one speaker's ampd. With `reconnect`, it connects again every 0.1 s when the link drops and
-    subscribes again, as an open window does. `values` is every value with its arrival time."""
+    subscribes again, as an open window does. `values` is every value with its arrival time,
+    `errors` every error, `others` every other message (ampd sends a monitor client nothing else)."""
 
     def __init__(self, address, port=MONITOR_PORT, reconnect=False, timeout=10, secret=TEST_SECRET, name="vpair-monitor"):
         self.address, self.port, self.reconnect = address, port, reconnect
         self.secret, self.name, self._file = secret, name, None
-        self.subs, self.values, self.errors = {}, [], []
+        self.subs, self.values, self.errors, self.others = {}, [], [], []
         self.connects, self.closed, self.sock = 0, False, None
         self._changed = threading.Condition()
         self._lock = threading.Lock()
@@ -1711,6 +1712,8 @@ class MonitorClient:
                             self.values.append((time.monotonic(), obj))
                         elif obj.get("op") == "error":
                             self.errors.append(obj)
+                        else:
+                            self.others.append(obj)
                         self._changed.notify_all()
             except (OSError, ValueError):
                 pass
