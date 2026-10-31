@@ -1,0 +1,295 @@
+"""plugin_identity (docs/autonomous-development.md, section 5): every plugin bundle says which build
+it is, and speakerd says which build each of its plugin nodes runs, live and in the render.
+
+A plugin's identity is its version (its CMakeLists.txt's `project(... VERSION)`) and its source
+id (12 lowercase hex characters of the source it was built from, `-dirty` after them when the tree
+had changes, or `unknown` without git), the same for all its targets.
+`dsp/juce_plugins/tools/plugin-versions.sh list` prints `<plugin> <version> <source-id>`, one line
+per plugin and nothing else, for the tree as it is; every LV2 bundle that `speaker_add_plugin()`
+builds carries a `buildinfo.ttl` next to its `manifest.ttl`, exactly
+
+    @prefix bpi: <https://github.com/AMuszkat/bpi_amp_dsp_tuning#> .
+
+    <PLUGIN-URI>
+        bpi:version "MAJOR.MINOR.PATCH" ;
+        bpi:sourceId "SOURCE-ID" .
+
+(with or without a newline after its last line). No LV2 host reads it: manifest.ttl stays as
+JUCE writes it, without naming it, and speakerd reads it beside the manifest. speakerd logs, each
+time a state layer, an apply or the render builds a graph, one line per plugin node:
+`plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>`, or
+`..., no build identity (an older build), bundle <dir>` for a bundle without buildinfo.ttl, or
+`(buildinfo.ttl unreadable)` for one it cannot read; none of these changes what it plays.
+
+The chain is chain_cost's, the board's: Mine -> loudness_headless (16) -> firConv (17) ->
+crossover (18), its bands to the woofer and the tweeter, from the bundles this test builds.
+
+Pass when:
+
+1. `plugin-versions.sh list` exits 0 and prints one line `<plugin> <version> <source-id>` for each
+   plugin under dsp/juce_plugins (those whose CMakeLists.txt calls speaker_add_plugin), and
+   nothing else; each version is the plugin's `project(... VERSION)`; and the bundles
+   loudness_headless, loudness (the complete build: all targets share the identity), firConv and
+   crossover each carry buildinfo.ttl exactly as above with that plugin's version and source id,
+   and their manifest.ttl does not name it;
+2. live, on both speakers, speakerd started on the chain says exactly one first-form line for
+   each of 16, 17 and 18 (its URI, the plugin's version and source id, and the bundle directory
+   the test gave it), and an apply of revision 2 over the local link on the left says them once
+   more, once each;
+3. `speakerd --render` of the same document says the same lines, once each;
+4. an older build: a copy of firConv's bundle with buildinfo.ttl removed (as a build from before
+   it existed), given to speakerd alone (an empty HOME and --lv2-bundle), renders
+   firConv alone (Mine -> firConv -> the woofer) from layer current, sample for sample as the
+   original bundle does, and says `plugin node 17: <URI>, no build identity (an older build),
+   bundle <the copy>`; a copy whose buildinfo.ttl is cut off inside its version (half written)
+   renders the same samples and says `(buildinfo.ttl unreadable), bundle <the copy>`.
+
+A bundle directory said in a line is compared with the one given as paths (a trailing `/` is the
+same directory).
+
+With plugins and a speakerd from before the build identity (the plugins 0.0.1 and speakerd 0.3.x
+of step 3), every part fails, saying what is missing: no plugin-versions.sh, no buildinfo.ttl, no
+`plugin node` line. It needs step 3's speakerd (the local link, the Mine pin): with an older one
+it fails, saying so.
+
+    python3 -m unittest -v tests.vpair.test_plugin_identity
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+from harness import (NO_LIMITS, RATE, ROOT, Pair, Speakerd, SpeakerdLink, built, lv2_uri, peak_dbfs, render,
+                     require_speakerd_local_link, state_dir)
+from test_chain_cost import CROSSOVER, FIRCONV, LOUDNESS, URIS, chain_document
+
+PLUGINS_DIR = ROOT / "dsp" / "juce_plugins"
+PLUGIN_VERSIONS = PLUGINS_DIR / "tools" / "plugin-versions.sh"
+
+BUILDINFO = ('@prefix bpi: <https://github.com/AMuszkat/bpi_amp_dsp_tuning#> .\n'
+             '\n'
+             '<{uri}>\n'
+             '    bpi:version "{version}" ;\n'
+             '    bpi:sourceId "{source}" .\n')
+LIST_LINE = re.compile(r"^(\S+) (\d+\.\d+\.\d+) ([0-9a-f]{12}(?:-dirty)?|unknown)$")
+NODE_LINE = re.compile(r"^speakerd: plugin node (\d+): (\S+), (.*)$")
+IDENTIFIED = re.compile(r"^version (\S+), source (\S+), bundle (.+)$")
+UNIDENTIFIED = re.compile(r"^no build identity \((an older build|buildinfo\.ttl unreadable)\), bundle (.+)$")
+
+# The chain's nodes: (plugin, the build's LV2 target).
+CHAIN = {LOUDNESS: ("loudness", "loudness_headless"), FIRCONV: ("firConv", "firConv"),
+         CROSSOVER: ("crossover", "crossover")}
+# The bundles of part 1: target -> (plugin, built()'s kind).
+BUNDLES = {"loudness_headless": ("loudness", "headless"), "loudness": ("loudness", "complete"),
+           "firConv": ("firConv", "complete"), "crossover": ("crossover", "complete")}
+
+# firConv alone, for the older builds: Mine -> firConv (17) -> the woofer.
+FIRCONV_ALONE = {"format": "speakerd-graph", "version": 1, "revision": 1,
+                 "nodes": [{"uid": FIRCONV, "plugin": {"format": "LV2", "identifier": URIS[FIRCONV]},
+                            "params": {"gain": -6.0}}],
+                 "connections": [{"src": {"node": 1, "channel": 2}, "dst": {"node": FIRCONV, "channel": 0}},
+                                 {"src": {"node": FIRCONV, "channel": 0}, "dst": {"node": 2, "channel": 0}}]}
+RENDERED = ", layer current (graph.json), revision 1, written to "
+
+
+def plugin_dirs():
+    """The plugins under dsp/juce_plugins: the folders whose CMakeLists.txt calls speaker_add_plugin()."""
+    return sorted(d.name for d in PLUGINS_DIR.iterdir()
+                  if (d / "CMakeLists.txt").is_file() and "speaker_add_plugin(" in (d / "CMakeLists.txt").read_text())
+
+
+def project_version(plugin):
+    """The VERSION of the plugin's project() in its CMakeLists.txt."""
+    found = re.search(r"project\(\s*\S+\s+VERSION\s+(\d+\.\d+\.\d+)", (PLUGINS_DIR / plugin / "CMakeLists.txt").read_text())
+    return found.group(1) if found else None
+
+
+def listed_identities(test):
+    """What `plugin-versions.sh list` prints, {plugin: (version, source id)}, after checking that it
+    exits 0, every line is `<plugin> <version> <source-id>` and there is one per plugin."""
+    if not PLUGIN_VERSIONS.exists():
+        test.fail(f"there is no {PLUGIN_VERSIONS.relative_to(ROOT)}: the plugins of this tree have no build identity")
+    result = subprocess.run([str(PLUGIN_VERSIONS), "list"], cwd=ROOT, stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=300)
+    said = f"\n  stdout:\n{result.stdout}  stderr:\n{result.stderr}"
+    test.assertEqual(result.returncode, 0, f"plugin-versions.sh list exited with status {result.returncode}{said}")
+    lines = result.stdout.splitlines()
+    bad = [line for line in lines if not LIST_LINE.match(line)]
+    test.assertEqual(bad, [], f"plugin-versions.sh list printed lines that are not '<plugin> <version> "
+                              f"<source-id>'{said}")
+    names = [LIST_LINE.match(line).group(1) for line in lines]
+    test.assertEqual(sorted(names), plugin_dirs(), f"plugin-versions.sh list does not list each plugin once{said}")
+    return {m.group(1): (m.group(2), m.group(3)) for m in map(LIST_LINE.match, lines)}
+
+
+def same_dir(a, b):
+    return os.path.realpath(a.rstrip("/") or "/") == os.path.realpath(str(b))
+
+
+def node_lines(lines):
+    """speakerd's `plugin node` lines among `lines`: {uid: [(URI, the rest), ...]}."""
+    out = {}
+    for line in lines:
+        found = NODE_LINE.match(line)
+        if found:
+            out.setdefault(int(found.group(1)), []).append((found.group(2), found.group(3), line))
+    return out
+
+
+def identified_problems(found, expected, where):
+    """What is wrong with `found` (node_lines()) against `expected`, {uid: (URI, version, source,
+    bundle)}: one first-form line per node, no other."""
+    problems = []
+    for uid, (uri, version, source, bundle) in sorted(expected.items()):
+        lines = found.get(uid, [])
+        if len(lines) != 1:
+            problems.append(f"{where}: {len(lines)} 'plugin node {uid}: ...' lines, not 1")
+            continue
+        said_uri, rest, line = lines[0]
+        identity = IDENTIFIED.match(rest)
+        if said_uri != uri or not identity or identity.group(1) != version or identity.group(2) != source \
+                or not same_dir(identity.group(3), bundle):
+            problems.append(f"{where}: '{line}', not 'speakerd: plugin node {uid}: {uri}, version {version}, "
+                            f"source {source}, bundle {bundle}'")
+    for uid in sorted(set(found) - set(expected)):
+        problems.append(f"{where}: a line for node {uid}, which the graph does not have: {found[uid]}")
+    return problems
+
+
+def noise(seconds, level=0.05, seed=2):
+    return np.clip(np.random.default_rng(seed).standard_normal(int(seconds * RATE)) * level, -0.9, 0.9)
+
+
+class PluginIdentity(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bundles = {target: built(plugin, kind) for target, (plugin, kind) in BUNDLES.items()}
+        cls.chain_bundles = [cls.bundles[target] for _, target in CHAIN.values()]
+        built("speakerd")
+        cls.tmp = Path(tempfile.mkdtemp(prefix="vpair-identity-"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
+
+    def expected_nodes(self):
+        """{uid: (URI, version, source id, bundle)} for the chain, from plugin-versions.sh."""
+        listed = listed_identities(self)
+        return {uid: (lv2_uri(target), *listed[plugin], self.bundles[target]) for uid, (plugin, target) in CHAIN.items()}
+
+    def test_1_each_bundle_carries_its_build_identity(self):
+        listed = listed_identities(self)
+        problems, rows = [], []
+        for plugin, (version, source) in sorted(listed.items()):
+            rows.append(f"plugin-versions.sh: {plugin} {version} {source}")
+            if version != project_version(plugin):
+                problems.append(f"{plugin}: plugin-versions.sh says version {version}, its CMakeLists.txt's project() "
+                                f"{project_version(plugin)}")
+        for target, (plugin, _) in BUNDLES.items():
+            bundle = self.bundles[target]
+            uri = lv2_uri(target)
+            version, source = listed[plugin]
+            want = BUILDINFO.format(uri=uri, version=version, source=source)
+            info = bundle / "buildinfo.ttl"
+            if not info.is_file():
+                problems.append(f"{target}: {bundle} has no buildinfo.ttl")
+                continue
+            text = info.read_text(errors="replace")
+            rows.append(f"{target}: buildinfo.ttl says " + " ".join(re.findall(r'"([^"]*)"', text)))
+            if text not in (want, want.rstrip("\n")):
+                problems.append(f"{target}: buildinfo.ttl is\n{text}\n  not\n{want}")
+            naming = [line for line in (bundle / "manifest.ttl").read_text().splitlines() if "buildinfo.ttl" in line]
+            if naming:
+                problems.append(f"{target}: manifest.ttl names buildinfo.ttl, which no LV2 host is to read: {naming}")
+        print("\n  " + "\n  ".join(rows))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_2_speakerd_says_each_node_s_build_live(self):
+        require_speakerd_local_link(self)
+        state = {name: state_dir(self.tmp / f"live-{name}", role=name, current=chain_document(), limits=NO_LIMITS)
+                 for name in ("left", "right")}
+        with Pair() as pair, \
+                Speakerd(pair["left"], state["left"], bundles=self.chain_bundles) as left, \
+                Speakerd(pair["right"], state["right"], bundles=self.chain_bundles) as right:
+            at_start = {name: sd.lines_starting("plugin node ") for name, sd in (("left", left), ("right", right))}
+            mark = left.mark()
+            with SpeakerdLink(pair["left"]) as link:
+                answer = link.apply(chain_document(revision=2, firconv_gain=-9.0), revision=2)
+            self.assertEqual(answer.get("op"), "applied", f"the apply of revision 2: {answer}\n{left.log()}")
+            left.wait_for("apply: revision 2: applied", after=mark)
+            at_apply = left.lines_starting("plugin node ", after=mark)
+        print("\n  " + "\n  ".join([f"{name}, at start: {line}" for name, lines in at_start.items() for line in lines]
+                                   + [f"left, at the apply: {line}" for line in at_apply]))
+        found = {where: node_lines(lines) for where, lines in
+                 (("left, layer current", at_start["left"]), ("right, layer current", at_start["right"]),
+                  ("left, the apply of revision 2", at_apply))}
+        self.assertTrue(any(found.values()), "speakerd said no 'plugin node <uid>: ...' line at all:\n" + left.log())
+        expected = self.expected_nodes()
+        problems = [p for where, lines in found.items() for p in identified_problems(lines, expected, where)]
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_3_the_render_says_the_same(self):
+        require_speakerd_local_link(self)
+        state = state_dir(self.tmp / "render", role="left", current=chain_document(), limits=NO_LIMITS)
+        _, log = render(state, noise(1.0), bundles=self.chain_bundles)
+        lines = [line for line in log.splitlines() if line.startswith("speakerd: plugin node ")]
+        print("\n  render: " + "\n  render: ".join(lines or ["(no plugin node line)"]))
+        self.assertIn(RENDERED, log, f"the render did not run the chain:\n{log}")
+        self.assertTrue(lines, f"the render said no 'plugin node <uid>: ...' line:\n{log}")
+        problems = identified_problems(node_lines(lines), self.expected_nodes(), "the render")
+        self.assertEqual(problems, [], "\n".join(problems) + f"\n{log}")
+
+    def test_4_an_older_build_and_a_broken_buildinfo(self):
+        require_speakerd_local_link(self)
+        original = self.bundles["firConv"]
+        uri = lv2_uri("firConv")
+
+        # A build from before buildinfo.ttl: the same bundle without it (the manifest never names it).
+        older = self.tmp / "older" / original.name
+        shutil.copytree(original, older)
+        (older / "buildinfo.ttl").unlink(missing_ok=True)
+
+        # Half written: cut off inside its version, as by a power cut during a copy.
+        broken = self.tmp / "broken" / original.name
+        shutil.copytree(original, broken)
+        info = original / "buildinfo.ttl"
+        text = info.read_text() if info.is_file() else BUILDINFO.format(uri=uri, version="0.0.0", source="unknown")
+        (broken / "buildinfo.ttl").write_text(text[:text.index('bpi:version "') + len('bpi:version "') + 1])
+
+        x = noise(1.0)
+        outputs, problems, rows = {}, [], []
+        for what, bundle, said in (("the original", original, None), ("the older build", older, "an older build"),
+                                   ("the broken buildinfo.ttl", broken, "buildinfo.ttl unreadable")):
+            state = state_dir(self.tmp / f"alone-{bundle.parent.name}", role="left", current=FIRCONV_ALONE,
+                              limits=NO_LIMITS)
+            outputs[what], log = render(state, x, bundles=[bundle])   # fails unless it exits 0
+            self.assertIn(RENDERED, log, f"{what}: the render did not run firConv from layer current:\n{log}")
+            lines = [line for line in log.splitlines() if line.startswith("speakerd: plugin node ")]
+            rows += [f"{what}: {line}" for line in lines] or [f"{what}: (no plugin node line)"]
+            if said is None:
+                continue
+            found = node_lines(lines)
+            got = found.get(FIRCONV, [])
+            match = UNIDENTIFIED.match(got[0][1]) if len(got) == 1 else None
+            if len(got) != 1 or got[0][0] != uri or not match or match.group(1) != said \
+                    or not same_dir(match.group(2), bundle):
+                problems.append(f"{what}: {[line for _, _, line in got] or 'no plugin node line'}, not one "
+                                f"'speakerd: plugin node {FIRCONV}: {uri}, no build identity ({said}), bundle {bundle}'")
+            if set(found) - {FIRCONV}:
+                problems.append(f"{what}: lines for nodes the graph does not have: {found}")
+            if not np.array_equal(outputs[what], outputs["the original"]):
+                worst = float(np.max(np.abs(outputs[what] - outputs["the original"])))
+                problems.append(f"{what}: renders other samples than the original bundle (worst difference "
+                                f"{20 * np.log10(max(worst, 1e-12)):.1f} dBFS)")
+        woofer = peak_dbfs(outputs["the original"][:, 0])
+        rows.append(f"firConv alone, the woofer peaks at {woofer:.1f} dBFS")
+        print("\n  " + "\n  ".join(rows))
+        self.assertGreater(woofer, -60.0, "firConv alone renders silence: the comparison would prove nothing")
+        self.assertEqual(problems, [], "\n".join(problems))
+
+
+if __name__ == "__main__":
+    unittest.main()

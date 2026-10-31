@@ -51,7 +51,10 @@ Pass when:
   device.json as it was, while factory.json or ampd's graph.json breaks that rule (naming the
   layer), and turns it on once none does; status marks such a layer with ***; the allow flag
   without --home, and in the remote mode, is refused before anything is changed or contacted;
-- a plugin bundle with one of the bundle's URIs in a system LV2 folder is named loudly;
+- a plugin bundle with one of the bundle's URIs in a system LV2 folder is named loudly, once per
+  system bundle, with its version against the bundle's: with one of the same version or a newer
+  one among them, as making speakerd refuse to start (status 2); with older ones only, as
+  replaced by the deployed bundle;
 - --import-filtergraph writes speakerd's conversion as factory.json, having given speakerd the
   device.json to be (--device), and a conversion that fails (exit 2) is refused;
 - the amplifier is found in a pw-dump: the one ALSA sink; with several, bpi-alsa-playback-pcm
@@ -213,6 +216,29 @@ def stub_build_root(root):
         if not link.exists():
             os.symlink(built("loudness", kind).parents[2], link)
     return root
+
+
+def lv2_version(bundle):
+    """(minor, micro, version) of a JUCE bundle: the lv2:minorVersion and lv2:microVersion lilv
+    compares, and doap:revision, all from its dsp.ttl; None for what it does not say."""
+    text = (bundle / "dsp.ttl").read_text()
+    found = [re.search(pattern, text) for pattern in
+             (r"lv2:minorVersion\s+(\d+)", r"lv2:microVersion\s+(\d+)", r'doap:revision\s+"([^"]+)"')]
+    return tuple(m and m.group(1) for m in found)
+
+
+def copy_at_version(bundle, to, minor, micro):
+    """A copy of a JUCE bundle at `to` whose dsp.ttl says version <major>.<minor>.<micro>, the
+    major its own; returns that version."""
+    shutil.copytree(bundle, to)
+    text = (to / "dsp.ttl").read_text()
+    version = f"{lv2_version(bundle)[2].split('.')[0]}.{minor}.{micro}"
+    for pattern, value in ((r"lv2:minorVersion\s+\d+", f"lv2:minorVersion {minor}"),
+                           (r"lv2:microVersion\s+\d+", f"lv2:microVersion {micro}"),
+                           (r'doap:revision\s+"[^"]+"', f'doap:revision "{version}"')):
+        text = re.sub(pattern, value, text, count=1)
+    (to / "dsp.ttl").write_text(text)
+    return version
 
 
 def firmware_at(repo, script, *args, env):
@@ -587,13 +613,59 @@ class Install(Setup):
         self.assertFalse((self.tmp / "no-home-given").exists())
 
     def test_names_a_bundle_shadowed_by_a_system_lv2_folder(self):
+        # lilv keeps the first bundle of a URI unless a later one is newer: a system copy of the
+        # same version or a newer one makes speakerd refuse the deployed bundle, older ones are
+        # replaced by it. Each is named with its version, and the message says which case it is.
+        headless = built("loudness", "headless")
+        minor, micro, version = lv2_version(headless)
+        self.assertTrue(minor and micro and version, f"{headless}/dsp.ttl does not say its version as JUCE writes it")
+        minor, micro = int(minor), int(micro)
+        self.assertGreater(minor + micro, 0, f"loudness_headless is {version}: no older version to make")
+        older = (minor, micro - 1) if micro > 0 else (minor - 1, micro)
         home = self.fresh_home("shadow")
-        system = self.tmp / "system-lv2"
-        shutil.rmtree(system, ignore_errors=True)
-        shutil.copytree(built("loudness", "headless"), system / "old-loudness.lv2")
-        result = self.install(home, "--role", "left", env=dict(self.env, SPEAKERD_SYSTEM_LV2_DIRS=str(system)))
-        self.assertIn("A system LV2 folder has a plugin with the URI of one of the bundle's", result.stdout)
-        self.assertIn(f"{lv2_uri('loudness_headless')}: {system / 'old-loudness.lv2'}", result.stdout)
+        systems = [self.tmp / "system-lv2-a", self.tmp / "system-lv2-b"]
+        for system in systems:
+            shutil.rmtree(system, ignore_errors=True)
+        same = systems[0] / "same-loudness.lv2"
+        shutil.copytree(headless, same)
+        newer = systems[1] / "newer-loudness.lv2"
+        newer_version = copy_at_version(headless, newer, minor, micro + 1)
+        old = systems[1] / "older-loudness.lv2"
+        old_version = copy_at_version(headless, old, *older)
+
+        uri = lv2_uri("loudness_headless")
+        named = "A system LV2 folder has a plugin with the URI of one of the bundle's:"
+        refuses = ("With a copy of the same version or a newer one, speakerd will refuse to start (status 2)\n"
+                   "and the speaker stay silent.")
+        replaced = ("Each is older, so the deployed bundle replaces it; but it shadows the next deploy that is not\n"
+                    "newer than it, which speakerd would refuse (status 2).")
+
+        def said(dirs):
+            result = self.install(home, "--role", "left",
+                                  env=dict(self.env, SPEAKERD_SYSTEM_LV2_DIRS=" ".join(map(str, dirs))))
+            loud = [line[4:] for line in result.stdout.splitlines() if line.startswith("*** ")]
+            print("\n  " + "\n  ".join(loud))
+            return loud, "\n".join(loud)
+
+        loud, text = said(systems)
+        self.assertIn(named, loud)
+        for copy, at, relation in ((same, version, "the same as"), (newer, newer_version, "newer than"),
+                                   (old, old_version, "older than")):
+            self.assertIn(f"    {uri}: {copy}, version {at}, {relation} the bundle's {version}", loud)
+        self.assertEqual(sum(f"{uri}: " in line for line in loud), 3,
+                         "not one line per system bundle (a preset's URI apart from its plugin's?)")
+        self.assertIn(refuses, text)
+        self.assertNotIn(replaced, text)
+
+        # Only the older copy: the deployed bundle replaces it, and it is named as loudly.
+        shutil.rmtree(newer)
+        loud, text = said([systems[1]])
+        self.assertIn(named, loud)
+        self.assertIn(f"    {uri}: {old}, version {old_version}, older than the bundle's {version}", loud)
+        self.assertEqual(sum(f"{uri}: " in line for line in loud), 1, loud)
+        self.assertIn(replaced, text)
+        self.assertNotIn(refuses, text)
+
         quiet = self.install(home, check=True)
         self.assertNotIn("A system LV2 folder", quiet.stdout)
 
