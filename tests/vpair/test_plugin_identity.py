@@ -63,10 +63,10 @@ Pass when:
 A bundle directory said in a line is compared with the one given as paths (a trailing `/` is the
 same directory).
 
-With plugins and a speakerd from before the build identity (the plugins 0.0.1 and speakerd 0.3.x
-of step 3), every part fails, saying what is missing: no plugin-versions.sh, no buildinfo.ttl, no
-`plugin node` line. It needs step 3's speakerd (the local link, the Mine pin): with an older one
-it fails, saying so.
+With plugins and a speakerd from before the build identity (the plugins 0.0.1 and step 3's
+speakerd 0.3.0), every part fails, saying what is missing: no plugin-versions.sh, no buildinfo.ttl,
+no `plugin node` line, which speakerd logs from 0.3.1 on. It runs only on step 3's speakerd 0.3.0
+or later (the local link, the Mine pin): with an older one it fails, saying so.
 
     python3 -m unittest -v tests.vpair.test_plugin_identity
 """
