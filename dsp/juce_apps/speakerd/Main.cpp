@@ -340,9 +340,12 @@ namespace
 
             if (found.isEmpty())
             {
-                // lilv keeps the first plugin of a URI it sees, and the default paths come first.
+                // The default paths come first, and lilv keeps the first plugin of a URI it sees
+                // unless a later one is newer (README.md, "Which build runs"): a copy there of the
+                // same version or a newer one shadows the bundle; an older one it replaces.
                 log ("--lv2-bundle " + bundle + ": no LV2 plugin loaded from it: either it holds none, or a plugin "
-                     "with the same URI in ~/.lv2, /usr/lib/lv2 or /usr/local/lib/lv2 shadows it");
+                     "with the same URI in ~/.lv2, /usr/lib/lv2 or /usr/local/lib/lv2, of the same version or a "
+                     "newer one, shadows it");
                 return false;
             }
 

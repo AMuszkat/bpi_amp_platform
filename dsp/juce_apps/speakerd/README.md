@@ -14,7 +14,8 @@ revisions (built beside the running graph and swapped in under a 30 ms fade-out 
 asks for the status, and subscribes to [monitor values](#monitoring): the output level of each
 amplifier channel and the plugins' `mon_` parameters. The input node gained the role-aware
 [**Mine** channel](#the-mine-channel). Scope frames and records are step 4. A rate change does
-not swap the graph: it re-prepares the running one in place, behind silence.
+not swap the graph: it re-prepares the running one in place, behind silence. 0.3.1 logs the
+build each plugin node runs ([Which build it is](#command-line)).
 
 ## Command line
 
@@ -40,7 +41,7 @@ speakerd --version
 | `--device DEVICE_JSON` | with `--import-filtergraph`: the speaker's `device.json`, which says whether the session's output channel 0 (`playback_FL`) or 1 (`playback_FR`) is the woofer. Without it, `playback_FL` is |
 | `--prefer-headless` | with `--import-filtergraph`: a complete or control build's URI becomes its `_headless` sibling's, when that plugin is found (in the default paths or a `--lv2-bundle`) |
 | `--allow-unsafe-routing` | with `--import-filtergraph`: import the stream straight to the tweeter, or a control build, with a warning, instead of failing |
-| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.0 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
+| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.1 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
 
 | Exit status | |
 |---|---|
@@ -530,7 +531,7 @@ version 1; this is what speakerd does with it. A Unix stream socket, by default
 
 | Message | When |
 |---|---|
-| `{"op":"hello","role":"speakerd","version":"0.3.0 (<commit>)","revision":8,"layer":"current","protocol":1}` | first, on every connection, also after a reconnect |
+| `{"op":"hello","role":"speakerd","version":"0.3.1 (<commit>)","revision":8,"layer":"current","protocol":1}` | first, on every connection, also after a reconnect |
 | the same fields with `"op":"status"`, and `"timing"` | the answer to `{"op":"status"}`; `timing` is the last minute's ([Timing](#timing)) |
 | `{"op":"applied","revision":8}` | an `apply` built, swapped in, and the audio thread has run a cycle of it (or 200 ms went by with no cycle: nothing is linked) |
 | `{"op":"failed","revision":8,"reason":"..."}` | an `apply` that did not load; the graph that played plays on, untouched |
@@ -798,7 +799,7 @@ stable.
 
 | Line | When |
 |---|---|
-| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf`; 0.3.0 has the local link, the Mine channel and the monitors |
+| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf`; 0.3.0 has the local link, the Mine channel and the monitors; 0.3.1 logs the build of each plugin node it runs (`plugin node` lines) |
 | `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or invalid, its `limits` included; the defaults are limited (see device.json) |
 | `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
 | `device: limits: output at <gain> dB, tweeter <muted\|on>`, followed by ` (no limits in device.json: the fail-safe)` or ` (device.json not read: the fail-safe)` when they are the fail-safe | always, right after the line before. `<gain>` is printed as `%g` does: `-20`, `-6.5`, `0`. No limit at all reads `output at 0 dB, tweeter on` |
