@@ -32,7 +32,7 @@ in which they were added (`extras/Build/CMake/JUCEUtils.cmake`):
 1. `juce_add_plugin()` adds, per format, the manifest helper: for LV2, `juce_lv2_helper`, which
    rewrites (truncates) `manifest.ttl`, `dsp.ttl` and `ui.ttl` at every link
    (`_juce_set_plugin_target_properties`; the writer is `writeManifestTtl` in
-   `juce_audio_plugin_client_LV2.cpp`, whose prefix block always declares `rdfs:`).
+   `juce_audio_plugin_client_LV2.cpp`).
 2. At its very end, if `COPY_PLUGIN_AFTER_BUILD` is set, it calls
    `juce_enable_copy_plugin_step()`, which adds the copy of the whole bundle into
    `JUCE_LV2_COPY_DIR` (`~/.lv2`, or a cross build's `copied/lv2`, `tools/build.sh`) with
@@ -47,9 +47,24 @@ shared-code target). The VST3 manifest step is unaffected: it is added during
 `juce_add_plugin()`, and `juce_enable_vst3_manifest_step` refuses only to run after a copy
 step that is already there.
 
-Because the helper rewrites `manifest.ttl` whenever the plugin is linked, a line appended to
-it (`rdfs:seeAlso <buildinfo.ttl>`) must be appended after every helper run, and checked for
-so that a rerun never adds it twice.
+**Do not name an extra file in `manifest.ttl`.** The helper rewrites the manifest whenever the
+plugin is linked, so a line added to it would have to be added again after every helper run;
+but the reason not to is lilv. A file the manifest names with `rdfs:seeAlso <file>` for the
+plugin's URI is plugin data to lilv: when a host first asks about the plugin, lilv parses every
+such file (`lilv_plugin_load`, in
+`juce_audio_processors_headless/format_types/LV2_SDK/lilv/src/plugin.c`), and a parse error in
+any of them sets `parse_errors`, after which `lilv_plugin_instantiate` (`instance.c`, what
+JUCE's `LV2PluginFormat` calls) returns null and `lilv_plugin_verify` false. lilv also parses
+them when two bundles have the same URI, to compare their versions (`load_plugin_model`,
+`world.c`; [`../hosting/lv2-discovery.md`](../hosting/lv2-discovery.md)). So a half-written
+`buildinfo.ttl` named in the manifest made the plugin fail to instantiate in `speakerd`
+(`lilv_world_load_file(): error ... end of file in short string`, then the layer failed and the
+speaker played passthrough). `buildinfo.ttl` is diagnostic and no LV2 host needs it, so the
+manifest stays exactly as the helper writes it, and `speakerd` reads the file directly; a
+damaged copy then costs a log line, never the plugin. Checked with `speakerd --render` on a
+firConv bundle whose `buildinfo.ttl` is cut after 60 bytes: with the `rdfs:seeAlso` line,
+`invalid IRI character`, `did not instantiate: Plugin was located, but could not be opened`,
+passthrough; without it, the layer loads.
 
 **Data that must reach the binary.** A plugin is a static shared-code library
 (`<target>`) linked into one module per format (`<target>_LV2`, `<target>_VST3`, listed in

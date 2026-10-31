@@ -2,8 +2,9 @@
 # Checks that built LV2 bundles of a plugin carry its version and source identity the way
 # juce_plugins/README.md ("Versions and source identity") says, and that they agree with
 # tools/plugin-versions.sh list, i.e. with what a build of this tree embeds: buildinfo.ttl
-# exactly, the manifest's rdfs:seeAlso line once and last, and the bpi-build-info string in the
-# binary. Part of rung 1 (tools/test.sh unit), on the bundles plugin-check builds.
+# exactly, a manifest.ttl that does not mention it (no LV2 host may parse it, so a damaged one
+# can never stop the bundle loading), and the bpi-build-info string in the binary. Part of
+# rung 1 (tools/test.sh unit), on the bundles plugin-check builds.
 #
 #     dsp/juce_plugins/tests/buildinfo/check.sh <plugin> <bundle.lv2>...
 set -euo pipefail
@@ -36,10 +37,10 @@ for bundle in "$@"; do
         problems+=("buildinfo.ttl is not what this tree builds ($(grep -o 'sourceId "[^"]*"' "$bundle/buildinfo.ttl" || echo 'unreadable'), expected version $version, source $id)")
     fi
 
-    see_also="<$uri> rdfs:seeAlso <buildinfo.ttl> ."
-    count="$(grep -cxF "$see_also" "$bundle/manifest.ttl" || true)"
-    if [ "$count" != 1 ] || [ "$(tail -n 1 "$bundle/manifest.ttl")" != "$see_also" ]; then
-        problems+=("the manifest has the seeAlso line $count times, or not as its last line")
+    if [ ! -f "$bundle/manifest.ttl" ]; then
+        problems+=("no manifest.ttl")
+    elif grep -qF "buildinfo" "$bundle/manifest.ttl"; then
+        problems+=("manifest.ttl mentions buildinfo.ttl: $(grep -m 1 -nF "buildinfo" "$bundle/manifest.ttl")")
     fi
 
     so="$bundle/lib$target.so"
@@ -48,7 +49,7 @@ for bundle in "$@"; do
     fi
 
     if [ ${#problems[@]} = 0 ]; then
-        echo "buildinfo: $target.lv2: version $version, source $id: buildinfo.ttl, manifest and binary agree"
+        echo "buildinfo: $target.lv2: version $version, source $id: buildinfo.ttl and binary agree, the manifest does not name it"
     else
         joined="$(printf '; %s' "${problems[@]}")"
         echo "buildinfo: $target.lv2 FAILED: ${joined#; }"

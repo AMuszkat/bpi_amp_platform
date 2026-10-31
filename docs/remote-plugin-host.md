@@ -836,8 +836,8 @@ having to change (`dsp/juce_plugins/README.md`, "Versions and source identity"):
 build, without a reconfigure, and rewrites the generated `SpeakerBuildInfo.h` only when the
 identity changes. The version and the identity are readable in three places: in the binary,
 as the string `bpi-build-info: <URI> version <version> source <source-id>` of every LV2 and
-VST3 `.so`; in every LV2 bundle, as `buildinfo.ttl` next to `manifest.ttl`, which names it
-(`rdfs:seeAlso`), written before JUCE copies the bundle into `~/.lv2`:
+VST3 `.so`; in every LV2 bundle, as `buildinfo.ttl` next to `manifest.ttl`, written before JUCE
+copies the bundle into `~/.lv2`:
 
 ```turtle
 @prefix bpi: <https://github.com/AMuszkat/bpi_amp_dsp_tuning#> .
@@ -848,6 +848,9 @@ VST3 `.so`; in every LV2 bundle, as `buildinfo.ttl` next to `manifest.ttl`, whic
 ```
 
 and in `speakerd`'s log, one line per plugin node whenever it builds a graph (section 10.3).
+The manifest does not name `buildinfo.ttl` (no `rdfs:seeAlso`): no LV2 host reads it, so a
+damaged file can never stop the plugin loading (named there, lilv parses it with the plugin's
+data, and one parse error makes the plugin fail to instantiate); `speakerd` reads it directly.
 The controller, which compiles the control builds' sources in, carries none yet.
 
 **The version rule.** A plugin's version goes up whenever its sources (its folder, or a shared
@@ -1221,6 +1224,7 @@ plugin knows no socket, no file and no clock.
 | `StateLayers` | the boot order: `current`, `last-known-good`, `factory`, passthrough; the first that loads | main |
 | `GraphDocument` | the document, version 1: parsing, checks, the tweeter rule | main, link |
 | `GraphBuilder`, `LV2State` | the document as an `AudioProcessorGraph`: hosted instances, connections, the plugins' own state | main |
+| `PluginBundles` | which bundle each plugin URI runs from (read once at start, by lilv's rules) and that bundle's build identity (`buildinfo.ttl`); the Turtle reader | main |
 | `Engine` | the running graph, the audio-thread entry point, the Mine channel, the parameter inbox, the level and timing rings, the fades, the hand-over | audio (process), main (swap) |
 | `TimedNode`, `Timing` | a hosted plugin as a graph node, with its processing time; the statistics | audio, monitor |
 | `PipeWireNode` | the `speakerd` input sink, the `speakerd-dsp` `pw_filter` node, the registry watch and the four links, the output gate | PipeWire loop |
@@ -1284,16 +1288,23 @@ primed anew before the audio thread sees the new block size. The limits of `devi
 constants of the engine, read once at start; no message changes them.
 
 **Which build each node runs.** Each time a layer, an `apply` or the render builds a graph,
-`speakerd` logs one line per plugin node, on the main thread, never on the audio thread, with
-the version and the source identity of section 7 read from the bundle's `buildinfo.ttl`:
+`speakerd` logs, on the main thread and never on the audio thread, one line per plugin node as
+soon as it is instantiated (so also for the nodes a layer or an `apply` instantiated before it
+failed), with the version and the source identity of section 7 read from the bundle's
+`buildinfo.ttl`:
 
 ```
 plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>
 ```
 
-JUCE's LV2 hosting never reads a version, so `speakerd` finds the bundle itself, in the order
-lilv does: the default paths, then the `--lv2-bundle`s. A bundle without an identity is logged
-as one, with the reason:
+JUCE's LV2 hosting does not say which bundle a URI came from, so `speakerd` finds it itself
+(`PluginBundles`), once at start, right after JUCE's LV2 hosting loaded lilv's world: it reads
+the manifests of the default paths, then of the `--lv2-bundle`s, by lilv's rules, which keep the
+first bundle of a URI unless a later one has a newer `lv2:minorVersion`/`lv2:microVersion`
+(JUCE writes them from the plugin's version, its last two numbers). With versions that now
+differ, a newer `--lv2-bundle` replaces an older copy in `~/.lv2` rather than being refused (an
+equal or older one is ignored, and `speakerd` stops with status 2). A bundle without an
+identity is logged as one, with the reason:
 
 ```
 plugin node <uid>: <URI>, no build identity (an older build), bundle <bundle dir>

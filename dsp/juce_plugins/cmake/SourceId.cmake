@@ -9,8 +9,8 @@
 #                  SpeakerBuildInfo.h, when its text changes
 #                    -DPLUGINS_DIR=<dsp/juce_plugins> -DPLUGIN=<folder> -DSHARED=<a,b,...>
 #                    -DVERSION=<x.y.z> -DOUTPUT=<path>
-#     bundle       after juce_lv2_helper wrote a bundle's ttl files: writes buildinfo.ttl and
-#                  appends the manifest's rdfs:seeAlso line to it (once)
+#     bundle       after juce_lv2_helper wrote a bundle's ttl files: writes buildinfo.ttl next
+#                  to them, and leaves manifest.ttl as the helper wrote it
 #                    -DHEADER=<SpeakerBuildInfo.h> -DBUNDLE=<dir> -DURI=<plugin URI>
 #                    -DBASE=<SPEAKER_LV2_URI_BASE>
 #     identity     prints "<version> <source-id>" for one plugin       -DPLUGIN_DIR=<folder>
@@ -221,25 +221,10 @@ elseif(MODE STREQUAL "bundle")
     bpi:sourceId \"${id}\" .
 ")
 
-    # LV2 tools reach buildinfo.ttl through the manifest. juce_lv2_helper rewrites the
-    # manifest whenever the plugin is linked, and this runs right after it, so the line is
-    # appended to every fresh manifest, and never twice to one.
-    set(manifest "${BUNDLE}/manifest.ttl")
-    if(NOT EXISTS "${manifest}")
-        message(FATAL_ERROR "${manifest} is missing: this step runs after juce_lv2_helper")
-    endif()
-    file(READ "${manifest}" text)
-    if(NOT text MATCHES "\n@prefix rdfs: +<http://www\\.w3\\.org/2000/01/rdf-schema#> \\.")
-        message(FATAL_ERROR "${manifest} does not declare rdfs:, which the seeAlso line uses")
-    endif()
-    set(line "<${URI}> rdfs:seeAlso <buildinfo.ttl> .")
-    string(FIND "${text}" "${line}" found)
-    if(found EQUAL -1)
-        if(NOT text MATCHES "\n$")
-            string(PREPEND line "\n")
-        endif()
-        file(APPEND "${manifest}" "${line}\n")
-    endif()
+    # manifest.ttl stays exactly as juce_lv2_helper wrote it: nothing names buildinfo.ttl. An
+    # rdfs:seeAlso to it would make lilv parse it as plugin data, and a damaged file would then
+    # stop the plugin instantiating (lilv's plugin.c and instance.c, parse_errors). No LV2 host
+    # needs it; speakerd reads it directly.
 
 elseif(MODE STREQUAL "identity")
     get_filename_component(pluginDir "${PLUGIN_DIR}" ABSOLUTE)

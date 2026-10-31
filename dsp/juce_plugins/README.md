@@ -253,7 +253,7 @@ unchanged identity recompiles nothing. Where it ends up:
 |---|---|
 | `SpeakerBuildInfo.h`, generated, on every target's include path | `SPEAKER_PLUGIN_NAME`, `SPEAKER_PLUGIN_VERSION`, `SPEAKER_PLUGIN_SOURCE_ID` |
 | every LV2 and VST3 binary | the string `bpi-build-info: <LV2 URI> version <version> source <source-id>` (`strings libfirConv.so \| grep bpi-build-info`) |
-| every LV2 bundle, next to `manifest.ttl` | `buildinfo.ttl`, below, and one line at the end of `manifest.ttl`: `<URI> rdfs:seeAlso <buildinfo.ttl> .` |
+| every LV2 bundle, next to `manifest.ttl` | `buildinfo.ttl`, below; `manifest.ttl` stays as JUCE writes it and does not name it |
 | `speakerd`'s log | `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` for each plugin node, read from the bundle's `buildinfo.ttl` |
 
 ```turtle
@@ -269,10 +269,19 @@ The subject is the target's own LV2 URI (`.../loudness_headless` for the headles
 after JUCE's `juce_lv2_helper` has written the bundle's `.ttl` files and before JUCE copies the
 bundle (into `~/.lv2`, or a cross build's `copied/lv2`), so the copy has it too
 ([cmake-reference.md](../docs/juce-knowledge/build-system/cmake-reference.md)).
+
+The manifest does not name `buildinfo.ttl` (no `rdfs:seeAlso`), on purpose: the file is
+diagnostic and no LV2 host reads it, so a damaged one can never stop the plugin loading. Named
+in the manifest, lilv would parse it with the plugin's data, and one parse error there (a
+half-written copy) makes lilv refuse to instantiate the plugin: the layer fails, and the speaker
+falls back to an older one or to passthrough. `speakerd` reads the file directly, from the
+bundle each plugin runs from (`../juce_apps/speakerd/README.md`, "Which build it is").
+
 `tests/buildinfo/check.sh` (rung 1, on the bundles plugin-check builds) checks that a bundle's
-`buildinfo.ttl`, manifest line and binary agree with `plugin-versions.sh list`. The controller,
-which compiles `loudness_control`'s sources in (`../juce_apps/controller/ControlPlugins.cmake`),
-does not compile the generated source and carries no plugin identity.
+`buildinfo.ttl` and binary agree with `plugin-versions.sh list`, and that its manifest does not
+mention `buildinfo.ttl`. The controller, which compiles `loudness_control`'s sources in
+(`../juce_apps/controller/ControlPlugins.cmake`), does not compile the generated source and
+carries no plugin identity.
 
 **The version rule.** A plugin's version goes up whenever its sources change (its folder or a
 shared folder it declares):
@@ -284,10 +293,16 @@ shared folder it declares):
 | changes the interface and breaks old saved states | **major** (0.1.0 -> 1.0.0) |
 
 A change only to `cmake/` or to the JUCE pin changes every identity but no version. The
-P1 block FIR is a patch: firConv and crossover 0.0.1 -> 0.0.2, the same parameters and state,
-their output bit-identical on x86_64; on aarch64 crossover's within -129 dB re peak, and
-firConv's within -59 dB re peak below 50 Hz, the rounding noise of its high-pass biquads,
-which any one-ulp change before them moves that much ([`firConv/README.md`](firConv/README.md)).
+P1 block FIR is a patch: firConv and crossover 0.0.1 -> 0.0.2, the same parameters and state.
+Its tolerance, as measured: the output bit-identical on x86_64; on aarch64 the FIRs within
+-131 dB re peak, crossover's output within -129 dB re peak, and firConv's within -59 dB re peak,
+all below 50 Hz, the rounding noise of its float32 high-pass biquads, which any one-ulp change
+before them moves that much, and did before P1 ([`firConv/README.md`](firConv/README.md)).
+
+lilv, which picks the bundle a host runs when two have one URI, sees only a version's last two
+numbers: JUCE writes `x.y.z` as `lv2:minorVersion y`, `lv2:microVersion z`, and lilv runs the
+greater, so 1.0.0 (0.0 to lilv) would lose to a 0.9.9, in either order
+([lv2-discovery.md](../docs/juce-knowledge/hosting/lv2-discovery.md)).
 
 **`tools/plugin-versions.sh`** (bash; git, coreutils and cmake; any directory, natively or in
 the development container):

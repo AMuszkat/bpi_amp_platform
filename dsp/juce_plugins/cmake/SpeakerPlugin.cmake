@@ -63,7 +63,8 @@
 #     SPEAKER_PLUGIN_VERSION, SPEAKER_PLUGIN_SOURCE_ID;
 #   - the string "bpi-build-info: <LV2 URI> version <version> source <source-id>" in each
 #     LV2 and VST3 binary (`strings <binary> | grep bpi-build-info`);
-#   - buildinfo.ttl in each LV2 bundle, next to manifest.ttl, which names it (rdfs:seeAlso).
+#   - buildinfo.ttl in each LV2 bundle, next to manifest.ttl, which does not name it: no LV2
+#     host reads it, so a damaged one can never stop the bundle loading; speakerd reads it.
 # tools/plugin-versions.sh reads the version and SHARED from this call's text, so both must be
 # written out literally; the configure step checks that it reads what CMake does.
 
@@ -296,7 +297,8 @@ extern \"C\" SPEAKER_KEEP const char speaker_build_info[] =
     endforeach()
 
     # buildinfo.ttl in the LV2 bundle, after juce_lv2_helper has written the bundle's ttl files
-    # (its POST_BUILD step, added by juce_add_plugin) and before the copy (below).
+    # (its POST_BUILD step, added by juce_add_plugin) and before the copy (below). The manifest
+    # is left as the helper wrote it.
     get_target_property(bundle ${name}_LV2 JUCE_PLUGIN_ARTEFACT_FILE)
     add_custom_command(TARGET ${name}_LV2 POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -DMODE=bundle "-DHEADER=${buildInfoHeader}" "-DBUNDLE=${bundle}"
