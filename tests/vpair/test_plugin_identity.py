@@ -11,8 +11,11 @@ repository root (dsp/juce_plugins/README.md, "Versions and source identity"),
                   HEAD:dsp/juce_plugins/cmake HEAD:dsp/juce_plugins/JUCE
         | git hash-object --stdin | cut -c1-12
 
-with a folder not yet in HEAD counted as the empty tree (`git hash-object -t tree /dev/null`) and
-dirty, and `-dirty` appended when `git status --porcelain -- <the same paths>` prints anything.
+with a folder not yet in HEAD counted as the empty tree (`git hash-object -t tree /dev/null`), and
+`-dirty` appended, for every path alike, exactly when `git status --porcelain -- <the same paths>`
+prints anything: the identity is HEAD's trees plus the changes git status sees, so a folder not in
+HEAD is dirty only through what git status prints of it (its untracked files that are not
+ignored), not for being missing from HEAD.
 The virtual pair runs in a git checkout with git, so here no plugin's id may be `unknown`.
 `dsp/juce_plugins/tools/plugin-versions.sh list` prints `<plugin> <version> <source-id>`, one line
 per plugin and nothing else, for the tree as it is; every LV2 bundle that `speaker_add_plugin()`
@@ -40,8 +43,8 @@ Pass when:
    plugin under dsp/juce_plugins (those whose CMakeLists.txt calls speaker_add_plugin), and
    nothing else; each version is the plugin's `project(... VERSION)`; no source id is `unknown`
    (git is there), each is the 12 hex characters of the command above, computed by this test
-   with git from the plugin's own SHARED, and ends in `-dirty` exactly when `git status
-   --porcelain` over the same paths prints anything (or one of them is not in HEAD yet); and the
+   with git from the plugin's own SHARED (a folder not in HEAD yet the empty tree), and ends in
+   `-dirty` exactly when `git status --porcelain` over the same paths prints anything; and the
    bundles loudness_headless, loudness (the complete build: all targets share the identity),
    firConv and crossover each carry buildinfo.ttl exactly as above with that plugin's version and
    that source id, and their manifest.ttl does not name it;
@@ -60,10 +63,10 @@ Pass when:
 A bundle directory said in a line is compared with the one given as paths (a trailing `/` is the
 same directory).
 
-With plugins and a speakerd from before the build identity (the plugins 0.0.1 and speakerd 0.3.x
-of step 3), every part fails, saying what is missing: no plugin-versions.sh, no buildinfo.ttl, no
-`plugin node` line. It needs step 3's speakerd (the local link, the Mine pin): with an older one
-it fails, saying so.
+With plugins and a speakerd from before the build identity (the plugins 0.0.1 and step 3's
+speakerd 0.3.0), every part fails, saying what is missing: no plugin-versions.sh, no buildinfo.ttl,
+no `plugin node` line, which speakerd logs from 0.3.1 on. It runs only on step 3's speakerd 0.3.0
+or later (the local link, the Mine pin): with an older one it fails, saying so.
 
     python3 -m unittest -v tests.vpair.test_plugin_identity
 """
@@ -151,8 +154,9 @@ def git(test, *args, stdin=None):
 
 def git_source_id(test, plugin):
     """The plugin's source id as dsp/juce_plugins/README.md's command gives it, computed here with
-    git: the 12 hex characters, `-dirty` after them exactly when `git status --porcelain` over the
-    same paths prints anything or one of them is not in HEAD yet (the empty tree, and dirty)."""
+    git: the 12 hex characters, a folder not in HEAD yet counted as the empty tree, and `-dirty`
+    after them exactly when `git status --porcelain` over the same paths prints anything (for a
+    folder not in HEAD as for every other: only what git status sees of it counts)."""
     if shutil.which("git") is None:
         test.fail("there is no git: the virtual pair runs in a git checkout, where every source id is known")
     if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
@@ -171,7 +175,7 @@ def git_source_id(test, plugin):
     source = git(test, "hash-object", "--stdin", stdin=git(test, "rev-parse", *revisions)).strip()[:12]
     test.assertRegex(source, r"^[0-9a-f]{12}$", f"{plugin}: git hash-object printed {source!r}")
     changes = git(test, "status", "--porcelain", "--", *paths)
-    return source + ("-dirty" if changes or not_in_head else ""), paths, changes, not_in_head
+    return source + ("-dirty" if changes else ""), paths, changes, not_in_head
 
 
 def listed_identities(test):

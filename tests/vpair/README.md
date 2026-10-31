@@ -97,7 +97,7 @@ path must fit in 108 bytes.
 | `test_ampd_persistence.py` | `graph.json` follows the values, speakerd boots on it, `graph.lkg.json` follows a revision that played long enough |
 | `test_controller_end_to_end.py` | the real controller in its script test mode against the real pair: connect, knob, edits, a refusal, monitors, another secret, and its GUI under Xvfb |
 | `test_chain_cost.py` | the board's chain (loudness, firConv, the crossover) at quantum 1024: what each FIR plugin costs speakerd's audio thread, by speakerd's own timing |
-| `test_plugin_identity.py` | each plugin bundle's `buildinfo.ttl` (version and source id, as `plugin-versions.sh list` says), and speakerd's line for each plugin node, live and rendered; an older build and a broken `buildinfo.ttl` |
+| `test_plugin_identity.py` | each plugin bundle's `buildinfo.ttl` (version and source id, as `plugin-versions.sh list` says, its source id also checked against the documented git command itself), and speakerd's line for each plugin node, live and rendered; an older build and a broken `buildinfo.ttl` |
 
 ## Before and after the speakerd that enforces the limits
 
