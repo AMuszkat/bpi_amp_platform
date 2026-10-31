@@ -3,7 +3,17 @@ it is, and speakerd says which build each of its plugin nodes runs, live and in 
 
 A plugin's identity is its version (its CMakeLists.txt's `project(... VERSION)`) and its source
 id (12 lowercase hex characters of the source it was built from, `-dirty` after them when the tree
-had changes, or `unknown` without git), the same for all its targets.
+had changes, or `unknown` without git), the same for all its targets. The source id is, from the
+repository root (dsp/juce_plugins/README.md, "Versions and source identity"),
+
+    git rev-parse HEAD:dsp/juce_plugins/<plugin>
+                  [HEAD:dsp/juce_plugins/shared/<name> for each name of its SHARED, in order]
+                  HEAD:dsp/juce_plugins/cmake HEAD:dsp/juce_plugins/JUCE
+        | git hash-object --stdin | cut -c1-12
+
+with a folder not yet in HEAD counted as the empty tree (`git hash-object -t tree /dev/null`) and
+dirty, and `-dirty` appended when `git status --porcelain -- <the same paths>` prints anything.
+The virtual pair runs in a git checkout with git, so here no plugin's id may be `unknown`.
 `dsp/juce_plugins/tools/plugin-versions.sh list` prints `<plugin> <version> <source-id>`, one line
 per plugin and nothing else, for the tree as it is; every LV2 bundle that `speaker_add_plugin()`
 builds carries a `buildinfo.ttl` next to its `manifest.ttl`, exactly
@@ -28,10 +38,13 @@ Pass when:
 
 1. `plugin-versions.sh list` exits 0 and prints one line `<plugin> <version> <source-id>` for each
    plugin under dsp/juce_plugins (those whose CMakeLists.txt calls speaker_add_plugin), and
-   nothing else; each version is the plugin's `project(... VERSION)`; and the bundles
-   loudness_headless, loudness (the complete build: all targets share the identity), firConv and
-   crossover each carry buildinfo.ttl exactly as above with that plugin's version and source id,
-   and their manifest.ttl does not name it;
+   nothing else; each version is the plugin's `project(... VERSION)`; no source id is `unknown`
+   (git is there), each is the 12 hex characters of the command above, computed by this test
+   with git from the plugin's own SHARED, and ends in `-dirty` exactly when `git status
+   --porcelain` over the same paths prints anything (or one of them is not in HEAD yet); and the
+   bundles loudness_headless, loudness (the complete build: all targets share the identity),
+   firConv and crossover each carry buildinfo.ttl exactly as above with that plugin's version and
+   that source id, and their manifest.ttl does not name it;
 2. live, on both speakers, speakerd started on the chain says exactly one first-form line for
    each of 16, 17 and 18 (its URI, the plugin's version and source id, and the bundle directory
    the test gave it), and an apply of revision 2 over the local link on the left says them once
@@ -110,6 +123,57 @@ def project_version(plugin):
     return found.group(1) if found else None
 
 
+def shared_folders(plugin):
+    """The SHARED folders of the plugin's speaker_add_plugin() call, in order, read from the text
+    (comments out), independently of cmake/SourceId.cmake."""
+    text = "\n" + re.sub(r"#[^\n]*", "", (PLUGINS_DIR / plugin / "CMakeLists.txt").read_text())
+    call = re.search(r"\n[ \t]*speaker_add_plugin[ \t]*\(([^)]*)\)", text)
+    if not call:
+        return []
+    keywords = {"CODE", "INPUTS", "OUTPUTS", "SOURCES", "DSP", "EDITOR", "MODULES", "TARGETS", "SHARED"}
+    shared, in_shared = [], False
+    for token in call.group(1).split():
+        if token in keywords:
+            in_shared = token == "SHARED"
+        elif in_shared:
+            shared.append(token)
+    return shared
+
+
+def git(test, *args, stdin=None):
+    """git's stdout, run at the repository root; fails the test when git fails."""
+    result = subprocess.run(["git", "--no-optional-locks", "-C", str(ROOT), *args], input=stdin,
+                            capture_output=True, text=True, timeout=60)
+    test.assertEqual(result.returncode, 0, f"git {' '.join(args)} exited with status {result.returncode}: "
+                                           f"{result.stderr.strip()}")
+    return result.stdout
+
+
+def git_source_id(test, plugin):
+    """The plugin's source id as dsp/juce_plugins/README.md's command gives it, computed here with
+    git: the 12 hex characters, `-dirty` after them exactly when `git status --porcelain` over the
+    same paths prints anything or one of them is not in HEAD yet (the empty tree, and dirty)."""
+    if shutil.which("git") is None:
+        test.fail("there is no git: the virtual pair runs in a git checkout, where every source id is known")
+    if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                      capture_output=True, timeout=60).returncode != 0:
+        test.fail(f"{ROOT} is not a git checkout with a commit: the virtual pair runs in one")
+    paths = ([f"dsp/juce_plugins/{plugin}"] + [f"dsp/juce_plugins/shared/{name}" for name in shared_folders(plugin)]
+             + ["dsp/juce_plugins/cmake", "dsp/juce_plugins/JUCE"])
+    revisions, not_in_head = [], []
+    for path in paths:
+        if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", f"HEAD:{path}"],
+                          capture_output=True, timeout=60).returncode == 0:
+            revisions.append(f"HEAD:{path}")
+        else:
+            not_in_head.append(path)
+            revisions.append(git(test, "hash-object", "-t", "tree", "/dev/null").strip())
+    source = git(test, "hash-object", "--stdin", stdin=git(test, "rev-parse", *revisions)).strip()[:12]
+    test.assertRegex(source, r"^[0-9a-f]{12}$", f"{plugin}: git hash-object printed {source!r}")
+    changes = git(test, "status", "--porcelain", "--", *paths)
+    return source + ("-dirty" if changes or not_in_head else ""), paths, changes, not_in_head
+
+
 def listed_identities(test):
     """What `plugin-versions.sh list` prints, {plugin: (version, source id)}, after checking that it
     exits 0, every line is `<plugin> <version> <source-id>` and there is one per plugin."""
@@ -176,22 +240,34 @@ class PluginIdentity(unittest.TestCase):
         cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
 
     def expected_nodes(self):
-        """{uid: (URI, version, source id, bundle)} for the chain, from plugin-versions.sh."""
-        listed = listed_identities(self)
-        return {uid: (lv2_uri(target), *listed[plugin], self.bundles[target]) for uid, (plugin, target) in CHAIN.items()}
+        """{uid: (URI, version, source id, bundle)} for the chain: the project() version and the
+        source id computed with git."""
+        return {uid: (lv2_uri(target), project_version(plugin), git_source_id(self, plugin)[0], self.bundles[target])
+                for uid, (plugin, target) in CHAIN.items()}
 
     def test_1_each_bundle_carries_its_build_identity(self):
         listed = listed_identities(self)
-        problems, rows = [], []
+        problems, rows, truth = [], [], {}
         for plugin, (version, source) in sorted(listed.items()):
-            rows.append(f"plugin-versions.sh: {plugin} {version} {source}")
+            truth[plugin], paths, changes, not_in_head = git_source_id(self, plugin)
+            rows.append(f"plugin-versions.sh: {plugin} {version} {source}; git: {truth[plugin]}"
+                        + (f" ({len(changes.splitlines())} changed paths)" if changes else "")
+                        + (f" (not in HEAD: {', '.join(not_in_head)})" if not_in_head else ""))
             if version != project_version(plugin):
                 problems.append(f"{plugin}: plugin-versions.sh says version {version}, its CMakeLists.txt's project() "
                                 f"{project_version(plugin)}")
+            if source == "unknown":
+                problems.append(f"{plugin}: plugin-versions.sh says source unknown, though git is there and gives "
+                                f"{truth[plugin]}")
+            elif source != truth[plugin]:
+                problems.append(f"{plugin}: plugin-versions.sh says source {source}, the documented git command over "
+                                f"{' '.join(paths)} gives {truth[plugin]}"
+                                + (f"; git status --porcelain prints:\n{changes}" if changes else
+                                   "; git status --porcelain prints nothing"))
         for target, (plugin, _) in BUNDLES.items():
             bundle = self.bundles[target]
             uri = lv2_uri(target)
-            version, source = listed[plugin]
+            version, source = project_version(plugin), truth[plugin]
             want = BUILDINFO.format(uri=uri, version=version, source=source)
             info = bundle / "buildinfo.ttl"
             if not info.is_file():

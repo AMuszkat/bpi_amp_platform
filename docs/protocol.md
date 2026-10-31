@@ -100,7 +100,7 @@ node's current `params`), a number, a time and an origin:
 
 - **A controller proposes** revision `base + 1` over the control link. The hub refuses it
   unless `base` is its current revision (`stale`), the document parses, and every plugin it
-  names is one the hub has seen loaded somewhere (the full catalogue with version hashes is
+  names is one the hub has seen loaded somewhere (the full catalogue, with versions and source identities, is
   step 4).
 - **The hub applies it everywhere it can.** It sends
   `{"op":"apply","revision":8,"document":{...}}` to its own `speakerd` (local) and to every
