@@ -744,12 +744,13 @@ into a stopped capture uses the fetched record, so it shows the real samples.
 
 **Latency.** In steady state a frame reaches the window one Wi-Fi round trip after the speaker
 produced it, a few milliseconds. On the speaker nothing waits: `ampd` relays each value as it
-arrives from `speakerd`, at most at the window's rate, so a value reaches a window about a
-millisecond after `speakerd` sampled it. `monitor_fanout` measures it on the virtual pair,
-eight windows at 20 Hz on the same x86_64 machine as the speaker, against a limit of 5 ms: in
-four runs with `ampd` 0.1.1 (alone and in the whole suite, with a 10 s and a 30 s window), the
-99th percentile was 0.63 to 1.09 ms on the hub's speaker and on the agent's; the longest age in
-the 30 s runs was 10.2 ms (one moment of the machine, in the whole suite). Its first relay sent
+arrives from `speakerd`, at most at the window's rate, so a value leaves the speaker about a
+millisecond after `speakerd` sampled it, and reaches the window a Wi-Fi trip later.
+`monitor_fanout` measures the speaker's part on the virtual pair, eight windows at 20 Hz on the
+same x86_64 machine as the speaker (no network between them), against a limit of 5 ms: in
+seven runs with `ampd` 0.1.1 (alone and in the whole suite, with a 10 s and a 30 s window), the
+99th percentile was 0.63 to 1.43 ms on the hub's speaker and on the agent's; single values took
+up to 10.2 ms in the whole suite (one moment of the machine). Its first relay sent
 each window's values on a clock of that window's own, so a value waited for the window's turn,
 up to a whole period: about 50 ms at the 99th percentile at 20 Hz. When a packet is lost, TCP
 retransmits it and that one frame arrives late; the next frame is fresh, because nothing queued

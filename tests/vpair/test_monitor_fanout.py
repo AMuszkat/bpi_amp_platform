@@ -18,8 +18,11 @@ its `t` (speakerd's `CLOCK_MONOTONIC` when its monitor thread sampled it: one cl
 Why 30 s: each flush sends one value to all eight clients, so a stall (speakerd's monitor thread,
 ampd's loop or the harness held up a moment, on a shared runner that also runs two PipeWire graphs)
 makes all eight late at once. The window's 4800 values are about 600 periods, and the 99th
-percentile stays under 5 ms with six of them stalled; a 10 s window tolerated two. Each speaker
-takes about 32 s, the scenario about 70 s with the pair's start (30 s before).
+percentile stays under 5 ms with six of them stalled; a 10 s window tolerated two. Each speaker's
+measurement takes about 32 s, and the scenario about 70 s, the pair's start included. Each tone
+lasts both measurements and 20 s more, so that both speakers play through both windows: no node
+or link goes away in the middle of one. At the end of each window both players must still play,
+or the scenario fails.
 
 Pass when, on each speaker:
 
@@ -58,6 +61,7 @@ CLIENTS = 8
 RATE_HZ = 20.0
 STAGGER = 1.5 / CLIENTS          # periods between two clients' subscriptions
 SETTLE, WINDOW = 1.0, 30.0       # seconds (WINDOW: the docstring's "Why 30 s")
+TONE = 2 * (SETTLE + WINDOW) + 20.0  # seconds: both measurements, one after the other, and 20 s to spare
 AGE_P99_MS = 5.0
 RATE_TOLERANCE = 0.3
 FREQ, LEVEL = 200.0, -20.0
@@ -86,10 +90,11 @@ class MonitorFanout(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         results = {}
         with SpeakerPair(tmp, {"left": DOCUMENT, "right": DOCUMENT}, [built("loudness", "headless")]) as pair, \
-                Player(pair["left"], tone(FREQ, LEVEL, 60.0), target="speakerd"), \
-                Player(pair["right"], tone(FREQ, LEVEL, 60.0), target="speakerd"):
+                Player(pair["left"], tone(FREQ, LEVEL, TONE), target="speakerd") as left, \
+                Player(pair["right"], tone(FREQ, LEVEL, TONE), target="speakerd") as right:
+            players = {"left": left, "right": right}
             for name in ("left", "right"):
-                results[name] = self.measure(name, pair.ampd[name].process.pid)
+                results[name] = self.measure(name, pair.ampd[name].process.pid, players)
         failures = []
         for name, (clients, cpu) in results.items():
             role = "the hub" if name == "left" else "the agent"
@@ -114,9 +119,10 @@ class MonitorFanout(unittest.TestCase):
         if failures:
             self.fail("\n".join(failures))
 
-    def measure(self, name, ampd_pid):
+    def measure(self, name, ampd_pid, players):
         """Eight clients on `name`'s monitor link, subscribed at staggered phases; returns
-        ([(rate, ages in ms) per client], ampd's CPU share over the window)."""
+        ([(rate, ages in ms) per client], ampd's CPU share over the window). Fails when a tone of
+        `players` ended before the window did."""
         period = 1.0 / RATE_HZ
         clients = [MonitorClient(ADDRESS[name], name=f"fanout-{name}-{k}") for k in range(CLIENTS)]
         try:
@@ -130,6 +136,10 @@ class MonitorFanout(unittest.TestCase):
             cpu0, start = cpu_seconds(ampd_pid), time.monotonic()
             time.sleep(WINDOW)
             end, cpu1 = time.monotonic(), cpu_seconds(ampd_pid)
+            ended = [speaker for speaker, player in players.items() if not player.playing()]
+            if ended:
+                self.fail(f"{name}: the tone on {' and '.join(ended)} ended before the window did "
+                          f"({TONE:g} s of tone): the window did not measure a speaker playing")
             measured = []
             for client in clients:
                 values = [(t, v) for t, v in client.of(STREAM, since=start) if t <= end]

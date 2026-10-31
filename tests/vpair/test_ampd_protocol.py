@@ -38,13 +38,18 @@ Pass when:
 - the monitor relay, on the hub's monitor link and on an agent's alike: a new subscription gets
   the newest value at once (with the union at 1 Hz, a value sampled before it subscribed, within
   0.1 s, the one the other client got); beside a client of 60 Hz, one of 45 and one of 30 each get
-  their own rate within 30 % (of at most what the 60 Hz one gets); one subscribing again at 15 Hz
-  gets 15 within 30 %, and speakerd is asked no other rate; nothing comes after an unsubscribe;
-  a value of a stream nobody subscribed to, a line of another op naming the stream, a value whose
-  stream is not a string, and one with no stream reach no client; a value of 56 KB is relayed;
-  one of 105 KB and one holding NaN are not (ampd says so), no client gets them, from 0.2 s on
-  none gets any value, nor does a client subscribing then (none is kept as the newest), and
-  values come again after; no client gets anything but values and errors, is disconnected, gets
+  their own rate within 30 % (of at most what the 60 Hz one gets); a new subscription of 5 Hz
+  beside them gets its first value within 0.1 s, from the store, and its second more than 100 ms
+  after it (ampd sends it a period, 200 ms, after the first, not the union's next value 17 ms on);
+  one subscribing again at 15 Hz gets 15 within 30 %, and speakerd is asked no other rate; nothing
+  comes after an unsubscribe; a value of a stream nobody subscribed to, a line of another op
+  naming the stream, a value whose stream is not a string, and one with no stream reach no client;
+  a value of 56 KB is relayed; one of 105 KB and one holding NaN are not (ampd says so), no client
+  gets them, from 0.2 s on none gets any value, nor does a client subscribing then (none is kept
+  as the newest), and values come again after; with speakerd gone, a client subscribing then gets
+  nothing for 0.5 s (the store is cleared) and those subscribed before get nothing from 0.2 s
+  after ampd lost it, and once it is back under the running ampd every subscriber, that one too,
+  gets values within 2 s; no client gets anything but values and errors, is disconnected, gets
   another stream, or gets a value twice or after a newer one;
 - persistence: while values change 25 times a second for 3 s, graph.json is replaced at most 4
   times and holds the last value within 1.1 s of it; a new revision is written at once (within
@@ -322,7 +327,7 @@ class Protocol(unittest.TestCase):
             pair.sd["left"].stop()
             pair.ampd["left"].wait_for("speakerd: lost the connection")
             mark = pair.ampd["left"].mark()
-            pair.sd["left"] = pair._stack.enter_context(type(pair.sd["right"])(pair.env["left"], pair.state["left"]))
+            pair.start_speakerd("left")
             squatter = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             squatter.connect(str(pair.sd["left"].socket))
             pair.ampd["left"].wait_for(("speakerd: busy", "speakerd: connected"), after=mark)
@@ -491,8 +496,10 @@ class Protocol(unittest.TestCase):
                                 f"{name}: the {asked_hz} Hz client got {got[label]:.1f} values/s beside the 60 Hz one")
 
             # A new subscription of 5 Hz beside them (speakerd at 60 Hz by now): its first value
-            # at once, from the store, and the next no sooner than a period later, not the
-            # union's next value 17 ms on (its bucket starts with the one token the first takes).
+            # at once, from the store, and the next a period later (200 to 217 ms as ampd sends
+            # them), not the union's next value 17 ms on (its bucket starts with the one token the
+            # first takes). Both are the client's arrival stamps, so the check is half a period:
+            # 100 ms of margin for a busy runner, and still 80 ms beyond a bucket that starts full.
             paced = client("paced")
             asked = time.monotonic()
             paced.subscribe(stream, 5)
@@ -501,8 +508,8 @@ class Protocol(unittest.TestCase):
             print(f"\n  {name}: a new subscription of 5 Hz beside the union of 60: its first value "
                   f"{1000 * (first_at - asked):.1f} ms after it, the next {1000 * (second_at - first_at):.0f} ms later", end="")
             self.assertLess(first_at - asked, 0.1, f"{name}: the newest value did not come at once")
-            self.assertGreater(second_at - first_at, 0.9 / 5, f"{name}: a new subscription's second value came "
-                               f"{1000 * (second_at - first_at):.0f} ms after its first, sooner than its period")
+            self.assertGreater(second_at - first_at, 0.5 / 5, f"{name}: a new subscription's second value came "
+                               f"{1000 * (second_at - first_at):.0f} ms after its first, not a period (200 ms) later")
 
             # Subscribed again at another rate: the client's bucket follows it, the union stays.
             mark = time.monotonic()
@@ -548,7 +555,11 @@ class Protocol(unittest.TestCase):
 
             # speakerd goes: the store is cleared, so a client subscribing then gets nothing (no
             # value of a speakerd that is gone). It comes back under the running ampd: every
-            # subscriber gets values again, the new one too, within 2 s.
+            # subscriber gets values again, the new one too, within 2 s. A client subscribed
+            # before may still get, stamped up to 0.2 s after the log line, a value ampd sent just
+            # before it read the stand-in's end (its reader thread stamps a value when it reads
+            # it); the one subscribing then gets nothing at all, which is what proves the store
+            # was cleared.
             control = json.loads(sd.control_path.read_text())
             mark = ampd.mark()
             sd.stop()
@@ -556,9 +567,10 @@ class Protocol(unittest.TestCase):
             gone = time.monotonic()
             meanwhile = client("while-speakerd-is-gone", 30)
             time.sleep(0.5)
+            self.assertEqual(meanwhile.values, [], f"{name}: a client subscribing while speakerd was gone got a value")
             for c in clients:
-                self.assertEqual(c.of(stream, since=gone), [], f"{name}: {c.name} got a value while speakerd was gone")
-            sd = pair.sd[name] = pair._stack.enter_context(StandInSpeakerd(pair.env[name], pair.state[name], control))
+                self.assertEqual(c.of(stream, since=gone + 0.2), [], f"{name}: {c.name} got a value while speakerd was gone")
+            sd = pair.start_speakerd(name, control)
             back, again = time.monotonic(), []
             for c in clients:
                 if stream in c.subs:         # all but the one that unsubscribed, `meanwhile` among them
