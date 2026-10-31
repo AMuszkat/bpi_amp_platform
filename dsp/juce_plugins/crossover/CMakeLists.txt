@@ -3,7 +3,7 @@
 # build with ../tools/build-podman.sh crossover  (see ../README.md).
 cmake_minimum_required(VERSION 3.22)
 
-project(CROSSOVER_PLUGIN VERSION 0.0.1)
+project(CROSSOVER_PLUGIN VERSION 0.0.2)
 
 find_package(JUCE CONFIG REQUIRED)
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/SpeakerPlugin.cmake)
@@ -18,4 +18,6 @@ speaker_add_plugin(crossover
         PlotComponent.cpp
     MODULES
         juce_dsp
+    SHARED
+        blockfir
 )

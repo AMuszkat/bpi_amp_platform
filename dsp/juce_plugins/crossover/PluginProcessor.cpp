@@ -126,25 +126,15 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     lpBuffer.setSize(1, preparedBlock);
     hpBuffer.setSize(1, preparedBlock);
 
-    // Prepare LP chain
-    lpChain.prepare(spec);
-    auto& lpGain = lpChain.get<lpGainIndex>();
-    auto& lpFilter = lpChain.get<lpFilterIndex>();
+    // The low band: its gain, then its FIR.
+    lpGain.prepare(spec);
     lpGain.setGainDecibels(0.0f);
-    {
-        using Coeffs = juce::dsp::FIR::Coefficients<float>;
-        lpFilter.coefficients = Coeffs::Ptr(new Coeffs(lp, (int)(sizeof(lp)/sizeof(lp[0])))); // FIR::Filter<>::CoefficientsPtr
-    }
+    lpFir.prepare(lp, (int)(sizeof(lp)/sizeof(lp[0])), preparedBlock);
 
-    // Prepare HP chain
-    hpChain.prepare(spec);
-    auto& hpGain = hpChain.get<hpGainIndex>();
-    auto& hpFilter = hpChain.get<hpFilterIndex>();
+    // The high band, the same way.
+    hpGain.prepare(spec);
     hpGain.setGainDecibels(0.0f);
-    {
-        using Coeffs = juce::dsp::FIR::Coefficients<float>;
-        hpFilter.coefficients = Coeffs::Ptr(new Coeffs(hp, (int)(sizeof(hp)/sizeof(hp[0])))); // FIR::Filter<>::CoefficientsPtr
-    }
+    hpFir.prepare(hp, (int)(sizeof(hp)/sizeof(hp[0])), preparedBlock);
 
     // The gain parameter is applied again at the next block, whatever it is now.
     appliedGainDb = std::numeric_limits<float>::quiet_NaN();
@@ -154,8 +144,10 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
 
 void PluginProcessor::reset()
 {
-    lpChain.reset();
-    hpChain.reset();
+    lpGain.reset();
+    lpFir.reset();
+    hpGain.reset();
+    hpFir.reset();
 }
 
 void PluginProcessor::releaseResources()
@@ -196,8 +188,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     if (! juce::exactlyEqual (gainDb, appliedGainDb))
     {
-        lpChain.get<lpGainIndex>().setGainDecibels (gainDb);
-        hpChain.get<hpGainIndex>().setGainDecibels (gainDb);
+        lpGain.setGainDecibels (gainDb);
+        hpGain.setGainDecibels (gainDb);
         appliedGainDb = gainDb;
     }
 
@@ -229,11 +221,13 @@ void PluginProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start,
     lpBuffer.copyFrom (0, 0, inData, numSamples);
     hpBuffer.copyFrom (0, 0, inData, numSamples);
 
-    // Process LP and HP over the first numSamples of their buffers
+    // Process LP and HP over the first numSamples of their buffers: the gain, then the FIR.
     auto lpBlock = juce::dsp::AudioBlock<float> (lpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
-    lpChain.process (juce::dsp::ProcessContextReplacing<float> (lpBlock));
+    lpGain.process (juce::dsp::ProcessContextReplacing<float> (lpBlock));
+    lpFir.process (lpBuffer.getReadPointer (0), lpBuffer.getWritePointer (0), numSamples);
     auto hpBlock = juce::dsp::AudioBlock<float> (hpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
-    hpChain.process (juce::dsp::ProcessContextReplacing<float> (hpBlock));
+    hpGain.process (juce::dsp::ProcessContextReplacing<float> (hpBlock));
+    hpFir.process (hpBuffer.getReadPointer (0), hpBuffer.getWritePointer (0), numSamples);
 
     // Route: output channel 0 = LP, output channel 1 = HP.
     const int outChs = getTotalNumOutputChannels();

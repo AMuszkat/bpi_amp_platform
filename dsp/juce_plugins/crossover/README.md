@@ -22,6 +22,15 @@ To change the crossover, re-export from the tuning GUI and rebuild:
 The per-band delays the tuning GUI uses for time alignment are simulation-only. They are
 not part of this header, so apply them in the host or in the signal chain.
 
+Each band's FIR is the shared block FIR, `../shared/blockfir/BlockFir.h` (`SHARED blockfir`
+in `CMakeLists.txt`, [../README.md](../README.md#shared-source-folders)), after the band's gain.
+Since 0.0.2 it replaces `juce::dsp::FIR::Filter`, a patch whose tolerance is, as measured: on
+x86_64 the same output bit for bit; on aarch64 every tap is a fused multiply-add, which differs
+from `FIR::Filter`'s mix of fused and unfused taps by less than -131 dB re the FIRs' peak
+(`../tests/blockfir`, full-scale noise), and the plugin's two outputs differ from 0.0.1's by
+-129.5 and -132.6 dB re their peak (rendered by `speakerd` from a sweep and noise). A block
+longer than the one prepared is processed in chunks of that size.
+
 | Parameter | Range | |
 |---|---|---|
 | Gain | −30 … 0 dB | applied to both bands |
