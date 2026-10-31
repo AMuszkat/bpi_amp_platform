@@ -8,7 +8,9 @@ cmake_minimum_required(VERSION 3.22)
 # 0.2.1: its own sink at priority.driver 0 and said loudly, client-rt.conf, the commit in --version.
 # 0.3.0: the local link to ampd (docs/protocol.md): parameters, graph revisions, status, the Mine
 #        pin, and the monitor thread (output/level, plugins' mon_ parameters).
-project(SPEAKERD VERSION 0.3.0)
+# 0.3.1: logs the build of each plugin node it runs (`plugin node` lines, from the bundle's
+#        buildinfo.ttl; PluginBundles: which bundle each URI runs from, by lilv's rules).
+project(SPEAKERD VERSION 0.3.1)
 
 # A cross build (tools/build.sh speakerd aarch64) links the target's libpipewire, never this
 # machine's, and checks that it does (below) by the target's multiarch triplet.
@@ -53,6 +55,7 @@ target_sources(speakerd
         Engine.cpp
         Monitor.cpp
         PipeWireNode.cpp
+        PluginBundles.cpp
         TimedNode.cpp
         Timing.cpp
         Render.cpp
@@ -101,6 +104,7 @@ target_sources(speakerd-make-filtergraph
     PRIVATE
         examples/MakeFiltergraph.cpp
         GraphBuilder.cpp
+        PluginBundles.cpp
         TimedNode.cpp
         GraphDocument.cpp
         LV2State.cpp)

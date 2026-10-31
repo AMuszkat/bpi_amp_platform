@@ -25,9 +25,10 @@ StartLimitIntervalSec=0
 Type=simple
 Environment=SPEAKERD_STATE_DIR=%h/.local/state/speakerd
 Environment=SPEAKERD_RUNTIME_DIR=%t/speakerd
-# An empty HOME: JUCE's LV2 host looks in ~/.lv2 before anything else, and an old bundle
-# copied there (build-podman.sh -install does that) would shadow the bundles speakerd-run
-# names on the command line.
+# An empty HOME: JUCE's LV2 host looks in ~/.lv2 before anything else, and a bundle copied
+# there (build-podman.sh -install does that) of the same version as one speakerd-run names on
+# the command line, or a newer one, would shadow it (lilv keeps the first unless a later one is
+# newer), so speakerd would refuse to start.
 Environment=HOME=%h/.local/lib/speakerd/home
 # client-rt.conf is client.conf plus PipeWire's module-rt: the thread speakerd's graph runs on
 # gets real-time priority (through RTKit or RLIMIT_RTPRIO, when either allows it). With the

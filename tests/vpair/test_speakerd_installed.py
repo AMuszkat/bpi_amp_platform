@@ -9,9 +9,8 @@ board's loads ~/.config/pipewire/pipewire.conf.d: the left one from speaker.conf
 amplifier has priority.driver 1000 like the board's ALSA sink in firmware/pipewire/pipewire.conf;
 the right one with the amplifier's priority.driver removed, as a board's ALSA sink defined
 without one. speakerd is started by the installed unit's ExecStart (harness.UserUnit), with
-the unit's environment: an empty HOME, client-rt.conf. An older, broken copy of
-loudness_headless.lv2 lies in the home's own ~/.lv2, where build-podman.sh -install puts
-bundles.
+the unit's environment: an empty HOME, client-rt.conf. A broken copy of loudness_headless.lv2,
+of the same version, lies in the home's own ~/.lv2, where build-podman.sh -install puts bundles.
 
 Pass when:
 
@@ -25,9 +24,10 @@ Pass when:
   capture is 0, and the woofer's gain for a 100 Hz tone is the complete build's offline render
   of the same document (no limits) minus 20 dB, within 0.05 dB;
 - speakerd loads loudness_headless from the current version's lv2/ folder, although the copy
-  in the home's own ~/.lv2 has the same URI; the same command with HOME set to that home stops
-  with status 2 (the copy would shadow it); after a rollback, the next start loads it from the
-  previous version's folder; speakerd's HOME is still empty after it ran;
+  in the home's own ~/.lv2 has the same URI and version; the same command with HOME set to that
+  home stops with status 2 (lilv keeps the copy, read first and not older); after a rollback,
+  the next start loads it from the previous version's folder; speakerd's HOME is still empty
+  after it ran;
 - firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it is
   capped, the live speakerd sink has the drop-in's properties and is the default sink, it is
   linked from the sink to the amplifier and nothing else feeds the amplifier, no AudioPluginHost
@@ -109,8 +109,9 @@ class Installed(unittest.TestCase):
                  "--allow-tweeter-without-crossover", env=no_pipewire)
         cls.lib = cls.user_home / ".local/lib/speakerd"
 
-        # An older copy of the bundle in the home's own ~/.lv2, broken: were it the one loaded,
-        # the factory layer could not load its plugin.
+        # A copy of the bundle in the home's own ~/.lv2, of the same version (lilv keeps it over a
+        # later bundle that is not newer), broken: were it the one loaded, the factory layer could
+        # not load its plugin.
         old = cls.user_home / ".lv2" / "loudness_headless.lv2"
         shutil.copytree(headless, old)
         for library in old.glob("*.so"):
@@ -226,7 +227,8 @@ class Installed(unittest.TestCase):
         current = f"speakerd: lv2 bundle {self.lib / self.current / 'lv2/loudness_headless.lv2'}: {URI}"
         self.assertIn(current, self.runs["left"].log().splitlines())
 
-        # The same command with the home's own ~/.lv2 in view: the old copy shadows the bundle.
+        # The same command with the home's own ~/.lv2 in view: the copy, read first and of the
+        # same version, shadows the bundle.
         version = self.lib / self.current
         command = [str(version / "bin/speakerd"), "--state-dir", str(self.user_home / ".local/state/speakerd"),
                    "--lv2-bundle", str(version / "lv2/loudness_headless.lv2")]

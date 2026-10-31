@@ -38,3 +38,31 @@ URI are interchangeable."* Same URI ⇒ one overwrites the other.
 (`PLUGIN_MANUFACTURER_CODE` may be shared). Current: every URI is `SPEAKER_LV2_URI_BASE/<plugin>` (juce_plugins/cmake/SpeakerPlugin.cmake), e.g. crossover = `…/bpi_amp_dsp_tuning/crossover` / `Cros`;
 firConv = `…/bpi_amp_dsp_tuning/firConv` / `Fcnv`. Bundle-folder and `.so` names being unique is **not**
 enough — the host dedupes by URI, not filename.
+
+## 3. Two bundles of one URI: which one runs, and what lilv parses
+
+lilv (`juce_audio_processors_headless/format_types/LV2_SDK/lilv/src/world.c`), on loading a
+bundle whose manifest declares a URI it already has from another bundle:
+
+- `lilv_world_load_bundle` compares versions: it reads the manifest of each bundle and every
+  file the manifest names for the plugin with `rdfs:seeAlso` (`load_plugin_model`; JUCE's
+  manifest names `dsp.ttl`, where the version is), takes `lv2:minorVersion` and
+  `lv2:microVersion` (`get_version`; 0.0 when either is missing), and **replaces** the loaded
+  plugin when the new bundle's version is greater (`Replacing version`), **ignores** the new
+  bundle when it is smaller (`Ignoring bundle`).
+- On equal versions `lilv_world_add_plugin` keeps the first (`Duplicate plugin ... (ignored)`).
+  JUCE loads the default paths first (section 1), so a bundle loaded later at the same version
+  (`speakerd --lv2-bundle`) loses to a copy in `~/.lv2`.
+
+**JUCE drops the major version.** `juce_audio_plugin_client_LV2.cpp` (the `dsp.ttl` writer)
+writes the plugin's version `x.y.z` as `lv2:minorVersion y` and `lv2:microVersion z`; `x` is not
+written anywhere lilv looks. So lilv orders 0.0.1 < 0.0.2 < 0.1.0 as intended, but sees 1.0.0 as
+0.0, older than 0.9.9. A major raise (juce_plugins/README.md, "The version rule") does not make
+a later bundle win.
+
+**Every `rdfs:seeAlso` file is parsed, and a parse error disables the plugin.** Besides the
+version comparison, `lilv_plugin_load` (`plugin.c`) parses all of a plugin's `rdfs:seeAlso`
+files the first time the plugin is asked about; one that fails to parse sets `parse_errors`,
+and `lilv_plugin_instantiate` then returns null (`instance.c`; what JUCE's LV2 hosting calls) and
+`lilv_plugin_verify` false. So a file that is only diagnostic must not be named in the manifest:
+`buildinfo.ttl` is not (`../build-system/cmake-reference.md`).

@@ -2,6 +2,7 @@
 
 #include "DeviceConfig.h"
 #include "GraphDocument.h"
+#include "PluginBundles.h"
 #include "TimedNode.h"
 
 #include <juce_audio_processors_headless/juce_audio_processors_headless.h>
@@ -68,12 +69,17 @@ namespace speakerd
     class GraphBuilder
     {
     public:
-        explicit GraphBuilder (juce::AudioPluginFormatManager& formatsIn) : formats (formatsIn) {}
+        /** With `bundles`, every plugin node it instantiates is logged with its build identity
+            (README.md, Log lines: "plugin node <uid>: ..."). */
+        explicit GraphBuilder (juce::AudioPluginFormatManager& formatsIn, PluginBundles* bundlesIn = nullptr)
+            : formats (formatsIn), bundles (bundlesIn) {}
 
         /** Builds and prepares the graph a document describes, at this sample rate and largest
             block. Fails, with the reason, unless every plugin is found and instantiated, takes
             its state and every parameter value, every connection is possible, and no node
-            feeds itself (a loop). */
+            feeds itself (a loop). Each plugin node's identity line is logged as soon as its
+            plugin is instantiated, so also for a document that fails after it; it never fails
+            the build. */
         juce::Result build (const GraphDocument&, double sampleRate, int maxBlock, BuiltGraph&);
 
         /** The last layer, passthrough: no plugin at all. The input node's Mine channel, the
@@ -84,5 +90,6 @@ namespace speakerd
 
     private:
         juce::AudioPluginFormatManager& formats;
+        PluginBundles* bundles = nullptr;
     };
 }

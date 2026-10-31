@@ -568,27 +568,67 @@ check_libraries() {
     ok "Every library speakerd and its plugins need is here"
 }
 
-# A plugin bundle with one of the bundle's URIs in a system LV2 folder: JUCE reads those before
-# any --lv2-bundle, so speakerd would refuse to start (status 2) and the speaker stays silent.
+# The version lilv compares between two bundles of one URI, as "<minor> <micro> <shown>": the
+# plugin's lv2:minorVersion and lv2:microVersion (0 where missing, as lilv takes them), which JUCE
+# writes into dsp.ttl from the plugin's version (0.0.2 is minor 0, micro 2; one plugin per bundle),
+# and the version a person knows it by: JUCE's doap:revision, else "lv2 <minor>.<micro>".
+lv2_version() {   # $1 = a bundle directory
+    local text minor micro shown
+    text="$(cat "$1"/*.ttl 2> /dev/null || true)"
+    minor="$(grep -m1 -oE 'lv2:minorVersion[[:space:]]+[0-9]+' <<< "$text" | grep -oE '[0-9]+$' || true)"
+    micro="$(grep -m1 -oE 'lv2:microVersion[[:space:]]+[0-9]+' <<< "$text" | grep -oE '[0-9]+$' || true)"
+    shown="$(grep -m1 -oE 'doap:revision[[:space:]]+"[^"]+"' <<< "$text" | cut -d'"' -f2 || true)"
+    minor=$((10#${minor:-0})); micro=$((10#${micro:-0}))
+    echo "$minor $micro ${shown:-lv2 $minor.$micro}"
+}
+
+# A plugin bundle with one of the bundle's URIs in a system LV2 folder. JUCE's LV2 host reads those
+# folders before any --lv2-bundle, and lilv keeps the first bundle of a URI unless a later one is a
+# newer version (lv2_version). So with a system copy of the same version as a bundle's or a newer
+# one, that bundle is ignored: speakerd refuses to start (status 2) and the speaker stays silent.
+# Copies that are all older are replaced by the deployed bundles, and named as loudly: each shadows
+# the next deploy that is not newer than it.
 check_lv2_shadows() {
-    local manifest uri dir other hits=()
+    local manifest uris uri dir other mine theirs relation hits=() refused=0
     for manifest in "$BUNDLE"/lv2/*.lv2/manifest.ttl; do
         [ -f "$manifest" ] || continue
-        while read -r uri; do
-            [ -n "$uri" ] || continue
-            for dir in $SYSTEM_LV2_DIRS; do
-                for other in "$dir"/*/manifest.ttl; do
-                    [ -f "$other" ] || continue
-                    grep -qF "<$uri>" "$other" 2> /dev/null && hits+=("$uri: $(dirname "$other")")
+        mapfile -t uris < <(grep -oE '^<[^>]+>' "$manifest" | tr -d '<>' | sort -u)
+        read -r -a mine <<< "$(lv2_version "$(dirname "$manifest")")"
+        for dir in $SYSTEM_LV2_DIRS; do
+            for other in "$dir"/*/manifest.ttl; do
+                [ -f "$other" ] || continue
+                # One line per system bundle, naming the first URI it shares: the plugin's sorts
+                # before its presets' and its UI's.
+                for uri in "${uris[@]}"; do
+                    grep -qF "<$uri>" "$other" 2> /dev/null || continue
+                    read -r -a theirs <<< "$(lv2_version "$(dirname "$other")")"
+                    if [ "${theirs[0]}" -lt "${mine[0]}" ] \
+                            || { [ "${theirs[0]}" -eq "${mine[0]}" ] && [ "${theirs[1]}" -lt "${mine[1]}" ]; }; then
+                        relation="older than"
+                    elif [ "${theirs[0]}" -eq "${mine[0]}" ] && [ "${theirs[1]}" -eq "${mine[1]}" ]; then
+                        relation="the same as"; refused=1
+                    else
+                        relation="newer than"; refused=1
+                    fi
+                    hits+=("$uri: $(dirname "$other"), version ${theirs[*]:2}, $relation the bundle's ${mine[*]:2}")
+                    break
                 done
             done
-        done < <(grep -oE '^<[^>]+>' "$manifest" | tr -d '<>' | sort -u)
+        done
     done
-    if [ ${#hits[@]} -gt 0 ]; then
-        loud "A system LV2 folder has a plugin with the URI of one of the bundle's:" "${hits[@]/#/    }" \
-             "JUCE reads it before --lv2-bundle, so speakerd will refuse to start (status 2) and the speaker" \
-             "stays silent. Remove it (it is not this installer's to remove)."
+    [ ${#hits[@]} -gt 0 ] || return 0
+    local said=("A system LV2 folder has a plugin with the URI of one of the bundle's:" "${hits[@]/#/    }")
+    if [ $refused -eq 1 ]; then
+        said+=("With a copy of the same version or a newer one, speakerd will refuse to start (status 2)"
+               "and the speaker stay silent.")
+    else
+        said+=("Each is older, so the deployed bundle replaces it; but it shadows the next deploy that is not"
+               "newer than it, which speakerd would refuse (status 2).")
     fi
+    loud "${said[@]}" \
+         "JUCE reads those folders before --lv2-bundle, and lilv keeps the first bundle of a URI unless a" \
+         "later one is newer (lv2:minorVersion, lv2:microVersion). Remove each copy named (none is this" \
+         "installer's to remove)."
 }
 
 # Checks the bundle; sets BUNDLE_ID and BUNDLE_SPEAKERD_VERSION.
@@ -896,7 +936,8 @@ prune_versions() {
 # After a (re)start under systemd: speakerd must still run and say exactly the limits
 # device.json gives it. Anything else fails loudly: a broken device.json, the fail-safe, no
 # line at all (which is also what a journal this user cannot read looks like), a speakerd that
-# stopped (status 2: a bundle shadowed by a system LV2 folder).
+# stopped (status 2: a bundle shadowed by a system LV2 folder's copy of the same version or a
+# newer one).
 check_started() {   # $1 = epoch seconds of the restart
     [ "$NO_SYSTEMD" -eq 0 ] || return 0
     local log="" run="" line wait="${SPEAKERD_START_WAIT:-15}"

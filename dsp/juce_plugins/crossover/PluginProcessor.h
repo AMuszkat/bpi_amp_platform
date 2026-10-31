@@ -3,6 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
+#include "BlockFir.h"   // dsp/juce_plugins/shared/blockfir (SHARED in CMakeLists.txt)
+
 #include <limits>
 
 #if (MSVC)
@@ -74,16 +76,9 @@ private:
     std::atomic<float>* gainParam = nullptr;
     float appliedGainDb = std::numeric_limits<float>::quiet_NaN();   // audio thread only
     
-    // using iirFilt = juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>, juce::dsp::IIR::Coefficients<float>>;
-
-    using firLpFilt = juce::dsp::FIR::Filter<float>;
-    using firHpFilt = juce::dsp::FIR::Filter<float>;
-    // Separate chains for LP and HP processing
-    enum lpChainIndex { lpGainIndex, lpFilterIndex };
-    enum hpChainIndex { hpGainIndex, hpFilterIndex };
-
-    juce::dsp::ProcessorChain<juce::dsp::Gain<float>, firLpFilt> lpChain;
-    juce::dsp::ProcessorChain<juce::dsp::Gain<float>, firHpFilt> hpChain;
+    // The two bands, each its gain and then its FIR, the shared block FIR (BlockFir.h).
+    juce::dsp::Gain<float> lpGain, hpGain;
+    speaker::BlockFir      lpFir, hpFir;
 
     // Temporary buffers to hold chain outputs prior to routing/mixing, sized in prepareToPlay
     // for the block size the host announced. A larger block is processed in chunks of that

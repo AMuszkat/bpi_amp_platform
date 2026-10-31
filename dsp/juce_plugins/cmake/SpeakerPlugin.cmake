@@ -44,8 +44,36 @@
 # (`<base>/<name>_control`, `<base>/<name>_headless`), so a host never confuses them with the
 # complete plugin. The parameter layout must be identical in all three; the controller and the
 # speaker exchange parameter values and saved state between the control and headless builds.
+#
+# Shared source folders. Code that several plugins compile lives in juce_plugins/shared/<name>/
+# (header-only: it is compiled where a plugin's sources include it), and a plugin that uses it
+# names the folder:
+#
+#     speaker_add_plugin(myPlugin
+#         ...
+#         SHARED  blockfir)                  # juce_plugins/shared/blockfir: BlockFir.h
+#
+# which puts the folder on the include path of every target, and into the plugin's source
+# identity (below). Only the folders a plugin declares are on its include path.
+#
+# Version and source identity (juce_plugins/README.md, "Versions and source identity"). Every
+# target embeds the plugin's version (its project() VERSION, MAJOR.MINOR.PATCH) and its source
+# identity (SourceId.cmake), recomputed at every build without a reconfigure:
+#   - SpeakerBuildInfo.h, generated, on every target's include path: SPEAKER_PLUGIN_NAME,
+#     SPEAKER_PLUGIN_VERSION, SPEAKER_PLUGIN_SOURCE_ID;
+#   - the string "bpi-build-info: <LV2 URI> version <version> source <source-id>" in each
+#     LV2 and VST3 binary (`strings <binary> | grep bpi-build-info`);
+#   - buildinfo.ttl in each LV2 bundle, next to manifest.ttl, which does not name it: no LV2
+#     host reads it, so a damaged one can never stop the bundle loading; speakerd reads it.
+# tools/plugin-versions.sh reads the version and SHARED from this call's text, so both must be
+# written out literally; the configure step checks that it reads what CMake does.
 
-include_guard(GLOBAL)
+# Per directory, not global: each plugin's directory needs the variables below, also when one
+# build adds several plugins (the controller), where a global guard would skip them for all
+# but the first.
+include_guard(DIRECTORY)
+
+include(${CMAKE_CURRENT_LIST_DIR}/SourceId.cmake)
 
 # Base of every plugin's LV2 URI. The URI is the plugin's global identity: hosts key their
 # plugin database on it, so two plugins sharing one collide and only one survives a scan,
@@ -60,6 +88,9 @@ include_guard(GLOBAL)
 # every existing build tree.)
 set(SPEAKER_LV2_URI_BASE "https://github.com/AMuszkat/bpi_amp_dsp_tuning")
 
+# juce_plugins/, which holds the plugin folders, shared/ and cmake/.
+get_filename_component(SPEAKER_PLUGINS_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+
 # JUCE modules every plugin links. A plugin adds more through MODULES.
 set(SPEAKER_COMMON_MODULES
     juce_audio_utils
@@ -68,7 +99,7 @@ set(SPEAKER_COMMON_MODULES
     juce_gui_extra)
 
 function(speaker_add_plugin target)
-    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "CODE;INPUTS;OUTPUTS" "SOURCES;DSP;EDITOR;MODULES;TARGETS")
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "CODE;INPUTS;OUTPUTS" "SOURCES;DSP;EDITOR;MODULES;TARGETS;SHARED")
 
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "speaker_add_plugin(${target}): unknown arguments ${ARG_UNPARSED_ARGUMENTS}")
@@ -114,6 +145,53 @@ function(speaker_add_plugin target)
                             "sources listed under DSP")
     endif()
 
+    # The plugin's folder is an input of its identity, and the scripts find plugins by
+    # folder: it must be juce_plugins/<target>.
+    get_filename_component(here "${CMAKE_CURRENT_SOURCE_DIR}" REALPATH)
+    get_filename_component(expected "${SPEAKER_PLUGINS_DIR}/${target}" REALPATH)
+    if(NOT here STREQUAL expected)
+        message(FATAL_ERROR "speaker_add_plugin(${target}): must be called from "
+                            "juce_plugins/${target}/CMakeLists.txt (called from ${CMAKE_CURRENT_SOURCE_DIR})")
+    endif()
+
+    set(sharedDirs "")
+    foreach(name IN LISTS ARG_SHARED)
+        if(NOT name MATCHES "^[A-Za-z0-9_-]+$" OR NOT IS_DIRECTORY "${SPEAKER_PLUGINS_DIR}/shared/${name}")
+            message(FATAL_ERROR "speaker_add_plugin(${target}): SHARED names a folder of "
+                                "juce_plugins/shared (got '${name}')")
+        endif()
+        list(APPEND sharedDirs "${SPEAKER_PLUGINS_DIR}/shared/${name}")
+    endforeach()
+
+    # tools/plugin-versions.sh reads the version and the shared folders from the text of this
+    # file (SourceId.cmake): it must read what CMake does.
+    speaker_read_declaration("${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt" textVersion textShared error)
+    if(error)
+        message(FATAL_ERROR "speaker_add_plugin(${target}): ${error}")
+    endif()
+    if(NOT textVersion STREQUAL PROJECT_VERSION)
+        message(FATAL_ERROR "speaker_add_plugin(${target}): the project() VERSION reads as "
+                            "'${textVersion}' from the text, CMake has '${PROJECT_VERSION}'")
+    endif()
+    if(NOT "${textShared}" STREQUAL "${ARG_SHARED}")
+        message(FATAL_ERROR "speaker_add_plugin(${target}): SHARED reads as '${textShared}' "
+                            "from the text, CMake has '${ARG_SHARED}': write it out literally")
+    endif()
+
+    # SpeakerBuildInfo.h, rewritten at every build when the identity changed (a new HEAD, an
+    # edit), shared by the plugin's targets.
+    set(generated "${CMAKE_CURRENT_BINARY_DIR}/speaker_generated")
+    set(buildInfoHeader "${generated}/SpeakerBuildInfo.h")
+    file(MAKE_DIRECTORY "${generated}")
+    list(JOIN ARG_SHARED "," sharedArg)
+    add_custom_target(${target}_build_info
+        COMMAND "${CMAKE_COMMAND}" -DMODE=header "-DPLUGINS_DIR=${SPEAKER_PLUGINS_DIR}"
+                "-DPLUGIN=${target}" "-DSHARED=${sharedArg}" "-DVERSION=${PROJECT_VERSION}"
+                "-DOUTPUT=${buildInfoHeader}" -P "${SPEAKER_PLUGINS_DIR}/cmake/SourceId.cmake"
+        BYPRODUCTS "${buildInfoHeader}"
+        COMMENT "${target}: version ${PROJECT_VERSION} and the source identity"
+        VERBATIM)
+
     set(modules ${SPEAKER_COMMON_MODULES} ${ARG_MODULES})
     list(REMOVE_DUPLICATES modules)
     list(TRANSFORM modules PREPEND "juce::")
@@ -135,14 +213,18 @@ function(speaker_add_plugin target)
             set(sources ${ARG_SOURCES} ${ARG_DSP})
         endif()
 
-        _speaker_add_plugin_target("${name}" "${code}" "${kind}" "${sources}" "${modules}")
+        _speaker_add_plugin_target("${name}" "${code}" "${kind}" "${sources}" "${modules}"
+                                   "${sharedDirs}" "${target}_build_info" "${buildInfoHeader}")
     endforeach()
 endfunction()
 
 # One juce_add_plugin() target. `kind` is complete, control or headless.
-function(_speaker_add_plugin_target name code kind sources modules)
+function(_speaker_add_plugin_target name code kind sources modules sharedDirs buildInfoTarget buildInfoHeader)
+    # The copy into ~/.lv2 and ~/.vst3 (or a cross build's copy directories) is enabled at the
+    # end, by juce_enable_copy_plugin_step(), not by COPY_PLUGIN_AFTER_BUILD: POST_BUILD steps
+    # run in the order they are added, and the copy must come after buildinfo.ttl is written.
     juce_add_plugin(${name}
-        COPY_PLUGIN_AFTER_BUILD TRUE
+        COPY_PLUGIN_AFTER_BUILD FALSE
         PLUGIN_MANUFACTURER_CODE Juce          # may be shared by all plugins
         PLUGIN_CODE ${code}
         FORMATS LV2 VST3
@@ -181,10 +263,62 @@ function(_speaker_add_plugin_target name code kind sources modules)
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
 
-    # Link-time optimisation, parallelised. This replaces juce::juce_recommended_lto_flags:
-    # for GCC/Clang that passes a bare `-flto`, which runs the LTO link phase (LTRANS)
-    # single-threaded -- the slowest part of the build. `-flto=auto` produces the same
-    # binary with one LTRANS job per core. MSVC keeps the usual -GL/-LTCG.
+    speaker_add_lto_flags(${name})
+
+    get_filename_component(generated "${buildInfoHeader}" DIRECTORY)
+    target_include_directories(${name} PRIVATE ${sharedDirs} "${generated}")
+    add_dependencies(${name} ${buildInfoTarget})
+
+    set(uri "${SPEAKER_LV2_URI_BASE}/${name}")
+    get_target_property(wrappers ${name} JUCE_ACTIVE_PLUGIN_TARGETS)
+
+    # The version and the identity in every binary. Compiled into each format's wrapper (an
+    # object on the link line is always linked; one in the shared-code archive that nothing
+    # references would be dropped), kept through LTO by `used`.
+    # It is written next to SpeakerBuildInfo.h, and that is the only reason its
+    # #include "SpeakerBuildInfo.h" resolves: a quoted include searches the including file's own
+    # directory first. The include directory above is PRIVATE to the shared-code target and
+    # does not reach the wrappers, so keep the two files in one directory.
+    set(buildInfoSource "${generated}/${name}_build_info.cpp")
+    file(CONFIGURE OUTPUT "${buildInfoSource}" CONTENT
+"// Written by SpeakerPlugin.cmake: the version and the source identity of @name@, as a string
+// in its binary (`strings <binary> | grep bpi-build-info`).
+#include \"SpeakerBuildInfo.h\"
+
+#if defined (__GNUC__)
+ #define SPEAKER_KEEP __attribute__ ((used))
+#else
+ #define SPEAKER_KEEP
+#endif
+
+extern \"C\" const char speaker_build_info[];
+extern \"C\" SPEAKER_KEEP const char speaker_build_info[] =
+    \"bpi-build-info: @uri@ version \" SPEAKER_PLUGIN_VERSION \" source \" SPEAKER_PLUGIN_SOURCE_ID;
+" @ONLY)
+    foreach(wrapper IN LISTS wrappers)
+        target_sources(${wrapper} PRIVATE "${buildInfoSource}")
+        add_dependencies(${wrapper} ${buildInfoTarget})
+    endforeach()
+
+    # buildinfo.ttl in the LV2 bundle, after juce_lv2_helper has written the bundle's ttl files
+    # (its POST_BUILD step, added by juce_add_plugin) and before the copy (below). The manifest
+    # is left as the helper wrote it.
+    get_target_property(bundle ${name}_LV2 JUCE_PLUGIN_ARTEFACT_FILE)
+    add_custom_command(TARGET ${name}_LV2 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -DMODE=bundle "-DHEADER=${buildInfoHeader}" "-DBUNDLE=${bundle}"
+                "-DURI=${uri}" "-DBASE=${SPEAKER_LV2_URI_BASE}"
+                -P "${SPEAKER_PLUGINS_DIR}/cmake/SourceId.cmake"
+        VERBATIM)
+
+    juce_enable_copy_plugin_step(${name})
+endfunction()
+
+# Link-time optimisation, parallelised, the way every plugin target gets it (also used by the
+# tests that build plugin code, so that they test what ships). This replaces
+# juce::juce_recommended_lto_flags: for GCC/Clang that passes a bare `-flto`, which runs the
+# LTO link phase (LTRANS) single-threaded -- the slowest part of the build. `-flto=auto`
+# produces the same binary with one LTRANS job per core. MSVC keeps the usual -GL/-LTCG.
+function(speaker_add_lto_flags name)
     if(MSVC)
         target_compile_options(${name} PUBLIC $<$<CONFIG:Release>:-GL>)
         target_link_options(${name} PUBLIC $<$<CONFIG:Release>:-LTCG>)
