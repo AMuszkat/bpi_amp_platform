@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="380" viewBox="0 0 760 380" role="img" aria-labelledby="title desc">
+<title id="title">Why GCC vector types: six ways to compute the same filters</title>
+<desc id="desc">Share of one Cortex-A73 core, simulated: JUCE FIR today 28.2 %, block FIR plain arrays 7.8 %, one output at a time with SIMDRegister 5.3 %, block FIR with SIMDRegister 4.2 %, one output at a time with GCC vector types 2.8 %, block FIR with GCC vector types (P1) 1.7 %.</desc>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace}
+.bg{fill:#fcfcfb;stroke:#e4e3df}
+.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#7a7975}
+.grid{stroke:#ebeae6;stroke-width:1}.axis{stroke:#c9c8c2;stroke-width:1}.ref{stroke:#7a7975;stroke-width:1}
+.today{fill:#eb6834}.p1{fill:#2a78d6}.alt{fill:#b4b3ad}
+.todayS{stroke:#eb6834}.p1S{stroke:#2a78d6}.lineS{stroke:#7a7975}
+.cell{fill:#f0efec;stroke:#d6d5d0}.cellHi{fill:#d9e7f8;stroke:#2a78d6}.cellOld{fill:#e6e5e1;stroke:#c9c8c2}
+.arrow{fill:#7a7975}
+@media (prefers-color-scheme: dark){
+.bg{fill:#1a1a19;stroke:#383835}
+.t1{fill:#f0efec}.t2{fill:#c3c2b7}.t3{fill:#9a9993}
+.grid{stroke:#2b2b29}.axis{stroke:#4a4a46}.ref{stroke:#9a9993}
+.today{fill:#d95926}.p1{fill:#3987e5}.alt{fill:#5f5e5a}
+.todayS{stroke:#d95926}.p1S{stroke:#3987e5}.lineS{stroke:#9a9993}
+.cell{fill:#262624;stroke:#44443f}.cellHi{fill:#1d3a5f;stroke:#3987e5}.cellOld{fill:#2f2f2c;stroke:#4a4a46}
+.arrow{fill:#9a9993}
+}
+</style>
+<rect class="bg" x="0.5" y="0.5" width="759" height="379" rx="8"/>
+<text x="24.0" y="34.0" class="t1" font-size="17" text-anchor="start" font-weight="600">Why GCC vector types: six ways to compute the same filters</text>
+<text x="24.0" y="56.0" class="t2" font-size="13" text-anchor="start">Share of one Cortex-A73 core for the four filters at 48 kHz, simulated. Lower is better.</text>
+<path d="M24.0,70.0 H32.0 A4.0,4.0 0 0 1 36.0,74.0 V78.0 A4.0,4.0 0 0 1 32.0,82.0 H24.0 Z" class="today"></path>
+<text x="42.0" y="81.0" class="t2" font-size="12" text-anchor="start">today</text>
+<path d="M102.0,70.0 H110.0 A4.0,4.0 0 0 1 114.0,74.0 V78.0 A4.0,4.0 0 0 1 110.0,82.0 H102.0 Z" class="p1"></path>
+<text x="120.0" y="81.0" class="t2" font-size="12" text-anchor="start">P1, the one applied</text>
+<path d="M262.0,70.0 H270.0 A4.0,4.0 0 0 1 274.0,74.0 V78.0 A4.0,4.0 0 0 1 270.0,82.0 H262.0 Z" class="alt"></path>
+<text x="280.0" y="81.0" class="t2" font-size="12" text-anchor="start">the alternatives</text>
+<line x1="330.0" y1="98.0" x2="330.0" y2="340.0" class="grid" />
+<text x="330.0" y="358.0" class="t3" font-size="12" text-anchor="middle">0 %</text>
+<line x1="457.7" y1="98.0" x2="457.7" y2="340.0" class="grid" />
+<text x="457.7" y="358.0" class="t3" font-size="12" text-anchor="middle">10 %</text>
+<line x1="585.3" y1="98.0" x2="585.3" y2="340.0" class="grid" />
+<text x="585.3" y="358.0" class="t3" font-size="12" text-anchor="middle">20 %</text>
+<line x1="713.0" y1="98.0" x2="713.0" y2="340.0" class="grid" />
+<text x="713.0" y="358.0" class="t3" font-size="12" text-anchor="middle">30 %</text>
+<text x="24.0" y="117.0" class="t1" font-size="13" text-anchor="start">juce::dsp::FIR::Filter: today</text>
+<text x="24.0" y="132.0" class="t3" font-size="11" text-anchor="start">one output at a time</text>
+<path d="M330.0,106.0 H686.0 A4.0,4.0 0 0 1 690.0,110.0 V120.0 A4.0,4.0 0 0 1 686.0,124.0 H330.0 Z" class="today"><title>juce::dsp::FIR::Filter: today: 28.2 %</title></path>
+<text x="696.0" y="119.0" class="t1" font-size="12" text-anchor="start">28.2 %</text>
+<text x="24.0" y="157.0" class="t1" font-size="13" text-anchor="start">Block FIR, plain C++ arrays</text>
+<text x="24.0" y="172.0" class="t3" font-size="11" text-anchor="start">GCC's own vectorising, full of shuffles</text>
+<path d="M330.0,146.0 H425.6 A4.0,4.0 0 0 1 429.6,150.0 V160.0 A4.0,4.0 0 0 1 425.6,164.0 H330.0 Z" class="alt"><title>Block FIR, plain C++ arrays: 7.8 %</title></path>
+<text x="435.6" y="159.0" class="t1" font-size="12" text-anchor="start">7.8 %</text>
+<text x="24.0" y="197.0" class="t1" font-size="13" text-anchor="start">One output at a time, SIMDRegister</text>
+<text x="24.0" y="212.0" class="t3" font-size="11" text-anchor="start">needs JUCE_USE_ARM_NEON=1</text>
+<path d="M330.0,186.0 H393.7 A4.0,4.0 0 0 1 397.7,190.0 V200.0 A4.0,4.0 0 0 1 393.7,204.0 H330.0 Z" class="alt"><title>One output at a time, SIMDRegister: 5.3 %</title></path>
+<text x="403.7" y="199.0" class="t1" font-size="12" text-anchor="start">5.3 %</text>
+<text x="24.0" y="237.0" class="t1" font-size="13" text-anchor="start">Block FIR, SIMDRegister</text>
+<text x="24.0" y="252.0" class="t3" font-size="11" text-anchor="start">needs JUCE_USE_ARM_NEON=1; multiply, then add</text>
+<path d="M330.0,226.0 H379.6 A4.0,4.0 0 0 1 383.6,230.0 V240.0 A4.0,4.0 0 0 1 379.6,244.0 H330.0 Z" class="alt"><title>Block FIR, SIMDRegister: 4.2 %</title></path>
+<text x="389.6" y="239.0" class="t1" font-size="12" text-anchor="start">4.2 %</text>
+<text x="24.0" y="277.0" class="t1" font-size="13" text-anchor="start">One output at a time, GCC vector types</text>
+<text x="24.0" y="292.0" class="t3" font-size="11" text-anchor="start">reorders every sum</text>
+<path d="M330.0,266.0 H361.7 A4.0,4.0 0 0 1 365.7,270.0 V280.0 A4.0,4.0 0 0 1 361.7,284.0 H330.0 Z" class="alt"><title>One output at a time, GCC vector types: 2.8 %</title></path>
+<text x="371.7" y="279.0" class="t1" font-size="12" text-anchor="start">2.8 %</text>
+<text x="24.0" y="317.0" class="t1" font-size="13" text-anchor="start" font-weight="600">Block FIR, GCC vector types: P1</text>
+<text x="24.0" y="332.0" class="t3" font-size="11" text-anchor="start">taps in order, fused multiply-add</text>
+<path d="M330.0,306.0 H347.7 A4.0,4.0 0 0 1 351.7,310.0 V320.0 A4.0,4.0 0 0 1 347.7,324.0 H330.0 Z" class="p1"><title>Block FIR, GCC vector types: P1: 1.7 %</title></path>
+<text x="357.7" y="319.0" class="t1" font-size="12" text-anchor="start" font-weight="600">1.7 %</text>
+<line x1="330.0" y1="98.0" x2="330.0" y2="340.0" class="axis" />
+</svg>

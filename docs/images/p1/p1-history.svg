@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="388" viewBox="0 0 760 388" role="img" aria-labelledby="title desc">
+<title id="title">Where the input samples are kept</title>
+<desc id="desc">Today a ring buffer: each output reads from the newest sample to the end and wraps to the start, two loops. P1: the last m-1 samples followed by the new block in one contiguous run; after the block its last m-1 samples are copied to the front.</desc>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace}
+.bg{fill:#fcfcfb;stroke:#e4e3df}
+.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#7a7975}
+.grid{stroke:#ebeae6;stroke-width:1}.axis{stroke:#c9c8c2;stroke-width:1}.ref{stroke:#7a7975;stroke-width:1}
+.today{fill:#eb6834}.p1{fill:#2a78d6}.alt{fill:#b4b3ad}
+.todayS{stroke:#eb6834}.p1S{stroke:#2a78d6}.lineS{stroke:#7a7975}
+.cell{fill:#f0efec;stroke:#d6d5d0}.cellHi{fill:#d9e7f8;stroke:#2a78d6}.cellOld{fill:#e6e5e1;stroke:#c9c8c2}
+.arrow{fill:#7a7975}
+@media (prefers-color-scheme: dark){
+.bg{fill:#1a1a19;stroke:#383835}
+.t1{fill:#f0efec}.t2{fill:#c3c2b7}.t3{fill:#9a9993}
+.grid{stroke:#2b2b29}.axis{stroke:#4a4a46}.ref{stroke:#9a9993}
+.today{fill:#d95926}.p1{fill:#3987e5}.alt{fill:#5f5e5a}
+.todayS{stroke:#d95926}.p1S{stroke:#3987e5}.lineS{stroke:#9a9993}
+.cell{fill:#262624;stroke:#44443f}.cellHi{fill:#1d3a5f;stroke:#3987e5}.cellOld{fill:#2f2f2c;stroke:#4a4a46}
+.arrow{fill:#9a9993}
+}
+</style>
+<rect class="bg" x="0.5" y="0.5" width="759" height="387" rx="8"/>
+<text x="24.0" y="34.0" class="t1" font-size="17" text-anchor="start" font-weight="600">Where the input samples are kept</text>
+<text x="24.0" y="56.0" class="t2" font-size="13" text-anchor="start">Each output needs the last m input samples (m = the number of taps).</text>
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker></defs>
+<text x="24.0" y="92.0" class="t1" font-size="14" text-anchor="start" font-weight="600">Today: a ring buffer</text>
+<text x="24.0" y="110.0" class="t2" font-size="12" text-anchor="start">The newest sample goes one place to the left each time. An output reads from there to the end,</text>
+<text x="24.0" y="125.0" class="t2" font-size="12" text-anchor="start">then wraps to the start: two loops per output, of lengths that change every sample.</text>
+<rect x="56" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="92" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="128" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="164" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="200" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="236" y="140" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="272" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="308" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="344" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="380" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="416" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="452" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="488" y="140" width="34" height="26" rx="3" class="cell"/>
+<rect x="524" y="140" width="34" height="26" rx="3" class="cell"/>
+<text x="253.0" y="157.0" class="t1 mono" font-size="10" text-anchor="middle">new</text>
+<path d="M240,176 H554" class="todayS" stroke-width="2" marker-end="url(#ah3)"/>
+<text x="398.0" y="192.0" class="t2" font-size="11" text-anchor="middle">loop 1</text>
+<path d="M558,150 C600,150 600,206 530,206 H86 C26,206 26,176 58,176" fill="none" class="lineS" stroke-width="1" stroke-dasharray="3 3"/>
+<path d="M60,176 H230" class="todayS" stroke-width="2" marker-end="url(#ah3)"/>
+<text x="146.0" y="192.0" class="t2" font-size="11" text-anchor="middle">loop 2</text>
+<text x="610.0" y="160.0" class="t3" font-size="11" text-anchor="start">wraps</text>
+<text x="24.0" y="246.0" class="t1" font-size="14" text-anchor="start" font-weight="600">P1: a straight line</text>
+<text x="24.0" y="264.0" class="t2" font-size="12" text-anchor="start">The last m − 1 samples, then the new block, side by side: every output reads one contiguous run.</text>
+<rect x="56" y="290" width="34" height="26" rx="3" class="cellOld"/>
+<rect x="92" y="290" width="34" height="26" rx="3" class="cellOld"/>
+<rect x="128" y="290" width="34" height="26" rx="3" class="cellOld"/>
+<rect x="164" y="290" width="34" height="26" rx="3" class="cellOld"/>
+<rect x="200" y="290" width="34" height="26" rx="3" class="cellOld"/>
+<rect x="236" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="272" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="308" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="344" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="380" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="416" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="452" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="488" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<rect x="524" y="290" width="34" height="26" rx="3" class="cellHi"/>
+<text x="146.0" y="284.0" class="t2" font-size="11" text-anchor="middle">m − 1 kept</text>
+<text x="398.0" y="284.0" class="t2" font-size="11" text-anchor="middle">the new block (up to 1024 samples)</text>
+<path d="M380,324 V330 H558 V324" fill="none" class="lineS" stroke-width="1.5"/>
+<path d="M469.0,330 C469.0,354 146.0,354 146.0,328" fill="none" class="lineS" stroke-width="1.5" marker-end="url(#ah3)"/>
+<text x="570.0" y="304.0" class="t2" font-size="11" text-anchor="start">after the block, its last</text>
+<text x="570.0" y="319.0" class="t2" font-size="11" text-anchor="start">m − 1 samples move to</text>
+<text x="570.0" y="334.0" class="t2" font-size="11" text-anchor="start">the front: one copy</text>
+<text x="570.0" y="349.0" class="t2" font-size="11" text-anchor="start">per block</text>
+<text x="24.0" y="376.0" class="t3" font-size="11" text-anchor="start">Allocated once in prepareToPlay. A block larger than the prepared size is processed in chunks.</text>
+</svg>

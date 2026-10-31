@@ -1226,7 +1226,8 @@ into a difference at the level of their own low-frequency rounding noise, as the
 `dsp/juce_plugins/tests/blockfir` (rung 1, outside every plugin's identity), builds it with the
 plugins' flags and checks it bit for bit against a reference whose arithmetic is written out,
 on x86_64 and on aarch64 under qemu. Both plugins went from 0.0.1 to 0.0.2: a patch, the
-processing changed and the interface did not.
+processing changed and the interface did not. [p1-block-fir.md](p1-block-fir.md) explains, with
+figures, why the block FIR is about sixteen times cheaper and how its output differs.
 
 Two things cross the plugin boundary at run time, both through JUCE's LV2 hosting inside
 `speakerd`: parameter values go **in** as `patch:Set` atoms, applied inside the plugin's `run()`;

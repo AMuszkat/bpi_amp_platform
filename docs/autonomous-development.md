@@ -409,10 +409,13 @@ sequenceDiagram
 Two pieces of infrastructure make this run unattended:
 
 - **CI in GitHub Actions** builds every target and runs rungs 1 and 2 on each pull request
-  and push to `develop` (`.github/workflows/ci.yml`: it installs the packages, caches the
+  and push to `develop` (`.github/workflows/ci.yml`: it installs the packages, the cross
+  compiler, qemu and the `:arm64` libraries of rung 1's aarch64 half included, caches the
   JUCE install by submodule commit, runs `tools/test.sh unit` and `tools/test.sh vpair`,
   and keeps the reports and screenshots as artifacts). Rung 2 needs no containers, so it
-  runs on ordinary runners.
+  runs on ordinary runners. On a pull request a second job runs
+  `dsp/juce_plugins/tools/plugin-versions.sh check` against the branch it merges into: a
+  plugin whose sources changed without its version going up fails it.
 - **Scheduled tasks** run the nightly rung 3 smoke, a weekly dependency check (JUCE submodule,
   PipeWire version on the boards, Snapcast release) that opens an issue with the diff, and a
   weekly "replay the scenarios against `main`" run that catches drift between `dsp/` and
@@ -433,8 +436,8 @@ In order, because each unlocks the next:
    catalogue.
 4. **The agent definitions** and the `CLAUDE.md` map of the repository with the rules. In
    place (`.claude/agents/`, the root `CLAUDE.md`).
-5. **CI** running rungs 1 and 2 on pull requests. In place (`.github/workflows/ci.yml`), not
-   yet seen running: it needs Actions enabled on the repository.
+5. **CI** running rungs 1 and 2 on pull requests. In place (`.github/workflows/ci.yml`) and
+   running on every push to `develop`.
 6. **Scheduled tasks** for rung 3, last, once the lab pair has run a week of manual deploys
    through the same skill without surprises.
 

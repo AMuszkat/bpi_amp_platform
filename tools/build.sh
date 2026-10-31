@@ -47,8 +47,8 @@ if [ $arch = aarch64 ]; then
     export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
     unset PKG_CONFIG_PATH
 
-    # JUCE copies every plugin it builds into ~/.lv2 and ~/.vst3 (SpeakerPlugin.cmake sets
-    # COPY_PLUGIN_AFTER_BUILD), where an x86_64 host, speakerd included, would then find
+    # JUCE copies every plugin it builds into ~/.lv2 and ~/.vst3 (SpeakerPlugin.cmake adds the
+    # copy step, juce_enable_copy_plugin_step), where an x86_64 host, speakerd included, would then find
     # aarch64 binaries under the URIs of its own plugins. So the copy directories of a cross
     # build are pinned inside it, in the build tree's own cache (CMAKE_PROJECT_INCLUDE), so
     # that a later reconfigure keeps them too; and the build runs with a throwaway HOME.

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="262" viewBox="0 0 760 262" role="img" aria-labelledby="title desc">
+<title id="title">Where the work is: 2580 multiply-adds per output sample</title>
+<desc id="desc">Taps per FIR filter: firConv inverse 2001, crossover low 259, crossover high 259, firConv pre-low-pass 61.</desc>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace}
+.bg{fill:#fcfcfb;stroke:#e4e3df}
+.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#7a7975}
+.grid{stroke:#ebeae6;stroke-width:1}.axis{stroke:#c9c8c2;stroke-width:1}.ref{stroke:#7a7975;stroke-width:1}
+.today{fill:#eb6834}.p1{fill:#2a78d6}.alt{fill:#b4b3ad}
+.todayS{stroke:#eb6834}.p1S{stroke:#2a78d6}.lineS{stroke:#7a7975}
+.cell{fill:#f0efec;stroke:#d6d5d0}.cellHi{fill:#d9e7f8;stroke:#2a78d6}.cellOld{fill:#e6e5e1;stroke:#c9c8c2}
+.arrow{fill:#7a7975}
+@media (prefers-color-scheme: dark){
+.bg{fill:#1a1a19;stroke:#383835}
+.t1{fill:#f0efec}.t2{fill:#c3c2b7}.t3{fill:#9a9993}
+.grid{stroke:#2b2b29}.axis{stroke:#4a4a46}.ref{stroke:#9a9993}
+.today{fill:#d95926}.p1{fill:#3987e5}.alt{fill:#5f5e5a}
+.todayS{stroke:#d95926}.p1S{stroke:#3987e5}.lineS{stroke:#9a9993}
+.cell{fill:#262624;stroke:#44443f}.cellHi{fill:#1d3a5f;stroke:#3987e5}.cellOld{fill:#2f2f2c;stroke:#4a4a46}
+.arrow{fill:#9a9993}
+}
+</style>
+<rect class="bg" x="0.5" y="0.5" width="759" height="261" rx="8"/>
+<text x="24.0" y="34.0" class="t1" font-size="17" text-anchor="start" font-weight="600">Where the work is: 2580 multiply-adds for every output sample</text>
+<text x="24.0" y="56.0" class="t2" font-size="13" text-anchor="start">One multiply-add per tap of each FIR filter: 124 million a second at 48 kHz.</text>
+<text x="24.0" y="98.0" class="t1" font-size="13" text-anchor="start">firConv: inverse filter</text>
+<text x="24.0" y="113.0" class="t3" font-size="11" text-anchor="start">the driver correction</text>
+<path d="M270.0,84.0 H656.0 A4.0,4.0 0 0 1 660.0,88.0 V98.0 A4.0,4.0 0 0 1 656.0,102.0 H270.0 Z" class="p1"><title>firConv: inverse filter: 2001 taps</title></path>
+<text x="666.0" y="97.0" class="t1" font-size="12" text-anchor="start">2001 taps</text>
+<text x="24.0" y="136.0" class="t1" font-size="13" text-anchor="start">crossover: low band</text>
+<path d="M270.0,122.0 H316.5 A4.0,4.0 0 0 1 320.5,126.0 V136.0 A4.0,4.0 0 0 1 316.5,140.0 H270.0 Z" class="p1"><title>crossover: low band: 259 taps</title></path>
+<text x="326.5" y="135.0" class="t1" font-size="12" text-anchor="start">259 taps</text>
+<text x="24.0" y="174.0" class="t1" font-size="13" text-anchor="start">crossover: high band</text>
+<path d="M270.0,160.0 H316.5 A4.0,4.0 0 0 1 320.5,164.0 V174.0 A4.0,4.0 0 0 1 316.5,178.0 H270.0 Z" class="p1"><title>crossover: high band: 259 taps</title></path>
+<text x="326.5" y="173.0" class="t1" font-size="12" text-anchor="start">259 taps</text>
+<text x="24.0" y="212.0" class="t1" font-size="13" text-anchor="start">firConv: pre-low-pass</text>
+<path d="M270.0,198.0 H277.9 A4.0,4.0 0 0 1 281.9,202.0 V212.0 A4.0,4.0 0 0 1 277.9,216.0 H270.0 Z" class="p1"><title>firConv: pre-low-pass: 61 taps</title></path>
+<text x="287.9" y="211.0" class="t1" font-size="12" text-anchor="start">61 taps</text>
+<line x1="270.0" y1="78.0" x2="270.0" y2="232.0" class="axis" />
+<text x="24.0" y="248.0" class="t3" font-size="11" text-anchor="start">loudness, the chain's third plugin, uses no FIR (0.13 % of the cycle) and is untouched by P1.</text>
+</svg>

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="520" viewBox="0 0 760 520" role="img" aria-labelledby="title desc">
+<title id="title">How much P1 changes the output: the filters by a few rounding steps</title>
+<desc id="desc">A dB scale from 0 to -150 dB below the output's peak: firConv's whole output on the board moves by up to -59 dB, all below 50 Hz, through its float32 high-pass biquads (today's board and x86_64 builds already differ by -54 dB); a 16-bit recording's smallest step at -96 dB; P1's test limit at -120 dB; the four FIRs, P1 against today on the board, between -131 and -136 dB; one float32 rounding step at about -138 dB.</desc>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace}
+.bg{fill:#fcfcfb;stroke:#e4e3df}
+.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#7a7975}
+.grid{stroke:#ebeae6;stroke-width:1}.axis{stroke:#c9c8c2;stroke-width:1}.ref{stroke:#7a7975;stroke-width:1}
+.today{fill:#eb6834}.p1{fill:#2a78d6}.alt{fill:#b4b3ad}
+.todayS{stroke:#eb6834}.p1S{stroke:#2a78d6}.lineS{stroke:#7a7975}
+.cell{fill:#f0efec;stroke:#d6d5d0}.cellHi{fill:#d9e7f8;stroke:#2a78d6}.cellOld{fill:#e6e5e1;stroke:#c9c8c2}
+.arrow{fill:#7a7975}
+@media (prefers-color-scheme: dark){
+.bg{fill:#1a1a19;stroke:#383835}
+.t1{fill:#f0efec}.t2{fill:#c3c2b7}.t3{fill:#9a9993}
+.grid{stroke:#2b2b29}.axis{stroke:#4a4a46}.ref{stroke:#9a9993}
+.today{fill:#d95926}.p1{fill:#3987e5}.alt{fill:#5f5e5a}
+.todayS{stroke:#d95926}.p1S{stroke:#3987e5}.lineS{stroke:#9a9993}
+.cell{fill:#262624;stroke:#44443f}.cellHi{fill:#1d3a5f;stroke:#3987e5}.cellOld{fill:#2f2f2c;stroke:#4a4a46}
+.arrow{fill:#9a9993}
+}
+</style>
+<rect class="bg" x="0.5" y="0.5" width="759" height="519" rx="8"/>
+<text x="24.0" y="34.0" class="t1" font-size="17" text-anchor="start" font-weight="600">How much P1 changes the output: the filters by a few rounding steps</text>
+<text x="24.0" y="56.0" class="t2" font-size="13" text-anchor="start">The largest difference between P1's output and today's on the board, in dB below the output's peak.</text>
+<line x1="210.0" y1="96.0" x2="210.0" y2="456.0" class="axis" />
+<line x1="205.0" y1="96.0" x2="210.0" y2="96.0" class="axis" />
+<text x="200.0" y="100.0" class="t3" font-size="12" text-anchor="end">0 dB</text>
+<line x1="205.0" y1="168.0" x2="210.0" y2="168.0" class="axis" />
+<text x="200.0" y="172.0" class="t3" font-size="12" text-anchor="end">−30 dB</text>
+<line x1="205.0" y1="240.0" x2="210.0" y2="240.0" class="axis" />
+<text x="200.0" y="244.0" class="t3" font-size="12" text-anchor="end">−60 dB</text>
+<line x1="205.0" y1="312.0" x2="210.0" y2="312.0" class="axis" />
+<text x="200.0" y="316.0" class="t3" font-size="12" text-anchor="end">−90 dB</text>
+<line x1="205.0" y1="384.0" x2="210.0" y2="384.0" class="axis" />
+<text x="200.0" y="388.0" class="t3" font-size="12" text-anchor="end">−120 dB</text>
+<line x1="205.0" y1="456.0" x2="210.0" y2="456.0" class="axis" />
+<text x="200.0" y="460.0" class="t3" font-size="12" text-anchor="end">−150 dB</text>
+<line x1="210.0" y1="96.0" x2="218.0" y2="96.0" class="ref" />
+<path d="M218,96.0 L244,96.0" fill="none" class="lineS" stroke-width="1"/>
+<text x="250.0" y="100.0" class="t1" font-size="13" text-anchor="start">the output's peak</text>
+<line x1="210.0" y1="237.6" x2="218.0" y2="237.6" class="ref" />
+<path d="M218,237.6 L244,237.6" fill="none" class="lineS" stroke-width="1"/>
+<text x="250.0" y="241.6" class="t1" font-size="13" text-anchor="start">firConv's whole output: up to −59 dB, all below 50 Hz</text>
+<text x="250.0" y="257.6" class="t2" font-size="12" text-anchor="start">its float32 high-pass biquads; today's board and x86_64 builds differ by −54 dB</text>
+<line x1="210.0" y1="326.4" x2="218.0" y2="326.4" class="ref" />
+<path d="M218,326.4 L244,326.4" fill="none" class="lineS" stroke-width="1"/>
+<text x="250.0" y="330.4" class="t2" font-size="13" text-anchor="start">a 16-bit recording's smallest step: −96 dB</text>
+<line x1="210.0" y1="384.0" x2="218.0" y2="384.0" class="ref" />
+<path d="M218,384.0 L244,374.0" fill="none" class="lineS" stroke-width="1"/>
+<text x="250.0" y="378.0" class="t1" font-size="13" text-anchor="start">P1's test limit against today: −120 dB</text>
+<rect x="204" y="410.4" width="12" height="12.0" rx="2" class="p1"/>
+<path d="M218,416.4 L244,422.4" fill="none" class="lineS" stroke-width="1"/>
+<text x="250.0" y="426.4" class="t1" font-size="13" text-anchor="start" font-weight="600">P1 against today, on the board: −131 to −136 dB</text>
+<text x="250.0" y="442.4" class="t2" font-size="12" text-anchor="start">the four FIRs, measured; in 49–71 % of samples. On x86_64 identical.</text>
+<line x1="210.0" y1="428.4" x2="218.0" y2="428.4" class="ref" />
+<path d="M218,428.4 L244,464.4" fill="none" class="lineS" stroke-width="1"/>
+<text x="250.0" y="468.4" class="t2" font-size="13" text-anchor="start">one float32 rounding step at the peak: about −138 dB</text>
+<text x="24.0" y="506.0" class="t3" font-size="11" text-anchor="start">Why it differs at all: P1 rounds each multiply-add once (fused); today's board build rounds most products separately.</text>
+</svg>

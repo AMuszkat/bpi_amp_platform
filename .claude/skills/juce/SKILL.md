@@ -26,11 +26,13 @@ All under `dsp/docs/juce-knowledge/`. Read every file whose topic matches; skip 
 
 | File | Read it for |
 |---|---|
-| `build-system/cmake-reference.md` | `speaker_add_plugin` / `juce_add_plugin`, the installed-JUCE + `juceaide` setup, cross-compile flags (find root, pkg-config, qemu for the LV2/VST3 manifest helpers), LTO, compile definitions that can't be overridden with `-D` |
-| `hosting/lv2-discovery.md` | "Unable to locate plugin with the requested URI", plugin missing after reopen or only one of two showing up, `$LV2_PATH` ignored, `~/.lv2` deployment, unique `LV2URI` / `PLUGIN_CODE` |
+| `build-system/cmake-reference.md` | `speaker_add_plugin` / `juce_add_plugin`, the installed-JUCE + `juceaide` setup, cross-compile flags (find root, pkg-config, qemu for the LV2/VST3 manifest helpers), LTO, compile definitions that can't be overridden with `-D`, adding a file to a bundle before JUCE's copy step (`juce_enable_copy_plugin_step`, `POST_BUILD` order), data that must reach the binary, `include_guard` and variables |
+| `hosting/lv2-discovery.md` | "Unable to locate plugin with the requested URI", plugin missing after reopen or only one of two showing up, `$LV2_PATH` ignored, `~/.lv2` deployment, unique `LV2URI` / `PLUGIN_CODE`, which of two bundles of one URI lilv keeps (`lv2:minorVersion` / `microVersion`) |
 | `hosting/audiopluginhost-linux.md` | `-setup-host` / `-debug-linux`, building AudioPluginHost (`ladspa.h`), hand-written `.filtergraph`, silent load failures, verifying a session headlessly, the PipeWire SIGSEGV and the `XDG_CONFIG_HOME` asoundrc fix, `prepareToPlay(0, 0)`, UTF-8 literals asserting in `juce::String` |
 | `gui/x11-plugin-windows.md` | fixed-size editor maximised or stretched (`setResizeLimits`, the X11 size-hint patch in `dsp/juce_plugins/patches/`), floating panels/extra windows from an embedded editor (focus, override-redirect, scale factor, stale screen position, `JUCE_GUI_BASICS_INCLUDE_XHEADERS`), slow Debug repaints at HiDPI and image caching |
 | `dsp/modulated-filter-topology.md` | parameters changing while audio runs: biquad vs SVF, TDF-II vs DF-I, zipper/clicks, ramping, float32 pole conditioning, allocation-free `ArrayCoefficients` updates |
+| `dsp/simd-on-aarch64-gcc.md` | `SIMDRegister` missing or `JUCE_USE_SIMD` 0 in the boards' aarch64 GCC builds (`__ARM_NEON` against `__ARM_NEON__`), `FloatVectorOperations` on its plain loops, `ScopedNoDenormals` still flushing, why not `JUCE_USE_ARM_NEON=1`, GCC vector types as the portable SIMD |
+| `dsp/fir-filter-rounding.md` | `juce::dsp::FIR::Filter` output differing between x86_64 and aarch64 or between build flags (GCC 12: vector `fmul` and in-order scalar `fadd`, fused leftovers), the shared block FIR (`shared/blockfir`), its bit-exact test and cost; a one-ulp change through low-cutoff float32 biquads |
 
 ## 2. Verify against the pinned source
 

@@ -8,6 +8,21 @@ on:
     branches: [develop]
 
 jobs:
+  # A pull request that changes a plugin's sources raises the plugin's version
+  # (dsp/juce_plugins/README.md, "Versions and source identity"), checked against the branch
+  # it merges into. Whether the level is right is the reviewer's to judge.
+  plugin-versions:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merge base needs the history; JUCE does not (only its pin, the gitlink).
+          fetch-depth: 0
+      - name: Every changed plugin raised its version
+        run: dsp/juce_plugins/tools/plugin-versions.sh check "origin/${{ github.base_ref }}"
+
   rungs-1-and-2:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -24,6 +39,23 @@ jobs:
 
       - name: Install packages
         run: |
+          # Rung 1's aarch64 half (the block FIR test under qemu, an aarch64 plugin build and
+          # its copy) needs the cross compiler, qemu and the :arm64 libraries of
+          # dsp/juce_plugins/tools/Containerfile. Ubuntu serves arm64 from ports.ubuntu.com,
+          # so the runner's own sources are limited to amd64 and a ports source is added.
+          sudo dpkg --add-architecture arm64
+          sources=/etc/apt/sources.list.d/ubuntu.sources
+          if [ -f $sources ] && ! grep -q '^Architectures:' $sources; then
+            sudo sed -i '/^Types:/a Architectures: amd64' $sources
+          fi
+          sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources > /dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports/
+          Suites: noble noble-updates noble-security
+          Components: main universe
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config \
@@ -31,7 +63,11 @@ jobs:
             libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl-dev \
             libcurl4-openssl-dev ladspa-sdk lv2-dev lilv-utils \
             pipewire pipewire-bin wireplumber dbus python3-numpy \
-            xvfb openbox imagemagick
+            xvfb openbox imagemagick \
+            crossbuild-essential-arm64 qemu-user-static \
+            libfreetype-dev:arm64 libfontconfig1-dev:arm64 libasound2-dev:arm64 \
+            libx11-dev:arm64 libxext-dev:arm64 libxrandr-dev:arm64 libxcursor-dev:arm64 \
+            libxinerama-dev:arm64 libxrender-dev:arm64 libgl-dev:arm64 libpipewire-0.3-dev:arm64
 
       - name: Cache the JUCE install
         id: juce

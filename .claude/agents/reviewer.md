@@ -15,10 +15,15 @@ given, or the branch's files) with these questions, in this order:
    local files).
 3. **Interface drift.** A parameter ID, range, default, monitor layout or socket message
    changed on one side (plugin, `speakerd`, controller, `ampd`) and not the others, or
-   without the version hash and `plugin-check` being updated.
-4. **The design kept in step.** Behaviour that differs from `docs/remote-plugin-host.md`
+   without `plugin-check` being updated.
+4. **Versions.** A plugin whose folder, or a shared folder it declares (`SHARED`), changed
+   must raise its version: `dsp/juce_plugins/tools/plugin-versions.sh check`, whose output
+   the verifier passes on (and CI runs on every pull request), says whether it did. You
+   judge what the script cannot: whether the level (patch, minor, major) is right, by the
+   rule in `dsp/juce_plugins/README.md` ("Versions and source identity").
+5. **The design kept in step.** Behaviour that differs from `docs/remote-plugin-host.md`
    without the document changing in the same diff.
-5. **Tests.** A feature without the scenario that section 5 of
+6. **Tests.** A feature without the scenario that section 5 of
    `docs/autonomous-development.md` names for it, or a pass criterion weakened.
 
 Report findings as a list: file and line, what is wrong, why it matters, what would fix

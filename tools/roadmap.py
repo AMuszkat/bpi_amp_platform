@@ -65,10 +65,10 @@ STEPS = [
      "orchestrator",
      "host-dev (socket, Mine pin, monitors), board-dev (ampd, hub, scenarios), "
      "controller-dev (bridge, control builds compiled in) in parallel worktrees"),
-    ("Step 4: scope frames and records, catalogue and version hashes, multiple controllers, gestures, tablet build",
+    ("Step 4: scope frames and records, the catalogue: versions and source identities compared, multiple controllers, gestures, tablet build",
      lambda: has_scenario("scope_resolution") and has_scenario("catalogue"),
      "orchestrator",
-     "plugin-dev (monitor layouts, version hash), host-dev (frames, records), "
+     "plugin-dev (monitor layouts, what the catalogue compares), host-dev (frames, records), "
      "controller-dev (subscriptions, gestures), board-dev (catalogue, scenarios)"),
 ]
 
