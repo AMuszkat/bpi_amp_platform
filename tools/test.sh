@@ -17,29 +17,23 @@ rc=0
 
 record() { [ $record = 0 ] || tools/status.py set "$@"; }
 
-# The version and source identity in the LV2 bundles plugin-check built for plugin $1, and in
-# the copies JUCE's copy step made of them, into ~/.lv2 of the HOME the build ran with: this
-# one, as plugin-check builds before it sets a HOME of its own (dsp/juce_plugins/tests/buildinfo).
-# The copy is what SpeakerPlugin.cmake orders after buildinfo.ttl is written.
+# The version and source identity in the LV2 bundles plugin-check built for plugin $1
+# (dsp/juce_plugins/tests/buildinfo). Not in the copies JUCE made of them in ~/.lv2: that folder
+# is outside the tree, and any other build in the same HOME (another tree's, build-podman's
+# local debug loop) may have written it since. That the copy step copies buildinfo.ttl too is
+# proven below, on the aarch64 build's copy.
 check_build_info() {
-    local p="$1" bundles copies=() b so
+    local p="$1" bundles
     bundles=("${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}/$p-builds/plugin/"*_artefacts/Release/LV2/*.lv2)
-    for b in "${bundles[@]}"; do copies+=("$HOME/.lv2/$(basename "$b")"); done
-    dsp/juce_plugins/tests/buildinfo/check.sh --arch x86_64 "$p" "${bundles[@]}" "${copies[@]}" && return 0
-    # JUCE copies a bundle only when it links its binary, so a copy whose binary is not this
-    # build's was written after it by another build in this HOME (tools/build.sh of another tree).
-    for b in "${bundles[@]}"; do
-        so="lib$(basename "$b" .lv2).so"
-        if [ -e "$HOME/.lv2/$(basename "$b")/$so" ] && ! cmp -s "$b/$so" "$HOME/.lv2/$(basename "$b")/$so"; then
-            echo "buildinfo: ~/.lv2/$(basename "$b") holds another build's binary, not a copy of this one: rm $b/$so and rerun, to link it and copy it again"
-        fi
-    done
-    return 1
+    dsp/juce_plugins/tests/buildinfo/check.sh --arch x86_64 "$p" "${bundles[@]}"
 }
 
 # One aarch64 bundle and its copy: loudness_headless, what the board installer deploys
 # (firmware/speakerd-setup.sh), and the cheapest target to cross-build (no editor sources).
-# tools/build.sh copies it into the build's own copied/lv2, never into a ~/.lv2.
+# tools/build.sh copies it into the build's own copied/lv2, never into a ~/.lv2, so only this
+# build tree writes that copy: it proves that the copy step, which SpeakerPlugin.cmake orders
+# after buildinfo.ttl is written, copies the bundle with it (one function there adds both steps
+# to every target, on every machine).
 AARCH64_PLUGIN=loudness
 AARCH64_TARGET=headless
 check_build_info_aarch64() {
