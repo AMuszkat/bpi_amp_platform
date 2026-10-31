@@ -1719,11 +1719,11 @@ class Subscription:
     keeps the part of a token it had left at the last value it got (with one token at most it
     would wait for whole numbers of the union's periods: 26 values a second for 45 asked, beside
     a client of 60 Hz). It starts with one token, which the stored value takes (Monitor.request),
-    so a new subscription's next value comes a period after it; the slack builds up over time.
-    So in any T seconds it gets at most 2 + T x rate values (1 + T x rate from its start): its
-    rate on average, and after a pause (a full bucket) one value may come early. Nothing waits
-    in it. `sent` is the number of the last value it got (Monitor.on_value): it never gets one
-    twice."""
+    so a new subscription's value after the stored one comes a period after that one; the slack
+    builds up over time. So in any T seconds ampd sends it at most 2 + T x rate values (1 + T x
+    rate from its start): its rate on average, and after a pause (a full bucket) one value may
+    come early. A subscribe again only changes the rate (set_rate). Nothing waits in it. `sent`
+    is the number of the last value it got (Monitor.on_value): it never gets one twice."""
 
     __slots__ = ("rate", "tokens", "then", "sent")
 

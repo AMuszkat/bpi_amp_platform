@@ -182,10 +182,16 @@ On the monitor link, straight to the speaker whose values are wanted:
   lines; nothing is produced for a stream nobody subscribed to.
 - `t` is `speakerd`'s monotonic clock in seconds. `ampd` keeps the newest value per stream, and
   sends each value as it arrives, at most at that controller's rate on average: in any T seconds
-  a controller gets at most 2 + T × rate values of a stream (1 + T × rate from its
-  subscription), so after a pause one value may come early. Newest wins, nothing queues. A new
-  subscription gets the stream's newest value at once when there is one (none of a `speakerd`
-  that went away), and then the next no sooner than a period later.
+  `ampd` sends a controller at most 2 + T × rate values of a stream (1 + T × rate from its
+  subscription), so after a pause one value may come early. Newest wins, nothing queues. The
+  bound is on what `ampd` sends: after its connection stalled, a controller can read more at once
+  (what the kernel's buffers held, and up to 256 KiB more that `ampd` had sent and the
+  connection not yet taken; past that, `ampd` sends that controller no value until it reads). A
+  new subscription gets the stream's newest value at once when there is one (none of a
+  `speakerd` that went away), and the value after that one no sooner than a period later. A
+  `subscribe` of a stream the connection is subscribed to already is not a new subscription: it
+  changes the rate from then on and sends no value at once (the bound holds across the change,
+  at the old rate before it and the new one after).
 - A subscription ends when the controller unsubscribes or its connection closes.
 - Frames, records and credits are step 4.
 
