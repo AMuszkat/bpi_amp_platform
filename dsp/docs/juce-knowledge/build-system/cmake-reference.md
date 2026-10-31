@@ -47,6 +47,15 @@ shared-code target). The VST3 manifest step is unaffected: it is added during
 `juce_add_plugin()`, and `juce_enable_vst3_manifest_step` refuses only to run after a copy
 step that is already there.
 
+The copy is a `POST_BUILD` step too, so it runs only when the format target links: a build
+whose binary is up to date copies nothing, and a copy that another build tree wrote into the same
+`~/.lv2` afterwards stays there. `copyDir.cmake`'s `file(INSTALL)` keeps the files' contents and
+times (to the second), so a copy whose binary differs from this build's artefact came from
+another build, which is how `tools/test.sh` tells them apart (two Release trees of the same
+sources and identity, `build/loudness` and plugin-check's, linked byte-identical binaries, so the
+test cannot tell those two apart, and need not). Removing the artefact's `.so` makes the next
+build link, and so copy, again.
+
 **Do not name an extra file in `manifest.ttl`.** The helper rewrites the manifest whenever the
 plugin is linked, so a line added to it would have to be added again after every helper run;
 but the reason not to is lilv. A file the manifest names with `rdfs:seeAlso <file>` for the
