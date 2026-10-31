@@ -129,10 +129,10 @@ louder input, at −6 dBFS). The cause is not the FIR:
 after the first FIR come firConv's high-pass biquads, float32 filters with poles very close to
 z = 1. They turn any change of rounding before them, even one rounding step, into a different
 pattern of their own low-frequency rounding noise. Today's board build already differs from the
-x86_64 build by −55 dB in the same way. The firConv response test,
-`dsp/juce_plugins/tests/firconv-response/run.sh`, plots the difference against frequency, next
-to the response the coefficients were designed for: from 100 Hz up it stays at least 76 dB
-below the output. crossover has no such filter: its output keeps the FIRs'
+x86_64 build by −55 dB in the same way. From 100 Hz up the difference stays at least 76 dB
+below the output. The firConv response test, `dsp/juce_plugins/tests/firconv-response/run.sh`,
+plots the plugin's magnitude response on x86_64 and on aarch64 against the response its
+coefficients were designed for: both builds are within 0.016 dB of it from 20 Hz to 20 kHz. crossover has no such filter: its output keeps the FIRs'
 difference, −130 to −133 dB.
 
 P1's tests check the FIRs bit for bit, and the plugins' outputs only where rounding allows:

@@ -1220,10 +1220,9 @@ chunks. On x86_64 it is bit-identical to `FIR::Filter`; on aarch64 every tap is 
 multiply-add, while `FIR::Filter` mixes fused and unfused taps from sample to sample, so the
 FIRs' outputs differ by at most -131 dB re their peak (crossover's output by -129 dB).
 firConv's output on aarch64 moves by up to about -55 dB re peak (-59 dB at -6 dBFS input),
-nearly all of it below 50 Hz, as `dsp/juce_plugins/tests/firconv-response` plots against
-frequency: its float32 high-pass
-biquads, with poles close to z = 1, turn any rounding change before them, even of one ulp,
-into a difference at the level of their own low-frequency rounding noise, as they did before
+nearly all of it below 50 Hz (measured with `speakerd` renders of 0.0.1 and 0.0.2): its float32
+high-pass biquads, with poles close to z = 1, turn any rounding change before them, even of one
+ulp, into a difference at the level of their own low-frequency rounding noise, as they did before
 (today's aarch64 build differs from the x86_64 one as much). Its test,
 `dsp/juce_plugins/tests/blockfir` (rung 1, outside every plugin's identity), builds it with the
 plugins' flags and checks it bit for bit against a reference whose arithmetic is written out,

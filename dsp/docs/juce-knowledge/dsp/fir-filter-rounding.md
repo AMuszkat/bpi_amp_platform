@@ -101,9 +101,8 @@ sweep and noise. firConv's output does not: after its pre-LP FIR come the high-p
 0.997 and 0.9987, a 25 Hz Butterworth), and P1 against 0.0.1 on aarch64 differs by up to
 **-55 to -59 dB re peak**, 99.9 % of the difference's energy below 50 Hz: -59 dB (-69 dBFS RMS)
 at -6 dBFS input peak, -55.0 to -55.7 dB at -9, -12 and -20 dBFS, because the peak of the
-biquads' noise does not scale with the signal (`dsp/juce_plugins/tests/firconv-response`
-plots it against frequency). Not because of
-P1: rendered on x86_64, where P1 is bit-identical, the same chain's output moves by -58 dB re
+biquads' noise does not scale with the signal (measured with `speakerd` renders of 0.0.1 and
+0.0.2). Not because of P1: rendered on x86_64, where P1 is bit-identical, the same chain's output moves by -58 dB re
 peak when the input moves by about one ulp in 1000 of its 480000 samples, and 0.0.1's aarch64
 build already differs from its x86_64 build by -54 to -55 dB re peak. The biquads turn any change of
 rounding before them into a different realisation of their own low-frequency rounding noise
