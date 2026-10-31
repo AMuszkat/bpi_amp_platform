@@ -117,18 +117,24 @@ from the chosen speaker, another secret is refused, and its GUI is captured unde
 measure the plugins on the board's own chain (the Mine pin through `loudness_headless`,
 `firConv` and the crossover, its bands to the woofer and the tweeter): `chain_cost` (speakerd's
 own timing of each node at quantum 1024 puts firConv under 5 % of the cycle on average and the
-crossover under 1.5 %) and `plugin_identity` (every bundle's `buildinfo.ttl` says its plugin's
-version and source id, as `plugin-versions.sh list` does, and speakerd says which build each node
-runs, live, at an apply and in the render; an older build, and a half-written `buildinfo.ttl`,
-play the same samples and are said to have no build identity). The Snapcast source and
-`tc netem` come next; the compose file comes with them, for CI.
+crossover under 1.5 %) and `plugin_identity` (`plugin-versions.sh list` gives each plugin the
+source id that the documented git command gives, every bundle's `buildinfo.ttl` says its plugin's
+version and that source id, and speakerd says which build each node runs, live, at an apply and
+in the render; an older build, and a half-written `buildinfo.ttl`, play the same samples and are
+said to have no build identity). The Snapcast source and `tc netem` come next; the compose file
+comes with them, for CI.
 
-**Rung 1 today** is `dsp/juce_apps/plugin-check`: it builds a plugin's
+**Rung 1 today** (`tools/test.sh unit`) is `dsp/juce_apps/plugin-check`: it builds a plugin's
 complete, control and headless targets and checks that they fit together (same parameters,
-state that moves between them, identical sound). Beside it runs the block FIR test: the block
-FIR that firConv and the crossover share is bit for bit a reference FIR whose arithmetic the test
-spells out, on x86_64 and on aarch64 under `qemu-aarch64-static`, and within -120 dB of
-`juce::dsp::FIR::Filter` (section 5).
+state that moves between them, identical sound). Beside it run four more checks (section 5): the
+block FIR test (`dsp/juce_plugins/tests/blockfir`: the block FIR that firConv and the crossover
+share is bit for bit a reference FIR whose arithmetic the test spells out, on x86_64 and on
+aarch64 under `qemu-aarch64-static`, and within -120 dB of `juce::dsp::FIR::Filter`); the build
+identity check (`dsp/juce_plugins/tests/buildinfo/check.sh`: loudness's bundles, x86_64 and
+aarch64, carry the `buildinfo.ttl` this tree builds, their binary's `bpi-build-info` string
+agrees, and the manifest does not name the file); the version tool's test
+(`dsp/juce_plugins/tests/plugin-versions/run.sh`: `plugin-versions.sh check` and `list` against a
+scratch git repository); and the controller's bridge against its fake hub.
 
 **The development container** is the builder image itself. Besides the aarch64 toolchain
 it carries what rungs 1 and 2 need on x86_64: the PipeWire headers `speakerd` builds
@@ -229,14 +235,14 @@ agent never improvises a `pw-cli` or `ssh` line.
 
 | Skill | What it does | Used by |
 |---|---|---|
-| `/build <plugin\|app> [target]` | builds complete, control or headless, or `speakerd`/controller, in the builder container; prints the version hash | all dev agents |
+| `/build <plugin\|app> [target]` | builds complete, control or headless, or `speakerd`/controller, for x86_64 or aarch64, in the builder container; every LV2 bundle it builds carries `buildinfo.ttl`, its plugin's version and source identity | all dev agents |
 | `/test unit` | `ctest` in the container: DSP cores against exported coefficients, control and headless parameter and monitor layouts identical, state-layer loading, graph diff, scope view model against recorded captures | verifier |
 | `/vpair up\|down\|scenario <name>` | brings the virtual pair up with a given build and runs one scenario from `tests/scenarios/` | verifier, orchestrator |
 | `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | verifier |
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
 | `/board status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3 (the board of `firmware/local.mk`); refuses when the lab lock exists or rung 2 is not green | board-ops |
 | `/juce` | the JUCE knowledge base in `dsp/docs/juce-knowledge/` | dev agents |
-| `/release` | builds every target, writes the catalogue with version hashes, tags | orchestrator |
+| `/release` | builds every target, writes the catalogue (each plugin's version and source identity, and what step 4's catalogue compares), tags | orchestrator |
 
 Hooks are the gates. They live in `.claude/settings.json` of each repository and run
 scripts from `.claude/hooks/`.
@@ -261,7 +267,8 @@ checks the Mermaid diagrams of an edited document when `tools/mermaid-check` is 
 `stop.py` runs the virtual pair tests when their files, `firmware/ampd/` or
 `dsp/juce_apps/` changed. The skills `/build`, `/test`, `/vpair` and `/pw-inspect` exist
 with their scripts in `tools/`; `/test` writes the status file the gate reads. `/board` exists
-too (`tools/board.sh`); `/measure` and `/release` wait for `ampd` and the version hash.
+too (`tools/board.sh`); `/measure` and `/release` do not exist yet: `/measure` follows `ampd`,
+`/release` step 4's catalogue.
 
 The deploy gate is the one that matters most. It reads `tests/.status/<commit>.json`, which
 `/test` writes after a run of both rungs, and refuses the deploy if the file is missing, red,
@@ -285,13 +292,26 @@ flowchart LR
 ```
 
 Rung 1 (`tools/test.sh unit`) runs `plugin-check` on every plugin that declares its targets,
-the controller's bridge against its fake hub, and the block FIR test: the block FIR that firConv
-and the crossover share is bit for bit a reference FIR defined in the test, whose arithmetic is
-explicit (taps in ascending order, each multiply-add fused through `std::fma` on aarch64), on
-x86_64 and on aarch64 under `qemu-aarch64-static`, for the four real coefficient sets (firConv's
-pre-low-pass of 61 taps and inverse of 2001, the crossover's low and high bands of 259 each), in
-blocks of 1024 and of random sizes from 1 to 1024; and against `juce::dsp::FIR::Filter` on the
-same input and coefficients its worst difference is below -120 dB re the output's peak.
+the controller's bridge against its fake hub, and three checks of the plugins' code and build:
+
+- **The block FIR test** (`dsp/juce_plugins/tests/blockfir`): the block FIR that firConv
+  and the crossover share is bit for bit a reference FIR defined in the test, whose arithmetic is
+  explicit (taps in ascending order, each multiply-add fused through `std::fma` on aarch64), on
+  x86_64 and on aarch64 under `qemu-aarch64-static`, for the four real coefficient sets (firConv's
+  pre-low-pass of 61 taps and inverse of 2001, the crossover's low and high bands of 259 each), in
+  blocks of 1024 and of random sizes from 1 to 1024; and against `juce::dsp::FIR::Filter` on the
+  same input and coefficients its worst difference is below -120 dB re the output's peak.
+- **The build identity check** (`dsp/juce_plugins/tests/buildinfo/check.sh`), after plugin-check
+  of each plugin that declares its targets (loudness): each bundle of its three targets, the
+  copy JUCE's copy step makes, and an aarch64 bundle carry exactly the `buildinfo.ttl` this tree
+  builds (the version and source identity of `plugin-versions.sh list`), the binary's
+  `bpi-build-info` string says the same, and `manifest.ttl` does not name the file.
+- **The version tool's test** (`dsp/juce_plugins/tests/plugin-versions/run.sh`):
+  `plugin-versions.sh check` and `list` against a scratch git repository. An unchanged tree
+  passes; a changed plugin whose version was not raised fails, and untracked files and a change
+  in a shared folder it declares count as changes; a raised version passes, and so does a new
+  plugin; a bad ref or an unreadable declaration is exit status 2; and `list` equals the
+  documented git command.
 
 The rung 2 scenarios, each a pytest module driving the harness, are the acceptance tests of
 the architecture:
@@ -304,7 +324,7 @@ the architecture:
 | `hub_down` | the right speaker keeps playing its revision when the left container is stopped, and switches to the L+R mix if configured |
 | `power_cut` | a speaker killed mid-write boots on last known good, and on factory after a corrupted factory-candidate |
 | `two_controllers` | changes from two harness clients interleave and both see the same final state |
-| `catalogue` | a version-hash mismatch between a control and a headless build is refused |
+| `catalogue` | a graph whose control and headless builds of a plugin disagree in what step 4's catalogue compares (the source identity or an interface hash, `docs/remote-plugin-host.md` section 7) is refused |
 | `speakerd_same_sound` | `speakerd` running a plugin's headless build gives every test tone the gain of the complete build's offline render within 0.05 dB on both amplifier channels, and that gain is not 0 dB |
 | `speakerd_state_layers` | a broken current layer plays last known good, and with both broken factory, each said in the log and recognised by its sound |
 | `speakerd_start_order` | `speakerd` started before its amplifier or its PipeWire, or with no network, links and plays the complete build's sound once they are there, and again when the amplifier comes back |
@@ -331,7 +351,7 @@ the architecture:
 | `controller_end_to_end` | the real controller (built by `tools/build.sh controller`, in its script test mode) against the real pair, both speakers with speakerd and ampd and the pair's secret, the Mine pin through loudness, a stereo 200 Hz tone 12 dB apart: (a) it connects with the secret file, is synced and proven on the hub's revision with the hub's document on its canvas, both speakers online on layer current, both monitor links connected, and nothing either side refused, ignored or answered with an error (its `--trace`, both ampd logs); (b) nine `set`s are echoed and each is heard on both speakers within 60 ms of the send (knob_latency's onset and set-asides, at least 5 measured), both graph.json hold the last value; a 1 s `drag` is heard on both through at least 10 intermediate 20 ms blocks and ends at the render's level within 0.1 dB, its value in both graph.json, the hub's state and the controller; (c) `add`, a `set` on the new node, `disconnect` and two `connect-pins` are applied (revisions 2 to 5) on both graph.json and heard (the woofers silent, then back at the render's level within 0.1 dB), and its state is the hub's; with the right's device.json turning the tweeter on, a straight connection to the tweeter is rejected with "right: the tweeter is on here (device.json)", undone in the controller, rolled back on the left, and its state is the hub's; (d) with a window open, `mon_levelDb` from the chosen speaker (left, then right) is loudness's detector model of that side within 1 dB and the subscription moves; `output/level` from each speaker is its own side's level within 1 dB, 12 dB apart, the muted tweeters under -100 dBFS; (e) with another secret it is refused (not proven, not synced, the refusal shown, no plugin node), the hub logs it, and no secret is printed; (f) one `--gui` run under Xvfb and openbox with a stepping tone: synced, both level bars fed, the loudness window's meter moving more than 6 dB, and its screenshot and the X screen written to `build/e2e-controller/` |
 | `firmware_ampd_install` | `ampd-setup.sh` and setup.sh's ampd component lay out the documented `ampd.json` (with the pair's secret, mode 600, never printed) and unit, refuse an agent with no hub address and a missing or malformed secret before any change (the secret file read as the controller reads it: exactly one trailing `\n` or `\r\n` dropped, nothing else), and status and smoke say whether ampd runs and is connected to speakerd and, on an agent, to the hub |
 | `chain_cost` | the board's chain (the Mine pin through `loudness_headless`, `firConv` and the crossover, its low band to the woofer and its high band to the tweeter) on a virtual speaker at its 48 kHz and quantum 1024, noise playing: over a 20 s window after 5 s of settling, `speakerd`'s own timing (`speakerd/timing` on the local link, each value weighted by its cycles) puts firConv's mean share of the cycle under 5 % and the crossover's under 1.5 %. With `juce::dsp::FIR::Filter` they cost 15.1 % and 3.8 % on x86_64, the shared block FIR about 1.0 % and 0.27 %: the limits are 3 and 2.5 times under the old cost and about five times over the new, so a slower or busier CI runner fails the old code by more and passes the new. The window must be a measurement (at least 80 % of its cycles, each node measured in 80 % of them, the quantum unchanged, the woofer above -60 dBFS); the maxima, late cycles and position jumps are printed, not asserted: they measure the machine's scheduler, not the chain |
-| `plugin_identity` | `plugin-versions.sh list` prints `<plugin> <version> <source-id>` once for each plugin and nothing else, each version its `project(... VERSION)`; the bundles of `loudness_headless`, `loudness`, `firConv` and `crossover` carry `buildinfo.ttl` exactly as specified with their plugin's version and source id, which their `manifest.ttl` does not name (it stays as JUCE writes it: no LV2 host reads `buildinfo.ttl`); `speakerd` says `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` once for each node of the chain, the bundle the one it was given, on both speakers at start, again at an apply, and in the render; a copy of firConv's bundle without `buildinfo.ttl`, given alone, renders the original's samples from layer current and says `no build identity (an older build)`, and one with a half-written `buildinfo.ttl` renders the same samples and says `(buildinfo.ttl unreadable)` |
+| `plugin_identity` | `plugin-versions.sh list` prints `<plugin> <version> <source-id>` once for each plugin and nothing else, each version its `project(... VERSION)`; no source id is `unknown` (the virtual pair has git), and each is the 12 hex characters that the test computes itself with the command of `dsp/juce_plugins/README.md` ("Versions and source identity": `git rev-parse` of the plugin's folder, each folder of its `SHARED` in order, `cmake/` and the JUCE gitlink, through `git hash-object --stdin`, a folder not yet in HEAD the empty tree), with `-dirty` exactly when `git status --porcelain` over those paths prints anything or one of them is not in HEAD; the bundles of `loudness_headless`, `loudness`, `firConv` and `crossover` carry `buildinfo.ttl` exactly as specified with their plugin's version and that source id, which their `manifest.ttl` does not name (it stays as JUCE writes it: no LV2 host reads `buildinfo.ttl`); `speakerd` says `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` once for each node of the chain, the bundle the one it was given, on both speakers at start, again at an apply, and in the render; a copy of firConv's bundle without `buildinfo.ttl`, given alone, renders the original's samples from layer current and says `no build identity (an older build)`, and one with a half-written `buildinfo.ttl` renders the same samples and says `(buildinfo.ttl unreadable)` |
 
 Rung 3 adds one smoke test, not a copy of rung 2: deploy, play the sweep, compare the
 telemetry capture with the expected crossover response within a tolerance, and check `pw-top`
@@ -400,8 +420,8 @@ In order, because each unlocks the next:
 2. **The hooks**, because agents will start touching boards the moment a deploy script exists.
    In place (`.claude/hooks/`, wired in `.claude/settings.json`).
 3. **The skills**, replacing ad-hoc shell. `/build`, `/test`, `/vpair` and `/pw-inspect` are in
-   place, and so is `/board` (`tools/board.sh`); `/measure` follows `ampd`, `/release` the
-   version hash.
+   place, and so is `/board` (`tools/board.sh`); `/measure` follows `ampd`, `/release` step 4's
+   catalogue.
 4. **The agent definitions** and the `CLAUDE.md` map of the repository with the rules. In
    place (`.claude/agents/`, the root `CLAUDE.md`).
 5. **CI** running rungs 1 and 2 on pull requests. In place (`.github/workflows/ci.yml`), not
