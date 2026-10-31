@@ -302,10 +302,15 @@ the controller's bridge against its fake hub, and three checks of the plugins' c
   blocks of 1024 and of random sizes from 1 to 1024; and against `juce::dsp::FIR::Filter` on the
   same input and coefficients its worst difference is below -120 dB re the output's peak.
 - **The build identity check** (`dsp/juce_plugins/tests/buildinfo/check.sh`), after plugin-check
-  of each plugin that declares its targets (loudness): each bundle of its three targets, the
-  copy JUCE's copy step makes, and an aarch64 bundle carry exactly the `buildinfo.ttl` this tree
-  builds (the version and source identity of `plugin-versions.sh list`), the binary's
-  `bpi-build-info` string says the same, and `manifest.ttl` does not name the file.
+  of each plugin that declares its targets (loudness): the bundle of each of its three targets
+  that plugin-check builds (x86_64, in plugin-check's build tree), and `loudness_headless`
+  cross-built for aarch64 (`tools/build.sh loudness aarch64 headless`) together with its copy in
+  that build's own `copied/lv2`, carry exactly the `buildinfo.ttl` this tree builds (the version
+  and source identity of `plugin-versions.sh list`), the binary's `bpi-build-info` string says
+  the same and the binary is code for that machine, and `manifest.ttl` does not name the file.
+  Only that build tree writes `copied/lv2`, so its copy proves that `buildinfo.ttl` is written
+  before JUCE's copy step; the copies in `~/.lv2` are not checked, because any other build in
+  the same HOME may have written them since.
 - **The version tool's test** (`dsp/juce_plugins/tests/plugin-versions/run.sh`):
   `plugin-versions.sh check` and `list` against a scratch git repository. An unchanged tree
   passes; a changed plugin whose version was not raised fails, and untracked files and a change
