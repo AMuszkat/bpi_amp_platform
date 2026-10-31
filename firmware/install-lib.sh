@@ -172,12 +172,16 @@ version_value() {   # $1 = VERSION file, $2 = key
 # no hook runs (a person's shell, a script calling a script).
 
 # Nothing reaches a board while a lab lock exists (this checkout's or the main checkout's). With
-# $1 = status also not unless tests/.status/<HEAD>.json says unit: pass and vpair: pass, both run
-# on a clean tree, and the tree is clean now. BPI_DEPLOY_OVERRIDE=1, set by a person in their
-# own shell, bypasses the test status (logged in tests/.status/overrides.log), never a lock.
+# $1 = status also not unless `tools/status.py gate` (the one definition of green, which the
+# pre-bash hook asks too) says this checkout is green: both rungs passed on a clean tree for
+# HEAD, or an affected run (tools/test.sh affected) covers every file changed since the last
+# commit green in full (tests/impact.json); and the tree is clean now. It fails closed: no
+# status.py, or an answer other than 0 (green) or 1 (not green, the reason), refuses with what it
+# printed. BPI_DEPLOY_OVERRIDE=1, set by a person in their own shell, bypasses the test status
+# (logged in tests/.status/overrides.log), never a lock.
 # $1 = lock | status, $2 = what is refused, for the message.
 deploy_gate() {
-    local need="$1" what="$2" repo common main="" lock head dirty why=""
+    local need="$1" what="$2" repo common main="" lock head dirty why="" said rc
     repo="$(cd "$FIRMWARE_DIR/.." && pwd)"
     common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" || common=""
     [ -z "$common" ] || main="$(dirname "$common")"
@@ -185,34 +189,22 @@ deploy_gate() {
         [ ! -e "$lock" ] || die "the lab is locked ($lock exists): nothing may reach a board. A person removes the lock when the boards are free."
     done
     [ "$need" = status ] || return 0
-    if [ -z "$common" ]; then
-        why="$repo is not a git checkout, so nothing says what was tested"
+    # status.py judges the checkout it is in (its parent's parent), whatever the cwd.
+    if [ ! -f "$repo/tools/status.py" ]; then
+        why="there is no $repo/tools/status.py to judge the test status, so nothing says what was tested"
     else
-        head="$(git -C "$repo" rev-parse HEAD)"
-        dirty="$(git -C "$repo" status --porcelain)"
-        if [ -n "$dirty" ]; then
-            why="the working tree has uncommitted changes: commit first, so that what is deployed is what was tested"
-        else
-            why="$(python3 - "$repo/tests/.status/$head.json" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        s = json.load(f)
-    if not isinstance(s, dict):
-        raise ValueError("not a JSON object")
-except (OSError, ValueError) as e:
-    print(f"no readable test status {sys.argv[1]} ({e}): run tools/test.sh all first")
-    sys.exit()
-bad = [f"{k}: {s.get(k, 'not run')}" + ("" if s.get(k + "_tree") == "clean" else f" (tree {s.get(k + '_tree', '?')})")
-       for k in ("unit", "vpair") if s.get(k) != "pass" or s.get(k + "_tree") != "clean"]
-if bad:
-    print("the test status of this commit is not green on a clean tree: " + ", ".join(bad))
-PY
-)"
-        fi
+        rc=0
+        # -I: no PYTHON* settings, user site or modules from the script's folder decide the gate.
+        said="$(python3 -I "$repo/tools/status.py" gate 2>&1)" || rc=$?
+        case "$rc" in
+            0) ok "the deploy gate: $said"; return 0 ;;
+            1) why="$said" ;;
+            *) why="tools/status.py gate could not judge the test status (exit status $rc): ${said:-it printed nothing}" ;;
+        esac
     fi
-    [ -n "$why" ] || return 0
     if [ "${BPI_DEPLOY_OVERRIDE:-}" = 1 ]; then
+        head="$(git -C "$repo" rev-parse --verify -q HEAD 2> /dev/null)" || head=""
+        dirty="$(git -C "$repo" status --porcelain 2> /dev/null)" || dirty=""
         mkdir -p "$repo/tests/.status"
         printf '%s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${head:0:12}" "${dirty:+dirty }" "$what" >> "$repo/tests/.status/overrides.log"
         warn "BPI_DEPLOY_OVERRIDE=1: going on although $why (logged in tests/.status/overrides.log)"

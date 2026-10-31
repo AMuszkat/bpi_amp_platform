@@ -6,8 +6,8 @@
 #                                                board's installed speakerd-setup.sh status; nothing
 #                                                is copied to the board)
 #     tools/board.sh journal [-n N] [--follow] [--unit speakerd|ampd]
-#                                                journalctl --user -u speakerd (or ampd) on the board
-#                                                (reads only)
+#                                                journalctl --user-unit speakerd -b (or ampd) on the
+#                                                board (reads only)
 #     tools/board.sh deploy [options]            builds the aarch64 artifacts, installs them capped
 #                                                (firmware/setup.sh --mode target-remote; default
 #                                                --only speakerd). Options: --role, --plugin,
@@ -23,10 +23,12 @@
 # firmware/local.mk; never a name written here.
 #
 # It checks its arguments first, then refuses every command while .claude/lab.lock exists (in
-# this checkout or the main one), and deploy, smoke and rollback unless tests/.status/<HEAD>.json
-# says unit: pass and vpair: pass, both run on a clean tree, and the tree is clean now. The
-# pre-bash hook gates the same; this is defence in depth. A person may bypass the test status,
-# never the lock, with BPI_DEPLOY_OVERRIDE=1; that is logged in tests/.status/overrides.log.
+# this checkout or the main one), and deploy, smoke and rollback unless tools/status.py gate says
+# the checkout is green: the tree clean now, and both rungs passed for HEAD on a clean tree, or an
+# affected run (tools/test.sh affected) covers every file changed since the last commit green in
+# full (tests/impact.json). The pre-bash hook asks the same command; this is defence in depth. A
+# person may bypass the test status, never the lock, with BPI_DEPLOY_OVERRIDE=1; that is logged
+# in tests/.status/overrides.log.
 # Nothing here lifts the output cap: every deploy installs capped, and only a person at the
 # speaker lifts it (firmware/speakerd-setup.sh limits, in their own shell).
 set -euo pipefail
@@ -96,7 +98,7 @@ esac
 
 # --- The gate ------------------------------------------------------------------------------------
 # The installers' gate (firmware/install-lib.sh): the lab locks for every command; for deploy,
-# smoke and rollback also a green test status for HEAD on a clean tree, unless a person set
+# smoke and rollback also tools/status.py gate's green on a clean tree, unless a person set
 # BPI_DEPLOY_OVERRIDE=1 in their own shell (logged).
 if [ "$command" = status ] || [ "$command" = journal ]; then
     deploy_gate lock "tools/board.sh $command"
@@ -115,7 +117,9 @@ case "$command" in
         run ssh -t -- "$TARGET" 'bash "$HOME/.local/lib/speakerd/current/setup/speakerd-setup.sh" status'
         ;;
     journal)
-        remote="journalctl --user -u $unit.service -b --no-pager -n $(printf %q "$lines")"
+        # --user-unit, not --user -u: --user finds no journal on a board's volatile journal
+        # (firmware/speakerd-setup.sh, above check_started, says why).
+        remote="journalctl --user-unit $unit.service -b --no-pager -n $(printf %q "$lines")"
         [ $follow = 0 ] || remote+=" --follow"
         run ssh -t -- "$TARGET" "$remote"
         ;;

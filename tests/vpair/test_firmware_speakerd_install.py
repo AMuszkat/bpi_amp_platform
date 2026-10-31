@@ -5,9 +5,11 @@ they change anything, and their remote mode and the board script quote what they
 firmware/speakerd-setup.sh runs here as it runs on a board, with two test hooks: --home (a
 fresh folder stands for the audio user's home) and --no-systemd (the systemctl calls are only
 printed), or, for the systemd path, stand-ins for systemctl and journalctl that record each call
-and answer as a test tells them. The bundles are made by the installer's own bundle step; their
-speakerd is the stand-in of stub_speakerd.c, which says the version STUB_VERSION gives it (the
-installer's minimum, SPEAKERD_MIN_VERSION, unless a test says otherwise). The old plugin host is
+and answer as a test tells them (journalctl, as on a board's volatile journal, finds no journal
+with --user: only --user-unit reads the units' lines). The bundles are made by the installer's
+own bundle step; their speakerd is the stand-in of stub_speakerd.c, which says the version
+STUB_VERSION gives it (the installer's minimum, SPEAKERD_MIN_VERSION, unless a test says
+otherwise). The old plugin host is
 a copy of sleep called harness.TEST_PLUGIN_HOST. The remote mode runs through a stand-in ssh
 that runs the board's side on this machine, as an unprivileged user when run as root, in a
 stand-in board home; the board script runs with --dry-run. Nothing here reaches a board.
@@ -104,12 +106,14 @@ Pass when:
   --allow-tweeter-without-crossover is refused before the stand-in ssh is called; and, for a
   host that is not a test's (.invalid), the remote mode applies the deploy gate before it calls
   ssh: refused outside a git checkout, without a readable test status for HEAD, with a red one or
-  one from a dirty tree, on a dirty tree, and while a lab lock exists; with all of it green it
-  reaches the (stand-in) board;
+  one from a dirty tree, on a dirty tree, and while a lab lock exists, as tools/status.py gate
+  judges the status; refused too with no tools/status.py and with one that answers neither 0
+  (green) nor 1 (not green); with all of it green it reaches the (stand-in) board;
 - the board script (with --dry-run) refuses `journal -n` that is not a number and a deploy
   option that is not an agent's (--base-conf, --stop-plugin-host, --server-ip, --no-restart),
-  quotes journal's argument, and reads status from the board's installed script with a fixed
-  command.
+  quotes journal's argument, reads the journal with `journalctl --user-unit` (never `--user -u`,
+  which finds nothing on a board's volatile journal), and reads status from the board's
+  installed script with a fixed command.
 
     python3 -m unittest -v tests.vpair.test_firmware_speakerd_install
 """
@@ -136,14 +140,18 @@ AMPD_LISTENING = "ampd: listening on 0.0.0.0: control 7450, knobs 7451, monitor 
 
 # Stand-ins for systemctl, journalctl and loginctl (by the name they are called), for the
 # installers' systemd path: each call is recorded in $FAKE_SYSTEMD/calls; is-active answers
-# $FAKE_SYSTEMD/active (default active); journalctl prints $FAKE_SYSTEMD/journal; a call whose
-# arguments contain a line of $FAKE_SYSTEMD/fail fails. At a restart of pipewire.service it
-# notes whether a process called $FAKE_PLUGIN_HOST runs.
+# $FAKE_SYSTEMD/active (default active); journalctl prints $FAKE_SYSTEMD/journal, except with
+# --user, which finds no journal file, as on a board (a volatile journal, not split per user:
+# only --user-unit reads the user units' lines); a call whose arguments contain a line of
+# $FAKE_SYSTEMD/fail fails. At a restart of pipewire.service it notes whether a process called
+# $FAKE_PLUGIN_HOST runs.
 FAKE_SYSTEMD = r'''#!/bin/bash
 name="$(basename "$0")"; d="${FAKE_SYSTEMD:?}"
 echo "$name $*" >> "$d/calls"
 case "$name" in
-    journalctl) cat "$d/before" "$d/journal" 2> /dev/null; exit 0 ;;
+    journalctl)
+        case " $* " in *" --user "*) echo "No journal files were found." >&2; echo "-- No entries --"; exit 0 ;; esac
+        cat "$d/before" "$d/journal" 2> /dev/null; exit 0 ;;
     loginctl) echo yes; exit 0 ;;
 esac
 if [ -f "$d/fail" ]; then
@@ -1195,13 +1203,17 @@ class Remote(Setup):
     def test_the_remote_mode_has_the_deploy_gate(self):
         """The installers' remote mode refuses, as tools/board.sh does, before it calls ssh: while a
         lab lock exists, outside a git checkout, on a dirty tree, and without a green test status
-        for HEAD from a clean tree. A copy of firmware/ in a scratch repository stands for the
-        checkout; the host is a .test name (reserved: nothing resolves it), reached only through
-        the stand-in ssh."""
+        for HEAD from a clean tree, as tools/status.py gate judges it; and it fails closed when
+        there is no status.py or it answers neither green nor not. A copy of firmware/ and of
+        tools/status.py in a scratch repository stands for the checkout; the host is a .test name
+        (reserved: nothing resolves it), reached only through the stand-in ssh. The affected run
+        is tools/tests' to test."""
         board, env = self.board("gate")
         repo = self.tmp / "gate-repo"
         shutil.rmtree(repo, ignore_errors=True)
         shutil.copytree(FIRMWARE, repo / "firmware", ignore=shutil.ignore_patterns("local.mk", "localBuild"))
+        (repo / "tools").mkdir()
+        shutil.copy2(ROOT / "tools/status.py", repo / "tools/status.py")
         host = "user@bpi-amp.test"
 
         def status():
@@ -1238,8 +1250,17 @@ class Remote(Setup):
         (repo / ".claude/lab.lock").unlink()
         (repo / ".claude").rmdir()
 
+        # Fail closed: no judge, or one that answers neither 0 (green) nor 1 (not green).
+        judge = repo / "tools/status.py"
+        judge.unlink()
+        refused("/tools/status.py to judge the test status")
+        judge.write_text("import sys\nprint('the judge broke')\nsys.exit(3)\n")
+        refused("could not judge the test status (exit status 3): the judge broke")
+        subprocess.run(git + ["checkout", "-q", "--", "tools/status.py"], check=True)
+
         result = status()
         self.assertIn(host, (board / "hosts").read_text(), result.stdout)
+        self.assertIn("the deploy gate: green", result.stdout)
 
     def test_not_as_root(self):
         board, env = self.board("root")
@@ -1276,7 +1297,7 @@ class Remote(Setup):
         self.assertFalse(marker.exists())
         journal = board("journal", "-n", "50")
         self.assertEqual(journal.returncode, 0, journal.stderr)
-        self.assertIn("ssh -t -- user@bpi-amp.invalid journalctl --user -u speakerd.service -b --no-pager -n 50",
+        self.assertIn("ssh -t -- user@bpi-amp.invalid journalctl --user-unit speakerd.service -b --no-pager -n 50",
                       journal.stdout.replace("\\", ""))
         status = board("status")
         self.assertEqual(status.returncode, 0, status.stderr)

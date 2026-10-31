@@ -228,7 +228,9 @@ check_started() {   # $1 = epoch seconds of the restart
     [ "$NO_SYSTEMD" -eq 0 ] || return 0
     local log="" wait="${AMPD_START_WAIT:-10}"
     for _ in $(seq 1 $((wait * 2))); do
-        log="$(journalctl --user -u ampd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
+        # --user-unit, not --user -u: --user finds no journal on a board's volatile journal
+        # (speakerd-setup.sh, above check_started, says why).
+        log="$(journalctl --user-unit ampd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
         grep -qE '^ampd: (listening on|cannot listen|config .*: FAILED)' <<< "$log" && break
         sleep 0.5
     done
@@ -275,7 +277,7 @@ do_install() {
     if [ "$NO_RESTART" -eq 1 ]; then info "Not (re)starting ampd (--no-restart)"; return 0; fi
     if [ "$changed" -eq 1 ] || ! { [ "$NO_SYSTEMD" -eq 1 ] || systemctl --user is-active --quiet ampd.service; }; then
         local restarted; restarted="$(date +%s)"
-        sc restart ampd.service || die "could not start ampd: journalctl --user -u ampd"
+        sc restart ampd.service || die "could not start ampd: journalctl --user-unit ampd -b"
         check_started "$restarted"
         ok "ampd (re)started"
     else
@@ -285,7 +287,7 @@ do_install() {
 
 ${c_green}ampd installed.${c_off} The speaker plays with or without it.
   - Check it: $(dirname "$SELF")/ampd-setup.sh smoke
-  - Its log:  journalctl --user -u ampd -b
+  - Its log:  journalctl --user-unit ampd -b
 EOF
 }
 
@@ -367,7 +369,7 @@ do_smoke() {
         if [ "$sd" = true ]; then
             pass "connected to speakerd: $(json_value "$STATUS" 'd["speakerd"].get("version")'), layer $(json_value "$STATUS" 'd["speakerd"].get("layer")'), revision $(json_value "$STATUS" 'd["speakerd"].get("revision")')"
         else
-            failed "not connected to speakerd ($(json_value "$STATUS" 'd["speakerd"].get("socket")')): journalctl --user -u ampd -b"
+            failed "not connected to speakerd ($(json_value "$STATUS" 'd["speakerd"].get("socket")')): journalctl --user-unit ampd -b"
         fi
         if [ "$role" = agent ]; then
             if [ "$hub" = true ]; then pass "connected to the hub at $(json_value "$STATUS" 'd["hub"].get("address")') ($(json_value "$STATUS" 'd["hub"].get("name")'))"

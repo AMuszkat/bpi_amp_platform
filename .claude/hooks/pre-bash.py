@@ -7,11 +7,13 @@ instructions alone cannot:
 - nothing reaches a board (ssh, scp, rsync, the deploy targets of the build scripts, any make
   on the firmware, the installers' remote mode, the /board skill's tools/board.sh) while a lab lock
   (.claude/lab.lock, in the checkout the command runs in or in the main checkout) exists, or
-  without a green test status for the exact commit being deployed (tests/.status/<commit>.json,
-  written by /test, both rungs run on a clean tree), with a clean tree now. The checkout is the
-  one the command runs in (the session's working directory), so a worktree is judged on its
-  own commit. Looking at a board (tools/board.sh status or journal) only needs the lab to be
-  unlocked;
+  without a green test status for the exact commit being deployed, with a clean tree now. Green
+  is tools/status.py's gate, the one definition firmware/install-lib.sh asks too: both rungs
+  passed on a clean tree (/test all), or an affected run (/test affected) covers every file
+  changed since a commit green in full (tests/impact.json). The checkout is the one the command
+  runs in (the session's working directory), so a worktree is judged on its own commit; the gate
+  is this checkout's tools/status.py. Looking at a board (tools/board.sh status or journal) only
+  needs the lab to be unlocked;
 - no command lifts a speaker's output cap (--person-present), and no command uses the deploy
   override (BPI_DEPLOY_OVERRIDE): both are a person's, in their own shell, which this hook
   never sees.
@@ -20,6 +22,7 @@ It is a tripwire on the command text, not a sandbox: tools/board.sh checks the s
 itself. Whatever goes wrong inside the hook on a guarded path blocks the command.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -49,6 +52,15 @@ OVERRIDE = re.compile(r"\bBPI_DEPLOY_OVERRIDE\b")
 # make on the firmware: its targets copy kernels, modules and device trees to a board and
 # change its /boot, so every make there is deploy-class, whatever the target.
 MAKE = re.compile(r"(^|[\s;&|(])make\b")
+
+
+def status_gate():
+    """tools/status.py's gate(tree) -> (green, why), loaded from this checkout."""
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("bpi_status", os.path.join(ROOT, "tools", "status.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.gate
 
 
 def refuse(msg):
@@ -94,29 +106,9 @@ def check_deploy(tree, command):
                           "A person removes the lock when the boards are free.")
     if BOARD_READ.search(command) and not DEPLOY.search(BOARD_READ.sub("", command)):
         return 0
-    head = git(tree, "rev-parse", "HEAD").strip()
-    if not head:
-        return refuse(f"cannot read the commit of {tree}: nothing reaches a board.")
-    dirty = git(tree, "status", "--porcelain").strip()
-    status_file = os.path.join(tree, "tests", ".status", f"{head}.json")
-    status = {}
-    if os.path.exists(status_file):
-        try:
-            with open(status_file) as f:
-                status = json.load(f)
-        except (OSError, ValueError):
-            status = None
-        if not isinstance(status, dict):
-            return refuse(f"the test status {status_file} is unreadable: run `/test all` again.")
-    green = (status.get("unit") == "pass" and status.get("vpair") == "pass"
-             and status.get("unit_tree") == "clean" and status.get("vpair_tree") == "clean")
-    if dirty:
-        return refuse(f"the working tree of {tree} has uncommitted changes: commit first, so that "
-                      "what is deployed is what was tested.")
+    green, why = status_gate()(tree)
     if not green:
-        return refuse(f"no green test status for commit {head[:12]} in {tree}: run `/test all` "
-                      f"there first (it writes tests/.status/{head[:12]}....json, both rungs on a "
-                      f"clean tree). Status now: {json.dumps(status) if status else 'none'}.")
+        return refuse(f"nothing reaches a board from {tree}: {why}.")
     return 0
 
 

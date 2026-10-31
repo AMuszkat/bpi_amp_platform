@@ -938,6 +938,13 @@ prune_versions() {
 # line at all (which is also what a journal this user cannot read looks like), a speakerd that
 # stopped (status 2: a bundle shadowed by a system LV2 folder's copy of the same version or a
 # newer one).
+#
+# Every journal read here (and in ampd-setup.sh and tools/board.sh) is `journalctl --user-unit
+# X`, never `journalctl --user -u X`: --user reads only the user's own journal file, which
+# journald writes only on persistent storage. A board keeps a volatile journal (Armbian: one
+# system.journal in /run/log/journal), into which user units log too, so there --user finds no
+# journal at all. --user-unit reads every journal this user may read: the system journal (as a
+# member of systemd-journal or adm) and, where journals are split, the user's own file.
 check_started() {   # $1 = epoch seconds of the restart
     [ "$NO_SYSTEMD" -eq 0 ] || return 0
     local log="" run="" line wait="${SPEAKERD_START_WAIT:-15}"
@@ -945,7 +952,7 @@ check_started() {   # $1 = epoch seconds of the restart
     # records the OLD one's end ("speakerd ended: clean") after the moment of the restart. An end
     # after that start is the new one's: a crash.
     for _ in $(seq 1 $((wait * 2))); do
-        log="$(journalctl --user -u speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
+        log="$(journalctl --user-unit speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
         run="$(awk '/^speakerd-run: starting speakerd/ { found = 1 } found' <<< "$log")"
         grep -qE '^speakerd: device(: limits|\.json: FAILED)' <<< "$run" && break
         sleep 0.5
@@ -953,12 +960,13 @@ check_started() {   # $1 = epoch seconds of the restart
     # A speakerd that refuses its bundles (status 2) has said its device line already: give it
     # the time to go.
     if [ "$wait" -ge 2 ]; then sleep 2; else sleep 1; fi
-    log="$(journalctl --user -u speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
+    log="$(journalctl --user-unit speakerd.service --since "@$1" -o cat --no-pager 2> /dev/null || true)"
     run="$(awk '/^speakerd-run: starting speakerd/ { found = 1 } found' <<< "$log")"
     if [ -z "$run" ]; then
-        loud "speakerd-run did not start speakerd within $wait s (see the journal: an AudioPluginHost it waits for?)." \
-             "If 'journalctl --user -n 5' shows no entries, $AUDIO_USER cannot read the journal (Armbian: a volatile" \
-             "or unsplit journal, or $AUDIO_USER not in the systemd-journal group): fix that first, nothing here can be checked."
+        loud "speakerd-run did not start speakerd within $wait s (journalctl --user-unit speakerd -b: an AudioPluginHost it waits for?)." \
+             "If 'journalctl -n 5' shows no entries either, $AUDIO_USER cannot read the journal: it is in neither the" \
+             "systemd-journal nor the adm group, and has no journal of its own (journald keeps one per user only on" \
+             "persistent storage). Fix that first: nothing here can be checked."
         exit 1
     fi
     if ! systemctl --user is-active --quiet speakerd.service || grep -qE '^speakerd-run: speakerd ended' <<< "$run"; then
@@ -982,7 +990,7 @@ check_started() {   # $1 = epoch seconds of the restart
         ok "${line#speakerd: }"
     else
         loud "speakerd started but has said nothing about its limits within $wait s: a speakerd that does not" \
-             "say them must not play on a board (journalctl --user -u speakerd -b)."
+             "say them must not play on a board (journalctl --user-unit speakerd -b)."
         exit 1
     fi
 }
@@ -1033,7 +1041,7 @@ do_install() {
     elif [ "$old" != "$BUNDLE_ID" ] || [ "$DEVICE_CHANGED$FACTORY_CHANGED$unit_changed$DROPIN_CHANGED" != 0000 ] \
          || ! { [ "$NO_SYSTEMD" -eq 1 ] || systemctl --user is-active --quiet speakerd.service; }; then
         local restarted; restarted="$(date +%s)"
-        sc restart speakerd.service || die "could not start speakerd: journalctl --user -u speakerd"
+        sc restart speakerd.service || die "could not start speakerd: journalctl --user-unit speakerd -b"
         ok "speakerd (re)started"
         check_started "$restarted"
     else
@@ -1048,7 +1056,7 @@ do_install() {
 
 ${c_green}speakerd $BUNDLE_ID installed.${c_off} The output is capped: -20 dB, tweeter muted.
   - Check it, without a sound, with a quiet stream playing: $(dirname "$SELF")/speakerd-setup.sh smoke
-  - Its log:                      journalctl --user -u speakerd -b
+  - Its log:                      journalctl --user-unit speakerd -b
   - Back to the previous version: $(dirname "$SELF")/speakerd-setup.sh rollback
 EOF
 }
@@ -1320,7 +1328,7 @@ speakerd_log() {   # everything speakerd and speakerd-run said since boot
     if [ "$NO_SYSTEMD" -eq 1 ]; then
         if [ -n "$LOG_FILE" ]; then cat "$LOG_FILE" 2> /dev/null; fi
     else
-        journalctl --user -u speakerd.service -b -o cat --no-pager 2> /dev/null
+        journalctl --user-unit speakerd.service -b -o cat --no-pager 2> /dev/null
     fi
 }
 
@@ -1343,7 +1351,7 @@ do_smoke() {
 
     # What it said since its last start.
     log="$(speakerd_log)"
-    [ -n "$log" ] || failed "speakerd's log is empty: if 'journalctl --user -n 5' shows nothing, $AUDIO_USER cannot read the journal (Armbian: volatile or unsplit journal, or not in the systemd-journal group)"
+    [ -n "$log" ] || failed "speakerd's log is empty: if 'journalctl --user-unit speakerd -n 5' (or 'journalctl -n 5') shows nothing, $AUDIO_USER cannot read the journal: it is in neither the systemd-journal nor the adm group, and has no journal of its own (journald keeps one per user only on persistent storage)"
     since="$(awk '/^speakerd-run: starting speakerd/ { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' <<< "$log")"
     lines0="$(wc -l <<< "$log")"
     t0="$(date +%s)"
@@ -1466,7 +1474,7 @@ do_smoke() {
     sleep 1.1
     local after starts
     if [ "$NO_SYSTEMD" -eq 0 ]; then
-        after="$(journalctl --user -u speakerd.service -u pipewire.service -u wireplumber.service --since "@$t0" -o cat --no-pager 2> /dev/null)"
+        after="$(journalctl --user-unit speakerd.service --user-unit pipewire.service --user-unit wireplumber.service --since "@$t0" -o cat --no-pager 2> /dev/null)"
         if [ "$(systemctl --user show speakerd.service -p NRestarts --value 2> /dev/null)" != "$restarts0" ] \
            || [ "$(systemctl --user show speakerd.service -p MainPID --value 2> /dev/null)" != "$pid0" ]; then
             failed "speakerd restarted while watched (restarts $restarts0 -> $(systemctl --user show speakerd.service -p NRestarts --value 2> /dev/null))"

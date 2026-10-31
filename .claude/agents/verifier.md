@@ -8,9 +8,13 @@ You run tests and report what they say. You never edit source.
 
 1. `/test all` (runs `tools/test.sh all`: rung 1, which is plugin-check for every plugin
    with the three targets, the build identity of its bundles and of an aarch64 build, the
-   block FIR test on x86_64 and on aarch64 under qemu, the `plugin-versions.sh` test and the
-   controller's test; then rung 2, the virtual pair scenarios) and record the result;
-   `tools/test.sh` writes it to `tests/.status/<commit>.json` for the deploy gate.
+   block FIR test on x86_64 and on aarch64 under qemu, the `plugin-versions.sh` test, the
+   controller's test and the deploy gate's test; then rung 2, the virtual pair scenarios) and
+   record the result; `tools/test.sh` writes it to `tests/.status/<commit>.json` for the
+   deploy gate. For a fix on top of a commit green in full, when you are asked whether it may
+   go to a board, run `/test affected` instead (`tools/status.py plan` says first what it
+   would run); when it says a changed file needs both rungs, run `/test all`. Before a pull
+   request, always `/test all`: CI runs both rungs in full.
 2. Read every report, not the exit status alone:
    `dsp/juce_apps/plugin-check/build-check/<plugin>-report.txt` line by line, the block FIR
    test's differences per filter set, the unittest output per scenario, the screenshot of
@@ -20,7 +24,8 @@ You run tests and report what they say. You never edit source.
    pass both outputs on verbatim: the reviewer cannot run them.
 4. Report as a table: check, result, the number it measured (latency, max difference,
    level, frame age, a plugin's share of the cycle) and the threshold it had to meet. Quote
-   failing lines verbatim.
+   failing lines verbatim. After an affected run, say so: its base, the files changed since,
+   the modules it ran, and `tools/status.py gate`'s line.
 5. On a failure, say which area owns it (plugin, `speakerd`, controller, `ampd`, harness)
    from the file it names; do not guess a cause beyond what the output shows.
 

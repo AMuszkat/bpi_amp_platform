@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "about": [
+    "What an affected run (tools/test.sh affected) runs again for each file changed since the last",
+    "commit green in full (both rungs on a clean tree). The first rule with a pattern that matches",
+    "a path decides. A path that no rule matches needs both rungs in full: the plugins, speakerd,",
+    "the controller, ampd.py, the tweeter rule, the virtual pair's harness and stand-ins, the build",
+    "and test tools, the deploy gate (tools/status.py, firmware/install-lib.sh, .claude/hooks/,",
+    ".claude/settings.json), this file, CI and the JUCE submodule. \"tests\" lists test modules of",
+    "tests/vpair; \"self\" is the changed test module itself. Every module that imports one that",
+    "runs runs too. Patterns are fnmatch patterns on the path from the repository's root, where *",
+    "also matches /. tools/status.py reads this file from the base commit, never from the commit",
+    "under test, so a change to it counts only from the next commit green in full."
+  ],
+  "rules": [
+    {
+      "why": "words and drawings: nothing here runs",
+      "paths": ["*.md", "docs/*", "hardware/*"],
+      "tests": []
+    },
+    {
+      "why": "the installers, what they install around speakerd, and the board script",
+      "paths": [
+        "firmware/setup.sh",
+        "firmware/speakerd-setup.sh",
+        "firmware/ampd-setup.sh",
+        "firmware/snapcast-setup.sh",
+        "firmware/speakerd/setup-helper.py",
+        "firmware/speakerd/speakerd-run",
+        "firmware/speakerd/speakerd.service",
+        "firmware/ampd/ampd.service",
+        "firmware/pipewire/*",
+        "tools/board.sh"
+      ],
+      "tests": [
+        "test_firmware_speakerd_install",
+        "test_firmware_ampd_install",
+        "test_speakerd_installed",
+        "test_speakerd_crash_restart"
+      ]
+    },
+    {
+      "why": "a test module of the virtual pair",
+      "paths": ["tests/vpair/test_*.py"],
+      "tests": "self"
+    }
+  ]
+}

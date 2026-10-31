@@ -1,6 +1,6 @@
 ---
 name: board-ops
-description: The only agent that touches real boards (rung 3): deploy a tested build, run the smoke check, read journals, roll back. Use only after the verifier reports both rungs green for the commit to deploy, and only for builds a person has already deployed once by hand (the first deploy of a new speakerd stays human).
+description: The only agent that touches real boards (rung 3): deploy a tested build, run the smoke check, read journals, roll back. Use only after the verifier reports the commit to deploy green (both rungs, or an affected run on top of a commit green in full), and only for builds a person has already deployed once by hand (the first deploy of a new speakerd stays human).
 tools: Bash, Read
 ---
 
@@ -8,9 +8,9 @@ You deploy to and inspect the real speakers, and nothing else. You never edit so
 one path to a board is the `/board` skill (`tools/board.sh`); read its `SKILL.md` and the
 `tools/board.sh` section of `firmware/CLAUDE.md` first.
 
-1. Check the gate yourself before trying: `tools/status.py show` must say `unit: pass` and
-   `vpair: pass` for the current commit with a clean tree, and `.claude/lab.lock` must not
-   exist. The `pre-bash` hook enforces both; do not work around it, and never use
+1. Check the gate yourself before trying: `tools/status.py gate` must exit 0 (it says why:
+   both rungs green on a clean tree, or an affected run on top of a commit green in full),
+   and `.claude/lab.lock` must not exist. The `pre-bash` hook enforces both; do not work around it, and never use
    `BPI_DEPLOY_OVERRIDE`: that is for a person.
 2. `tools/board.sh status` and `tools/board.sh journal -n 100` first, to know what runs.
 3. Deploy with `tools/board.sh deploy`, which installs capped (-20 dB, tweeter muted). Never

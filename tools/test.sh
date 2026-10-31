@@ -1,10 +1,12 @@
 #!/bin/bash
 # Runs the test rungs and records their results for the deploy gate. See .claude/skills/test.
 #
-#     tools/test.sh unit | vpair | all [--no-record]
+#     tools/test.sh unit | vpair | all | affected [--no-record]
 #
-# --no-record runs the tests without writing the status file (the Stop hook uses it on a
-# tree with uncommitted changes).
+# affected runs only the virtual pair modules that cover the files changed since the last
+# commit green in full (tools/status.py plan, by tests/impact.json), and refuses when a changed
+# file needs both rungs in full. --no-record runs the tests without writing the status file (the
+# Stop hook uses it on a tree with uncommitted changes).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -16,6 +18,7 @@ record=1
 rc=0
 
 record() { [ $record = 0 ] || tools/status.py set "$@"; }
+record_affected() { [ $record = 0 ] || tools/status.py affected "$@"; }
 
 # The version and source identity in the LV2 bundles plugin-check built for plugin $1
 # (dsp/juce_plugins/tests/buildinfo). Not in the copies JUCE made of them in ~/.lv2: that folder
@@ -89,16 +92,23 @@ run_unit() {
         fi
         checked+=" controller"
     fi
+    # The deploy gate's definition of green, full and affected (tools/status.py gate).
+    echo "=== /test unit: status-gate"
+    if python3 tools/tests/test_status_gate.py; then echo "unit: status-gate passed"; else echo "unit: status-gate FAILED"; failed=1; fi
+    checked+=" status-gate"
     if [ $failed = 0 ]; then record unit pass "$checked"; else record unit fail "$checked"; fi
     return $failed
 }
 
+have_pipewire() {
+    command -v pipewire > /dev/null && command -v wireplumber > /dev/null && return 0
+    echo "$1: pipewire and wireplumber are needed: install Podman (tools/container.sh), or see CLAUDE.md"
+    return 1
+}
+
 run_vpair() {
     echo "=== /test vpair"
-    if ! command -v pipewire > /dev/null || ! command -v wireplumber > /dev/null; then
-        echo "vpair: pipewire and wireplumber are needed: install Podman (tools/container.sh), or see CLAUDE.md"
-        record vpair skipped "no pipewire"; return 1
-    fi
+    have_pipewire vpair || { record vpair skipped "no pipewire"; return 1; }
     # python3 -m unittest discover -s tests/vpair -v, which also writes the note: how many tests
     # ran, which failed, and which were skipped and why, so that a pass with skips shows.
     local note result=pass
@@ -110,9 +120,39 @@ run_vpair() {
     [ "$result" = pass ]
 }
 
+# Runs no part of rung 1: every file rung 1 covers needs the full run, so the base's stands.
+run_affected() {
+    echo "=== /test affected"
+    local plan base tests note result=pass
+    if ! plan="$(tools/status.py plan)"; then
+        echo "affected: needs both rungs in full: tools/test.sh all"; return 1
+    fi
+    base="$(sed -n 1p <<< "$plan")"
+    tests="$(sed -n 2p <<< "$plan")"
+    if [ -z "$tests" ]; then
+        echo "affected: no test covers what changed since ${base:0:12}: nothing to run"
+        record_affected pass "$base" "" "nothing to run: no test covers the files changed since ${base:0:12}"
+        return 0
+    fi
+    have_pipewire affected || { record_affected skipped "$base" "" "no pipewire"; return 1; }
+    note="$(mktemp)"
+    # shellcheck disable=SC2086 # the module names, one word each
+    python3 -c "$VPAIR_RUNNER" "$note" $tests || result=fail
+    [ -s "$note" ] || echo "the test run wrote no note" > "$note"
+    record_affected "$result" "$base" "$tests" "$(cat "$note")"
+    rm -f "$note"
+    [ "$result" = pass ]
+}
+
+# python3 -c "$VPAIR_RUNNER" NOTE [MODULE ...]: the modules of tests/vpair named, or all of them.
 VPAIR_RUNNER='
 import sys, unittest
-result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("tests/vpair"))
+if sys.argv[2:]:
+    sys.path.insert(0, "tests/vpair")
+    suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[2:])
+else:
+    suite = unittest.defaultTestLoader.discover("tests/vpair")
+result = unittest.TextTestRunner(verbosity=2).run(suite)
 one_line = lambda text: " ".join(str(text).split())
 note = [f"{result.testsRun} tests"]
 broken = [test.id() for test, _ in result.failures + result.errors]
@@ -129,7 +169,8 @@ case "$what" in
     unit)  run_unit || rc=1 ;;
     vpair) run_vpair || rc=1 ;;
     all)   run_unit || rc=1; run_vpair || rc=1 ;;
-    *) echo "usage: $0 unit | vpair | all [--no-record]" >&2; exit 2 ;;
+    affected) run_affected || rc=1 ;;
+    *) echo "usage: $0 unit | vpair | all | affected [--no-record]" >&2; exit 2 ;;
 esac
 [ $record = 0 ] || { echo "=== status"; tools/status.py show; }
 exit $rc

@@ -13,8 +13,9 @@ which step.
 
 ## 1. Three environments, climbed in order
 
-Nothing reaches a real speaker that has not passed the rung below. The rungs are also the
-only places an agent ever executes anything.
+Nothing reaches a real speaker that has not passed the rung below: all of it, or, for a fix on
+top of a commit that passed all of it, the part that covers the fix (section 4). The rungs are
+also the only places an agent ever executes anything.
 
 <!-- diagram: ladder -->
 ```mermaid
@@ -167,8 +168,9 @@ to the board and run their local mode there; they build nothing. Nothing is rout
 the `/board` skill (`.claude/skills/board`), builds the aarch64 artifacts and deploys, runs a
 smoke test that makes no sound (it plays, capped, through the drop-in's sink, linked, clocked
 by the amplifier, no restart or xrun for a while), reads the journal and rolls back, and
-refuses while the lab is locked or unless both rungs are green for the commit, run on a clean
-tree; the installers' remote modes apply the same gate themselves. Their local mode is
+refuses while the lab is locked or unless the commit is green on a clean tree (both rungs, or
+an affected run on top of a commit green in full: section 4); the installers' remote modes
+apply the same gate themselves. Their local mode is
 tested on the virtual pair, their remote mode through a stand-in `ssh` that runs the board's
 side on the same machine; neither has run on a board yet, and the first deploy is a person's
 (section 8, and the staged procedure in `firmware/CLAUDE.md`). The smoke test does not yet
@@ -182,7 +184,7 @@ forgotten and hooks cannot.
 | Rule | Why | Enforced by |
 |---|---|---|
 | No hostname, IP, user name or home path in any tracked file | the repository is public | `PreToolUse` on Edit/Write and a pre-commit check |
-| Nothing is deployed to rung 3 unless rung 2 is green for the same commit | an agent cannot hear a broken crossover | `PreToolUse` gate on the deploy skill |
+| Nothing is deployed to rung 3 unless rung 2 is green for the same commit: in full, or, for a fix on top of a commit green in full, the scenarios that cover every file it changed | an agent cannot hear a broken crossover | `PreToolUse` gate on the deploy skill, and the deploy skill itself |
 | Every deploy caps the master gain and mutes the tweeter path until the first smoke test passes | a wrong graph must not reach a tweeter at full level | the deploy skill itself (every install writes the cap into `device.json`, and smoke checks that `speakerd` enforces it), and `PreToolUse` on Bash, which refuses any command that lifts it (`--person-present`) |
 | A lab lock file stops every hardware action | a human may be measuring, or the boards may be on a bench | `PreToolUse` on any ssh to a board |
 | No `git push` to `main`, no force push, no history rewrite | agents work on branches and open pull requests | `PreToolUse` on Bash |
@@ -240,6 +242,7 @@ agent never improvises a `pw-cli` or `ssh` line.
 |---|---|---|
 | `/build <plugin\|app> [target]` | builds complete, control or headless, or `speakerd`/controller, for x86_64 or aarch64, in the builder container; every LV2 bundle it builds carries `buildinfo.ttl`, its plugin's version and source identity | all dev agents |
 | `/test unit` | `ctest` in the container: DSP cores against exported coefficients, control and headless parameter and monitor layouts identical, state-layer loading, graph diff, scope view model against recorded captures | verifier |
+| `/test affected` | after a fix on top of a commit green in full: only the rung 2 modules that cover the files changed since (`tests/impact.json`); refuses when one of them needs both rungs | verifier |
 | `/vpair up\|down\|scenario <name>` | brings the virtual pair up with a given build and runs one scenario from `tests/scenarios/` | verifier, orchestrator |
 | `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | verifier |
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
@@ -254,7 +257,7 @@ scripts from `.claude/hooks/`.
 ```mermaid
 flowchart LR
     ss["SessionStart<br/>pull the builder image, verify local.env exists<br/>and is gitignored, print the lab lock state"]
-    pre["PreToolUse<br/>Bash: block push to main and force push<br/>gate ssh, scp, rsync and /board: no lab lock,<br/>both rungs green for HEAD on a clean tree<br/>Edit/Write: block private strings in tracked files"]
+    pre["PreToolUse<br/>Bash: block push to main and force push<br/>gate ssh, scp, rsync and /board: no lab lock,<br/>HEAD green on a clean tree: both rungs,<br/>or an affected run on a base green in full<br/>Edit/Write: block private strings in tracked files"]
     post["PostToolUse<br/>Edit of *.cpp/*.h: clang-format<br/>Edit of docs/*.md: render the Mermaid blocks to check syntax"]
     stop["Stop<br/>run /test unit when source changed<br/>refuse to end with a red build"]
     ss --> pre --> post --> stop
@@ -274,9 +277,27 @@ too (`tools/board.sh`); `/measure` and `/release` do not exist yet: `/measure` f
 `/release` step 4's catalogue.
 
 The deploy gate is the one that matters most. It reads `tests/.status/<commit>.json`, which
-`/test` writes after a run of both rungs, and refuses the deploy if the file is missing, red,
-for another commit or from a run on a dirty tree, or if the tree is dirty now; while
-`.claude/lab.lock` exists it refuses everything. Only a person can override the test status,
+`/test` writes, and refuses the deploy if the file is missing, red, for another commit or from
+a run on a dirty tree, or if the tree is dirty now; while `.claude/lab.lock` exists it
+refuses everything. A commit is green in one of two ways. **In full:** both rungs passed on a
+clean tree (`/test all`). **Affected:** for a fix on top of a commit green in full (the base),
+typically one found at the bench, `/test affected` runs only the rung 2 modules that cover the
+files changed since the base, by the base's `tests/impact.json`: the installers and the board
+script re-run the installer scenarios, a test module itself and the modules that import it,
+documentation nothing. Any other file (the plugins, `speakerd`, the controller, `ampd.py`, the
+tweeter rule, the harness, the build and test tools, the gate, the map itself, CI) needs both
+rungs. The installer files the shortcut covers do decide what plays (snapclient's routing, the
+sink drop-in, the wrapper's fallback layers, the unit's empty HOME, the tweeter-rule check of a
+factory graph), but no test outside the installer scenarios exercises them, so an affected run
+gives them exactly the tests a full run would. CI still runs both rungs in full on every pull
+request. The gate does not take the record's word for what changed or what had to run: it
+recomputes both from git (with submodules and untracked files shown whatever the local
+configuration says) and the base's map. It refuses when a full run failed on a clean tree on
+the commit or since the base (something the map does not see), and the base must be green in
+full itself, so fixes add up against it until the next full run. It does believe the record's
+pass, as it believes a full run's. The definition is
+in one place, `tools/status.py gate`, which the hook, `tools/board.sh` and the installers'
+remote modes all ask, and which rung 1 tests (`tools/tests/test_status_gate.py`). Only a person can override the test status,
 never the lock: they run the one command in their own shell with the variable set, as in
 `BPI_DEPLOY_OVERRIDE=1 tools/board.sh deploy`, and the override is logged in
 `tests/.status/overrides.log`. An agent cannot: the hook refuses any command of its that sets
@@ -295,7 +316,10 @@ flowchart LR
 ```
 
 Rung 1 (`tools/test.sh unit`) runs `plugin-check` on every plugin that declares its targets,
-the controller's bridge against its fake hub, and three checks of the plugins' code and build:
+the controller's bridge against its fake hub, the deploy gate's test
+(`tools/tests/test_status_gate.py`: what is green in full and by an affected run, on scratch
+repositories, and the decisions of `tests/impact.json`), and three checks of the plugins'
+code and build:
 
 - **The block FIR test** (`dsp/juce_plugins/tests/blockfir`): the block FIR that firConv
   and the crossover share is bit for bit a reference FIR defined in the test, whose arithmetic is

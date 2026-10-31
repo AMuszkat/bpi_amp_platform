@@ -30,8 +30,12 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
 - **The design documents in `docs/` are the plan.** When the implementation diverges from
   them, change the document in the same commit, and keep their Mermaid diagrams rendering
   (every ```mermaid block must parse; a label that starts with `1. ` is read as a list).
-- **Nothing is deployed to a board unless the virtual pair tests pass**
-  (`python3 -m unittest discover -s tests/vpair`), and every deploy keeps the volume capped.
+- **Nothing is deployed to a board unless its commit is green:** both rungs
+  (`tools/test.sh all`), or, for a fix on top of a commit green in full, the virtual pair tests
+  that cover every file it changed (`tools/test.sh affected`, by `tests/impact.json`). The
+  plugins, speakerd, ampd, the tweeter rule, the harness and the gate always need both; an
+  installer fix re-runs exactly the installer tests a full run would. Every deploy keeps the
+  volume capped.
 - **Real-time code never blocks:** no allocation, lock or syscall on the audio thread, in
   plugins and in `speakerd` alike.
 
@@ -51,7 +55,7 @@ task would change:
 | running the tests, "is it green?" | `verifier` |
 | before a pull request is merged | `reviewer` |
 | where the time and the margins go, what (if anything) to make faster | `optimiser`, which measures and proposes; the area agents implement |
-| a real board | `board-ops`, only after the verifier reports both rungs green |
+| a real board | `board-ops`, only after the verifier reports the commit green (both rungs, or an affected run) |
 
 A single-area task goes straight to its agent; the orchestrator is for work that has to be
 split and merged, not a required entry point. Agents do not cross areas: an agent that
@@ -65,15 +69,18 @@ needs a change outside its files says so and stops.
   no private data in an edit or a commit, no push to `main`, no force push, and the
   **deploy gate**: nothing reaches a board (`ssh`, `scp`, `rsync`, `-install`,
   `--target-host`, the installers' `--mode target-remote`, `tools/board.sh`) while a
-  `.claude/lab.lock` exists, or without `tests/.status/<commit>.json` saying `unit: pass` and
-  `vpair: pass`, both run on a clean tree, for the exact commit of the checkout the command
-  runs in, with that tree clean. Agents may never use `--person-present` (lifting a speaker's
+  `.claude/lab.lock` exists, or unless the exact commit of the checkout the command runs in is
+  green, with that tree clean: `tests/.status/<commit>.json` saying `unit: pass` and
+  `vpair: pass`, both run on a clean tree, or a passing affected run on top of a commit green
+  in full that covers every file changed since. `tools/status.py gate` is the one definition
+  (the hook, `tools/board.sh` and the installers all ask it) and says why. Agents may never use `--person-present` (lifting a speaker's
   output cap) or `BPI_DEPLOY_OVERRIDE`: both are a person's, in their own shell
   (`BPI_DEPLOY_OVERRIDE=1 tools/board.sh ...` bypasses the status, never the lock, and is
   logged in `tests/.status/overrides.log`). Create `.claude/lab.lock` whenever the boards are
   on a bench.
 - **Skills**: `/build` (a plugin or app, x86_64 or aarch64), `/test` (`unit` = plugin-check,
-  `vpair` = the virtual pair, `all`; writes the status file), `/vpair` (operate the virtual
+  `vpair` = the virtual pair, `all`, `affected` = only the virtual pair tests that cover a fix
+  since the last commit green in full; writes the status file), `/vpair` (operate the virtual
   pair), `/pw-inspect` (a PipeWire graph, summarised), `/board` (a real board: status,
   journal, deploy capped, smoke, rollback; gated), `/juce` (JUCE knowledge). Their
   scripts are in `tools/`, work without Claude, and run in the development container

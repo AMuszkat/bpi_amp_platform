@@ -52,11 +52,17 @@ MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speake
 SECRET = "the-pairs-test-secret-0123456789"
 DOCUMENT = revision_document(graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1"}), 2)
 
-# A stand-in for systemctl and journalctl: records the calls, prints $FAKE_SYSTEMD/journal.
+# A stand-in for systemctl and journalctl: records the calls, prints $FAKE_SYSTEMD/journal,
+# except with --user, which finds no journal file, as on a board (a volatile journal, not split
+# per user: only --user-unit reads the user units' lines).
 FAKE_SYSTEMD = r'''#!/bin/bash
 name="$(basename "$0")"; d="${FAKE_SYSTEMD:?}"
 echo "$name $*" >> "$d/calls"
-case "$name" in journalctl) cat "$d/journal" 2> /dev/null; exit 0 ;; esac
+case "$name" in
+    journalctl)
+        case " $* " in *" --user "*) echo "No journal files were found." >&2; echo "-- No entries --"; exit 0 ;; esac
+        cat "$d/journal" 2> /dev/null; exit 0 ;;
+esac
 case " $* " in
     *" is-active "*) state="$(cat "$d/active" 2> /dev/null || echo active)"; [[ " $* " == *" --quiet "* ]] || echo "$state"; [ "$state" = active ]; exit ;;
     *" is-enabled "*) exit 1 ;;
