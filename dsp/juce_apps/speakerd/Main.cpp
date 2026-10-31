@@ -19,6 +19,7 @@
 #include "Log.h"
 #include "Monitor.h"
 #include "PipeWireNode.h"
+#include "PluginBundles.h"
 #include "Render.h"
 #include "StateLayers.h"
 
@@ -351,6 +352,33 @@ namespace
         return true;
     }
 
+    /** Which bundle each plugin URI runs from, read the way lilv's world was (PluginBundles.h):
+        the LV2 format's default locations, then every --lv2-bundle in order. Right after the
+        format and loadBundles read them, so that both see the same files. */
+    PluginBundles bundlesOf (juce::AudioPluginFormatManager& formats, const juce::StringArray& lv2Bundles)
+    {
+        PluginBundles bundles;
+
+        for (auto* format : formats.getFormats())
+        {
+            if (format->getName() != "LV2")
+                continue;
+
+            const auto locations = format->getDefaultLocationsToSearch();
+            juce::StringArray raw;
+
+            for (int i = 0; i < locations.getNumPaths(); ++i)
+                raw.add (locations.getRawString (i));   // "~/.lv2" as lilv was given it
+
+            bundles.loadDirectories (raw);
+        }
+
+        for (const auto& bundle : lv2Bundles)
+            bundles.loadBundle (juce::File (bundle));
+
+        return bundles;
+    }
+
     //==============================================================================
     /** Watches the live node from the message thread: a stop request, the audio thread's
         requests, the links to the amplifier, and the "playing" line. */
@@ -444,7 +472,8 @@ namespace
         int exitCode = exitOk;
     };
 
-    int runLive (const Options& options, const DeviceConfig& device, juce::AudioPluginFormatManager& formats)
+    int runLive (const Options& options, const DeviceConfig& device, juce::AudioPluginFormatManager& formats,
+                 PluginBundles& bundles)
     {
         Engine engine (outputLimitsOf (device), device.role);
         PipeWireNode node (engine, options.nodeName, device);
@@ -479,7 +508,7 @@ namespace
 
         // Prepared for the largest block a cycle can bring; settled at the quantum it will bring.
         const auto maxBlock = juce::jmax (clock.quantumLimit, clock.quantum);
-        GraphBuilder builder (formats);
+        GraphBuilder builder (formats, &bundles);
         const auto tweeterRule = tweeterRuleOf (device, options);
         Control control (engine, builder, versionText(), tweeterRule);
         control.installLayer (loadFirstWorkingLayer (options.stateDir, builder, device.role, tweeterRule, clock.rate,
@@ -556,7 +585,8 @@ namespace
         return exitCode;
     }
 
-    int runRender (const Options& options, const DeviceConfig& device, juce::AudioPluginFormatManager& formats)
+    int runRender (const Options& options, const DeviceConfig& device, juce::AudioPluginFormatManager& formats,
+                   PluginBundles& bundles)
     {
         std::unique_ptr<juce::AudioFormatReader> input;
 
@@ -569,7 +599,7 @@ namespace
         const auto rate = input->sampleRate;
         const auto maxBlock = juce::jmax (defaultQuantumLimit, options.block);
 
-        GraphBuilder builder (formats);
+        GraphBuilder builder (formats, &bundles);
         auto layer = loadFirstWorkingLayer (options.stateDir, builder, device.role, tweeterRuleOf (device, options), rate,
                                             maxBlock, options.firstLayer);
 
@@ -703,6 +733,8 @@ int main (int argc, char* argv[])
     if (! loadBundles (formats, options.bundles))
         return exitUsage;
 
-    return options.render ? runRender (options, device, formats)
-                          : runLive (options, device, formats);
+    auto bundles = bundlesOf (formats, options.bundles);
+
+    return options.render ? runRender (options, device, formats, bundles)
+                          : runLive (options, device, formats, bundles);
 }

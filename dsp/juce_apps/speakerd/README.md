@@ -56,10 +56,56 @@ waiting for PipeWire, every way out logs `stopping` once, as its last line befor
 (a bad command line or `--lv2-bundle`, exit 2, comes earlier and does not).
 
 **Which build runs.** lilv keeps the first plugin of a URI it sees, and it sees the default
-paths first. A `--lv2-bundle` whose URI is also in `~/.lv2` is therefore ignored, and speakerd
-stops with status 2 rather than run a build it was not asked for. To run exactly the bundles
-named, give speakerd an empty `HOME`, as plugin-check does. lilv's `attempt to map invalid URI`
-line on loading a bundle is harmless.
+paths first, and in each the bundles in the order the directory lists them. A later bundle of
+the same URI replaces it only when its version is newer: lilv compares `lv2:minorVersion` and
+`lv2:microVersion`, which JUCE writes into `dsp.ttl` from the plugin's version (0.0.2 is minor 0,
+micro 2), and ignores a later bundle whose version is older. A `--lv2-bundle` whose URI is also
+in `~/.lv2` at the same version or an older one is therefore ignored, and speakerd stops with
+status 2 rather than run a build it was not asked for; a newer one replaces the one in `~/.lv2`.
+To run exactly the bundles named, give speakerd an empty `HOME`, as plugin-check does. lilv's
+`attempt to map invalid URI` line on loading a bundle is harmless, and its `Duplicate plugin`,
+`Replacing version` and `Ignoring bundle` warnings say which of two bundles it kept.
+
+**Which build it is.** Every plugin node of a graph speakerd builds (a layer at boot, live or
+in the render, and every `apply`) is logged with the build it runs, read from its bundle's
+`buildinfo.ttl`, which the plugins' build writes next to `manifest.ttl`
+([`dsp/juce_plugins/README.md`](../../juce_plugins/README.md)):
+
+```
+speakerd: plugin node 17: https://github.com/AMuszkat/bpi_amp_dsp_tuning/firConv, version 0.0.2, source 3f2a9c81b0de, bundle /home/user/.lv2/firConv.lv2
+speakerd: plugin node 16: https://github.com/AMuszkat/bpi_amp_dsp_tuning/loudness_headless, no build identity (an older build), bundle /home/user/.lv2/loudness_headless.lv2
+```
+
+`version` is the plugin's version and `source` its source identity, a hash of what it is
+compiled from (12 lowercase hex digits, `-dirty` after them for a build with uncommitted
+changes, or `unknown` for one built without git). A bundle without `buildinfo.ttl`, built before it existed, is `no build identity (an older
+build)`; one whose file cannot be read as the plugins' build writes it is `no build identity
+(buildinfo.ttl unreadable)`. Neither changes anything else: the node loads and plays as it did,
+and the layer, the `apply` or the render goes on.
+
+- **The bundle named is the one that runs.** JUCE's LV2 hosting does not say which bundle a URI
+  came from, so speakerd finds it the way lilv did (`PluginBundles.h`): once, at start, right
+  after JUCE's LV2 hosting loaded lilv's world, it reads the `manifest.ttl` of every bundle in
+  the same default paths (`~` as lilv expands it: `$HOME`) and of every `--lv2-bundle`, in the
+  same order, by lilv's rules above (a plugin is what a manifest says is `a lv2:Plugin`; on two
+  bundles of one URI, the versions from each bundle's manifest and the plugin's `rdfs:seeAlso`
+  files). lilv never reads the paths again, and neither does speakerd. `no build identity (bundle
+  not found)` is a plugin lilv found where speakerd did not: a manifest larger than 16 MiB (lilv
+  reads it, speakerd does not), or one in Turtle speakerd's reader refuses.
+- **What it costs.** On the main thread, never the audio thread: at start, about 20 us of CPU
+  per bundle on x86_64 (420 bundles with 2.3 MB of manifests take 44 ms, where lilv spends about
+  400 ms on the same files a moment before; a speaker has a handful). It keeps only the
+  statements it needs (which plugins a manifest declares), not the files. Then, each time a graph
+  is built, one read of each node's `buildinfo.ttl` (at most 64 KiB). Nothing while a graph
+  plays.
+- **What `buildinfo.ttl` must be.** Turtle, in any layout (prefixes or full IRIs, any order),
+  read strictly: no statement about an IRI other than the bundle's plugin URI, `bpi:version`
+  (`https://github.com/AMuszkat/bpi_amp_dsp_tuning#version`) and `bpi:sourceId` of that URI each
+  once, as plain strings, the version three numbers (`0.0.2`), the source as above. Other
+  statements about the plugin are allowed (a later build may say more). A file that does not
+  parse, names another plugin, has a version or a source of another shape, or is not a regular
+  file of at most 64 KiB (a directory, a dangling link, a FIFO, on which speakerd never waits)
+  is unreadable.
 
 ## Building and running
 
@@ -258,7 +304,8 @@ speakerd only reads these files. At start it tries `graph.json`, `graph.lkg.json
 `factory.json` in that order, from the one `--from` names, and uses the first that **loads
 completely**: it parses, every plugin in it is found, instantiated and takes its state and
 every parameter value, every connection is possible, and there is no loop. It says on stderr
-why each layer before it failed. If none loads, it plays **passthrough**.
+why each layer before it failed, and for every plugin node it instantiates which build the node
+runs ([Which build it is](#command-line)). If none loads, it plays **passthrough**.
 
 ## device.json
 
@@ -669,7 +716,8 @@ mono player gets through PipeWire. `OUT.wav` has two channels, the
 woofer and the tweeter, at the input's rate, as 32-bit integer PCM. The render starts at full
 level (the live node fades in once, at start, before anything plays). Pointing the same
 document's URI at `.../loudness` instead of `.../loudness_headless` gives what the complete
-build outputs: the reference a live capture is compared with.
+build outputs: the reference a live capture is compared with. It logs the layers as the live
+mode does, the `plugin node` lines of the builds it ran included, before its `render:` line.
 
 ## Real time
 
@@ -759,6 +807,7 @@ stable.
 | `cannot connect to PipeWire: <reason>: trying again every second`, `PipeWire did not answer: trying again every second`, `cannot start the PipeWire client loop: trying again every second` | PipeWire is not there (yet); said once, however long it takes |
 | `pipewire: <rate> Hz, quantum <n>, largest quantum <n>` | connected to PipeWire |
 | `starting at layer <name> (--from)` | `--from` names a layer after `current` |
+| `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>`, or `plugin node <uid>: <URI>, no build identity (an older build), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (buildinfo.ttl unreadable), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (bundle not found)` | once per plugin node each time a layer (live or in the render) or an `apply` builds a graph with it, as soon as its plugin is instantiated: before the layer's `loaded` line and the apply's `applied` line, and also for the nodes a layer or an apply instantiated before it failed (then before its `FAILED` line). `<uid>` is the node's uid in the document, `<URI>` the plugin URI it runs, `<bundle dir>` the bundle it runs from ([Which build it is](#command-line)). Never a failure or a warning: nothing else changes. None for passthrough (no plugin) or `--import-filtergraph` |
 | `layer <name> (<file>): FAILED: <reason>` | a layer that did not load; `<name>` is `current`, `last-known-good` or `factory` |
 | `layer <name> (<file>): warning: <text>` | a clamped value, or no connection to the amplifier |
 | `layer <name> (<file>): loaded, revision <n>, <k> plugin node(s)` | the layer that loaded |
@@ -791,7 +840,7 @@ stable.
 | `local link: closed the connection: <reason>` | speakerd closed it: `a line that is not JSON`, `a line longer than 32 MiB`, a peer that does not read, or a socket error |
 | `local link: refused a second client: busy` | a client came while another is connected |
 | `apply: revision <n>: waiting behind <k> other revision(s)` | an `apply` came while others are being built or wait |
-| `apply: revision <n>: building` | the message thread starts on it |
+| `apply: revision <n>: building` | the message thread starts on it; a `plugin node` line for each of its plugin nodes follows |
 | `apply: revision <n>: warning: <text>` | as a layer's warnings (no connection to the amplifier, a clamped value) |
 | `apply: revision <n>: applied, <k> plugin node(s)` | it plays; `applied` was answered |
 | `apply: revision <n>: FAILED: <reason>; <layer> plays on` | it did not load (`<layer>` as in the `playing:` line); `failed` was answered. An `apply` refused at once says `apply: revision <n>: FAILED: <reason>` (`apply: FAILED: <reason>` when it has no revision) |
@@ -909,6 +958,7 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `GraphDocument.*` | the graph document, version 1: parsing and checks |
 | `GraphBuilder.*` | the document as an `AudioProcessorGraph`, the way `PluginGraph::restoreFromXml` does it; the passthrough graph |
 | `LV2State.*` | the plugin's own state into and out of the hosted build's LV2 state |
+| `PluginBundles.*` | which bundle each plugin URI runs from, read the way lilv reads them, and that bundle's build identity (`buildinfo.ttl`); the Turtle reader for both |
 | `Engine.*` | the running graph, the audio-thread entry point, the Mine channel, the parameter inbox, the level ring, the timing ring, the fades, the hand-over between the threads, settling, priming |
 | `TimedNode.*` | a plugin node: the hosted instance, forwarded as the graph needs, with its processing time |
 | `Timing.*` | the timing statistics: means, maxima, late cycles, position jumps |
