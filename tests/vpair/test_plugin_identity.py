@@ -14,9 +14,9 @@ builds carries a `buildinfo.ttl` next to its `manifest.ttl`, exactly
         bpi:version "MAJOR.MINOR.PATCH" ;
         bpi:sourceId "SOURCE-ID" .
 
-(with or without a newline after its last line), and a manifest that names it does so in its
-last line, `<PLUGIN-URI> rdfs:seeAlso <buildinfo.ttl> .`. speakerd logs, each time a state
-layer, an apply or the render builds a graph, one line per plugin node:
+(with or without a newline after its last line). No LV2 host reads it: manifest.ttl stays as
+JUCE writes it, without naming it, and speakerd reads it beside the manifest. speakerd logs, each
+time a state layer, an apply or the render builds a graph, one line per plugin node:
 `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>`, or
 `..., no build identity (an older build), bundle <dir>` for a bundle without buildinfo.ttl, or
 `(buildinfo.ttl unreadable)` for one it cannot read; none of these changes what it plays.
@@ -31,14 +31,14 @@ Pass when:
    nothing else; each version is the plugin's `project(... VERSION)`; and the bundles
    loudness_headless, loudness (the complete build: all targets share the identity), firConv and
    crossover each carry buildinfo.ttl exactly as above with that plugin's version and source id,
-   their manifest naming it only as its last line, or not at all;
+   and their manifest.ttl does not name it;
 2. live, on both speakers, speakerd started on the chain says exactly one first-form line for
    each of 16, 17 and 18 (its URI, the plugin's version and source id, and the bundle directory
    the test gave it), and an apply of revision 2 over the local link on the left says them once
    more, once each;
 3. `speakerd --render` of the same document says the same lines, once each;
-4. an older build: a copy of firConv's bundle with buildinfo.ttl removed and the manifest's line
-   naming it removed, given to speakerd alone (an empty HOME and --lv2-bundle), renders
+4. an older build: a copy of firConv's bundle with buildinfo.ttl removed (as a build from before
+   it existed), given to speakerd alone (an empty HOME and --lv2-bundle), renders
    firConv alone (Mine -> firConv -> the woofer) from layer current, sample for sample as the
    original bundle does, and says `plugin node 17: <URI>, no build identity (an older build),
    bundle <the copy>`; a copy whose buildinfo.ttl is cut off inside its version (half written)
@@ -201,11 +201,9 @@ class PluginIdentity(unittest.TestCase):
             rows.append(f"{target}: buildinfo.ttl says " + " ".join(re.findall(r'"([^"]*)"', text)))
             if text not in (want, want.rstrip("\n")):
                 problems.append(f"{target}: buildinfo.ttl is\n{text}\n  not\n{want}")
-            manifest = [line for line in (bundle / "manifest.ttl").read_text().splitlines() if line.strip()]
-            naming = [line for line in manifest if "buildinfo.ttl" in line]
-            if naming and (naming != [manifest[-1]] or manifest[-1] != f"<{uri}> rdfs:seeAlso <buildinfo.ttl> ."):
-                problems.append(f"{target}: manifest.ttl names buildinfo.ttl in {naming}, not only in its last line "
-                                f"'<{uri}> rdfs:seeAlso <buildinfo.ttl> .'")
+            naming = [line for line in (bundle / "manifest.ttl").read_text().splitlines() if "buildinfo.ttl" in line]
+            if naming:
+                problems.append(f"{target}: manifest.ttl names buildinfo.ttl, which no LV2 host is to read: {naming}")
         print("\n  " + "\n  ".join(rows))
         self.assertEqual(problems, [], "\n".join(problems))
 
@@ -249,12 +247,10 @@ class PluginIdentity(unittest.TestCase):
         original = self.bundles["firConv"]
         uri = lv2_uri("firConv")
 
+        # A build from before buildinfo.ttl: the same bundle without it (the manifest never names it).
         older = self.tmp / "older" / original.name
         shutil.copytree(original, older)
         (older / "buildinfo.ttl").unlink(missing_ok=True)
-        manifest = older / "manifest.ttl"
-        manifest.write_text("".join(line for line in manifest.read_text().splitlines(keepends=True)
-                                    if "buildinfo.ttl" not in line))
 
         # Half written: cut off inside its version, as by a power cut during a copy.
         broken = self.tmp / "broken" / original.name
