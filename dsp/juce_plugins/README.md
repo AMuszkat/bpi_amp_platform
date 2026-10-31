@@ -22,7 +22,7 @@ juce_plugins/
 ├── tests/                      tests of shared code, outside every plugin's identity
 │   ├── blockfir/                 the block FIR, bit for bit on x86_64 and aarch64 (rung 1)
 │   ├── buildinfo/                a built bundle and its copy carry the identity of its sources (rung 1)
-│   ├── firconv-response/         firConv through speakerd, two builds compared, plotted (standalone)
+│   ├── firconv-response/         firConv's magnitude response: the design against both builds (standalone)
 │   └── plugin-versions/          plugin-versions.sh check and list on a scratch repository (rung 1)
 ├── tools/                      the build system, shared by every plugin
 │   ├── build-podman.sh           recommended: containerised cross-build, deploy, local debug
@@ -222,51 +222,28 @@ aarch64: [`simd-on-aarch64-gcc.md`](../docs/juce-knowledge/dsp/simd-on-aarch64-g
 
 ## The response test
 
-`tests/firconv-response/run.sh [--base REF]` shows what a change does to firConv's output: it
-renders one input through two builds of the plugin with `speakerd --render`, plots the
-responses and their difference against frequency, and asserts limits on them. It is standalone,
-not part of rung 1: a run took 4 min 41 s cold (nothing built yet in the checkout, 24 threads)
-and 22 s warm (nothing changed), of which the renders and the analysis take 19 s. It moves into
-the development container like the other test scripts.
+`tests/firconv-response/run.sh` plots firConv's magnitude response in dB, three ways on one
+logarithmic frequency axis: the design, `filters.hpp` as the tuning GUI graphs it (scipy in
+float64, the high-pass as the `HPreHpSos` cascade the plugin runs), and the plugin built for
+x86_64 and for aarch64, each rendered by `speakerd --render` (the aarch64 build under
+`qemu-aarch64-static`). A second panel shows each build's deviation from the design, where the
+three curves no longer sit on top of each other. It is standalone, not part of rung 1: a run
+took 3 min 2 s cold (nothing built yet in the checkout, 24 threads) and 13 s warm (nothing
+changed), and it moves into the development container like the other test scripts.
 
-- **Builds** (`builds.py`): speakerd and firConv at the current tree, for x86_64 and aarch64, with
-  `tools/build.sh` (where it puts them); and firConv at the base, by default its previous version
-  (the parent of the commit that raised its `VERSION`), from a `git archive` export of
-  `dsp/juce_plugins` into `build/tests/firconv-response/base-<commit>/`, built by today's
-  `tools/build.sh` with the export as its root. Nothing is checked out, and the base's x86_64
-  build copies its bundle into a throwaway `HOME`. The export's git sees no repository, so the
-  base's bundles carry no source identity of their own; the figures give the one git computes
-  for that commit. A base that pins another JUCE is refused.
-- **Renders**: an exponential sweep from 10 Hz to 22 kHz (6 s) and white noise (4 s), both at
-  -9 dBFS peak, gain -12 dB, through each of the four builds at 48 kHz in blocks of 1024, alone
-  in a one-node graph to the woofer, the aarch64 builds under `qemu-aarch64-static` with an
-  empty `HOME`.
-- **Analysis** (`response.py`, numpy, and scipy for the design): each excitation is transformed
-  whole, with the silence after it, so the averaged cross-spectrum over the input spectrum is the
-  exact response of each build, with no window; the difference of two outputs goes through the
-  same transforms, and every curve is a 1/6-octave power sum. The design is `filters.hpp` as the
-  tuning GUI graphs it (`freqz` of the two FIRs, `sosfreqz` of `HPreHpSos`, in float64), times
-  the gain.
-- **Figures** (`svgplot.py`, no plotting package): one SVG per pair, aarch64 current against base
-  (the change the board hears), x86_64 current against base, and the current build on aarch64
-  against x86_64, each with the magnitude responses and the design, the output's and the
-  difference's band power, the difference relative to the output with the limits, and each
-  build's deviation from the design; the same curves as CSV beside each, and `landmarks.csv`
-  (the design and each build at 20 Hz to 10 kHz). All in `build/tests/firconv-response/firConv/`.
-- **Assertions** (`test_firconv_response.py`, each limit with how it was measured): on x86_64,
-  bit for bit against 0.0.1; on aarch64, the peak difference within -53 dB re peak, every band
-  from 100 Hz to 20 kHz at least 73 dB below the output (86 dB from 1 kHz), the two responses
-  within 0.01 dB from 30 Hz to 17 kHz; and for every build, within 0.05 dB of the design from
-  20 Hz to 20 kHz, its high-pass's -3 dB point within 0.5 % of the design's, its peak below
-  -1 dBFS. A failure names the band and the numbers. Against a base other than 0.0.1, an x86_64
-  difference is reported as a skipped test, with its size.
-
-Measured, 0.0.2 against 0.0.1: identical on x86_64; on aarch64 up to -55.0 dB re peak (-59 dB
-at -6 dBFS input peak only, [`firConv/README.md`](firConv/README.md)), 99.9 % of the
-difference's energy below 50 Hz, at least 76.8 dB below the output in every band from 100 Hz,
-as large as 0.0.1's own difference between aarch64 and x86_64. A second plugin is an entry of
-`PLUGINS` in the test module. Without python3-scipy (in the development container's
-`Containerfile`) the design's tests fail and name the package.
+- It builds speakerd and firConv for both architectures with `tools/build.sh`, and renders
+  through each build an exponential sweep from 5 Hz to 24 kHz at -9 dBFS peak, firConv's gain at
+  -12 dB (headroom for the chain's +17.5 dB at 28 Hz), 48 kHz, blocks of 1024. The sweep and the
+  silence after it are transformed whole, so the output's spectrum over the input's is the
+  build's exact response, with no window; each curve is a power average over 1/6-octave bands,
+  the design weighted like the builds.
+- It asserts that each build is within 0.05 dB of the design in every band from 20 Hz to 20 kHz
+  (measured: 0.015 dB at 20 Hz, most of it the coefficients rounded to float32) and that the
+  output peaks below -1 dBFS. A failure names the band and the numbers. Without python3-scipy
+  (in the development container's `Containerfile`) it fails and names the package.
+- It writes `build/tests/firconv-response/firConv/response.svg` (`svgplot.py`, no plotting
+  package), `response.csv` (frequency, then the design, x86_64 and aarch64 in dB) and
+  `landmarks.txt`, the three responses at 20 Hz to 10 kHz, which `run.sh` prints.
 
 ## Versions and source identity
 
@@ -359,7 +336,7 @@ A change only to `cmake/` or to the JUCE pin changes every identity but no versi
 P1 block FIR is a patch: firConv and crossover 0.0.1 -> 0.0.2, the same parameters and state.
 Its tolerance, as measured: the output bit-identical on x86_64; on aarch64 the FIRs within
 -131 dB re peak, crossover's output within -129 dB re peak, and firConv's within about -55 dB re
-peak (-59 dB at -6 dBFS input; measured by [the response test](#the-response-test)),
+peak (-59 dB at -6 dBFS input; measured with `speakerd` renders of 0.0.1 and 0.0.2),
 all below 50 Hz, the rounding noise of its float32 high-pass biquads, which any one-ulp change
 before them moves that much, and did before P1 ([`firConv/README.md`](firConv/README.md)).
 
