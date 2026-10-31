@@ -1935,16 +1935,17 @@ class StandInPair:
         self._stack.enter_context(self.ampd[name])
         return self.ampd[name]
 
-    def start_speakerd(self, name, control=None):
-        """A new stand-in speakerd for `name`, told `control`, once the old one has stopped
-        (stop()): ampd, which kept running, connects to it."""
+    def start_speakerd(self, name, *, control=None):
+        """A new stand-in speakerd for `name`, told `control` (keyword only: SpeakerPair's
+        start_speakerd takes another second argument), once the old one has stopped (stop()):
+        ampd, which kept running, connects to it."""
         self.sd[name] = self._stack.enter_context(StandInSpeakerd(self.env[name], self.state[name], control))
         return self.sd[name]
 
     def restart_speakerd(self, name):
         """stop() and start_speakerd(), the new one told what the old one was."""
         self.sd[name].stop()
-        return self.start_speakerd(name, json.loads(self.sd[name].control_path.read_text()))
+        return self.start_speakerd(name, control=json.loads(self.sd[name].control_path.read_text()))
 
     def __exit__(self, *exc):
         return self._stack.__exit__(*exc)

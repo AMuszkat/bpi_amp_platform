@@ -39,8 +39,10 @@ Pass when:
   the newest value at once (with the union at 1 Hz, a value sampled before it subscribed, within
   0.1 s, the one the other client got); beside a client of 60 Hz, one of 45 and one of 30 each get
   their own rate within 30 % (of at most what the 60 Hz one gets); a new subscription of 5 Hz
-  beside them gets its first value within 0.1 s, from the store, and its second more than 100 ms
-  after it (ampd sends it a period, 200 ms, after the first, not the union's next value 17 ms on);
+  beside them gets its first value within 0.1 s (from the store or as the union's next value,
+  17 ms on, which this cannot tell: the 1 Hz check above proves the store), and its second more
+  than 100 ms after it (ampd sends it no sooner than a period, 200 ms, after the first, not the
+  union's next value 17 ms on);
   one subscribing again at 15 Hz gets 15 within 30 %, and speakerd is asked no other rate; nothing
   comes after an unsubscribe; a value of a stream nobody subscribed to, a line of another op
   naming the stream, a value whose stream is not a string, and one with no stream reach no client;
@@ -496,9 +498,10 @@ class Protocol(unittest.TestCase):
                                 f"{name}: the {asked_hz} Hz client got {got[label]:.1f} values/s beside the 60 Hz one")
 
             # A new subscription of 5 Hz beside them (speakerd at 60 Hz by now): its first value
-            # at once, from the store, and the next a period later (200 to 217 ms as ampd sends
-            # them), not the union's next value 17 ms on (its bucket starts with the one token the
-            # first takes). Both are the client's arrival stamps, so the check is half a period:
+            # at once (ampd sends the stored one; the union's next, 17 ms on, would pass this too:
+            # the 1 Hz check above is the one that proves the store), and the next no sooner than
+            # a period later (200 to 217 ms as ampd sends them), not the union's next value 17 ms
+            # on (its bucket starts with the one token the first takes). Both are the client's arrival stamps, so the check is half a period:
             # 100 ms of margin for a busy runner, and still 80 ms beyond a bucket that starts full.
             paced = client("paced")
             asked = time.monotonic()
@@ -570,7 +573,7 @@ class Protocol(unittest.TestCase):
             self.assertEqual(meanwhile.values, [], f"{name}: a client subscribing while speakerd was gone got a value")
             for c in clients:
                 self.assertEqual(c.of(stream, since=gone + 0.2), [], f"{name}: {c.name} got a value while speakerd was gone")
-            sd = pair.start_speakerd(name, control)
+            sd = pair.start_speakerd(name, control=control)
             back, again = time.monotonic(), []
             for c in clients:
                 if stream in c.subs:         # all but the one that unsubscribed, `meanwhile` among them

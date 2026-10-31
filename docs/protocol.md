@@ -23,9 +23,12 @@ socket and no WebSocket client, and nothing in this system is a browser.
 
 - **JSON lines.** One JSON object per line, UTF-8, `\n`-terminated, no newline inside an object.
   Every object has an `"op"`. A line longer than 32 MiB, or one that does not parse, closes the
-  connection (the peer reconnects). Unknown `op`s and unknown keys are ignored, so a newer
-  peer can add to a message without breaking an older one; a change of meaning needs a new
-  `op`.
+  connection (the peer reconnects). `ampd` closes it already at a line longer than 64 KiB until
+  the peer has proved the pair's secret (the hub reads a controller's or an agent's `hello`, an
+  agent the hub's `hello` and `welcome`, at 64 KiB; with no secret configured, until that
+  handshake is over: "Authentication", below), and on the monitor link always. Unknown `op`s
+  and unknown keys are ignored, so a newer peer can add to a message without breaking an older
+  one; a change of meaning needs a new `op`.
 - **OSC.** OSC 1.0 messages, one per UDP datagram, no bundles.
 - **Ports.** Every `ampd` listens on TCP **7450** (control), UDP **7451** (knobs) and TCP
   **7452** (monitor), on the address in its own configuration (below). The hub role only
@@ -183,12 +186,18 @@ On the monitor link, straight to the speaker whose values are wanted:
 - `t` is `speakerd`'s monotonic clock in seconds. `ampd` keeps the newest value per stream, and
   sends each value as it arrives, at most at that controller's rate on average: in any T seconds
   `ampd` sends a controller at most 2 + T × rate values of a stream (1 + T × rate from its
-  subscription), so after a pause one value may come early. Newest wins, nothing queues. The
-  bound is on what `ampd` sends: after its connection stalled, a controller can read more at once
-  (what the kernel's buffers held, and up to 256 KiB more that `ampd` had sent and the
-  connection not yet taken; past that, `ampd` sends that controller no value until it reads). A
-  new subscription gets the stream's newest value at once when there is one (none of a
-  `speakerd` that went away), and the value after that one no sooner than a period later. A
+  subscription), so after a pause one value may come early. Newest wins, nothing queues.
+  `ampd` relays a value line only if it is at most 64 KiB long and its numbers are finite (no
+  `NaN` or `Infinity`); it drops any other, says so in its log, and the stream then has no
+  newest value until the next one (so a new subscription gets nothing at once). The bound is on
+  what `ampd` sends: after its connection stalled, a controller can read more at once: what the
+  kernel's buffers held, and what `ampd` had sent and the connection not yet taken. `ampd`
+  writes a controller a value only while less than 256 KiB of that waits, so it can come to
+  256 KiB plus the value that crossed it (at most 64 KiB) plus any `error` lines, which go
+  whatever waits (a controller with more than 1 MiB waiting is dropped); from 256 KiB on, `ampd`
+  sends that controller no value until it reads. A new subscription gets the stream's newest
+  value at once when there is one (none of a `speakerd` that went away), and the value after
+  that one no sooner than a period later. A
   `subscribe` of a stream the connection is subscribed to already is not a new subscription: it
   changes the rate from then on and sends no value at once (the bound holds across the change,
   at the old rate before it and the new one after).

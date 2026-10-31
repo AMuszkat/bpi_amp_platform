@@ -742,15 +742,15 @@ into a stopped capture uses the fetched record, so it shows the real samples.
 | `ampScope` frame | 10 to 20 kB (int16 min/max, enabled traces only) | 20 Hz | 1.6 to 3 Mbit/s |
 | `ampScope` record | about 5 MB | once, on stop or trigger | under a second to fetch |
 
-**Latency.** In steady state a frame reaches the window one Wi-Fi round trip after the speaker
+**Latency.** In steady state a frame reaches the window a one-way Wi-Fi trip after the speaker
 produced it, a few milliseconds. On the speaker nothing waits: `ampd` relays each value as it
 arrives from `speakerd`, at most at the window's rate, so a value leaves the speaker about a
-millisecond after `speakerd` sampled it, and reaches the window a Wi-Fi trip later.
+millisecond after `speakerd` sampled it, and reaches the window a one-way Wi-Fi trip later.
 `monitor_fanout` measures the speaker's part on the virtual pair, eight windows at 20 Hz on the
 same x86_64 machine as the speaker (no network between them), against a limit of 5 ms: in
 seven runs with `ampd` 0.1.1 (alone and in the whole suite, with a 10 s and a 30 s window), the
 99th percentile was 0.63 to 1.43 ms on the hub's speaker and on the agent's; single values took
-up to 10.2 ms in the whole suite (one moment of the machine). Its first relay sent
+up to 10.2 ms in the whole suite (one moment of the machine). `ampd` 0.1.0's relay sent
 each window's values on a clock of that window's own, so a value waited for the window's turn,
 up to a whole period: about 50 ms at the 99th percentile at 20 Hz. When a packet is lost, TCP
 retransmits it and that one frame arrives late; the next frame is fresh, because nothing queued
@@ -1347,7 +1347,7 @@ so a slow disk holds up no connection. Its classes:
 | `Role` | what both roles share: following `speakerd` when it says hello on another revision than ampd's (it fell back to a layer), re-sending values when it restarted on ampd's |
 | `Hub(Role)` | the left speaker: the controllers and agents as `Peer`s, the `seq` counter, echoes, gestures (5 s timeout), proposals one at a time, the catalogue of plugins some speaker has loaded (`seen`), `state` to every controller |
 | `Agent(Role)` | the right speaker: connects to the hub every second, forwards its `param` and `apply` to `speakerd`, reports `speakerd`'s layer and revision, ignores OSC |
-| `Monitor`, `MonitorClient`, `Subscription` | the monitor link's server: the union of the clients' subscriptions, at the highest rate any asked, is what `speakerd` is asked for. It keeps the newest line of each stream as `speakerd` sent it (a value of a subscribed stream, at most 64 KiB, nothing else), and flushes once per pass of the event loop, so of the lines read at once only the newest of each stream goes out: as it came, never encoded again, to each subscriber whose token bucket (one per client and stream, filling at its rate, starting with one token, which the newest value takes, and holding at most two) has one. A new subscription gets the newest value at once; a client further than 256 KiB behind skips values; no task or timer per client |
+| `Monitor`, `MonitorClient`, `Subscription` | the monitor link's server: the union of the clients' subscriptions, at the highest rate any asked, is what `speakerd` is asked for. It keeps the newest line of each stream (a value of a subscribed stream, at most 64 KiB, its numbers finite, nothing else) as `speakerd` sent it, or encoded once more, for all the clients, when it does not start with `{` or holds `NaN` or `Infinity`. It flushes once per pass of the event loop, so of the lines read at once only the newest of each stream goes out, never encoded again for each client, to each subscriber whose token bucket (one per client and stream, filling at its rate, starting with one token, which the newest value takes, and holding at most two) has one. A new subscription gets the newest value at once; a client further than 256 KiB behind skips values; no task or timer per client |
 | `Knobs` | the UDP socket: OSC datagrams, checked for the token of an authenticated controller at that address |
 | `tweeter_rule` | the one Python definition of the tweeter rule, shared with the installer's `setup-helper.py` |
 

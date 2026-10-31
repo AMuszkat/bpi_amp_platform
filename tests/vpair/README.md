@@ -274,6 +274,9 @@ with SpeakerPair(tmp, {"left": document, "right": document}, [built("loudness", 
 - `StandInPair(tmp, documents)` is the same with stand-in speakerds and no PipeWire: the protocol
   alone. `pair.sd[name].set_control({"fail": {"5": "why"}, "delay": 11.0})` makes it fail or delay an
   apply (`"level"` is its output/level value, `"also"` lines it writes after each one); `pair.sd[name].events(op, "in")` is what ampd sent it.
+  `pair.start_speakerd(name, control=...)` starts a new stand-in after `pair.sd[name].stop()`
+  (`control`, keyword-only, is what `set_control` would tell it), and `pair.restart_speakerd(name)`
+  does both, the new one told what the old one was; ampd keeps running and connects to it.
 - The step 3 scenarios run with the tweeter muted in device.json (`harness.TWEETER_MUTED`, no gain
   limit): their documents send a plugin to both amplifier channels, which ampd refuses once the
   tweeter is on (the tweeter rule); `test_tweeter_rule` turns it on. `limits={"right": NO_LIMITS}`
