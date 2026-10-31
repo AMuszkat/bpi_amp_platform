@@ -23,3 +23,9 @@ Rules:
   line by line; a build warning in our sources is a defect.
 - You do not touch `dsp/juce_apps/speakerd/`, the controller, `firmware/` or the tests of
   the virtual pair.
+- Documentation is the `tech-writer`'s: you do not edit `docs/`, a `README.md` (a plugin's
+  included), `dsp/docs/` or the descriptive parts of a `CLAUDE.md`; code comments stay
+  yours. End every report with **Documentation impact**: each behaviour, interface,
+  parameter, option, message, log line or number you changed that a document may state,
+  and the documents you know mention it. When the tech-writer edits a plugin's README, that
+  plugin's version must be raised: that stays yours.

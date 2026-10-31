@@ -23,3 +23,9 @@ Rules:
 - Test with `/vpair` and `/test vpair`. You never run anything on a real board: that is
   `board-ops`, through the `/board` skill (`tools/board.sh`).
 - You do not touch plugins, `speakerd` or the controller.
+- Documentation is the `tech-writer`'s: you do not edit `docs/`, a `README.md`
+  (`tests/vpair/README.md` included), `dsp/docs/` or the descriptive parts of a `CLAUDE.md`
+  (`firmware/CLAUDE.md`'s reference sections included); code comments stay yours. End every
+  report with **Documentation impact**: each behaviour, interface, option, message, log
+  line or number you changed that a document may state, and the documents you know mention
+  it.

@@ -193,7 +193,7 @@ forgotten and hooks cannot.
 
 ## 3. The agents
 
-One orchestrator and eight specialists. Each has the tools it needs and nothing else; the
+One orchestrator and ten specialists. Each has the tools it needs and nothing else; the
 "tools" column is what its `.claude/agents/<name>.md` definition grants.
 
 <!-- diagram: agents -->
@@ -204,7 +204,9 @@ flowchart TB
     orch --> hd["host-dev<br/>speakerd: graph engine, pw_filter,<br/>state layers, ampd protocol"]
     orch --> cd["controller-dev<br/>the controller app, bridge,<br/>control-build hosting"]
     orch --> bd["board-dev<br/>ampd, systemd units, PipeWire config,<br/>device.json, web page"]
-    pd & hd & cd & bd --> ver["verifier<br/>runs rungs 1 and 2, reads spectra and<br/>latencies, returns numbers and pass/fail"]
+    pd & hd & cd & bd -- "documentation impact" --> tw["tech-writer<br/>updates every document<br/>on the merged branch"]
+    arch["architect<br/>reads the code and the documents,<br/>briefs, edits nothing"] -. "facts, on request" .-> tw
+    tw --> ver["verifier<br/>runs rungs 1 and 2, reads spectra and<br/>latencies, returns numbers and pass/fail"]
     ver --> rev["reviewer<br/>reads the diff against the rules:<br/>RT safety, private data, API drift<br/>between control and headless"]
     rev --> ops["board-ops<br/>rung 3 only: deploy, smoke test,<br/>journal, pw-top, roll back"]
     rev -.-> orch
@@ -222,12 +224,28 @@ flowchart TB
 | `reviewer` | all | Read, Grep, Glob | edits source, runs anything |
 | `board-ops` | `firmware/` | the board skill only | edits source, runs on a locked lab |
 | `optimiser` | all | Read, Grep, Glob, Bash for rungs 1 and 2 | edits source, records a test status, touches a board |
+| `architect` | all | Read, Grep, Glob, Bash for git and other reads | edits anything, builds, runs a test, touches a board, decides a design question |
+| `tech-writer` | the documentation: `docs/`, every `README.md`, `dsp/docs/`, the descriptive parts of the `CLAUDE.md` files | Read, Edit, Write, Grep, Glob, Bash, and Agent to start the `architect` | edits code, tests, `.claude/` or the rules in a `CLAUDE.md`; commits |
 
-All nine definitions are in `.claude/agents/`, with these tool grants and rules;
+All eleven definitions are in `.claude/agents/`, with these tool grants and rules;
 `board-ops` works only through the `/board` skill (`tools/board.sh`). The `optimiser`
 implements nothing: it measures where the time and the margins go and returns ranked
 proposals, each with its evidence, owner and the scenario that would prove it, for the
 orchestrator or an area agent to take up, or the finding that nothing is worth changing.
+
+The documentation is one agent's, the `tech-writer`'s. The area agents edit no document;
+each ends its report with its **documentation impact** (every behaviour, interface, option,
+message, log line or number it changed that a document may state), and the writer updates
+the documents on the merged branch before the verifier runs, so the design and the code
+still change in the same commit. The writer takes its facts from the `architect`, which it
+starts itself with the Agent tool (the definition says `Agent(architect)`, an allowlist
+Claude Code enforces only when the writer runs as the main thread; as a subagent the
+architect is the only agent its instructions let it start). The architect checks the
+architecture against the code each time, in a fixed order of authority (the code, the
+tests, the history, then the documents), returns a brief with a source for every fact and
+names every place where a document and the code disagree; it edits nothing and decides no
+design question. A plugin's README is part of the plugin's source identity, so a README the
+writer changes raises that plugin's version, which stays `plugin-dev`'s.
 
 The split between `plugin-dev`, `host-dev` and `controller-dev` follows the three build
 targets. They work in separate git worktrees so that the orchestrator can run them in
@@ -400,6 +418,8 @@ sequenceDiagram
     participant I as Issue / request
     participant O as orchestrator
     participant D as dev agents (worktrees)
+    participant W as tech-writer
+    participant A as architect
     participant V as verifier
     participant R as reviewer
     participant G as GitHub
@@ -411,8 +431,12 @@ sequenceDiagram
         O->>D: host-dev
         O->>D: controller-dev
     end
-    D-->>O: branches
+    D-->>O: branches, each with its documentation impact
     O->>O: merge the worktrees
+    O->>W: the plan and the documentation impact
+    W->>A: what changed, how it works now
+    A-->>W: a brief, a source for every fact
+    W-->>O: the documents updated on the merged branch
     O->>V: /test unit, /vpair scenario (all that the plan names)
     V-->>O: numbers, pass/fail, .status/<commit>.json
     alt red

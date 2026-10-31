@@ -51,6 +51,8 @@ task would change:
 | `dsp/juce_apps/speakerd/` | `host-dev` |
 | `dsp/juce_apps/controller/` | `controller-dev` |
 | `firmware/`, `tests/vpair/` | `board-dev` |
+| documentation: `docs/`, every `README.md`, `dsp/docs/`, the descriptive parts of the `CLAUDE.md` files, diagrams and figures | `tech-writer`, which gets its facts from the `architect` |
+| "how does X work", "what changed since", a design question across areas | `architect`, which reads the code and the documents and edits nothing |
 | more than one of the above, or a protocol they share | `orchestrator`, which runs the area agents in parallel worktrees and merges |
 | running the tests, "is it green?" | `verifier` |
 | before a pull request is merged | `reviewer` |
@@ -59,7 +61,10 @@ task would change:
 
 A single-area task goes straight to its agent; the orchestrator is for work that has to be
 split and merged, not a required entry point. Agents do not cross areas: an agent that
-needs a change outside its files says so and stops.
+needs a change outside its files says so and stops. The area agents leave the documentation
+to the `tech-writer` and end each report with its documentation impact; the writer updates
+the documents on the same branch, so the design and the code still change in the same
+commit. The rules in the `CLAUDE.md` files and everything in `.claude/` stay the person's.
 
 ## Hooks, skills and agents
 
@@ -86,8 +91,9 @@ needs a change outside its files says so and stops.
   scripts are in `tools/`, work without Claude, and run in the development container
   (below).
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
-  `controller-dev`, `board-dev`, `verifier`, `reviewer`, `board-ops`, `optimiser`, each
-  limited to its area and tools as the document's table says.
+  `controller-dev`, `board-dev`, `verifier`, `reviewer`, `board-ops`, `optimiser`,
+  `architect`, `tech-writer`, each limited to its area and tools as the document's table
+  says. The `tech-writer` may start the `architect` (and only it) to ask for facts.
 - **CI** (`.github/workflows/ci.yml`) runs rungs 1 and 2 on pull requests and on `develop`.
 
 ## Developing the remote plugin host

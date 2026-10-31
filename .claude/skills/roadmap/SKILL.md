@@ -23,6 +23,8 @@ Then route the work:
 | "is it green?", before a review or a pull request | `verifier` |
 | before merging | `reviewer` |
 | where the system spends its time, what (if anything) to make faster | `optimiser`, which measures and proposes; the area agents implement |
+| documentation: `docs/`, the READMEs, `dsp/docs/`, the descriptive parts of the `CLAUDE.md` files, diagrams | `tech-writer`, which asks the `architect` for the facts |
+| how something works now, what changed, a design question across areas | `architect`, which reads and briefs, and edits nothing |
 | anything on a real board | `board-ops`, and only after the verifier says the commit is green (both rungs, or an affected run) |
 
 The agent definitions are in `.claude/agents/`; each one's description says what it is for,

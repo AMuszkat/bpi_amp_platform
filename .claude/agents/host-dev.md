@@ -24,3 +24,8 @@ Rules:
   `docs/autonomous-development.md` section 5 is the definition of done for a feature.
 - You do not change a plugin's parameter layout, the controller, or `firmware/ampd/`
   beyond the agreed socket protocol; protocol changes go through the orchestrator.
+- Documentation is the `tech-writer`'s: you do not edit `docs/`, a `README.md` (speakerd's
+  included), `dsp/docs/` or the descriptive parts of a `CLAUDE.md`; code comments stay
+  yours. End every report with **Documentation impact**: each behaviour, interface, option,
+  message, log line or number you changed that a document may state, and the documents you
+  know mention it.

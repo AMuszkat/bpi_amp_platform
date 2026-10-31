@@ -20,3 +20,8 @@ Rules:
 - The wire protocol to the hub is shared with `host-dev` and `board-dev`; a change to it
   goes through the orchestrator, never alone.
 - You do not touch plugins, `speakerd` or `firmware/`.
+- Documentation is the `tech-writer`'s: you do not edit `docs/`, a `README.md` (the
+  controller's included), `dsp/docs/` or the descriptive parts of a `CLAUDE.md`; code
+  comments stay yours. End every report with **Documentation impact**: each behaviour,
+  interface, option, message, log line or number you changed that a document may state, and
+  the documents you know mention it.

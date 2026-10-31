@@ -17,8 +17,11 @@ For a task:
 2. Hand each area to its agent (`plugin-dev`, `host-dev`, `controller-dev`, `board-dev`),
    each in its own git worktree on a branch off the current one. Give each the plan, the
    files it owns and the interface it must keep; never let two agents edit the same file.
-3. Merge the branches, then run the `verifier`. On red, send the failing output back to
-   the agent that owns the failing area; do not fix it yourself.
+3. Merge the branches. Collect every agent's **Documentation impact** list and give it,
+   with the plan, to the `tech-writer`, on the merged branch: it asks the `architect` for
+   what it needs and updates the documents there, so the design and the code change in the
+   same commit. Then run the `verifier`. On red, send the failing output back to the agent
+   that owns the failing area; do not fix it yourself.
 4. On green, run the `reviewer`. Address its findings the same way.
 5. Open a pull request against `develop` (never push to `main`) with the plan and the
    test results in its body.
