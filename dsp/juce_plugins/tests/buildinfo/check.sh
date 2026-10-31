@@ -5,10 +5,14 @@
 # exactly, a manifest.ttl that does not mention it (no LV2 host may parse it, so a damaged one
 # can never stop the bundle loading), the bpi-build-info string in the binary and, with
 # --arch, that the binary is code for that machine. Part of rung 1 (tools/test.sh unit): on the
-# x86_64 bundles plugin-check builds and the copies JUCE's copy step made of them in ~/.lv2, and
-# on one aarch64 bundle of tools/build.sh and its copy in the build's copied/lv2.
+# x86_64 bundles plugin-check builds, and on one aarch64 bundle of tools/build.sh and its copy
+# in the build's copied/lv2, which only that build tree writes: the copy proves that JUCE's copy
+# step runs after buildinfo.ttl is written. Not on the copies in ~/.lv2, which any other build
+# in the same HOME may have written since.
 #
 #     dsp/juce_plugins/tests/buildinfo/check.sh [--arch x86_64|aarch64] <plugin> <bundle.lv2>...
+#
+# Any bundle can be checked, a copy included (~/.lv2/<target>.lv2 after a build of this tree).
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../tools" && pwd)/common.sh"
 usage="usage: $0 [--arch x86_64|aarch64] <plugin> <bundle.lv2>..."

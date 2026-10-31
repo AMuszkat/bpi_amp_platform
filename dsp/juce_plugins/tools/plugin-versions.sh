@@ -15,8 +15,9 @@
 # raise a version. A plugin absent at the base passes.
 #
 # Exit status: 0 (check: every changed plugin raised its version), 1 (check: one did not),
-# 2 (a usage, git or parse error: no such ref, not a repository, a git command that failed, a
-# CMakeLists.txt whose version or SHARED cannot be read, at HEAD or at the base). Needs git,
+# 2 (a usage, git or parse error: no such ref, not a repository, a git command that failed or
+# a tree of the base it could not read, a CMakeLists.txt whose version or SHARED cannot be
+# read, at HEAD or at the base). Needs git 2.15 or later (--no-optional-locks), bash,
 # coreutils and cmake; runs from any directory, natively or in the development container. The
 # version and the identity come from cmake/SourceId.cmake, the one implementation the build
 # uses too. Tested by tests/plugin-versions/run.sh.
@@ -90,6 +91,11 @@ cmd_check() {
         paths=("./$p")
         for name in $shared; do paths+=("./shared/$name"); done
 
+        # Every tree under the paths at the base, read first: git diff --quiet reads only what
+        # it needs, and with a tree missing it can print nothing and exit 0 or 1 (git 2.39 and
+        # 2.53), a verdict after an error. ls-tree prints nothing for a path the base does not
+        # have. A blob it cannot read fails git diff itself (exit 128).
+        git_ ls-tree -r "$base" -- "${paths[@]}" > /dev/null || die "cannot read the base's trees for $p"
         rc=0
         git_ diff --quiet --no-ext-diff "$base" -- "${paths[@]}" || rc=$?
         [ $rc -le 1 ] || die "git diff failed for $p"

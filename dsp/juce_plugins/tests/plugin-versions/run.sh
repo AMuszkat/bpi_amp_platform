@@ -8,9 +8,20 @@
 #
 #     dsp/juce_plugins/tests/plugin-versions/run.sh
 #
-# Needs git, bash, coreutils and cmake, and takes seconds. Runs in the development container
-# when Podman is installed (tools/container.sh; BPI_CONTAINER=0 runs it natively). The scratch
-# repository, in a temporary directory, is removed at the end.
+# Needs git 2.15 or later (--no-optional-locks, which plugin-versions.sh and SourceId.cmake
+# use; the test itself needs nothing later: no `git init -b`, 2.28, no GIT_CONFIG_GLOBAL, 2.32),
+# bash, coreutils and cmake, and takes seconds. Run on git 2.39 (the development container's)
+# and 2.53. Runs in the development container when Podman is installed (tools/container.sh;
+# BPI_CONTAINER=0 runs it natively). The scratch repository, in a temporary directory, is
+# removed at the end.
+#
+# It touches no repository but its own, wherever the temporary directory is (a TMPDIR inside a
+# repository included) and whatever git's version and configuration: every git command, the
+# tool's too, runs with GIT_CEILING_DIRECTORIES at the temporary directory, so git never
+# searches above it, and the test stops unless git finds the scratch repository exactly where
+# it made it. HOME and XDG_CONFIG_HOME point into the temporary directory, so no user
+# configuration, global ignore or attributes file is read (with any git), and the variables
+# that point git at another repository or configuration are unset.
 #
 # The scratch layout (dsp/juce_plugins/ of a repository, as in this one):
 #   alpha/   0.1.0, SHARED fir           beta/   0.9.0, SHARED fir other
@@ -31,19 +42,44 @@ for tool in git cmake; do
     command -v $tool > /dev/null || { echo "plugin-versions test: FAILED: no $tool" >&2; exit 1; }
 done
 
-# A git of its own: no system or user configuration, no repository of the caller's.
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=user@example.com
-export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=user@example.com
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+fatal() { echo "plugin-versions test: FAILED: $*" >&2; exit 1; }
 
-T="$(mktemp -d)" || exit 1
+# The temporary directory, by its real path (git compares the ceiling with real paths). Two
+# steps, so that a failed mktemp can never leave T empty or the current directory.
+T="$(mktemp -d)" && T="$(cd "$T" && pwd -P)" && [ -n "$T" ] || fatal "no temporary directory"
 trap 'rm -rf "$T"' EXIT
 R="$T/repo"
 P="$R/dsp/juce_plugins"
 PV="$P/tools/plugin-versions.sh"
 PV_SCRATCH="$PV"
 g() { git -C "$R" "$@"; }
+
+# A git of its own (see above), for the test's commands and the tool's alike: the variables
+# that name another repository, object store or configuration unset (git's list of them, and
+# every GIT_CONFIG_*), no system configuration or attributes, a HOME without configuration, and
+# no search for a repository above T.
+unset $(compgen -e | grep '^GIT_CONFIG')
+local_vars="$(git rev-parse --local-env-vars)" || fatal "git rev-parse --local-env-vars failed"
+unset $local_vars
+mkdir -p "$T/home/.config" || fatal "cannot make $T/home"
+export HOME="$T/home" XDG_CONFIG_HOME="$T/home/.config"
+export GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_CEILING_DIRECTORIES="$T"
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=user@example.com
+export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=user@example.com
+
+# init_repo <dir>: a repository of its own at <dir> (an absolute real path), on a branch
+# develop with no commit, with any git (HEAD set by hand: `git init -b` is git 2.28). Stops the
+# test unless git then finds exactly that repository there, so that no later `git -C` can
+# reach another.
+init_repo() {
+    git init -q "$1" && git -C "$1" symbolic-ref HEAD refs/heads/develop \
+        && [ "$(git -C "$1" rev-parse --show-toplevel)" = "$1" ] \
+        || fatal "cannot make a git repository of its own in $1"
+}
+
+# not_in_repo <dir>: true when git finds no repository at <dir> (the cases "outside a
+# repository" below; with the ceiling at T, nothing above T counts).
+not_in_repo() { ! git -C "$1" rev-parse --git-dir > /dev/null 2>&1; }
 
 passed=0
 failed=0
@@ -93,7 +129,7 @@ printf 'cmake_minimum_required(VERSION 3.22)\nproject(NOTES VERSION 9.9.9)\n' > 
 for name in fir other unused; do echo "// $name" > "$P/shared/$name/${name^}.h"; done
 echo "build-podman/" > "$R/.gitignore"
 echo "scratch" > "$R/README.md"
-git init -q -b develop "$R"
+init_repo "$R"
 g add -A
 g update-index --add --cacheinfo "160000,$JUCE_PIN,dsp/juce_plugins/JUCE"
 g commit -q -m base
@@ -312,23 +348,39 @@ expect_check_error "beta's project() without a VERSION" \
     "cannot read the declaration in beta/CMakeLists.txt"
 
 # A git failure inside the loop: alpha's tree at the base missing, in a copy of the repository
-# (once: "alpha new", exit 0). Which git command notices first is git's business (git 2.39 and
-# 2.53: the ls-tree of the base, after git diff printed an error); the script must exit 2,
-# naming alpha.
+# (once: "alpha new", exit 0). The script must exit 2, naming alpha, whichever git command
+# notices first (now the ls-tree -r of the base's trees, before git diff; before it, the ls-tree
+# of alpha/CMakeLists.txt, git diff having gone on and exited 1).
 reset
 cp -a "$R" "$T/broken"
 tree="$(g rev-parse "$BASE:dsp/juce_plugins/alpha")"
-rm -f "$T/broken/.git/objects/${tree:0:2}/${tree:2}"
+rm "$T/broken/.git/objects/${tree:0:2}/${tree:2}"
 echo "// changed" >> "$T/broken/dsp/juce_plugins/alpha/Alpha.cpp"
 PV="$T/broken/dsp/juce_plugins/tools/plugin-versions.sh"
 expect_check_error "a git command failing for alpha" " for alpha"
 rm -rf "$T/broken"
 
-# Outside a repository.
+# The tree of shared/other, which only beta declares, missing at the base, and nothing changed:
+# git diff --quiet then says nothing and exits 0 (git 2.39 and 2.53), so the base's trees are
+# read on their own (once: "beta unchanged", exit 0, without a word of error).
+reset
+cp -a "$R" "$T/broken"
+tree="$(g rev-parse "$BASE:dsp/juce_plugins/shared/other")"
+rm "$T/broken/.git/objects/${tree:0:2}/${tree:2}"
+PV="$T/broken/dsp/juce_plugins/tools/plugin-versions.sh"
+expect_check_error "shared/other's tree missing at the base, nothing changed" \
+    "cannot read the base's trees for beta"
+rm -rf "$T/broken"
+
+# Outside a repository: git finds none in the copy (and, with the ceiling, none above T).
 reset
 cp -a "$P" "$T/nogit"
 PV="$T/nogit/tools/plugin-versions.sh"
-expect_check_error "outside a git repository" "is not in a git repository"
+if not_in_repo "$T/nogit"; then
+    expect_check_error "outside a git repository" "is not in a git repository"
+else
+    not_ok "check: outside a git repository: git finds one at $T/nogit"
+fi
 
 # ---------------------------------------------------------------------------------------------
 # list
@@ -444,14 +496,16 @@ reset
 rm -rf "$T/nogit"
 cp -a "$P" "$T/nogit"
 out="$("$T/nogit/tools/plugin-versions.sh" list 2>&1)"
-if [ "$out" = "alpha 0.1.0 unknown
+if ! not_in_repo "$T/nogit"; then
+    not_ok "list: outside a repository: git finds one at $T/nogit"
+elif [ "$out" = "alpha 0.1.0 unknown
 beta 0.9.0 unknown
 gamma 1.2.3 unknown" ]; then
     ok "list: outside a repository: every identity unknown"
 else
     not_ok "list: outside a repository: $(echo "$out" | tr '\n' ' ')"
 fi
-git init -q "$T/nogit"
+init_repo "$T/nogit"
 out="$("$T/nogit/tools/plugin-versions.sh" list 2>&1)"
 if [ "$(echo "$out" | awk '{ print $3 }' | sort -u)" = unknown ] && [ "$(echo "$out" | wc -l)" = 3 ]; then
     ok "list: in a repository without a commit: every identity unknown"

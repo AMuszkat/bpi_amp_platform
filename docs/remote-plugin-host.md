@@ -868,8 +868,10 @@ identity, as a build made at that moment embeds them; `plugin-versions.sh check 
 defaults to `origin/develop`) and the working tree has not raised its version, and exits 2 on
 any git or parse error. Rung 1 tests both commands on a scratch repository
 (`dsp/juce_plugins/tests/plugin-versions`), and checks the identity in the bundles plugin-check
-builds, in the copies JUCE's copy step makes of them in `~/.lv2`, and in `loudness_headless`
-cross-built for aarch64 with its copy (`dsp/juce_plugins/tests/buildinfo`).
+builds and in `loudness_headless` cross-built for aarch64 with its copy in the build's own
+`copied/lv2`, which proves that JUCE's copy step runs after `buildinfo.ttl` is written
+(`dsp/juce_plugins/tests/buildinfo`; not the copies in `~/.lv2`, which another build in the
+same HOME may have written).
 
 Step 4's catalogue carries both for every build a speaker has, and the hub will only apply a
 graph when the controller's control build of each plugin agrees with the speakers' headless

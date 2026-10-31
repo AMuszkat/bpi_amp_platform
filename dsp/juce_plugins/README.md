@@ -237,10 +237,13 @@ git rev-parse HEAD:dsp/juce_plugins/firConv HEAD:dsp/juce_plugins/shared/blockfi
 
 with `-dirty` appended when `git status --porcelain -- <the same paths>` prints anything
 (tracked changes, staged or not, and untracked files that are not ignored), and `unknown`
-without git, outside a repository, or in one without a commit. A folder that is not committed
-yet counts as the empty tree (`git hash-object -t tree /dev/null`), and is dirty. On a clean
-tree the identity is reproducible from git alone. It follows the tree, not a commit: a commit
-that touches none of a plugin's inputs leaves its identity as it was. It works in a git worktree
+without git, outside a repository, or in one without a commit. A folder that is not in HEAD
+yet (a new plugin or shared folder) counts as the empty tree
+(`git hash-object -t tree /dev/null`); `-dirty` follows, as for every input, exactly when
+`git status --porcelain` over the inputs prints anything: a new plugin's untracked files do, a
+declared shared folder that is missing or holds only ignored files does not. On a clean tree
+the identity is reproducible from git alone. It follows the tree, not a commit: a commit that
+touches none of a plugin's inputs leaves its identity as it was. It works in a git worktree
 (the gitlink is read from HEAD's tree, so an uninitialised submodule changes nothing).
 `tools/build-podman.sh` mounts only `juce_plugins/` into its container, where git finds no
 repository: its bundles say `unknown`.
@@ -280,15 +283,16 @@ bundle each plugin runs from (`../juce_apps/speakerd/README.md`, "Which build it
 
 `tests/buildinfo/check.sh` checks that a bundle's `buildinfo.ttl` and binary agree with
 `plugin-versions.sh list`, that its manifest does not mention `buildinfo.ttl`, and with `--arch`
-that the binary is code for that machine. Rung 1 (`tools/test.sh unit`) runs it on the x86_64
-bundles plugin-check builds, on the copies JUCE's copy step made of them in `~/.lv2` of the HOME
-the build ran with (the development container's; the copy is why `speaker_add_plugin()` orders
-it after `buildinfo.ttl` is written), and on `loudness_headless` cross-built for aarch64 with its
-copy in `copied/lv2` (`tools/build.sh loudness aarch64 headless`: what the board installer
-deploys, and the cheapest target to cross-build). JUCE copies a bundle only when it links the
-binary, so a copy that another build in the same HOME wrote later (`tools/build.sh` of another
-tree) stays until the next link; the check then says so, and how to make it link again. The
-controller, which compiles `loudness_control`'s sources in
+that the binary is code for that machine; it checks any bundle it is given, a copy included.
+Rung 1 (`tools/test.sh unit`) runs it on the x86_64 bundles plugin-check builds, and on
+`loudness_headless` cross-built for aarch64 with its copy in the build's `copied/lv2`
+(`tools/build.sh loudness aarch64 headless`: what the board installer deploys, and the cheapest
+target to cross-build). That copy proves the copy step's order (the copy is why
+`speaker_add_plugin()` writes `buildinfo.ttl` before it), because only that build tree writes
+`copied/lv2`. Rung 1 does not check the copies in `~/.lv2`: any other build in the same HOME
+(`tools/build.sh` of another tree, `build-podman.sh`'s local debug loop, whose bundles say
+`unknown`) may have written them since, and JUCE copies a bundle again only when it links the
+binary. The controller, which compiles `loudness_control`'s sources in
 (`../juce_apps/controller/ControlPlugins.cmake`), does not compile the generated source and
 carries no plugin identity.
 
@@ -314,8 +318,8 @@ numbers: JUCE writes `x.y.z` as `lv2:minorVersion y`, `lv2:microVersion z`, and 
 greater, so 1.0.0 (0.0 to lilv) would lose to a 0.9.9, in either order
 ([lv2-discovery.md](../docs/juce-knowledge/hosting/lv2-discovery.md)).
 
-**`tools/plugin-versions.sh`** (bash; git, coreutils and cmake; any directory, natively or in
-the development container):
+**`tools/plugin-versions.sh`** (bash; git 2.15 or later, coreutils and cmake; any directory,
+natively or in the development container):
 
 ```bash
 tools/plugin-versions.sh list           # "<plugin> <version> <source-id>", one line per plugin
@@ -330,12 +334,17 @@ working tree, tracked changes and untracked files included, and prints one line 
 `<plugin> changed, NOT raised <old> -> <new>`, or `<plugin> new <version>` for one absent at the
 base. Exit status 0 when every changed plugin raised its version, 1 when one did not, 2 on a
 usage, git or parse error (a `CMakeLists.txt` whose version or `SHARED` cannot be read, at HEAD
-or at the base, fails the check rather than pass a plugin unread). The version and `SHARED` are
-read from the text of the plugin's `CMakeLists.txt`, so both must be written out literally; the
-configure step fails when that reading disagrees with CMake's. `tests/plugin-versions/run.sh`
-(rung 1, a few seconds) runs both commands on a scratch repository with this layout: every
-verdict of `check` and its exit status, and every identity `list` prints against the `git`
-command above, `-dirty` exactly when the plugin's inputs changed.
+or at the base, or a tree of the base that git cannot read, fails the check rather than pass a
+plugin unread). The version and `SHARED` are read from the text of the plugin's
+`CMakeLists.txt`, so both must be written out literally; the configure step fails when that
+reading disagrees with CMake's. `tests/plugin-versions/run.sh` (rung 1, a few seconds) runs
+both commands on a scratch repository with this layout: every verdict of `check` and its exit
+status, and every identity `list` prints against the `git` command above, `-dirty` exactly when
+the plugin's inputs changed. It touches no other repository, wherever `TMPDIR` is (inside a
+repository too), and reads no system or user git configuration: git never searches above its
+temporary directory (`GIT_CEILING_DIRECTORIES`), the test stops unless git finds the scratch
+repository where it made it, and `HOME` points into the temporary directory. It needs nothing
+newer than the tool's git 2.15, and is run on 2.39 (the development container's) and 2.53.
 
 ## JUCE
 
