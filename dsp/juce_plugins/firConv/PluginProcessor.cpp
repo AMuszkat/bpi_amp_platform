@@ -128,8 +128,8 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     // Pre-LP FIR (remez low-pass): rolls the correction off above the driver's usable band.
     preLp.prepare (HPreLpTaps, (int) (sizeof(HPreLpTaps) / sizeof(HPreLpTaps[0])), (int) spec.maximumBlockSize);
 
-    // Pre-HP: Butterworth high-pass, applied as a cascade of biquads (float32-stable).
-    loadSosCascade(HPreHpSos, (int) (sizeof(HPreHpSos) / sizeof(HPreHpSos[0])), spec);
+    // Pre-HP: Butterworth high-pass, applied as a cascade of biquads, in double.
+    loadSosCascade (HPreHpSos, (int) (sizeof(HPreHpSos) / sizeof(HPreHpSos[0])));
 
     // Inverse FIR (least-squares magnitude inverse of the summed driver response).
     inv.prepare (InvFilter, (int) (sizeof(InvFilter) / sizeof(InvFilter[0])), (int) spec.maximumBlockSize);
@@ -137,20 +137,18 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     reset();
 }
 
-void PluginProcessor::loadSosCascade(const float* sos, int numFloats, const juce::dsp::ProcessSpec& spec)
+void PluginProcessor::loadSosCascade (const float* sos, int numFloats)
 {
-    preHpSections.clear();
     const int nSections = numFloats / 6;  // 6 coeffs per biquad: [b0,b1,b2,a0,a1,a2]
+    preHp.clear();
+    preHp.reserve ((size_t) nSections);
     for (int s = 0; s < nSections; ++s)
     {
+        // Normalised by a0 as juce::dsp::IIR::Coefficients does (times 1 / a0); scipy's
+        // sections have a0 == 1, so these are the float values exactly.
         const float* c = sos + 6 * s;
-        // juce::dsp::IIR::Coefficients' array constructor takes [b0,b1,b2,a0,a1,a2] and
-        // normalises by a0 internally; scipy's SOS already have a0 == 1.
-        std::array<float, 6> biquad { c[0], c[1], c[2], c[3], c[4], c[5] };
-        auto* filt = new juce::dsp::IIR::Filter<float>();
-        filt->coefficients = new juce::dsp::IIR::Coefficients<float>(biquad);
-        filt->prepare(spec);
-        preHpSections.add(filt);
+        const double a0Inv = 1.0 / (double) c[3];
+        preHp.push_back ({ c[0] * a0Inv, c[1] * a0Inv, c[2] * a0Inv, c[4] * a0Inv, c[5] * a0Inv, 0.0, 0.0 });
     }
 }
 
@@ -158,9 +156,33 @@ void PluginProcessor::reset()
 {
     gain.reset();
     preLp.reset();
-    for (auto* f : preHpSections)
-        f->reset();
+    for (auto& q : preHp)
+        q.s1 = q.s2 = 0.0;
     inv.reset();
+}
+
+void PluginProcessor::processPreHp (float* samples, int numSamples) noexcept
+{
+    // Sample by sample through every section, so the signal between sections stays double
+    // without a buffer. TDF-II, the equations of juce::dsp::IIR::Filter. No snapToZero() at the
+    // end of the block as that filter's process() does (on x86 only; elsewhere it is a no-op):
+    // processBlock's ScopedNoDenormals already flushes denormals, double ones too, on x86_64
+    // (MXCSR FTZ and DAZ) and aarch64 (FPCR.FZ), and setting a state below 1e-8 to zero is a
+    // step the poles would carry to the output.
+    for (int i = 0; i < numSamples; ++i)
+    {
+        double v = samples[i];
+
+        for (auto& q : preHp)
+        {
+            const double y = q.b0 * v + q.s1;
+            q.s1 = q.b1 * v - q.a1 * y + q.s2;
+            q.s2 = q.b2 * v - q.a2 * y;
+            v = y;
+        }
+
+        samples[i] = (float) v;
+    }
 }
 
 void PluginProcessor::releaseResources()
@@ -216,8 +238,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     gain.process (context);
     preLp.process (samples, samples, numSamples);
-    for (auto* f : preHpSections)
-        f->process (context);
+    processPreHp (samples, numSamples);
     inv.process (samples, samples, numSamples);
 }
 

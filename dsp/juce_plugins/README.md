@@ -238,8 +238,9 @@ changed), and it moves into the development container like the other test script
   build's exact response, with no window; each curve is a power average over 1/6-octave bands,
   the design weighted like the builds.
 - It asserts that each build is within 0.05 dB of the design in every band from 20 Hz to 20 kHz
-  (measured: 0.015 dB at 20 Hz, most of it the coefficients rounded to float32) and that the
-  output peaks below -1 dBFS. A failure names the band and the numbers. Without python3-scipy
+  (measured with firConv 0.0.3: 0.0112 dB at 20 Hz on both builds, all of it the coefficients
+  rounded to float32; 0.0.2's float32 high-pass added up to 0.004 dB) and that the output peaks
+  below -1 dBFS. A failure names the band and the numbers. Without python3-scipy
   (in the development container's `Containerfile`) it fails and names the package.
 - It writes `build/tests/firconv-response/firConv/response.svg` (`svgplot.py`, no plotting
   package), `response.csv` (frequency, then the design, x86_64 and aarch64 in dB) and
@@ -339,6 +340,10 @@ Its tolerance, as measured: the output bit-identical on x86_64; on aarch64 the F
 peak (-59 dB at -6 dBFS input; measured with `speakerd` renders of 0.0.1 and 0.0.2),
 all below 50 Hz, the rounding noise of its float32 high-pass biquads, which any one-ulp change
 before them moves that much, and did before P1 ([`firConv/README.md`](firConv/README.md)).
+firConv 0.0.3 runs that high-pass in double, a patch too: its output differs from 0.0.2's by
+-59.7 dB re peak on x86_64 and -57.9 dB on aarch64, all below 50 Hz (that noise, gone), and its
+x86_64 and aarch64 builds now differ by -92 dB re peak (0.0.2: -55.6 dB), 93 % of that above
+20 kHz, where the inverse FIR boosts the pre-LP FIR's float32 rounding.
 
 lilv, which picks the bundle a host runs when two have one URI, sees only a version's last two
 numbers: JUCE writes `x.y.z` as `lv2:minorVersion y`, `lv2:microVersion z`, and lilv runs the

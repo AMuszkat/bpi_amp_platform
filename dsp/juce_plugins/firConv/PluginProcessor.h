@@ -5,8 +5,8 @@
 
 #include "BlockFir.h"   // dsp/juce_plugins/shared/blockfir (SHARED in CMakeLists.txt)
 
-#include <array>
 #include <limits>
+#include <vector>
 
 #if (MSVC)
 #include "ipps.h"
@@ -87,12 +87,26 @@ private:
     // prepared size in chunks of it.
     juce::dsp::Gain<float>        gain;
     speaker::BlockFir             preLp;   // HPreLpTaps  (remez low-pass, HF band-limit)
-    juce::OwnedArray<juce::dsp::IIR::Filter<float>> preHpSections;  // HPreHpSos (LF band-limit)
     speaker::BlockFir             inv;     // InvFilter   (least-squares magnitude inverse)
 
-    // Build the pre-HP biquad cascade from a flat SOS array laid out 6 floats per section
+    // The pre-HP (HPreHpSos, the LF band-limit): its second-order sections in Transposed Direct
+    // Form II, as juce::dsp::IIR::Filter runs them, but in double. Its poles sit close to
+    // z = 1, so the rounding of its state passes through about 100 dB of gain at 10-25 Hz: in
+    // float32 that was the chain's largest error, and every build realised it differently
+    // (README.md). The coefficients are HPreHpSos's float values, promoted.
+    struct Biquad
+    {
+        double b0, b1, b2, a1, a2;   // divided by a0 (scipy's sections have a0 == 1)
+        double s1, s2;               // the state
+    };
+    std::vector<Biquad> preHp;       // sized in prepareToPlay
+
+    // Build the pre-HP cascade from a flat SOS array laid out 6 floats per section
     // ([b0,b1,b2,a0,a1,a2], the layout scipy.signal.butter(..., output='sos') emits).
-    void loadSosCascade (const float* sos, int numFloats, const juce::dsp::ProcessSpec& spec);
+    void loadSosCascade (const float* sos, int numFloats);
+    // The pre-HP in place on `numSamples` floats: each sample promoted to double, through every
+    // section, rounded to float once.
+    void processPreHp (float* samples, int numSamples) noexcept;
 
     std::vector<double> frequencies;
     std::vector<double> magnitudes;

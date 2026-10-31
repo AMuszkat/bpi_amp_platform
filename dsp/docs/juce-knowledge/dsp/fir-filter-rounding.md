@@ -96,7 +96,7 @@ plugins' `processBlock` has it). Not measured here: the board's Cortex-A73.
 
 -131 dB is the FIRs' own difference, and crossover's output (two FIRs after a gain) keeps it:
 -129.5 and -132.6 dB re peak, P1 against 0.0.1, on aarch64, rendered by `speakerd` from a
-sweep and noise. firConv's output does not: after its pre-LP FIR come the high-pass biquads
+sweep and noise. firConv 0.0.2's output did not: after its pre-LP FIR came the high-pass biquads
 (`juce::dsp::IIR::Filter`, Transposed Direct Form II, float32, `HPreHpSos`: poles at radius
 0.997 and 0.9987, a 25 Hz Butterworth), and P1 against 0.0.1 on aarch64 differs by up to
 **-55 to -59 dB re peak**, 99.9 % of the difference's energy below 50 Hz: -59 dB (-69 dBFS RMS)
@@ -109,6 +109,39 @@ rounding before them into a different realisation of their own low-frequency rou
 (a TDF-II's state errors pass through its poles, not its zeros). So an output comparison of a
 chain with low-cutoff float32 biquads, across builds, compilers or architectures, can only
 hold to that noise level, and a bit-exact comparison has to be made before them.
+
+**The fix, firConv 0.0.3: the biquads in double.** The same TDF-II equations, written out in
+`PluginProcessor::processPreHp` (sample by sample through both sections, so nothing between them
+needs a buffer), in double: the coefficients `HPreHpSos`'s float values, the pre-LP's float
+output promoted, the cascade's output rounded to float once. It has no `snapToZero()`:
+`juce::dsp::IIR::Filter`'s only acts on x86 (`JUCE_SNAP_TO_ZERO` is a no-op unless
+`JUCE_INTEL`), and `ScopedNoDenormals` flushes double denormals too (MXCSR FTZ and DAZ, FPCR.FZ).
+In double the state's rounding is 29 bits further down. Measured with the response test's sweep
+(5 Hz to 24 kHz, -9 dBFS peak, gain -12 dB, `speakerd --render`) against the chain in float64:
+
+| | 0.0.2 (float32 biquads) | 0.0.3 (double) |
+|---|---|---|
+| the arithmetic's error, x86_64 / aarch64 | -74.7 / -74.1 dBFS RMS, 99.8 % below 50 Hz | -107.2 / -107.5 dBFS RMS, 97.8 / 99.3 % above 20 kHz |
+| x86_64 against aarch64 | -55.6 dB re peak, -71.6 dBFS RMS | -92.1 dB re peak, -111.5 dBFS RMS, 93 % above 20 kHz |
+| closest 1/6-octave band of that, 20 Hz to 20 kHz | 53 dB below the output (20 Hz) | 84 dB below the output (19.9 kHz) |
+
+0.0.3 against 0.0.2: -59.7 dB re peak on x86_64, -57.9 dB on aarch64, 99.9 % below 50 Hz. What
+remains of the error against float64 is the coefficients' rounding to float32 in `filters.hpp`
+(-77.4 dBFS RMS, the same in every build). On x86_64 the double cascade costs what the float one
+did (0.055 % against 0.057 % of real time, blocks of 1024).
+
+Not down to the FIRs' -131 dB, for two reasons. That number is measured on full-scale white
+noise: its output's peak is the inverse FIR's +63 dB boost at 23 kHz, and the same rounding
+difference (every tap fused against every tap unfused) is -134 dB re that peak but -101 dB re
+the peak of firConv's own band-limited signal. And the mechanism above repeats at the other end of
+the band: the pre-LP FIR's float32 rounding is white, the inverse FIR boosts it by +40 dB at
+20 kHz up to +63 dB at 23 kHz, exactly where the pre-LP cuts, and any change of rounding before or
+in the pre-LP is a new realisation of it. aarch64's fused pre-LP taps alone move the output by
+-92.8 dB re peak, and so does (-91.3 dB) its gain factor for -12 dB, one float ulp above x86_64's.
+A numpy model of the arithmetic (float32 gain and FIRs, fused taps on aarch64, the cascade in
+double) reproduces both renders to one step of the 32-bit WAV. The rule: a float32 stage between
+a filter that cuts a band and one that boosts it has its rounding noise boosted by the second, so
+a cross-build comparison holds to that boosted level, wherever the band is.
 
 Why not `juce::dsp::SIMDRegister`: it does not exist in the aarch64 builds, and with NEON
 forced on it was slower ([`simd-on-aarch64-gcc.md`](simd-on-aarch64-gcc.md)).

@@ -38,10 +38,13 @@ LANDMARKS_HZ = (20.0, 25.0, 50.0, 100.0, 1000.0, 10000.0)
 ARCHES = ("x86_64", "aarch64")
 
 # Each build within DESIGN_DB of the design in every 1/6-octave band from 20 Hz to 20 kHz.
-# Measured worst: x86_64 +0.0153 dB at 20 Hz, aarch64 +0.0138 dB at 20.3 Hz, most of it the
-# rounding of the coefficients to float32 (against the design with float32 coefficients, 0.004
-# dB). Limit 0.05 dB, 3x that. Outside it: up to 0.022 dB below 20 Hz, the float32 high-pass's
-# noise, and up to 13 dB above 22.5 kHz, where the output's floor is above the design's -90 dB.
+# Measured worst (firConv 0.0.3): +0.0112 dB at 20 Hz on both builds, all of it the rounding of
+# the coefficients to float32 (against the design with float32 coefficients, 0.00002 dB; 0.0.2,
+# whose high-pass ran in float32, was 0.004 dB further off). Limit 0.05 dB, 4x that. Outside
+# it: up to 0.013 dB from 10 to 20 Hz, the coefficients' rounding too (0.0.2: 0.022 dB, the
+# float32 high-pass's noise), and up to 13 dB above 22.5 kHz, where the output's floor, the
+# pre-LP FIR's float32 rounding boosted by the inverse FIR (+40 dB at 20 kHz to +63 dB at
+# 23 kHz), is above the design's -90 dB.
 DESIGN_BAND_HZ, DESIGN_DB = (20.0, 20000.0), 0.05
 # The output's peak: measured -3.32 dBFS. Limit -1 dBFS: no sample near the render's clamp.
 PEAK_LIMIT_DBFS = -1.0
