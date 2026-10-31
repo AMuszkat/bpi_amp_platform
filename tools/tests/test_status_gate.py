@@ -228,9 +228,8 @@ class Gate(unittest.TestCase):
 
     def test_local_configuration_hides_nothing(self):
         # A submodule's commit counts, and an untracked file dirties the tree, whatever
-        # .git/config says.
-        self.repo.git("config", "diff.ignoreSubmodules", "all")
-        self.repo.git("config", "status.showUntrackedFiles", "no")
+        # .git/config says. The configuration goes in after the commits: with it, git 2.39
+        # finds nothing to commit in a submodule bump.
         (self.repo.path / "lib").mkdir()
         self.repo.git("update-index", "--add", "--cacheinfo", f"160000,{self.base},lib")
         self.repo.git("commit", "-q", "-m", "a submodule")
@@ -240,6 +239,8 @@ class Gate(unittest.TestCase):
         self.repo.git("update-index", "--cacheinfo", f"160000,{first},lib")
         self.repo.git("commit", "-q", "-m", "bump the submodule")
         head = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("config", "diff.ignoreSubmodules", "all")
+        self.repo.git("config", "status.showUntrackedFiles", "no")
         self.repo.affected(head, with_lib, [])
         self.refused("lib changed since")
         self.repo.write("untracked.txt", "x\n")
