@@ -27,10 +27,11 @@ block is processed in chunks of that size. Since 0.0.2 it replaces `juce::dsp::F
 a patch whose tolerance is, as measured: on x86_64 the same output bit for bit. On aarch64
 every tap is a fused multiply-add, which differs from `FIR::Filter`'s mix of fused and unfused
 taps by less than -131 dB re the FIRs' peak (`../tests/blockfir`); the plugin's output differs
-from 0.0.1's by up to -59 dB re peak (rendered by `speakerd` from a sweep and noise), all of it
+from 0.0.1's by up to about -55 dB re peak (-59 dB at -6 dBFS input peak, -55.0 to -55.7 dB at
+-9 to -20 dBFS: below; rendered by `speakerd` from a sweep and noise), all of it
 below about 50 Hz, because the high-pass biquads (float32, poles close to z = 1) turn any
 change of rounding before them, of even one ulp, into a difference at the level of their own
-low-frequency rounding noise (about -69 dBFS RMS on that signal). That predates P1: on x86_64
+low-frequency rounding noise (about -69 dBFS RMS at -6 dBFS peak). That predates P1: on x86_64
 the same input moved by one ulp in 1000 samples moves 0.0.1's output as much (-58 dB re peak),
 and 0.0.1's aarch64 build differs from its x86_64 build by more (-54 dB re peak). On x86_64
 the inverse FIR's cost at blocks of 1024 dropped from about 14 % to 1 % of real time

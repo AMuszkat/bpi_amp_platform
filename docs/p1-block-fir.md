@@ -124,11 +124,15 @@ below the peak: a few rounding steps of a 32-bit float. On x86_64 they are ident
 the coefficients `firConv` and `crossover` carry, does not change.
 
 **firConv's whole output moves more, below 50 Hz.** On the board, firConv's output differs from
-today's by up to −59 dB below its peak, nearly all of it under 50 Hz. The cause is not the FIR:
+today's by up to about −55 dB below its peak, nearly all of it under 50 Hz (−59 dB with a
+louder input, at −6 dBFS). The cause is not the FIR:
 after the first FIR come firConv's high-pass biquads, float32 filters with poles very close to
 z = 1. They turn any change of rounding before them, even one rounding step, into a different
 pattern of their own low-frequency rounding noise. Today's board build already differs from the
-x86_64 build by −54 dB in the same way. crossover has no such filter: its output keeps the FIRs'
+x86_64 build by −55 dB in the same way. The firConv response test,
+`dsp/juce_plugins/tests/firconv-response/run.sh`, plots the difference against frequency, next
+to the response the coefficients were designed for: from 100 Hz up it stays at least 76 dB
+below the output. crossover has no such filter: its output keeps the FIRs'
 difference, −130 to −133 dB.
 
 P1's tests check the FIRs bit for bit, and the plugins' outputs only where rounding allows:

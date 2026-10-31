@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="760" height="520" viewBox="0 0 760 520" role="img" aria-labelledby="title desc">
 <title id="title">How much P1 changes the output: the filters by a few rounding steps</title>
-<desc id="desc">A dB scale from 0 to -150 dB below the output's peak: firConv's whole output on the board moves by up to -59 dB, all below 50 Hz, through its float32 high-pass biquads (today's board and x86_64 builds already differ by -54 dB); a 16-bit recording's smallest step at -96 dB; P1's test limit at -120 dB; the four FIRs, P1 against today on the board, between -131 and -136 dB; one float32 rounding step at about -138 dB.</desc>
+<desc id="desc">A dB scale from 0 to -150 dB below the output's peak: firConv's whole output on the board moves by up to about -55 dB, nearly all below 50 Hz, through its float32 high-pass biquads (today's board and x86_64 builds already differ as much); a 16-bit recording's smallest step at -96 dB; P1's test limit at -120 dB; the four FIRs, P1 against today on the board, between -131 and -136 dB; one float32 rounding step at about -138 dB.</desc>
 <style>
 text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace}
@@ -40,10 +40,10 @@ text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Aria
 <line x1="210.0" y1="96.0" x2="218.0" y2="96.0" class="ref" />
 <path d="M218,96.0 L244,96.0" fill="none" class="lineS" stroke-width="1"/>
 <text x="250.0" y="100.0" class="t1" font-size="13" text-anchor="start">the output's peak</text>
-<line x1="210.0" y1="237.6" x2="218.0" y2="237.6" class="ref" />
-<path d="M218,237.6 L244,237.6" fill="none" class="lineS" stroke-width="1"/>
-<text x="250.0" y="241.6" class="t1" font-size="13" text-anchor="start">firConv's whole output: up to −59 dB, all below 50 Hz</text>
-<text x="250.0" y="257.6" class="t2" font-size="12" text-anchor="start">its float32 high-pass biquads; today's board and x86_64 builds differ by −54 dB</text>
+<line x1="210.0" y1="228.0" x2="218.0" y2="228.0" class="ref" />
+<path d="M218,228.0 L244,228.0" fill="none" class="lineS" stroke-width="1"/>
+<text x="250.0" y="232.0" class="t1" font-size="13" text-anchor="start">firConv's whole output: up to about −55 dB, nearly all below 50 Hz</text>
+<text x="250.0" y="248.0" class="t2" font-size="12" text-anchor="start">its float32 high-pass biquads; today's board and x86_64 builds differ as much</text>
 <line x1="210.0" y1="326.4" x2="218.0" y2="326.4" class="ref" />
 <path d="M218,326.4 L244,326.4" fill="none" class="lineS" stroke-width="1"/>
 <text x="250.0" y="330.4" class="t2" font-size="13" text-anchor="start">a 16-bit recording's smallest step: −96 dB</text>

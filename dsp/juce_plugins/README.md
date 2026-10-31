@@ -261,8 +261,8 @@ the development container like the other test scripts.
   -1 dBFS. A failure names the band and the numbers. Against a base other than 0.0.1, an x86_64
   difference is reported as a skipped test, with its size.
 
-Measured, 0.0.2 against 0.0.1: identical on x86_64; on aarch64 up to -55.0 dB re peak (the
--59 dB of [`firConv/README.md`](firConv/README.md) holds at -6 dBFS peak only), 99.9 % of the
+Measured, 0.0.2 against 0.0.1: identical on x86_64; on aarch64 up to -55.0 dB re peak (-59 dB
+at -6 dBFS input peak only, [`firConv/README.md`](firConv/README.md)), 99.9 % of the
 difference's energy below 50 Hz, at least 76.8 dB below the output in every band from 100 Hz,
 as large as 0.0.1's own difference between aarch64 and x86_64. A second plugin is an entry of
 `PLUGINS` in the test module. Without python3-scipy (in the development container's
@@ -358,7 +358,8 @@ shared folder it declares):
 A change only to `cmake/` or to the JUCE pin changes every identity but no version. The
 P1 block FIR is a patch: firConv and crossover 0.0.1 -> 0.0.2, the same parameters and state.
 Its tolerance, as measured: the output bit-identical on x86_64; on aarch64 the FIRs within
--131 dB re peak, crossover's output within -129 dB re peak, and firConv's within -59 dB re peak,
+-131 dB re peak, crossover's output within -129 dB re peak, and firConv's within about -55 dB re
+peak (-59 dB at -6 dBFS input; measured by [the response test](#the-response-test)),
 all below 50 Hz, the rounding noise of its float32 high-pass biquads, which any one-ulp change
 before them moves that much, and did before P1 ([`firConv/README.md`](firConv/README.md)).
 
