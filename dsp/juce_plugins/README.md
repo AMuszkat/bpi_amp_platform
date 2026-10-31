@@ -237,10 +237,13 @@ git rev-parse HEAD:dsp/juce_plugins/firConv HEAD:dsp/juce_plugins/shared/blockfi
 
 with `-dirty` appended when `git status --porcelain -- <the same paths>` prints anything
 (tracked changes, staged or not, and untracked files that are not ignored), and `unknown`
-without git, outside a repository, or in one without a commit. A folder that is not committed
-yet counts as the empty tree (`git hash-object -t tree /dev/null`), and is dirty. On a clean
-tree the identity is reproducible from git alone. It follows the tree, not a commit: a commit
-that touches none of a plugin's inputs leaves its identity as it was. It works in a git worktree
+without git, outside a repository, or in one without a commit. A folder that is not in HEAD
+yet (a new plugin or shared folder) counts as the empty tree
+(`git hash-object -t tree /dev/null`); `-dirty` follows, as for every input, exactly when
+`git status --porcelain` over the inputs prints anything: a new plugin's untracked files do, a
+declared shared folder that is missing or holds only ignored files does not. On a clean tree
+the identity is reproducible from git alone. It follows the tree, not a commit: a commit that
+touches none of a plugin's inputs leaves its identity as it was. It works in a git worktree
 (the gitlink is read from HEAD's tree, so an uninitialised submodule changes nothing).
 `tools/build-podman.sh` mounts only `juce_plugins/` into its container, where git finds no
 repository: its bundles say `unknown`.
