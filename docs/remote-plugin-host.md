@@ -1219,15 +1219,20 @@ history allocated in `prepareToPlay`, and processes a block longer than the prep
 chunks. On x86_64 it is bit-identical to `FIR::Filter`; on aarch64 every tap is one fused
 multiply-add, while `FIR::Filter` mixes fused and unfused taps from sample to sample, so the
 FIRs' outputs differ by at most -131 dB re their peak (crossover's output by -129 dB).
-firConv's output on aarch64 moves by up to about -55 dB re peak (-59 dB at -6 dBFS input),
-nearly all of it below 50 Hz (measured with `speakerd` renders of 0.0.1 and 0.0.2): its float32
-high-pass biquads, with poles close to z = 1, turn any rounding change before them, even of one
-ulp, into a difference at the level of their own low-frequency rounding noise, as they did before
-(today's aarch64 build differs from the x86_64 one as much). Its test,
-`dsp/juce_plugins/tests/blockfir` (rung 1, outside every plugin's identity), builds it with the
-plugins' flags and checks it bit for bit against a reference whose arithmetic is written out,
-on x86_64 and on aarch64 under qemu. Both plugins went from 0.0.1 to 0.0.2: a patch, the
-processing changed and the interface did not. [p1-block-fir.md](p1-block-fir.md) explains, with
+In 0.0.2 firConv's output on aarch64 moved by up to about -55 dB re peak (-59 dB at -6 dBFS
+input), nearly all of it below 50 Hz (measured with `speakerd` renders of 0.0.1 and 0.0.2): its
+float32 high-pass biquads, with poles close to z = 1, turned any rounding change before them,
+even of one ulp, into a difference at the level of their own low-frequency rounding noise, as
+they did before (0.0.1's aarch64 build differed from its x86_64 one as much). firConv 0.0.3
+runs those biquads in double. Rendered from the response test's sweep, its x86_64 and aarch64
+builds differ by -92 dB re peak, 93 % of it above 20 kHz, and every 1/6-octave band from 20 Hz
+to 20 kHz of the difference is at least 84 dB below the output. Against the chain computed in
+float64, what remains is the float32 rounding of the coefficients in `filters.hpp` (-77 dBFS
+RMS, the same in every build); the arithmetic's share fell from -75 to -107 dBFS RMS. The block
+FIR's test, `dsp/juce_plugins/tests/blockfir` (rung 1, outside every plugin's identity), builds
+it with the plugins' flags and checks it bit for bit against a reference whose arithmetic is
+written out, on x86_64 and on aarch64 under qemu. Both plugins went from 0.0.1 to 0.0.2, and
+firConv on to 0.0.3: patches, the processing changed and the interface did not. [p1-block-fir.md](p1-block-fir.md) explains, with
 figures, why the block FIR is about sixteen times cheaper and how its output differs.
 
 Two things cross the plugin boundary at run time, both through JUCE's LV2 hosting inside

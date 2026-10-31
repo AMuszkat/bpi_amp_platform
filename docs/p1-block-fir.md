@@ -135,6 +135,15 @@ plots the plugin's magnitude response on x86_64 and on aarch64 against the respo
 coefficients were designed for: both builds are within 0.016 dB of it from 20 Hz to 20 kHz. crossover has no such filter: its output keeps the FIRs'
 difference, −130 to −133 dB.
 
+**firConv 0.0.3 removes that noise.** It runs the high-pass biquads in double precision, so
+their rounding no longer piles up. Against 0.0.2 its output moves by −60 dB below the peak on
+x86_64 and −58 dB on the board, nearly all of it under 50 Hz: that is the noise going away.
+Its x86_64 and board builds now differ by −92 dB below the peak instead of −55 dB, 93 % of it
+above 20 kHz, where the inverse FIR boosts the first FIR's own rounding. From 20 Hz to 20 kHz
+the difference stays at least 84 dB below the output. What is left of firConv's error against
+its exact design is the rounding of its coefficients to 32-bit floats in `filters.hpp`, the same
+in every build: both builds are within 0.011 dB of the design from 20 Hz to 20 kHz.
+
 P1's tests check the FIRs bit for bit, and the plugins' outputs only where rounding allows:
 
 | Test (rung 1 and rung 2) | Result | Limit |
