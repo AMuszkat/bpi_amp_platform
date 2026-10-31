@@ -40,7 +40,7 @@ for _folder in (_HERE, os.path.join(os.path.dirname(_HERE), "speakerd")):
         break
 import tweeter_rule  # noqa: E402
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PROTOCOL = 1
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
 LINE_LIMIT = 32 * 1024 * 1024          # a longer line closes the connection
@@ -53,6 +53,7 @@ PERSIST_INTERVAL = 1.0                 # graph.json at most once a second while 
 LKG_AFTER = 60.0                       # graph.json -> graph.lkg.json after this long with no restart
 MAX_MONITOR_RATE = 60.0
 MONITOR_BACKLOG = 256 * 1024           # a monitor client further behind than this skips values
+MONITOR_TOKENS = 2.0                   # a monitor subscription's bucket holds at most this (Subscription)
 LAYER_FILES = {"current": "graph.json", "last-known-good": "graph.lkg.json", "factory": "factory.json"}
 SEQ_MASK = 0xFFFFFFFF
 BIG = 2 ** 63 - 1
@@ -433,23 +434,25 @@ class Conn:
         self.line_limit = limit
         self.reader._limit = limit
 
-    async def read(self):
-        """The next object, or None at the end. ProtocolError for a line longer than the line
-        limit (64 KiB until the peer proved the pair's secret, 32 MiB after) or one that is not a
-        JSON object: the connection closes (the peer reconnects)."""
+    async def read(self, raw=False):
+        """The next object, or None at the end; with `raw`, (the object, its line as it came, with
+        its newline) or (None, None): the local link's monitor values go to the clients as they
+        came (Monitor.on_value). ProtocolError for a line longer than the line limit (64 KiB until
+        the peer proved the pair's secret, 32 MiB after) or one that is not a JSON object: the
+        connection closes (the peer reconnects)."""
         try:
             line = await self.reader.readline()
         except (asyncio.LimitOverrunError, ValueError):
             raise ProtocolError(f"a line longer than {self.line_limit // 1024} KiB") from None
         if not line or not line.endswith(b"\n"):
-            return None      # the end, or the peer went away in the middle of a line
+            return (None, None) if raw else None      # the end, or the peer went away in the middle of a line
         try:
             obj = json.loads(line)
         except (UnicodeDecodeError, ValueError, RecursionError) as e:
             raise ProtocolError(f"a line that is not JSON ({e})") from None
         if not isinstance(obj, dict):
             raise ProtocolError("a line that is not a JSON object")
-        return obj
+        return (obj, line) if raw else obj
 
     def unread_documents(self, backlog):
         """How much of `backlog` (written, not yet taken by the kernel) is documents."""
@@ -462,8 +465,21 @@ class Conn:
         """Queues one line. A peer that leaves more than `limit` unread, not counting whole
         documents (`document`: a state or graph, up to 32 MiB each, which a controller may
         take a while to read), or more than DOCUMENTS_WRITE_LIMIT of documents, is dropped."""
+        if self.room():
+            self.write(json.dumps(obj, separators=(",", ":")).encode() + b"\n", document)
+
+    def send_line(self, line):
+        """Queues a line already encoded, with its newline: a monitor value as speakerd sent it,
+        which goes to every subscriber without being encoded again for each. The same limits as
+        send(): it counts as what is unread besides documents."""
+        if self.room():
+            self.write(line, False)
+
+    def room(self):
+        """False when this connection is closed, or is closed now because its peer does not read
+        what it gets (send()): nothing more queues for it."""
         if self.closed:
-            return
+            return False
         if self.limit is not None:
             backlog = self.backlog()
             documents = self.unread_documents(backlog)
@@ -473,8 +489,11 @@ class Conn:
                               + (f"{self.limit // 1024} KiB unread besides documents" if documents <= DOCUMENTS_WRITE_LIMIT
                                  else f"{DOCUMENTS_WRITE_LIMIT >> 20} MiB of documents unread"))
                 self.close()
-                return
-        data = json.dumps(obj, separators=(",", ":")).encode() + b"\n"
+                return False
+        return True
+
+    def write(self, data, document):
+        """Hands one encoded line to the transport, counting where documents lie in it."""
         try:
             self.writer.write(data)
         except (ConnectionError, RuntimeError):
@@ -830,11 +849,11 @@ class Speakerd:
                 except Exception as e:
                     bad_message("speakerd", hello, e)
                 while True:
-                    obj = await conn.read()
+                    obj, line = await conn.read(raw=True)
                     if obj is None:
                         break
                     try:
-                        self.dispatch(obj)
+                        self.dispatch(obj, line)
                     except Exception as e:
                         bad_message("speakerd", obj, e)
             except ProtocolError as e:
@@ -844,6 +863,7 @@ class Speakerd:
             finally:
                 conn.close()
                 self.conn, self.connected = None, False
+                self.core.monitor.on_speakerd_lost()
                 for futures in list(self.pending.values()):
                     for future in futures:
                         if not future.done():
@@ -861,7 +881,8 @@ class Speakerd:
         revision = hello.get("revision")
         self.revision = revision if good_int(revision, 0, BIG) else 0
 
-    def dispatch(self, obj):
+    def dispatch(self, obj, line):
+        """One message from speakerd; `line` is it as it came (a monitor value is relayed so)."""
         op = obj.get("op")
         if op in ("applied", "failed"):
             revision = obj.get("revision")
@@ -876,7 +897,7 @@ class Speakerd:
                 self.core.role.late_answer(revision, result)
             self.core.status_changed()
         elif op == "value":
-            self.core.monitor.on_value(obj)
+            self.core.monitor.on_value(obj, line)
         elif op == "error" and obj.get("about") == "subscribe":
             self.core.monitor.on_error(obj)
         elif op == "error":
@@ -1687,21 +1708,53 @@ class Agent(Role):
 
 
 # ---------------------------------------------------------------------------------------------
-# Monitoring: subscriptions go to speakerd as their union, values to each client newest-wins
+# Monitoring: subscriptions go to speakerd as their union, each value to the clients as it arrives
+
+class Subscription:
+    """One client's subscription to one stream: its rate, and a token bucket that lets a value
+    through when it holds a token. It fills at the rate and holds at most MONITOR_TOKENS (two):
+    the one a value takes, and one of slack. The slack is what keeps the client at its own rate:
+    a value that comes early after a late one (speakerd's monitor thread or this loop held up a
+    moment) still goes, and a client slower than the union, which gets one value in every few,
+    keeps the part of a token it had left at the last value it got (with one token at most it
+    would wait for whole numbers of the union's periods: 26 values a second for 45 asked, beside
+    a client of 60 Hz). It starts with one token, which the stored value takes (Monitor.request),
+    so a new subscription's next value comes a period after it; the slack builds up over time.
+    So in any T seconds it gets at most 2 + T x rate values (1 + T x rate from its start): its
+    rate on average, and after a pause (a full bucket) one value may come early. Nothing waits
+    in it. `sent` is the number of the last value it got (Monitor.on_value): it never gets one
+    twice."""
+
+    __slots__ = ("rate", "tokens", "then", "sent")
+
+    def __init__(self, rate, now):
+        self.rate, self.tokens, self.then, self.sent = rate, 1.0, now, 0
+
+    def fill(self, now):
+        self.tokens = min(MONITOR_TOKENS, self.tokens + (now - self.then) * self.rate)
+        self.then = now
+
+    def set_rate(self, rate, now):
+        """Subscribed again at another rate: what it holds is counted at the old one up to now."""
+        self.fill(now)
+        self.rate = rate
+
 
 class MonitorClient:
     def __init__(self, conn):
         self.conn = conn
-        self.subs = {}       # stream -> rate in Hz
-        self.pumps = {}      # stream -> task
+        self.subs = {}       # stream -> Subscription
 
 
 class Monitor:
     def __init__(self, core):
         self.core = core
         self.clients = []
-        self.latest = {}     # stream -> the newest value line from speakerd
+        self.latest = {}     # stream of the union -> (number, its newest value line as speakerd sent it)
         self.union = {}      # stream -> the rate speakerd was asked for
+        self.arrived = set()             # streams whose newest line has not been flushed yet
+        self.flush_scheduled = False
+        self.values = 0                  # the values kept so far, which numbers them
 
     def on_error(self, obj):
         """speakerd refused a subscription: every subscriber of that stream is told, and loses it."""
@@ -1710,19 +1763,90 @@ class Monitor:
             if stream in client.subs:
                 client.conn.send({"op": "error", "about": "subscribe", "stream": stream, "reason": obj.get("reason")})
                 del client.subs[stream]
-                client.pumps.pop(stream).cancel()
         self.update_union()
 
-    def on_value(self, obj):
+    def on_value(self, obj, line):
+        """A value from speakerd, `line` as it came. That line is what the clients get (it is not
+        encoded again for each), so it is kept only when a client may get it as it is: a value
+        (dispatch) of a stream some client subscribed to, that starts with its object and holds
+        no NaN or Infinity (Python's json reads them, a controller does not: such a line is
+        encoded again, which a value that is not a number fails), and at most 64 KiB long (the
+        longest line ampd reads on the monitor link). A line longer than twice that is refused
+        before anything else, so that no huge line is encoded again on the loop (encoding it
+        compactly does not halve it: speakerd writes at most a space after a separator).
+        Otherwise no client gets it, and the stream has no newest value until the next one."""
         stream = obj.get("stream")
-        if isinstance(stream, str) and stream in self.union:
-            self.latest[stream] = obj
+        if not isinstance(stream, str) or stream not in self.union:
+            return       # nobody asked for it (speakerd has not read an unsubscribe yet)
+        if len(line) - 1 > 2 * HELLO_LINE_LIMIT:
+            self.not_relayed(stream, "huge", f"longer than {HELLO_LINE_LIMIT // 1024} KiB")
+            return
+        if line[:1] != b"{" or b"NaN" in line or b"Infinity" in line:
+            try:
+                line = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+            except ValueError:
+                self.not_relayed(stream, "number", "that is not a number")
+                return
+        if len(line) - 1 > HELLO_LINE_LIMIT:
+            self.not_relayed(stream, "long", f"longer than {HELLO_LINE_LIMIT // 1024} KiB")
+            return
+        self.values += 1
+        self.latest[stream] = (self.values, line)
+        # One flush per pass of the event loop, after every line read at once: of a burst, only
+        # the newest of each stream goes out. A value waits for nothing else.
+        self.arrived.add(stream)
+        if not self.flush_scheduled:
+            self.flush_scheduled = True
+            asyncio.get_running_loop().call_soon(self.flush)
+
+    def not_relayed(self, stream, why, text):
+        """A value of `stream` that no client may get: the stream has no newest value, and ampd
+        says so (at most every 10 s for each `why`)."""
+        self.latest.pop(stream, None)
+        THROTTLED.say(("monitor-value", why), f"speakerd: a value of {stream} {text}: not relayed")
+
+    def flush(self):
+        """Sends the newest line of each stream that got one since the last flush to each of its
+        subscribers whose bucket holds a token. A callback of the loop's: what breaks in one offer
+        (one client, one stream) is said here, since nobody else would, and the others go on."""
+        self.flush_scheduled = False
+        arrived, self.arrived = self.arrived, set()
+        now = time.monotonic()
+        for stream in arrived:
+            newest = self.latest.get(stream)
+            if newest is None:
+                continue         # it left the union since, or speakerd went away
+            for client in self.clients:
+                sub = client.subs.get(stream)
+                if sub is not None:
+                    try:
+                        self.offer(client, sub, newest, now)
+                    except Exception as e:
+                        THROTTLED.say(("task", "monitor", type(e).__name__),
+                                      f"monitor: {type(e).__name__}: {e}: carrying on")
+
+    @staticmethod
+    def offer(client, sub, newest, now):
+        """The newest value, (number, line), to `client` if its subscription holds a token and has
+        not had it (a subscription served from the store in the same pass as a flush of that
+        value: speakerd/timing's `late` would count twice). A client further behind than
+        MONITOR_BACKLOG skips it (the next may go); one whose connection closed gets nothing (it
+        leaves self.clients when its serve() ends, which can come after a flush)."""
+        number, line = newest
+        if sub.sent == number:
+            return
+        sub.fill(now)
+        conn = client.conn
+        if sub.tokens >= 1.0 and not conn.closed and conn.backlog() < MONITOR_BACKLOG:
+            conn.send_line(line)
+            sub.tokens -= 1.0
+            sub.sent = number
 
     def update_union(self):
         want = {}
         for client in self.clients:
-            for stream, rate in client.subs.items():
-                want[stream] = max(want.get(stream, 0), rate)
+            for stream, sub in client.subs.items():
+                want[stream] = max(want.get(stream, 0), sub.rate)
         sd = self.core.sd
         for stream, rate in want.items():
             if self.union.get(stream) != rate:
@@ -1738,17 +1862,10 @@ class Monitor:
         for stream, rate in self.union.items():
             self.core.sd.send({"op": "subscribe", "stream": stream, "rate_hz": rate})
 
-    async def pump(self, client, stream):
-        """Sends `stream`'s newest value to `client` at the client's rate, when there is one it
-        has not had: newest wins, a value it has not taken yet is replaced, never queued."""
-        sent, due = None, time.monotonic()
-        while stream in client.subs and not client.conn.closed:
-            value = self.latest.get(stream)
-            if value is not None and value is not sent and client.conn.backlog() < MONITOR_BACKLOG:
-                client.conn.send(value)
-                sent = value
-            due = max(due + 1.0 / client.subs.get(stream, 1.0), time.monotonic() - 0.5)
-            await asyncio.sleep(max(0.0, due - time.monotonic()))
+    def on_speakerd_lost(self):
+        """The newest values were a speakerd's that is gone: a window opened now waits for the
+        next one's."""
+        self.latest.clear()
 
     async def serve(self, reader, writer):
         conn = Conn(reader, writer)
@@ -1781,8 +1898,6 @@ class Monitor:
         finally:
             conn.close()
             self.clients.remove(client)
-            for task in client.pumps.values():
-                task.cancel()
             self.update_union()
 
     def request(self, client, msg):
@@ -1802,15 +1917,20 @@ class Monitor:
                 conn.send({"op": "error", "about": "subscribe", "stream": stream,
                            "reason": f"rate_hz must be 0.1 to {MAX_MONITOR_RATE:g}"})
                 return
-            rate = float(rate)
-            fresh = stream not in client.subs
-            client.subs[stream] = rate
-            if fresh:
-                client.pumps[stream] = asyncio.get_running_loop().create_task(self.pump(client, stream))
+            rate, now = float(rate), time.monotonic()
+            sub = client.subs.get(stream)
+            if sub is not None:
+                sub.set_rate(rate, now)        # the bucket follows the new rate from now on
+                self.update_union()
+                return
+            sub = client.subs[stream] = Subscription(rate, now)
             self.update_union()
+            # A window opened now shows the newest value at once, from the store the others get.
+            newest = self.latest.get(stream)
+            if newest is not None:
+                self.offer(client, sub, newest, now)
         elif op == "unsubscribe":
             if client.subs.pop(stream, None) is not None:
-                client.pumps.pop(stream).cancel()
                 self.update_union()
 
 

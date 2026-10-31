@@ -1659,12 +1659,13 @@ class MonitorRefused(AssertionError):
 class MonitorClient:
     """A monitor subscriber, as a plugin window (docs/protocol.md, "Monitoring"): the monitor link
     to one speaker's ampd. With `reconnect`, it connects again every 0.1 s when the link drops and
-    subscribes again, as an open window does. `values` is every value with its arrival time."""
+    subscribes again, as an open window does. `values` is every value with its arrival time,
+    `errors` every error, `others` every other message (ampd sends a monitor client nothing else)."""
 
     def __init__(self, address, port=MONITOR_PORT, reconnect=False, timeout=10, secret=TEST_SECRET, name="vpair-monitor"):
         self.address, self.port, self.reconnect = address, port, reconnect
         self.secret, self.name, self._file = secret, name, None
-        self.subs, self.values, self.errors = {}, [], []
+        self.subs, self.values, self.errors, self.others = {}, [], [], []
         self.connects, self.closed, self.sock = 0, False, None
         self._changed = threading.Condition()
         self._lock = threading.Lock()
@@ -1711,6 +1712,8 @@ class MonitorClient:
                             self.values.append((time.monotonic(), obj))
                         elif obj.get("op") == "error":
                             self.errors.append(obj)
+                        else:
+                            self.others.append(obj)
                         self._changed.notify_all()
             except (OSError, ValueError):
                 pass
@@ -1737,16 +1740,19 @@ class MonitorClient:
         with self._changed:
             return [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)]
 
-    def wait_value(self, stream, since=None, timeout=10):
+    def wait_value(self, stream, since=None, timeout=10, where=None):
+        """The first (arrival, value line) of a stream that arrived after `since` and, with
+        `where`, for which where(value line) is true; AssertionError after `timeout` seconds."""
         deadline = time.monotonic() + timeout
         with self._changed:
             while True:
-                found = [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)]
+                found = [(t, v) for t, v in self.values if v["stream"] == stream and (since is None or t > since)
+                         and (where is None or where(v))]
                 if found:
                     return found[0]
                 if time.monotonic() > deadline:
-                    raise AssertionError(f"no value of {stream} from {self.address} within {timeout} s"
-                                         + (f"; errors: {self.errors}" if self.errors else ""))
+                    raise AssertionError(f"no value of {stream}{' such as asked' if where else ''} from {self.address} "
+                                         f"within {timeout} s" + (f"; errors: {self.errors}" if self.errors else ""))
                 self._changed.wait(0.05)
 
     def close(self):

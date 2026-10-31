@@ -21,7 +21,9 @@ speakerd that does exactly what it is told, including failing.
   "monitors"[stream] (a number), speakerd/timing the control file's "timing" (an object, default
   TIMING with "cycles_total" counting up), and nothing while the current document has no node <uid>
   (clarification 19: the stream is kept and starts when a revision has it). A name that is no
-  stream, or one in the control file's "refuse_streams", is answered with an error.
+  stream, or one in the control file's "refuse_streams", is answered with an error. After each
+  output/level value it writes the control file's "also" (lines of text, each as it is, with a
+  newline): lines ampd must not relay to a monitor client.
 - `status` is answered with the hello's fields.
 - Every line it reads and the hellos it sends go to the events file, one JSON object per line
   with "dir" ("in" or "out") and "t" (time.monotonic()), for the test to read.
@@ -96,6 +98,8 @@ class StandIn:
                 if stream == "output/level":
                     send({"op": "value", "stream": stream, "t": time.monotonic(),
                           "v": control.get("level", [-12.0, -15.0, -120.0, -120.0])})
+                    for line in control.get("also", []):
+                        writer.write(line.encode() + b"\n")
                 elif stream == "speakerd/timing":
                     timing = dict(control.get("timing", TIMING))
                     timing["cycles_total"] = timing.get("cycles_total", 0) + int(time.monotonic() * 47)

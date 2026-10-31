@@ -35,6 +35,17 @@ Pass when:
   is relayed at its rate with speakerd's object unchanged; a stream that is not output/level,
   speakerd/timing or node/<uid>/mon_<id> (speakerd/timings, speakerd/timing/, Speakerd/timing,
   speakerd/) is answered with an error;
+- the monitor relay, on the hub's monitor link and on an agent's alike: a new subscription gets
+  the newest value at once (with the union at 1 Hz, a value sampled before it subscribed, within
+  0.1 s, the one the other client got); beside a client of 60 Hz, one of 45 and one of 30 each get
+  their own rate within 30 % (of at most what the 60 Hz one gets); one subscribing again at 15 Hz
+  gets 15 within 30 %, and speakerd is asked no other rate; nothing comes after an unsubscribe;
+  a value of a stream nobody subscribed to, a line of another op naming the stream, a value whose
+  stream is not a string, and one with no stream reach no client; a value of 56 KB is relayed;
+  one of 105 KB and one holding NaN are not (ampd says so), no client gets them, from 0.2 s on
+  none gets any value, nor does a client subscribing then (none is kept as the newest), and
+  values come again after; no client gets anything but values and errors, is disconnected, gets
+  another stream, or gets a value twice or after a newer one;
 - persistence: while values change 25 times a second for 3 s, graph.json is replaced at most 4
   times and holds the last value within 1.1 s of it; a new revision is written at once (within
   0.5 s); graph.lkg.json appears once the revision has played --lkg-after seconds (2 here), not
@@ -87,6 +98,7 @@ Pass when:
 import hashlib
 import hmac
 import json
+import math
 import os
 import shutil
 import socket
@@ -397,6 +409,176 @@ class Protocol(unittest.TestCase):
                 self.assertTrue(slow.errors and slow.errors[0]["about"] == "subscribe", slow.errors)
             sd.wait_event(lambda e: e.get("op") == "unsubscribe" and e["stream"] == "output/level",
                           what="the unsubscribe when the last subscriber left")
+
+    def test_monitor_relay(self):
+        """The relay of docs/protocol.md, "Monitoring" (each value as it arrives, at most at the
+        client's rate, newest wins), on the hub's monitor link and on an agent's alike."""
+        with StandInPair(self.tmp, documents()) as pair:
+            for name in ("left", "right"):
+                with self.subTest(speaker=name):
+                    self.check_relay(pair, name)
+
+    def check_relay(self, pair, name):
+        sd, ampd, stream = pair.sd[name], pair.ampd[name], "output/level"
+        clients = []
+
+        def client(label, rate=None):
+            c = MonitorClient(ADDRESS[name], name=f"relay-{name}-{label}")
+            clients.append(c)
+            if rate is not None:
+                c.subscribe(stream, rate)
+            return c
+
+        def rate_of(c, start, end):
+            return len([t for t, _ in c.of(stream, since=start) if t <= end]) / (end - start)
+
+        def window(seconds=3.0):
+            start = time.monotonic()
+            time.sleep(seconds)
+            return start, time.monotonic()
+
+        def nothing_relayed(level, log_line, watch):
+            """The stand-in's output/level made `level`: ampd says `log_line`; no client gets such a
+            value, none from 0.2 s on, and a client subscribing then gets none from the store; when
+            the level is a plain one again, values come again, to `watch` and to the new client."""
+            mark = ampd.mark()
+            sd.set_control({"level": level})
+            ampd.wait_for(log_line, after=mark, timeout=5)
+            since = time.monotonic() + 0.2
+            fresh = client(f"during-{len(clients)}", 30)
+            time.sleep(0.7)
+            for c in clients:
+                self.assertEqual(c.of(stream, since=since), [], f"{name}: {c.name} got a value after '{log_line}'")
+                self.assertFalse([v for _, v in c.values if len(v["v"]) == len(level)
+                                  and (len(level) > 4 or math.isnan(v["v"][0]))],
+                                 f"{name}: {c.name} got the value that ampd said it did not relay")
+            sd.set_control({})
+            back = time.monotonic()
+            for c in (watch, fresh):
+                c.wait_value(stream, since=back, timeout=3)
+
+        try:
+            # A new subscription gets the newest value at once, from the store: with the union at
+            # 1 Hz the source's next value is a second away, so a value sampled before the
+            # subscription and here within 0.1 s of it is the stored one.
+            first = client("first", 1)
+            first.wait_value(stream, timeout=5)
+            time.sleep(0.3)
+            late = client("late")
+            asked = time.monotonic()
+            late.subscribe(stream, 1)
+            arrived, value = late.wait_value(stream, timeout=2)
+            print(f"\n  {name}: a new subscription's first value {1000 * (arrived - asked):.1f} ms after it, "
+                  f"sampled {1000 * (asked - value['t']):.0f} ms before it", end="")
+            self.assertLess(value["t"], asked, f"{name}: the first value is not the newest one there was")
+            self.assertLess(arrived - asked, 0.1, f"{name}: the newest value did not come at once")
+            self.assertEqual(value["t"], first.of(stream)[-1][1]["t"], f"{name}: not the value the others got")
+
+            # Beside a client of 60 Hz, a client of 45 and one of 30 each get their own rate.
+            mark = time.monotonic()
+            fast, mid, slow = client("fast", 60), client("mid", 45), client("slow", 30)
+            sd.wait_event(lambda e: e.get("op") == "subscribe" and e.get("rate_hz") == 60 and e["t"] > mark,
+                          what="the union at 60 Hz")
+            time.sleep(1.1)          # the stand-in may still be in the 1 s sleep of the union's 1 Hz
+            start, end = window()
+            source, got = rate_of(fast, start, end), {"mid": rate_of(mid, start, end), "slow": rate_of(slow, start, end)}
+            print(f"\n  {name}: beside a client of 60 Hz ({source:.1f} values/s): 45 Hz asked {got['mid']:.1f}, "
+                  f"30 Hz asked {got['slow']:.1f}", end="")
+            self.assertLess(abs(source - 60) / 60, 0.3, f"{name}: the 60 Hz client got {source:.1f} values/s")
+            for label, asked_hz in (("mid", 45), ("slow", 30)):
+                want = min(asked_hz, source)
+                self.assertLess(abs(got[label] - want) / want, 0.3,
+                                f"{name}: the {asked_hz} Hz client got {got[label]:.1f} values/s beside the 60 Hz one")
+
+            # A new subscription of 5 Hz beside them (speakerd at 60 Hz by now): its first value
+            # at once, from the store, and the next no sooner than a period later, not the
+            # union's next value 17 ms on (its bucket starts with the one token the first takes).
+            paced = client("paced")
+            asked = time.monotonic()
+            paced.subscribe(stream, 5)
+            first_at, _ = paced.wait_value(stream, timeout=2)
+            second_at, _ = paced.wait_value(stream, since=first_at, timeout=2)
+            print(f"\n  {name}: a new subscription of 5 Hz beside the union of 60: its first value "
+                  f"{1000 * (first_at - asked):.1f} ms after it, the next {1000 * (second_at - first_at):.0f} ms later", end="")
+            self.assertLess(first_at - asked, 0.1, f"{name}: the newest value did not come at once")
+            self.assertGreater(second_at - first_at, 0.9 / 5, f"{name}: a new subscription's second value came "
+                               f"{1000 * (second_at - first_at):.0f} ms after its first, sooner than its period")
+
+            # Subscribed again at another rate: the client's bucket follows it, the union stays.
+            mark = time.monotonic()
+            mid.subscribe(stream, 15)
+            time.sleep(0.3)
+            start, end = window()
+            changed = rate_of(mid, start, end)
+            print(f"\n  {name}: subscribed again at 15 Hz: {changed:.1f} values/s", end="")
+            self.assertLess(abs(changed - 15) / 15, 0.3, f"{name}: {changed:.1f} values/s after asking 15 Hz")
+            self.assertEqual([e for e in sd.events("subscribe", "in") if e["t"] > mark], [],
+                             f"{name}: speakerd was asked another rate, the union is still 60 Hz")
+
+            # Unsubscribed: nothing more.
+            slow.unsubscribe(stream)
+            time.sleep(0.2)
+            count = len(slow.of(stream))
+            time.sleep(0.5)
+            self.assertEqual(len(slow.of(stream)), count, f"{name}: values after an unsubscribe")
+
+            # Nothing of speakerd's but a value of a subscribed stream reaches a client.
+            sd.set_control({"also": [json.dumps({"op": "value", "stream": "node/99/mon_x", "t": 1.0, "v": 1.0}),
+                                     json.dumps({"op": "frame", "stream": stream, "t": 1.0, "v": [1, 2, 3]}),
+                                     json.dumps({"op": "value", "stream": [stream], "t": 1.0, "v": 1.0}),
+                                     json.dumps({"op": "value", "t": 1.0, "v": 1.0})]})
+            time.sleep(0.5)
+            sd.set_control({})
+
+            # A value of up to 64 KiB is relayed; a longer one, or one that is not a number (NaN),
+            # reaches no client, and none stays as the newest; the stream goes on after it.
+            sd.set_control({"level": [-12.0] * 8000})                      # a line of about 56 KB
+            since = time.monotonic()
+            try:
+                fast.wait_value(stream, since=since, timeout=3, where=lambda v: len(v["v"]) == 8000)
+            except AssertionError:
+                self.fail(f"{name}: a value of 56 KB was not relayed within 3 s")
+            nothing_relayed([-12.0] * 15000, "speakerd: a value of output/level longer than 64 KiB: not relayed", fast)
+            nothing_relayed([float("nan"), -15.0, -120.0, -120.0],
+                            "speakerd: a value of output/level that is not a number: not relayed", fast)
+            # A line over twice the limit is refused before anything else: one with a NaN is
+            # never encoded again (which would say "not a number").
+            nothing_relayed([float("nan")] + [-12.0] * 20000,             # about 140 KB
+                            "speakerd: a value of output/level longer than 64 KiB: not relayed", fast)
+
+            # speakerd goes: the store is cleared, so a client subscribing then gets nothing (no
+            # value of a speakerd that is gone). It comes back under the running ampd: every
+            # subscriber gets values again, the new one too, within 2 s.
+            control = json.loads(sd.control_path.read_text())
+            mark = ampd.mark()
+            sd.stop()
+            ampd.wait_for("speakerd: lost the connection", after=mark, timeout=5)
+            gone = time.monotonic()
+            meanwhile = client("while-speakerd-is-gone", 30)
+            time.sleep(0.5)
+            for c in clients:
+                self.assertEqual(c.of(stream, since=gone), [], f"{name}: {c.name} got a value while speakerd was gone")
+            sd = pair.sd[name] = pair._stack.enter_context(StandInSpeakerd(pair.env[name], pair.state[name], control))
+            back, again = time.monotonic(), []
+            for c in clients:
+                if stream in c.subs:         # all but the one that unsubscribed, `meanwhile` among them
+                    try:
+                        again.append(c.wait_value(stream, since=back, timeout=max(0.0, back + 2.0 - time.monotonic()))[0])
+                    except AssertionError:
+                        self.fail(f"{name}: {c.name} got no value within 2 s of speakerd's return")
+            print(f"\n  {name}: speakerd back: {len(again)} subscribers got values again, the last "
+                  f"{1000 * (max(again) - back):.0f} ms after it", end="")
+
+            for c in clients:
+                self.assertEqual(c.others, [], f"{name}: {c.name} got something that is not a value or an error")
+                self.assertEqual(c.connects, 1, f"{name}: {c.name} was disconnected")
+                self.assertEqual({v["stream"] for _, v in c.values}, {stream}, f"{name}: {c.name} got another stream")
+                times = [v["t"] for _, v in c.values]
+                self.assertTrue(all(a < b for a, b in zip(times, times[1:])),
+                                f"{name}: {c.name} got a value twice, or an older one after a newer one")
+        finally:
+            for c in clients:
+                c.close()
 
     def test_persistence(self):
         with StandInPair(self.tmp, documents(), ampd_args=["--lkg-after", "2"]) as pair, Controller("ctl-a") as a:
