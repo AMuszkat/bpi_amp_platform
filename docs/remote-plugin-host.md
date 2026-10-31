@@ -453,8 +453,8 @@ serves the knob, IR receiver and web page. It never touches audio.
 **The hub** is a role of `ampd` on the left speaker: the one place that holds the truth. The
 truth has two parts, the **graph document** with a revision number and the **parameter
 values** keyed by node uid and parameter ID. The hub also keeps the **catalogue** (which plugin
-builds, at which version hash, each speaker has installed) and refuses a graph that references
-a plugin a speaker lacks.
+builds each speaker has installed, each with its version and source identity, section 7) and
+refuses a graph that references a plugin a speaker lacks.
 
 ## 3. A knob in a fake GUI
 
@@ -718,8 +718,9 @@ monitor, and setting one moves the control build's getter.
 Frame streams use a shared view-model class that turns a
 ring buffer into a frame (trigger search, window selection, one min/max pair per pixel
 column, the measurements). The complete build runs it locally; the headless build runs it on
-the speaker and the control build draws what it receives. The monitor layout is part of the
-version hash, so a GUI can never wait for a stream the speaker does not produce.
+the speaker and the control build draws what it receives. The monitor layout is part of a
+plugin's interface: changing it raises the plugin's version (section 7), and step 4's catalogue
+check covers it, so a GUI can never wait for a stream the speaker does not produce.
 
 **Built into `speakerd`, for any graph.** Some monitors need no plugin:
 
@@ -847,7 +848,8 @@ copies the bundle into `~/.lv2`:
     bpi:sourceId "0123456789ab" .
 ```
 
-and in `speakerd`'s log, one line per plugin node whenever it builds a graph (section 10.3).
+and in `speakerd`'s log (from `speakerd` 0.3.1), one line per plugin node whenever it builds a
+graph (section 10.3).
 The manifest does not name `buildinfo.ttl` (no `rdfs:seeAlso`): no LV2 host reads it, so a
 damaged file can never stop the plugin loading (named there, lilv parses it with the plugin's
 data, and one parse error makes the plugin fail to instantiate); `speakerd` reads it directly.
@@ -857,18 +859,25 @@ The controller, which compiles the control builds' sources in, carries none yet.
 folder it declares) change: the **patch** for a change that keeps the interface (parameter
 IDs, ranges, defaults, monitors, state format) and changes the processing, output differences
 within a stated tolerance included, or fixes a bug; the **minor** for an interface change that
-keeps old saved states loadable; the **major** for one that breaks them. A change to
+keeps old saved states loadable; the **major** for one that breaks them; and the **patch** for
+any other change to its sources (its README, its editor alone, a comment). A change to
 `dsp/juce_plugins/cmake` or to the JUCE pin changes every source identity and no version.
 `dsp/juce_plugins/tools/plugin-versions.sh list` prints every plugin's version and source
 identity, as a build made at that moment embeds them; `plugin-versions.sh check [REF]` fails
 (exit status 1) when a plugin whose sources differ between `git merge-base HEAD REF` (REF
-defaults to `origin/develop`) and the working tree has not raised its version.
+defaults to `origin/develop`) and the working tree has not raised its version, and exits 2 on
+any git or parse error. Rung 1 tests both commands on a scratch repository
+(`dsp/juce_plugins/tests/plugin-versions`), and checks the identity in the bundles plugin-check
+builds, in the copies JUCE's copy step makes of them in `~/.lv2`, and in `loudness_headless`
+cross-built for aarch64 with its copy (`dsp/juce_plugins/tests/buildinfo`).
 
-Step 4's catalogue carries them, and the hub only applies a graph when control and headless
-hashes agree, so a GUI can never show a parameter, or wait for a monitor stream, that the
-speaker does not have. Step 4 decides whether that compares the source identity or an
-interface hash, because a processing-only change such as P1 (the shared block FIR of section
-10.2, a patch) must not force controllers to be rebuilt.
+Step 4's catalogue carries both for every build a speaker has, and the hub will only apply a
+graph when the controller's control build of each plugin agrees with the speakers' headless
+build, so a GUI can never show a parameter, or wait for a monitor stream, that the speaker does
+not have. Step 4 decides what agreeing compares: the source identity, or an interface hash (over
+the parameter layout, the monitors and the state format) that step 4 would define, because a
+processing-only change such as P1 (the shared block FIR of section 10.2, a patch) must not force
+controllers to be rebuilt.
 
 **What `plugin-check` verifies.** `dsp/juce_apps/plugin-check/run.sh loudness` builds the three
 targets and loads them through JUCE's LV2 hosting. It checks that they expose the same 38
@@ -1288,10 +1297,10 @@ primed anew before the audio thread sees the new block size. The limits of `devi
 constants of the engine, read once at start; no message changes them.
 
 **Which build each node runs.** Each time a layer, an `apply` or the render builds a graph,
-`speakerd` logs, on the main thread and never on the audio thread, one line per plugin node as
-soon as it is instantiated (so also for the nodes a layer or an `apply` instantiated before it
-failed), with the version and the source identity of section 7 read from the bundle's
-`buildinfo.ttl`:
+`speakerd` (from 0.3.1, the first version that logs them) logs, on the main thread and never on
+the audio thread, one line per plugin node as soon as it is instantiated (so also for the nodes
+a layer or an `apply` instantiated before it failed), with the version and the source identity
+of section 7 read from the bundle's `buildinfo.ttl`:
 
 ```
 plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>
@@ -1528,7 +1537,7 @@ Each rule is enforced at the lowest layer that can hold it, so that nothing abov
 |---|---|
 | DSP cores, the three plugin targets, `speaker_add_plugin()`, `Monitors.h` | `dsp/juce_plugins/` |
 | shared source folders of the plugins (the block FIR of firConv and crossover) and their tests | `dsp/juce_plugins/shared/`, `dsp/juce_plugins/tests/` |
-| the version and source identity of every plugin; the version rule's check | `dsp/juce_plugins/cmake/SourceId.cmake`, `dsp/juce_plugins/tools/plugin-versions.sh` |
+| the version and source identity of every plugin; the version rule's check; their tests | `dsp/juce_plugins/cmake/SourceId.cmake`, `dsp/juce_plugins/tools/plugin-versions.sh`, `dsp/juce_plugins/tests/{buildinfo,plugin-versions}` |
 | `plugin-check`, `speakerd`, the controller app (JUCE applications, one build system) | `dsp/juce_apps/` |
 | `ampd`, its systemd unit | `firmware/ampd/` |
 | `speakerd`'s unit, `speakerd-run`, the installer's JSON helper, the tweeter rule | `firmware/speakerd/` |
@@ -1547,7 +1556,7 @@ and `firmware/local.mk` files, as before.
 flowchart LR
     s1["Step 1, done<br/>loudness builds as complete,<br/>control and headless.<br/>plugin-check proves they fit:<br/>same parameters, state, sound."] --> s2["Step 2, done<br/>speakerd, the headless host:<br/>PluginGraph + pw_filter,<br/>state layers and boot order,<br/>one speaker, no controller at all.<br/>Same sound as today."]
     s2 --> s3["Step 3, done<br/>Bridge + hub: parameters over OSC,<br/>document over TCP, two speakers,<br/>the Mine pin, value monitors<br/>and the output level bar."]
-    s3 --> s4["Step 4<br/>Scope frames and records,<br/>catalogue and version hashes,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
+    s3 --> s4["Step 4<br/>Scope frames and records,<br/>the catalogue: versions and<br/>source identities compared,<br/>multiple controllers, gestures,<br/>tablet build with static plugins."]
 ```
 
 Step 1 is done: the editor survives being detached from its DSP, and the headless build

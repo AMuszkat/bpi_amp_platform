@@ -15,14 +15,23 @@
 # raise a version. A plugin absent at the base passes.
 #
 # Exit status: 0 (check: every changed plugin raised its version), 1 (check: one did not),
-# 2 (a usage or git error: no such ref, not a repository). Needs git, coreutils and cmake;
-# runs from any directory, natively or in the development container. The version and the
-# identity come from cmake/SourceId.cmake, the one implementation the build uses too.
+# 2 (a usage, git or parse error: no such ref, not a repository, a git command that failed, a
+# CMakeLists.txt whose version or SHARED cannot be read, at HEAD or at the base). Needs git,
+# coreutils and cmake; runs from any directory, natively or in the development container. The
+# version and the identity come from cmake/SourceId.cmake, the one implementation the build
+# uses too. Tested by tests/plugin-versions/run.sh.
+#
+# errexit is not relied on: bash ignores it throughout a function called from a || or && list
+# (as cmd_check is, below), and a die in a $(...) exits only that subshell. So every command
+# that can fail handles its failure itself: `|| die` in this shell, `|| exit 2` after a
+# substitution whose subshell died (and said why).
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 SOURCE_ID="$PLUGINS_DIR/cmake/SourceId.cmake"
 usage="usage: $(basename "$0") list | check [REF]"
 
+# Says why and exits 2: the script, or only the subshell of a $(...) it runs in, whose caller
+# then adds `|| exit 2`.
 die() { echo "plugin-versions.sh: $*" >&2; exit 2; }
 
 command -v cmake > /dev/null || die "cmake is needed"
@@ -30,9 +39,11 @@ command -v git > /dev/null || die "git is needed"
 
 git_() { git --no-optional-locks -C "$PLUGINS_DIR" "$@"; }
 
+# The plugin folders' names, sorted, one per line (a folder name has no whitespace: it is the
+# CMake target's name).
 plugins() { list_plugins | LC_ALL=C sort; }
 
-# "<version>[ <shared>...]" from a CMakeLists.txt.
+# "<version>[ <shared>...]" from a CMakeLists.txt. Run in $(...): `|| exit 2` after it.
 declaration() {
     cmake -DMODE=declaration -DFILE="$1" -P "$SOURCE_ID" || die "cannot read the declaration in $2"
 }
@@ -50,27 +61,31 @@ version_gt() {
 }
 
 cmd_list() {
-    local p line
-    while read -r p; do
+    local names p line
+    names="$(plugins)" || die "cannot list the plugins in $PLUGINS_DIR"
+    for p in $names; do
         line="$(cmake -DMODE=identity -DPLUGIN_DIR="$PLUGINS_DIR/$p" -P "$SOURCE_ID")" \
             || die "cannot read the version and identity of $p"
         echo "$p $line"
-    done < <(plugins)
+    done
 }
 
+# Returns 0 or 1 (the version rule); exits 2 on any other failure.
 cmd_check() {
-    local ref="${1:-origin/develop}" base p decl new old shared paths name rc failed=0
+    local ref="$1" base short names p decl new old shared paths name rc untracked at_base failed=0
 
     git_ rev-parse --git-dir > /dev/null 2>&1 || die "$PLUGINS_DIR is not in a git repository"
     git_ rev-parse --verify --quiet "$ref^{commit}" > /dev/null || die "no such commit: $ref"
     base="$(git_ merge-base HEAD "$ref")" || die "HEAD and $ref have no merge base"
-    echo "plugin-versions.sh check: base $(git_ rev-parse --short=12 "$base") (merge-base of HEAD and $ref)" >&2
+    short="$(git_ rev-parse --short=12 "$base")" || die "cannot read the merge base $base"
+    echo "plugin-versions.sh check: base $short (merge-base of HEAD and $ref)" >&2
 
-    TMP="$(mktemp)"
+    TMP="$(mktemp)" || die "cannot make a temporary file"
     trap 'rm -f "$TMP"' EXIT
+    names="$(plugins)" || die "cannot list the plugins in $PLUGINS_DIR"
 
-    while read -r p; do
-        decl="$(declaration "$PLUGINS_DIR/$p/CMakeLists.txt" "$p/CMakeLists.txt")"
+    for p in $names; do
+        decl="$(declaration "$PLUGINS_DIR/$p/CMakeLists.txt" "$p/CMakeLists.txt")" || exit 2
         read -r new shared <<< "$decl"
         paths=("./$p")
         for name in $shared; do paths+=("./shared/$name"); done
@@ -78,17 +93,23 @@ cmd_check() {
         rc=0
         git_ diff --quiet --no-ext-diff "$base" -- "${paths[@]}" || rc=$?
         [ $rc -le 1 ] || die "git diff failed for $p"
-        if [ $rc = 0 ] && [ -z "$(git_ ls-files --others --exclude-standard -- "${paths[@]}")" ]; then
+        untracked="$(git_ ls-files --others --exclude-standard -- "${paths[@]}")" \
+            || die "git ls-files failed for $p"
+        if [ $rc = 0 ] && [ -z "$untracked" ]; then
             echo "$p unchanged $new"
             continue
         fi
 
-        if ! git_ cat-file -e "$base:./$p/CMakeLists.txt" 2> /dev/null; then
+        # ls-tree prints nothing for a path the base does not have (a new plugin), and fails
+        # only when git does.
+        at_base="$(git_ ls-tree --name-only "$base" -- "./$p/CMakeLists.txt")" \
+            || die "cannot read the base's tree for $p"
+        if [ -z "$at_base" ]; then
             echo "$p new $new"
             continue
         fi
         git_ show "$base:./$p/CMakeLists.txt" > "$TMP" || die "cannot read $p/CMakeLists.txt at the base"
-        decl="$(declaration "$TMP" "$p/CMakeLists.txt at the base")"
+        decl="$(declaration "$TMP" "$p/CMakeLists.txt at the base")" || exit 2
         old="${decl%% *}"
 
         if version_gt "$new" "$old"; then
@@ -97,7 +118,7 @@ cmd_check() {
             echo "$p changed, NOT raised $old -> $new"
             failed=1
         fi
-    done < <(plugins)
+    done
 
     return $failed
 }
@@ -109,6 +130,7 @@ case "${1:-}" in
         ;;
     check)
         [ $# -le 2 ] || die "$usage"
+        # cmd_check exits 2 itself on an error, so its status here is the rule's, 0 or 1.
         cmd_check "${2:-origin/develop}" || exit 1
         ;;
     *)

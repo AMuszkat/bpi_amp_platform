@@ -21,7 +21,8 @@ juce_plugins/
 ├── shared/<name>/              source folders several plugins compile (SHARED), e.g. blockfir/
 ├── tests/                      tests of shared code, outside every plugin's identity
 │   ├── blockfir/                 the block FIR, bit for bit on x86_64 and aarch64 (rung 1)
-│   └── buildinfo/                a built bundle carries the identity of its sources (rung 1)
+│   ├── buildinfo/                a built bundle and its copy carry the identity of its sources (rung 1)
+│   └── plugin-versions/          plugin-versions.sh check and list on a scratch repository (rung 1)
 ├── tools/                      the build system, shared by every plugin
 │   ├── build-podman.sh           recommended: containerised cross-build, deploy, local debug
 │   ├── common.sh                 config loading + plugin discovery used by the scripts
@@ -254,7 +255,7 @@ unchanged identity recompiles nothing. Where it ends up:
 | `SpeakerBuildInfo.h`, generated, on every target's include path | `SPEAKER_PLUGIN_NAME`, `SPEAKER_PLUGIN_VERSION`, `SPEAKER_PLUGIN_SOURCE_ID` |
 | every LV2 and VST3 binary | the string `bpi-build-info: <LV2 URI> version <version> source <source-id>` (`strings libfirConv.so \| grep bpi-build-info`) |
 | every LV2 bundle, next to `manifest.ttl` | `buildinfo.ttl`, below; `manifest.ttl` stays as JUCE writes it and does not name it |
-| `speakerd`'s log | `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` for each plugin node, read from the bundle's `buildinfo.ttl` |
+| `speakerd`'s log, from `speakerd` 0.3.1 | `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` for each plugin node, read from the bundle's `buildinfo.ttl` |
 
 ```turtle
 @prefix bpi: <https://github.com/AMuszkat/bpi_amp_dsp_tuning#> .
@@ -277,9 +278,17 @@ half-written copy) makes lilv refuse to instantiate the plugin: the layer fails,
 falls back to an older one or to passthrough. `speakerd` reads the file directly, from the
 bundle each plugin runs from (`../juce_apps/speakerd/README.md`, "Which build it is").
 
-`tests/buildinfo/check.sh` (rung 1, on the bundles plugin-check builds) checks that a bundle's
-`buildinfo.ttl` and binary agree with `plugin-versions.sh list`, and that its manifest does not
-mention `buildinfo.ttl`. The controller, which compiles `loudness_control`'s sources in
+`tests/buildinfo/check.sh` checks that a bundle's `buildinfo.ttl` and binary agree with
+`plugin-versions.sh list`, that its manifest does not mention `buildinfo.ttl`, and with `--arch`
+that the binary is code for that machine. Rung 1 (`tools/test.sh unit`) runs it on the x86_64
+bundles plugin-check builds, on the copies JUCE's copy step made of them in `~/.lv2` of the HOME
+the build ran with (the development container's; the copy is why `speaker_add_plugin()` orders
+it after `buildinfo.ttl` is written), and on `loudness_headless` cross-built for aarch64 with its
+copy in `copied/lv2` (`tools/build.sh loudness aarch64 headless`: what the board installer
+deploys, and the cheapest target to cross-build). JUCE copies a bundle only when it links the
+binary, so a copy that another build in the same HOME wrote later (`tools/build.sh` of another
+tree) stays until the next link; the check then says so, and how to make it link again. The
+controller, which compiles `loudness_control`'s sources in
 (`../juce_apps/controller/ControlPlugins.cmake`), does not compile the generated source and
 carries no plugin identity.
 
@@ -291,6 +300,7 @@ shared folder it declares):
 | keeps the interface (parameter IDs, ranges, defaults, monitors, state format) and changes the processing (output differences within a stated tolerance included), or fixes a bug | **patch** (0.0.1 -> 0.0.2) |
 | changes the interface and keeps old saved states loadable | **minor** (0.0.2 -> 0.1.0) |
 | changes the interface and breaks old saved states | **major** (0.1.0 -> 1.0.0) |
+| any other change to its sources (its README, its editor alone, a comment) | **patch** |
 
 A change only to `cmake/` or to the JUCE pin changes every identity but no version. The
 P1 block FIR is a patch: firConv and crossover 0.0.1 -> 0.0.2, the same parameters and state.
@@ -319,9 +329,13 @@ working tree, tracked changes and untracked files included, and prints one line 
 `<plugin> unchanged <version>`, `<plugin> changed, raised <old> -> <new>`,
 `<plugin> changed, NOT raised <old> -> <new>`, or `<plugin> new <version>` for one absent at the
 base. Exit status 0 when every changed plugin raised its version, 1 when one did not, 2 on a
-usage or git error. The version and `SHARED` are read from the text of the plugin's
-`CMakeLists.txt`, so both must be written out literally; the configure step fails when that
-reading disagrees with CMake's.
+usage, git or parse error (a `CMakeLists.txt` whose version or `SHARED` cannot be read, at HEAD
+or at the base, fails the check rather than pass a plugin unread). The version and `SHARED` are
+read from the text of the plugin's `CMakeLists.txt`, so both must be written out literally; the
+configure step fails when that reading disagrees with CMake's. `tests/plugin-versions/run.sh`
+(rung 1, a few seconds) runs both commands on a scratch repository with this layout: every
+verdict of `check` and its exit status, and every identity `list` prints against the `git`
+command above, `-dirty` exactly when the plugin's inputs changed.
 
 ## JUCE
 

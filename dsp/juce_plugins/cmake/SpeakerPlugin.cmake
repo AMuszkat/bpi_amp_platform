@@ -275,6 +275,10 @@ function(_speaker_add_plugin_target name code kind sources modules sharedDirs bu
     # The version and the identity in every binary. Compiled into each format's wrapper (an
     # object on the link line is always linked; one in the shared-code archive that nothing
     # references would be dropped), kept through LTO by `used`.
+    # It is written next to SpeakerBuildInfo.h, and that is the only reason its
+    # #include "SpeakerBuildInfo.h" resolves: a quoted include searches the including file's own
+    # directory first. The include directory above is PRIVATE to the shared-code target and
+    # does not reach the wrappers, so keep the two files in one directory.
     set(buildInfoSource "${generated}/${name}_build_info.cpp")
     file(CONFIGURE OUTPUT "${buildInfoSource}" CONTENT
 "// Written by SpeakerPlugin.cmake: the version and the source identity of @name@, as a string

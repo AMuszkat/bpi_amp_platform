@@ -17,11 +17,36 @@ rc=0
 
 record() { [ $record = 0 ] || tools/status.py set "$@"; }
 
-# The version and source identity in the LV2 bundles plugin-check built for plugin $1
-# (dsp/juce_plugins/tests/buildinfo).
+# The version and source identity in the LV2 bundles plugin-check built for plugin $1, and in
+# the copies JUCE's copy step made of them, into ~/.lv2 of the HOME the build ran with: this
+# one, as plugin-check builds before it sets a HOME of its own (dsp/juce_plugins/tests/buildinfo).
+# The copy is what SpeakerPlugin.cmake orders after buildinfo.ttl is written.
 check_build_info() {
-    dsp/juce_plugins/tests/buildinfo/check.sh "$1" \
-        "${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}/$1-builds/plugin/"*_artefacts/Release/LV2/*.lv2
+    local p="$1" bundles copies=() b so
+    bundles=("${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}/$p-builds/plugin/"*_artefacts/Release/LV2/*.lv2)
+    for b in "${bundles[@]}"; do copies+=("$HOME/.lv2/$(basename "$b")"); done
+    dsp/juce_plugins/tests/buildinfo/check.sh --arch x86_64 "$p" "${bundles[@]}" "${copies[@]}" && return 0
+    # JUCE copies a bundle only when it links its binary, so a copy whose binary is not this
+    # build's was written after it by another build in this HOME (tools/build.sh of another tree).
+    for b in "${bundles[@]}"; do
+        so="lib$(basename "$b" .lv2).so"
+        if [ -e "$HOME/.lv2/$(basename "$b")/$so" ] && ! cmp -s "$b/$so" "$HOME/.lv2/$(basename "$b")/$so"; then
+            echo "buildinfo: ~/.lv2/$(basename "$b") holds another build's binary, not a copy of this one: rm $b/$so and rerun, to link it and copy it again"
+        fi
+    done
+    return 1
+}
+
+# One aarch64 bundle and its copy: loudness_headless, what the board installer deploys
+# (firmware/speakerd-setup.sh), and the cheapest target to cross-build (no editor sources).
+# tools/build.sh copies it into the build's own copied/lv2, never into a ~/.lv2.
+AARCH64_PLUGIN=loudness
+AARCH64_TARGET=headless
+check_build_info_aarch64() {
+    local out="build/aarch64/$AARCH64_PLUGIN" name="${AARCH64_PLUGIN}_$AARCH64_TARGET"
+    tools/build.sh "$AARCH64_PLUGIN" aarch64 "$AARCH64_TARGET" \
+        && dsp/juce_plugins/tests/buildinfo/check.sh --arch aarch64 "$AARCH64_PLUGIN" \
+               "$out/${name}_artefacts/Release/LV2/$name.lv2" "$out/copied/lv2/$name.lv2"
 }
 
 run_unit() {
@@ -47,11 +72,19 @@ run_unit() {
         fi
     done
     local checked="${plugins[*]}"
+    # The version and source identity in an aarch64 build and its copy.
+    echo "=== /test unit: buildinfo-aarch64"
+    if check_build_info_aarch64; then echo "unit: buildinfo-aarch64 passed"; else echo "unit: buildinfo-aarch64 FAILED"; failed=1; fi
+    checked+=" buildinfo-aarch64"
     # The shared block FIR of firConv and crossover, bit for bit on x86_64 and on aarch64
     # under qemu (dsp/juce_plugins/tests/blockfir).
     echo "=== /test unit: blockfir"
     if dsp/juce_plugins/tests/blockfir/run.sh; then echo "unit: blockfir passed"; else echo "unit: blockfir FAILED"; failed=1; fi
     checked+=" blockfir"
+    # plugin-versions.sh check and list on a scratch repository (dsp/juce_plugins/tests/plugin-versions).
+    echo "=== /test unit: plugin-versions"
+    if dsp/juce_plugins/tests/plugin-versions/run.sh; then echo "unit: plugin-versions passed"; else echo "unit: plugin-versions FAILED"; failed=1; fi
+    checked+=" plugin-versions"
     # The controller's bridge against its fake hub (dsp/juce_apps/controller/tests).
     if [ -f dsp/juce_apps/controller/CMakeLists.txt ]; then
         echo "=== /test unit: controller"
