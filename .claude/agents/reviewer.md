@@ -18,14 +18,13 @@ given, or the branch's files) with these questions, in this order:
    without `plugin-check` being updated.
 4. **Versions.** A plugin whose folder, or a shared folder it declares (`SHARED`), changed
    must raise its version: `dsp/juce_plugins/tools/plugin-versions.sh check`, whose output
-   the verifier passes on (and CI runs on every pull request), says whether it did. You
+   the orchestrator passes on (and CI runs on every pull request), says whether it did. You
    judge what the script cannot: whether the level (patch, minor, major) is right, by the
    rule in `dsp/juce_plugins/README.md` ("Versions and source identity").
 5. **The documents kept in step.** Behaviour that differs from `docs/remote-plugin-host.md`
    without the document changing in the same diff; and any other document (a README,
    `docs/protocol.md`, an area `CLAUDE.md`'s reference) that states what the diff changed
-   and still states the old. Documentation is the `tech-writer`'s: say which document needs
-   what, for it.
+   and still states the old. Say which document needs what, for the agent that owns the change.
 6. **Tests.** A feature without the scenario that section 5 of
    `docs/autonomous-development.md` names for it, or a pass criterion weakened.
 

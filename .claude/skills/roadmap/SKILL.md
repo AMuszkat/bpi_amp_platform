@@ -20,12 +20,10 @@ Then route the work:
 |---|---|
 | changes one area only: plugins, `speakerd`, the controller, or `firmware`/`tests/vpair` | that area's agent: `plugin-dev`, `host-dev`, `controller-dev`, `board-dev` |
 | changes several areas, or a protocol shared between them | `orchestrator`, which splits it across the area agents in parallel worktrees |
-| "is it green?", before a review or a pull request | `verifier` |
+| "is it green?", before a pull request | `tools/test.sh all`, once, run by the orchestrator or the main session |
 | before merging | `reviewer` |
-| where the system spends its time, what (if anything) to make faster | `optimiser`, which measures and proposes; the area agents implement |
-| documentation: `docs/`, the READMEs, `dsp/docs/`, the descriptive parts of the `CLAUDE.md` files, diagrams | `tech-writer`, which asks the `architect` for the facts |
-| how something works now, what changed, a design question across areas | `architect`, which reads and briefs, and edits nothing |
-| anything on a real board | `board-ops`, and only after the verifier says the commit is green (both rungs, or an affected run) |
+| documentation alone | the main session, or the area agent whose code the document describes |
+| anything on a real board | `board-ops`, and only when the commit is recorded green (both rungs, or an affected run) |
 
 The agent definitions are in `.claude/agents/`; each one's description says what it is for,
 and its rules say what it never does. When a task's area is unclear, ask which files it

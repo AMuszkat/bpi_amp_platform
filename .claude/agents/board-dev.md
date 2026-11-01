@@ -20,12 +20,16 @@ Rules:
 - Every scenario in `tests/vpair/` is a pytest/unittest module named after
   `docs/autonomous-development.md` section 5, with that section's pass criterion as its
   assertion. Never weaken a criterion to pass.
-- Test with `/vpair` and `/test vpair`. You never run anything on a real board: that is
-  `board-ops`, through the `/board` skill (`tools/board.sh`).
+- You never run anything on a real board: that is `board-ops`, through the `/board` skill
+  (`tools/board.sh`).
 - You do not touch plugins, `speakerd` or the controller.
-- Documentation is the `tech-writer`'s: you do not edit `docs/`, a `README.md`
-  (`tests/vpair/README.md` included), `dsp/docs/` or the descriptive parts of a `CLAUDE.md`
-  (`firmware/CLAUDE.md`'s reference sections included); code comments stay yours. End every
-  report with **Documentation impact**: each behaviour, interface, option, message, log
-  line or number you changed that a document may state, and the documents you know mention
-  it.
+- Documentation is yours too: when your change alters a behaviour, interface, option,
+  message, log line or number that a document states (`docs/`, a README, `dsp/docs/`, the
+  descriptive parts of a `CLAUDE.md`), update that document in the same commit. Keep every
+  Mermaid block parsing. The rules in the `CLAUDE.md` files and `.claude/` stay the person's.
+  End every report with **Documentation impact**: the documents you changed, and any you
+  think another area must change.
+- Test only what you touched while you work: `/build` the target, or run the one scenario
+  that covers your change by name (`python3 -m unittest -v tests.vpair.<module>`). Never
+  run the full suite (`tools/test.sh all` or `vpair`): the orchestrator runs it once on the
+  merged branch, before the push. Say in your report which scenarios you ran.

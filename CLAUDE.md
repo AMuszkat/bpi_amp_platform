@@ -51,20 +51,23 @@ task would change:
 | `dsp/juce_apps/speakerd/` | `host-dev` |
 | `dsp/juce_apps/controller/` | `controller-dev` |
 | `firmware/`, `tests/vpair/` | `board-dev` |
-| documentation: `docs/`, every `README.md`, `dsp/docs/`, the descriptive parts of the `CLAUDE.md` files, diagrams and figures | `tech-writer`, which gets its facts from the `architect` |
-| "how does X work", "what changed since", a design question across areas | `architect`, which reads the code and the documents and edits nothing |
-| more than one of the above, or a protocol they share | `orchestrator`, which runs the area agents in parallel worktrees and merges |
-| running the tests, "is it green?" | `verifier` |
+| documentation alone | the main session, or the area agent whose code it describes |
+| more than one of the above, work that can run in parallel, or a protocol they share | `orchestrator`, which runs the area agents in parallel worktrees, merges, and runs the full suite once |
 | before a pull request is merged | `reviewer` |
-| where the time and the margins go, what (if anything) to make faster | `optimiser`, which measures and proposes; the area agents implement |
-| a real board | `board-ops`, only after the verifier reports the commit green (both rungs, or an affected run) |
+| a real board | `board-ops`, only when the commit is recorded green (both rungs, or an affected run) |
 
 A single-area task goes straight to its agent; the orchestrator is for work that has to be
 split and merged, not a required entry point. Agents do not cross areas: an agent that
-needs a change outside its files says so and stops. The area agents leave the documentation
-to the `tech-writer` and end each report with its documentation impact; the writer updates
-the documents on the same branch, so the design and the code still change in the same
-commit. The rules in the `CLAUDE.md` files and everything in `.claude/` stay the person's.
+needs a change outside its files says so and stops. Each area agent updates the documents
+its change affects in the same commit, and ends its report with its documentation impact.
+The rules in the `CLAUDE.md` files and everything in `.claude/` stay the person's.
+
+**Testing is cheap during development and complete before a push.** While working, an agent
+builds what it changed and runs only the scenario that covers it, by name
+(`python3 -m unittest -v tests.vpair.<module>`, or `plugin-check/run.sh <plugin>`); no hook
+runs tests at the end of a turn. The full suite (`tools/test.sh all`) runs once on the
+finished branch, before it is pushed, and again only if code changed since; CI repeats it on
+the pull request. That run is also what the deploy gate reads.
 
 ## Hooks, skills and agents
 
@@ -91,9 +94,8 @@ commit. The rules in the `CLAUDE.md` files and everything in `.claude/` stay the
   scripts are in `tools/`, work without Claude, and run in the development container
   (below).
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
-  `controller-dev`, `board-dev`, `verifier`, `reviewer`, `board-ops`, `optimiser`,
-  `architect`, `tech-writer`, each limited to its area and tools as the document's table
-  says. The `tech-writer` may start the `architect` (and only it) to ask for facts.
+  `controller-dev`, `board-dev`, `reviewer`, `board-ops`, each limited to its area and tools
+  as the document's table says.
 - **CI** (`.github/workflows/ci.yml`) runs rungs 1 and 2 on pull requests and on `develop`.
 
 ## Developing the remote plugin host

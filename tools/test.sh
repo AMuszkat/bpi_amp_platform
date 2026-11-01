@@ -5,8 +5,7 @@
 #
 # affected runs only the virtual pair modules that cover the files changed since the last
 # commit green in full (tools/status.py plan, by tests/impact.json), and refuses when a changed
-# file needs both rungs in full. --no-record runs the tests without writing the status file (the
-# Stop hook uses it on a tree with uncommitted changes).
+# file needs both rungs in full. --no-record runs the tests without writing the status file.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

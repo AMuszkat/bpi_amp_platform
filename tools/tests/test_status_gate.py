@@ -300,7 +300,7 @@ class TheRealMap(unittest.TestCase):
 
     def test_words_run_nothing(self):
         for path in ("docs/remote-plugin-host.md", "docs/images/p1/p1-result.svg", "firmware/CLAUDE.md",
-                     "CLAUDE.md", "hardware/amp/amp.kicad_pcb", ".claude/agents/verifier.md"):
+                     "CLAUDE.md", "hardware/amp/amp.kicad_pcb", ".claude/agents/reviewer.md"):
             self.assertEqual(self.decides(path), ([], None), path)
 
     def test_the_installers_run_the_installer_tests(self):

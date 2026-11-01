@@ -157,8 +157,8 @@ microphone, so a sweep sent through Snapcast can be compared with the expected c
 response on each driver. Until that capture path is confirmed on the hardware, the fallback
 is a USB audio interface wired to the amplifier outputs through a divider.
 
-**What exists today** for rung 3 is the way onto a board, not yet tried on one
-(`firmware/CLAUDE.md`). `firmware/setup.sh` installs a speaker's audio side by component, in
+**What exists today** for rung 3 is the way onto a board (`firmware/CLAUDE.md`), tried by a
+person on one board so far (below). `firmware/setup.sh` installs a speaker's audio side by component, in
 boot order: the PipeWire drop-in with the persistent `speakerd` sink, snapclient routed into
 it, and `speakerd` (`ampd` comes with step 3). `firmware/speakerd-setup.sh` installs `speakerd`
 as a versioned systemd user service with rollback, capped on every install, whose wrapper
@@ -172,9 +172,13 @@ refuses while the lab is locked or unless the commit is green on a clean tree (b
 an affected run on top of a commit green in full: section 4); the installers' remote modes
 apply the same gate themselves. Their local mode is
 tested on the virtual pair, their remote mode through a stand-in `ssh` that runs the board's
-side on the same machine; neither has run on a board yet, and the first deploy is a person's
-(section 8, and the staged procedure in `firmware/CLAUDE.md`). The smoke test does not yet
-compare the amplifier telemetry with the expected response.
+side on the same machine. The first deploy is a person's (section 8, and the staged procedure
+in `firmware/CLAUDE.md`); it ran them on one board on 2026-11-01: `speakerd` capped,
+snapclient routed into it, the smoke check, a reboot after which everything came back by itself
+and played, and the check by ear that only the woofer sounds (`firmware/CLAUDE.md`, "The board
+measured"). Lifting the cap and the second stage (`ampd` and the controller) have not run on a
+board yet. The smoke test does not yet compare the amplifier telemetry with the expected
+response.
 
 ## 2. The rules an agent runs under
 
@@ -193,63 +197,53 @@ forgotten and hooks cannot.
 
 ## 3. The agents
 
-One orchestrator and ten specialists. Each has the tools it needs and nothing else; the
-"tools" column is what its `.claude/agents/<name>.md` definition grants.
+One orchestrator, four area developers, a reviewer and board-ops. Each has the tools it
+needs and nothing else; the "tools" column is what its `.claude/agents/<name>.md` definition
+grants.
 
 <!-- diagram: agents -->
 ```mermaid
 flowchart TB
-    orch["orchestrator<br/>plans, splits, merges, opens the PR"]
+    orch["orchestrator<br/>plans, splits, merges,<br/>runs the full suite once, opens the PR"]
     orch --> pd["plugin-dev<br/>DSP cores, the three targets,<br/>speaker_add_plugin()"]
     orch --> hd["host-dev<br/>speakerd: graph engine, pw_filter,<br/>state layers, ampd protocol"]
     orch --> cd["controller-dev<br/>the controller app, bridge,<br/>control-build hosting"]
     orch --> bd["board-dev<br/>ampd, systemd units, PipeWire config,<br/>device.json, web page"]
-    pd & hd & cd & bd -- "documentation impact" --> tw["tech-writer<br/>updates every document<br/>on the merged branch"]
-    arch["architect<br/>reads the code and the documents,<br/>briefs, edits nothing"] -. "facts, on request" .-> tw
-    tw --> ver["verifier<br/>runs rungs 1 and 2, reads spectra and<br/>latencies, returns numbers and pass/fail"]
-    ver --> rev["reviewer<br/>reads the diff against the rules:<br/>RT safety, private data, API drift<br/>between control and headless"]
+    pd & hd & cd & bd -- "branches: code, documents,<br/>the scenarios they ran" --> orch
+    orch --> rev["reviewer<br/>reads the diff against the rules:<br/>RT safety, private data, API drift<br/>between control and headless"]
     rev --> ops["board-ops<br/>rung 3 only: deploy, smoke test,<br/>journal, pw-top, roll back"]
     rev -.-> orch
-    opt["optimiser<br/>measures rungs 1 and 2, proposes<br/>ranked changes, edits nothing"] -. "proposals" .-> orch
 ```
 
 | Agent | Area | Tools | Never does |
 |---|---|---|---|
-| `orchestrator` | all | Agent, Read, Grep, Glob, git on branches | writes code itself |
-| `plugin-dev` | `dsp/juce_plugins/` | Read, Edit, Write, Bash in the builder container | touches `speakerd` or the controller |
-| `host-dev` | `dsp/juce_apps/speakerd/` | same | changes the plugin parameter layouts |
-| `controller-dev` | `dsp/juce_apps/controller/` | same, plus a headless X server for GUI screenshots | changes the wire protocol without `host-dev` |
-| `board-dev` | `firmware/`, `tests/vpair/` | Read, Edit, Write, Bash for the virtual pair | ssh to real boards |
-| `verifier` | all | Bash for rungs 1 and 2, Read | edits source |
+| `orchestrator` | all | Agent, Read, Grep, Glob, Bash for git and the full test run | writes code itself |
+| `plugin-dev` | `dsp/juce_plugins/` and the documents of its change | Read, Edit, Write, Bash in the builder container | touches `speakerd` or the controller |
+| `host-dev` | `dsp/juce_apps/speakerd/` and the documents of its change | same | changes the plugin parameter layouts |
+| `controller-dev` | `dsp/juce_apps/controller/` and the documents of its change | same, plus a headless X server for GUI screenshots | changes the wire protocol without `host-dev` |
+| `board-dev` | `firmware/`, `tests/vpair/` and the documents of its change | Read, Edit, Write, Bash for the virtual pair | ssh to real boards |
 | `reviewer` | all | Read, Grep, Glob | edits source, runs anything |
 | `board-ops` | `firmware/` | the board skill only | edits source, runs on a locked lab |
-| `optimiser` | all | Read, Grep, Glob, Bash for rungs 1 and 2 | edits source, records a test status, touches a board |
-| `architect` | all | Read, Grep, Glob, Bash for git and other reads | edits anything, builds, runs a test, touches a board, decides a design question |
-| `tech-writer` | the documentation: `docs/`, every `README.md`, `dsp/docs/`, the descriptive parts of the `CLAUDE.md` files | Read, Edit, Write, Grep, Glob, Bash, and Agent to start the `architect` | edits code, tests, `.claude/` or the rules in a `CLAUDE.md`; commits |
 
-All eleven definitions are in `.claude/agents/`, with these tool grants and rules;
-`board-ops` works only through the `/board` skill (`tools/board.sh`). The `optimiser`
-implements nothing: it measures where the time and the margins go and returns ranked
-proposals, each with its evidence, owner and the scenario that would prove it, for the
-orchestrator or an area agent to take up, or the finding that nothing is worth changing.
+All seven definitions are in `.claude/agents/`, with these tool grants and rules;
+`board-ops` works only through the `/board` skill (`tools/board.sh`).
 
-The documentation is one agent's, the `tech-writer`'s. The area agents edit no document;
-each ends its report with its **documentation impact** (every behaviour, interface, option,
-message, log line or number it changed that a document may state), and the writer updates
-the documents on the merged branch before the verifier runs, so the design and the code
-still change in the same commit. The writer takes its facts from the `architect`, which it
-starts itself with the Agent tool (the definition says `Agent(architect)`, an allowlist
-Claude Code enforces only when the writer runs as the main thread; as a subagent the
-architect is the only agent its instructions let it start). The architect checks the
-architecture against the code each time, in a fixed order of authority (the code, the
-tests, the history, then the documents), returns a brief with a source for every fact and
-names every place where a document and the code disagree; it edits nothing and decides no
-design question. A plugin's README is part of the plugin's source identity, so a README the
-writer changes raises that plugin's version, which stays `plugin-dev`'s.
+Each area agent updates the documents its change affects (`docs/`, the READMEs, `dsp/docs/`,
+the descriptive parts of the `CLAUDE.md` files) in the same commit as the code, and ends its
+report with its **documentation impact**: the documents it changed and any it thinks another
+area must change. The orchestrator checks that list against the merged diff. A plugin's
+README is part of the plugin's source identity, so a change to it raises that plugin's
+version, which stays `plugin-dev`'s. The rules in the `CLAUDE.md` files and everything in
+`.claude/` stay the person's.
 
 The split between `plugin-dev`, `host-dev` and `controller-dev` follows the three build
 targets. They work in separate git worktrees so that the orchestrator can run them in
 parallel on one feature and merge the results.
+
+**Testing during development is minimal.** An area agent builds what it changed and runs
+only the scenario that covers it, by name; it never runs the full suite, and no hook runs
+tests at the end of a turn. The full suite runs once, by the orchestrator, on the merged
+branch before the push (section 6).
 
 ## 4. Skills and hooks
 
@@ -259,10 +253,10 @@ agent never improvises a `pw-cli` or `ssh` line.
 | Skill | What it does | Used by |
 |---|---|---|
 | `/build <plugin\|app> [target]` | builds complete, control or headless, or `speakerd`/controller, for x86_64 or aarch64, in the builder container; every LV2 bundle it builds carries `buildinfo.ttl`, its plugin's version and source identity | all dev agents |
-| `/test unit` | `ctest` in the container: DSP cores against exported coefficients, control and headless parameter and monitor layouts identical, state-layer loading, graph diff, scope view model against recorded captures | verifier |
-| `/test affected` | after a fix on top of a commit green in full: only the rung 2 modules that cover the files changed since (`tests/impact.json`); refuses when one of them needs both rungs | verifier |
-| `/vpair up\|down\|scenario <name>` | brings the virtual pair up with a given build and runs one scenario from `tests/scenarios/` | verifier, orchestrator |
-| `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | verifier |
+| `/test unit` | `ctest` in the container: DSP cores against exported coefficients, control and headless parameter and monitor layouts identical, state-layer loading, graph diff, scope view model against recorded captures | orchestrator, once before the push; `plugin-dev` runs plugin-check for its plugin only |
+| `/test affected` | after a fix on top of a commit green in full: only the rung 2 modules that cover the files changed since (`tests/impact.json`); refuses when one of them needs both rungs | a person at the bench, the orchestrator |
+| `/vpair up\|down\|scenario <name>` | brings the virtual pair up with a given build and runs one scenario from `tests/scenarios/` | all dev agents, one scenario at a time |
+| `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | dev agents, orchestrator |
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
 | `/board status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3 (the board of `firmware/local.mk`); refuses when the lab lock exists or rung 2 is not green | board-ops |
 | `/juce` | the JUCE knowledge base in `dsp/docs/juce-knowledge/` | dev agents |
@@ -277,8 +271,7 @@ flowchart LR
     ss["SessionStart<br/>pull the builder image, verify local.env exists<br/>and is gitignored, print the lab lock state"]
     pre["PreToolUse<br/>Bash: block push to main and force push<br/>gate ssh, scp, rsync and /board: no lab lock,<br/>HEAD green on a clean tree: both rungs,<br/>or an affected run on a base green in full<br/>Edit/Write: block private strings in tracked files"]
     post["PostToolUse<br/>Edit of *.cpp/*.h: clang-format<br/>Edit of docs/*.md: render the Mermaid blocks to check syntax"]
-    stop["Stop<br/>run /test unit when source changed<br/>refuse to end with a red build"]
-    ss --> pre --> post --> stop
+    ss --> pre --> post
 ```
 
 **What exists today.** The hooks are in place: `.claude/hooks/pre-edit.py` and the commit
@@ -287,9 +280,10 @@ documentation address ranges and the placeholders as exceptions); `pre-bash.py` 
 pushes to `main` and force pushes, and gates every command that could reach a board (`ssh`,
 `scp`, `rsync`, the `-install` and `--target-host` paths of the build scripts) on the lab
 lock and on a green test status for the exact commit with a clean tree; `post-edit.py`
-checks the Mermaid diagrams of an edited document when `tools/mermaid-check` is installed;
-`stop.py` runs the virtual pair tests when their files, `firmware/ampd/` or
-`dsp/juce_apps/` changed. The skills `/build`, `/test`, `/vpair` and `/pw-inspect` exist
+checks the Mermaid diagrams of an edited document when `tools/mermaid-check` is installed.
+No hook runs tests: a Stop hook that ran the virtual pair at the end of every turn was
+removed, because the suite takes 10 to 14 minutes and the full run before the push covers
+it. The skills `/build`, `/test`, `/vpair` and `/pw-inspect` exist
 with their scripts in `tools/`; `/test` writes the status file the gate reads. `/board` exists
 too (`tools/board.sh`); `/measure` and `/release` do not exist yet: `/measure` follows `ampd`,
 `/release` step 4's catalogue.
@@ -384,7 +378,7 @@ the architecture:
 | `speakerd_quantum_change` | with a stream playing, the quantum changes and comes back, and after each change the gain is the render's again, with nothing non-finite or above full scale reaching the amplifier |
 | `speakerd_device_limits` | with `device.json` limits of -20 dB and the tweeter muted, live and in the render, the tweeter is exact zeros and the woofer is the unlimited capture minus 20 dB; a +6 dBFS input or a +20 dB boost never puts a sample above -20 dBFS (-40 in passthrough); a `device.json` without limits, with a misspelt key, broken or missing says so and plays the same way capped |
 | `speakerd_import` | AudioPluginHost's example session, imported, renders sample for sample like the same settings given as parameters, also with `--prefer-headless`; malformed sessions and one that sends the input straight to the tweeter are refused, with nothing on stdout |
-| `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install and every rollback, rolls back both ways, and refuses, before it changes anything, without a role, while an AudioPluginHost runs or anything would start one again at boot or login, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph (new or kept) that reaches the tweeter other than through a crossover's high band; `limits` turns the tweeter on only when no layer does; routing into `speakerd` needs a snapclient unit that reads client-rt.conf; uninstall stops snapclient when the routing it restores names a node the running PipeWire lacks; under systemd it fails unless `speakerd` runs and says exactly its limits after its start, also when `limits` or `rollback` restart a running one; setup.sh refuses to restart PipeWire under a running AudioPluginHost; smoke reports speakerd's timing (per node, the graph, the cycle) from its status before and after the window or, its local link busy, its log, fails when the graph's longest cycle took more than half its cycle or a cycle was late in the window, and warns on position jumps in it, late cycles before it, timing not measured and a clock read above 150 ns (system calls), reading a passthrough minute line (no node) too; the remote mode and the board script quote every argument |
+| `firmware_speakerd_install` | the installer's local mode lays out the documented tree with `device.json` capped (-20 dB, tweeter muted), caps again on every install and every rollback, rolls back both ways, and refuses, before it changes anything, without a role, while an AudioPluginHost runs or anything would start one again at boot or login, a speakerd older than the one that enforces the limits, a `device.json` speakerd would reject, and a factory graph (new or kept) that reaches the tweeter other than through a crossover's high band; `limits` turns the tweeter on only when no layer does; routing into `speakerd` needs a snapclient unit that reads client-rt.conf; uninstall stops snapclient when the routing it restores names a node the running PipeWire lacks; under systemd it fails unless `speakerd` runs and says exactly its limits after its start, also when `limits` or `rollback` restart a running one; setup.sh refuses to restart PipeWire under a running AudioPluginHost; smoke reports speakerd's timing (per node, the graph, the cycle) from its status before and after the window or, its local link busy, its log, fails when the graph's longest cycle took more than half its cycle or a cycle was late in the window, and warns on position jumps in it, late cycles before it, timing not measured and a clock read above 150 ns (system calls), reading a passthrough minute line (no node) too; smoke finds snapclient's stream by its `application.name` in `pw-dump` (snapclient 0.34.0's has no `node.name`) and passes only when it plays into the `speakerd` sink; the same install again, directly or through setup.sh, restarts neither PipeWire nor `speakerd` and writes no file, and the closing hints name the installed `speakerd-setup.sh`, never the bundle's (in the remote mode too); `snapcast-setup.sh --mode target`, through stand-ins, finds the pipewire player from `--help`'s `--player` line, installs snapclient only when it lacks it, keeps a person's client-rt.conf as `.orig` once, restarts snapclient but never PipeWire on a first run, and on a second run with the same options changes nothing and says so in one line (another server writes only the unit, another route only client-rt.conf; `--routing-only` alike); the remote mode and the board script quote every argument |
 | `speakerd_crash_restart` | the installed unit starts speakerd on current, on last known good after a crash (a real speakerd killed by SIGSEGV), on factory after three crashes within 60 s, on passthrough after three more on factory, and never while an AudioPluginHost runs |
 | `speakerd_installed` | on a speaker set up like a board, the persistent `speakerd` sink exists before speakerd and never drives while the amplifier exists, speakerd plays through it with the tweeter at exact zeros and the woofer at the render minus 20 dB, the deployed bundle runs and not a copy of the same version in `~/.lv2`, and the smoke test passes (speakerd's timing included: the graph within half its cycle, no late cycle while watched), and fails when the amplifier is the default sink; with a PipeWire that does not load the drop-in, nothing is routed into `speakerd` and smoke, `sink` and `install` refuse |
 | `meter_values` | a level monitor subscribed on each speaker tracks a stepped test tone within 1 dB, and reports the left and right levels separately; with the Mine pin each speaker plays its own side (a mono speaker (FL + FR) / 2); loudness's `mon_levelDb` is compared with its detector applied to the input (JUCE's BallisticsFilter, 100 ms attack and 300 ms release, which reads a steady sine about 1.3 dB over its RMS), not with the raw input level, within 1 dB |
@@ -400,7 +394,7 @@ the architecture:
 | `drag_during_revision` | a knob moved while another controller's revision is being applied keeps its last value in every `graph.json` and every controller, and a restarted `speakerd` plays it |
 | `ampd_protocol` | against stand-in speakerds, `ampd` does what `docs/protocol.md` says: parameters with the hub's seq to both speakers and every controller, errors for what it cannot address, revisions all or nothing with the roll back and the 10 s timeout, an offline speaker caught up, a newer agent revision adopted, gestures and their 5 s, the local link's busy, restart and fall back, the monitor union and per-client rates (also a client beside a faster one, and one subscribing again at another rate, the union unchanged), and on the hub's monitor link and an agent's alike a new subscription given the newest value at once and its next one more than half a period after it (`ampd` sends it no sooner than a period after, not the union's next value: a new 5 Hz subscription beside one of 60 Hz), nothing after an unsubscribe, no value twice, and nothing of `speakerd`'s relayed but a value of a subscribed stream of at most 64 KiB (a longer one, one with NaN, another stream's, another op's: none reaches a client, which stays connected; one over 128 KiB is refused for its length before it would be encoded again), with `speakerd` gone nothing for a new subscription (the store cleared) and nothing for the others from 0.2 s after `ampd` lost it, and, once it is back under the running `ampd`, values again within 2 s for every subscriber, persistence; the pair's secret proven on every control and monitor hello, OSC only from authenticated addresses, the limits (document size, subscriptions, a huge number, exact stream names), values set during an apply kept, the tweeter rule on the hub and on an agent; the handshake proven both ways, an agent believing nothing from a hub that does not prove the secret, OSC only with a live controller's token from its address (others dropped and counted, a replayed token too), agents ignoring OSC; a line before the peer proved the secret, and on the monitor link, is at most 64 KiB (a 100 KiB hello closes the connection on the control and monitor links and at an agent, a 60 KiB one is welcomed); a legal 24 MiB document reaches a controller that does not read for a while, with the values after it (the 1 MiB limit counts what queues besides documents); the known answer of `tests/vpair/auth_vector.json` (client and server proof, K, OSC token) computed from protocol.md's definitions and by ampd's functions |
 | `controller_end_to_end` | the real controller (built by `tools/build.sh controller`, in its script test mode) against the real pair, both speakers with speakerd and ampd and the pair's secret, the Mine pin through loudness, a stereo 200 Hz tone 12 dB apart: (a) it connects with the secret file, is synced and proven on the hub's revision with the hub's document on its canvas, both speakers online on layer current, both monitor links connected, and nothing either side refused, ignored or answered with an error (its `--trace`, both ampd logs); (b) nine `set`s are echoed and each is heard on both speakers within 60 ms of the send (knob_latency's onset and set-asides, at least 5 measured), both graph.json hold the last value; a 1 s `drag` is heard on both through at least 10 intermediate 20 ms blocks and ends at the render's level within 0.1 dB, its value in both graph.json, the hub's state and the controller; (c) `add`, a `set` on the new node, `disconnect` and two `connect-pins` are applied (revisions 2 to 5) on both graph.json and heard (the woofers silent, then back at the render's level within 0.1 dB), and its state is the hub's; with the right's device.json turning the tweeter on, a straight connection to the tweeter is rejected with "right: the tweeter is on here (device.json)", undone in the controller, rolled back on the left, and its state is the hub's; (d) with a window open, `mon_levelDb` from the chosen speaker (left, then right) is loudness's detector model of that side within 1 dB and the subscription moves; `output/level` from each speaker is its own side's level within 1 dB, 12 dB apart, the muted tweeters under -100 dBFS; (e) with another secret it is refused (not proven, not synced, the refusal shown, no plugin node), the hub logs it, and no secret is printed; (f) one `--gui` run under Xvfb and openbox with a stepping tone: synced, both level bars fed, the loudness window's meter moving more than 6 dB, and its screenshot and the X screen written to `build/e2e-controller/` |
-| `firmware_ampd_install` | `ampd-setup.sh` and setup.sh's ampd component lay out the documented `ampd.json` (with the pair's secret, mode 600, never printed) and unit, refuse an agent with no hub address and a missing or malformed secret before any change (the secret file read as the controller reads it: exactly one trailing `\n` or `\r\n` dropped, nothing else), and status and smoke say whether ampd runs and is connected to speakerd and, on an agent, to the hub |
+| `firmware_ampd_install` | `ampd-setup.sh` and setup.sh's ampd component lay out the documented `ampd.json` (with the pair's secret, mode 600, never printed) and unit, refuse an agent with no hub address and a missing or malformed secret before any change (the secret file read as the controller reads it: exactly one trailing `\n` or `\r\n` dropped, nothing else), and status and smoke say whether ampd runs and is connected to speakerd and, on an agent, to the hub; install's closing hint names the installed `ampd-setup.sh` |
 | `chain_cost` | the board's chain (the Mine pin through `loudness_headless`, `firConv` and the crossover, its low band to the woofer and its high band to the tweeter) on a virtual speaker at its 48 kHz and quantum 1024, noise playing: over a 20 s window after 5 s of settling, `speakerd`'s own timing (`speakerd/timing` on the local link, each value weighted by its cycles) puts firConv's mean share of the cycle under 5 % and the crossover's under 1.5 %. With `juce::dsp::FIR::Filter` they cost 15.1 % and 3.8 % on x86_64, the shared block FIR about 1.0 % and 0.27 %: the limits are 3 and 2.5 times under the old cost and about five times over the new, so a slower or busier CI runner fails the old code by more and passes the new. The window must be a measurement (at least 80 % of its cycles, each node measured in 80 % of them, the quantum unchanged, the woofer above -60 dBFS); the maxima, late cycles and position jumps are printed, not asserted: they measure the machine's scheduler, not the chain |
 | `plugin_identity` | `plugin-versions.sh list` prints `<plugin> <version> <source-id>` once for each plugin and nothing else, each version its `project(... VERSION)`; no source id is `unknown` (the virtual pair has git), and each is the 12 hex characters that the test computes itself with the command of `dsp/juce_plugins/README.md` ("Versions and source identity": `git rev-parse` of the plugin's folder, each folder of its `SHARED` in order, `cmake/` and the JUCE gitlink, through `git hash-object --stdin`, a folder not yet in HEAD the empty tree), with `-dirty`, for every path alike, exactly when `git status --porcelain` over those paths prints anything; the bundles of `loudness_headless`, `loudness`, `firConv` and `crossover` carry `buildinfo.ttl` exactly as specified with their plugin's version and that source id, which their `manifest.ttl` does not name (it stays as JUCE writes it: no LV2 host reads `buildinfo.ttl`); `speakerd` says `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` once for each node of the chain, the bundle the one it was given, on both speakers at start, again at an apply, and in the render; a copy of firConv's bundle without `buildinfo.ttl`, given alone, renders the original's samples from layer current and says `no build identity (an older build)`, and one with a half-written `buildinfo.ttl` renders the same samples and says `(buildinfo.ttl unreadable)` |
 
@@ -410,7 +404,9 @@ for xruns. It runs nightly and after every merge to `main`, never on an unreview
 
 ## 6. The feature loop
 
-How one task flows, from an issue to a merged pull request, with no human until review.
+How one task flows, from an issue to a merged pull request, with no human until review. The
+area agents test only what they touch; the full suite runs once, on the merged branch, before
+the push, and again only if code changed since.
 
 <!-- diagram: loop -->
 ```mermaid
@@ -418,36 +414,31 @@ sequenceDiagram
     participant I as Issue / request
     participant O as orchestrator
     participant D as dev agents (worktrees)
-    participant W as tech-writer
-    participant A as architect
-    participant V as verifier
     participant R as reviewer
     participant G as GitHub
     participant B as board-ops
     I->>O: implement X
-    O->>O: plan: which targets, which repo, which scenarios prove it
+    O->>O: plan: which targets, which scenarios prove it
     par in parallel worktrees
         O->>D: plugin-dev
         O->>D: host-dev
         O->>D: controller-dev
     end
+    D->>D: build, one scenario each, documents updated
     D-->>O: branches, each with its documentation impact
-    O->>O: merge the worktrees
-    O->>W: the plan and the documentation impact
-    W->>A: what changed, how it works now
-    A-->>W: a brief, a source for every fact
-    W-->>O: the documents updated on the merged branch
-    O->>V: /test unit, /vpair scenario (all that the plan names)
-    V-->>O: numbers, pass/fail, .status/<commit>.json
+    O->>O: merge, then tools/test.sh all, once
     alt red
-        O->>D: fix, with the verifier's numbers
+        O->>D: fix the failing module, rerun that module only
+        D-->>O: fixes
+        O->>O: merge, tools/test.sh all, once
     else green
         O->>R: review the diff
         R-->>O: findings
-        O->>G: pull request with the scenario results in the body
+        O->>D: fixes, if any
+        O->>O: tools/test.sh all again only if code changed
+        O->>G: push, pull request with the results in the body
         G->>G: CI repeats rung 1 and rung 2 on the PR
         G-->>O: review comments, CI events
-        O->>O: address, push, repeat until green and approved
         G->>B: merge to main
         B->>B: nightly: /board deploy + smoke on the lab pair
         B-->>G: result as a check on the merge commit, roll back on red

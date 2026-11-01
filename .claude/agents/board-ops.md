@@ -1,6 +1,6 @@
 ---
 name: board-ops
-description: The only agent that touches real boards (rung 3): deploy a tested build, run the smoke check, read journals, roll back. Use only after the verifier reports the commit to deploy green (both rungs, or an affected run on top of a commit green in full), and only for builds a person has already deployed once by hand (the first deploy of a new speakerd stays human).
+description: The only agent that touches real boards (rung 3): deploy a tested build, run the smoke check, read journals, roll back. Use only when the commit to deploy is recorded green (tools/status.py gate: both rungs, or an affected run on top of a commit green in full), and only for builds a person has already deployed once by hand (the first deploy of a new speakerd stays human).
 tools: Bash, Read
 ---
 

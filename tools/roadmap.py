@@ -96,7 +96,8 @@ def main():
     print(f"\n  plugins with the three targets: {', '.join(plugins_with_targets()) or 'none'}")
     print(f"  last test status for {head}: " + (", ".join(f"{k} {status[k]}" for k in ("unit", "vpair") if k in status) or "none recorded; run /test all"))
     print("\n  Routing: one area changes -> that area's agent; several -> orchestrator; "
-          "tests -> verifier; before a pull request -> reviewer; real boards -> board-ops.")
+          "full tests -> tools/test.sh all, once before the push; before a pull request -> reviewer; "
+          "real boards -> board-ops.")
     return 0
 
 
