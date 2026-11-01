@@ -9,10 +9,11 @@ card by card, and what docs/diagrams/render.js turns into docs/images/*.png.
     python3 docs/diagrams/diagrams.py                 # writes docs/diagrams/<name>.html
     python3 docs/diagrams/diagrams.py --artboards DIR # also writes DIR/<Name>.dc.html
 
-The visual language (also in each diagram's legend): a thick dark outline is a device you can
-touch, a dark solid card a physical component, a teal card software of this repository, a white
-card third-party software, a grey-blue card a kernel module, a folded-corner card a file on
-disk. Blue arrows carry audio, orange ones settings, dotted grey ones data read once.
+The visual language (also in each diagram's legend), after the "Lab Report" style of Claude
+Design: a ruled ink frame is a device you can touch, a solid ink card a physical component, a
+pale blue card software of this repository, a dashed card third-party software, a double-ruled
+card a kernel module, a folded-corner card a file on disk. Blue arrows carry audio, dashed
+orange ones settings, dotted grey ones data read once.
 """
 import argparse
 import os
@@ -20,30 +21,36 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-FONT_SANS = "'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif"
+# The "Lab Report" style (a Claude Design template): paper ground, one ink, serif text, monospace
+# names, square corners. Physical things are solid ink; software is a pale blue card outlined in
+# ink; third-party software is dashed; a kernel module has a double rule; a file has a folded corner.
+FONT_SANS = "'IBM Plex Serif', Georgia, serif"
 FONT_MONO = "'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace"
 FONT_LINK = ('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
-             'family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">')
+             'family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,700;1,400;1,500&display=swap">')
 
-INK = "#14171F"
-MUTED = "#5B6472"
+PAPER = "#EEF2F6"
+INK = "#14223A"
+MUTED = "#515C6F"     # ink 72 % over the paper
+LABEL = "#3B475C"     # ink 82 % over the paper
+TINT = "#E3E8EE"      # ink 5 % over the paper
 
 # Card styles: (background, border, text colour, radius)
 STYLES = {
-    "ours":   ("#DCEFEA", "2px solid #0F766E", INK, 10),
-    "third":  ("#FFFFFF", "1px solid #AEB6C2", INK, 10),
-    "kernel": ("#D9E0EB", "1px solid #7A8AA3", INK, 6),
-    "hw":     ("#243041", "1px solid #243041", "#F6F8FB", 4),
-    "file":   ("#F1E9D2", "none", INK, 0),
+    "ours":   ("#D6E2F0", f"1px solid {INK}", INK, 0),
+    "third":  (PAPER, f"1px dashed {INK}", INK, 0),
+    "kernel": ("#FFFFFF", f"3px double {INK}", INK, 0),
+    "hw":     (INK, "none", PAPER, 0),
+    "file":   ("#FFFFFF", "none", INK, 0),
     "label":  ("transparent", "none", INK, 0),
 }
 
 # Arrow styles: (stroke, width, dasharray or None)
 ARROWS = {
-    "audio":   ("#2F6DB5", 3, None),
-    "control": ("#C96A1B", 2, None),
-    "once":    ("#6B7280", 2, "6 6"),
-    "wire":    ("#243041", 2, None),
+    "audio":   ("#1F5FBF", 2, None),
+    "control": ("#C0532B", 1.5, "6 4"),
+    "once":    (MUTED, 1.5, "2 4"),
+    "wire":    (INK, 1, None),
 }
 
 _marker_n = [0]
@@ -54,32 +61,32 @@ def px(v):
 
 
 def root(w, h, inner):
-    return (f'<div style="position: relative; width: {px(w)}; height: {px(h)}; background: #FFFFFF; '
+    return (f'<div style="position: relative; width: {px(w)}; height: {px(h)}; background: {PAPER}; '
             f'font-family: {FONT_SANS}; color: {INK}; overflow: hidden">\n' + inner + "</div>\n")
 
 
 def title(x, y, text, sub=None):
-    out = (f'<div style="position: absolute; left: {px(x)}; top: {px(y)}; font-size: 28px; line-height: 36px; '
-           f'font-weight: 600; letter-spacing: -0.01em; color: {INK}">{text}</div>\n')
+    out = (f'<div style="position: absolute; left: {px(x)}; top: {px(y)}; font-size: 34px; line-height: 36px; '
+           f'font-weight: 500; letter-spacing: -0.015em; color: {INK}">{text}</div>\n')
     if sub:
-        out += (f'<div style="position: absolute; left: {px(x)}; top: {px(y + 40)}; font-size: 15px; '
-                f'line-height: 22px; color: {MUTED}">{sub}</div>\n')
+        out += (f'<div style="position: absolute; left: {px(x)}; top: {px(y + 40)}; font-size: 16px; '
+                f'line-height: 22px; font-style: italic; color: {MUTED}">{sub}</div>\n')
     return out
 
 
-def band(x, y, w, h, fill, name=None, border="none", radius=14, name_color=MUTED, name_dx=16):
+def band(x, y, w, h, fill, name=None, border="none", radius=0, name_color=MUTED, name_dx=16):
     out = (f'<div style="position: absolute; left: {px(x)}; top: {px(y)}; width: {px(w)}; height: {px(h)}; '
            f'box-sizing: border-box; background: {fill}; border: {border}; border-radius: {px(radius)}"></div>\n')
     if name:
-        out += (f'<div style="position: absolute; left: {px(x + name_dx)}; top: {px(y + 10)}; font-size: 12px; '
-                f'line-height: 18px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; '
-                f'color: {name_color}">{name}</div>\n')
+        out += (f'<div style="position: absolute; left: {px(x + name_dx)}; top: {px(y + 12)}; font-size: 11.5px; '
+                f'line-height: 16px; font-family: {FONT_MONO}; font-weight: 500; letter-spacing: 0.16em; '
+                f'text-transform: uppercase; color: {name_color}">{name}</div>\n')
     return out
 
 
 def device(x, y, w, h, name, name_dx=16):
-    """A physical device: a thick dark outline around the software it runs."""
-    return band(x, y, w, h, "#FBFBFC", name, border="2px solid #243041", radius=16, name_color=INK, name_dx=name_dx)
+    """A physical device: a ruled ink frame around the software it runs."""
+    return band(x, y, w, h, "transparent", name, border=f"1.5px solid {INK}", name_color=INK, name_dx=name_dx)
 
 
 def card(x, y, w, h, html, kind, size=14):
@@ -101,31 +108,33 @@ def name(text):
 
 def label(cx, top, text, w):
     return (f'<div style="position: absolute; left: {px(cx - w / 2)}; top: {px(top)}; width: {px(w)}; '
-            f'text-align: center; font-size: 13px; line-height: 16px; color: {MUTED}">{text}</div>\n')
+            f'text-align: center; font-size: 14px; line-height: 16px; font-style: italic; color: {LABEL}">{text}</div>\n')
 
 
 def side_label(x, top, text, w):
     """A label beside a vertical segment, left-aligned at x."""
     return (f'<div style="position: absolute; left: {px(x)}; top: {px(top)}; width: {px(w)}; '
-            f'font-size: 13px; line-height: 16px; color: {MUTED}">{text}</div>\n')
+            f'font-size: 14px; line-height: 16px; font-style: italic; color: {LABEL}">{text}</div>\n')
 
 
 def arrow(x1, y1, x2, y2, kind, head=True):
     """One straight segment from (x1, y1) to (x2, y2), the tip at (x2, y2) when it has a head.
     The svg spans the segment, 8px thick, the line along its middle."""
     stroke, width, dash = ARROWS[kind]
-    h = 2 * width if head else 0
+    length = max(11.0, width * 5.5)     # the head, in px
+    lu = length / width                 # the head, in stroke widths (the marker's units)
+    h = round(length / 2, 2) if head else 0
     style = (f"position: absolute; overflow: visible; fill: none; stroke: {stroke}; stroke-width: {width}; "
-             f"stroke-linecap: round; stroke-linejoin: round")
+             f"stroke-linecap: butt; stroke-linejoin: miter")
     if dash:
         style += f"; stroke-dasharray: {dash}"
     defs = marker_end = ""
     if head:
         _marker_n[0] += 1
         mid = f"dc-arrow-head-filled-{_marker_n[0]}"
-        defs = (f'<defs><marker id="{mid}" orient="auto" markerWidth="5" markerHeight="5" refX="2" refY="2" '
-                f'overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="{stroke}" stroke="none" '
-                f'style="stroke: none; fill: {stroke}; fill: context-stroke"/></marker></defs>')
+        defs = (f'<defs><marker id="{mid}" orient="auto" markerWidth="{lu:g}" markerHeight="{lu:g}" refX="{lu / 2:g}" '
+                f'refY="{lu * 0.31:g}" overflow="visible"><path d="M0 0 L{lu:g} {lu * 0.31:g} L0 {lu * 0.62:g} Z" '
+                f'fill="{stroke}" stroke="none" style="stroke: none; fill: {stroke}; fill: context-stroke"/></marker></defs>')
         marker_end = f' marker-end="url(#{mid})"'
     if y1 == y2:
         n = abs(x2 - x1)
@@ -151,7 +160,7 @@ def legend(x, y, items, arrows):
     for i, (kind, text) in enumerate(items):
         sx = x + i * 256
         if kind == "device":
-            bg, border, radius = "#FBFBFC", "2px solid #243041", 6
+            bg, border, radius = "transparent", f"1.5px solid {INK}", 0
         else:
             bg, border, _, radius = STYLES[kind]
         extra = ""
@@ -160,12 +169,12 @@ def legend(x, y, items, arrows):
         out += (f'<div style="position: absolute; left: {px(sx)}; top: {px(y)}; width: 24px; height: 24px; '
                 f'box-sizing: border-box; background: {bg}; border: {border}; border-radius: {px(radius)};{extra}"></div>\n')
         out += (f'<div style="position: absolute; left: {px(sx + 36)}; top: {px(y)}; font-size: 13px; '
-                f'line-height: 24px; color: {MUTED}">{text}</div>\n')
+                f'line-height: 24px; color: {INK}">{text}</div>\n')
     for i, (kind, text) in enumerate(arrows):
         sx = x + i * 256
         out += arrow(sx, y + 60, sx + 56, y + 60, kind)
         out += (f'<div style="position: absolute; left: {px(sx + 68)}; top: {px(y + 48)}; font-size: 13px; '
-                f'line-height: 24px; color: {MUTED}">{text}</div>\n')
+                f'line-height: 24px; color: {INK}">{text}</div>\n')
     return out
 
 
@@ -216,11 +225,11 @@ def overview():
     o += device(80, 776, 688, 160, "Your computer")
     o += card(112, 824, 272, 80, f"{name('controller')}<br>a plugin host GUI: add plugins,<br>wire them, turn the knobs", "ours")
     o += card(432, 824, 304, 80, "<b>measurement and tuning GUIs</b><br>design the filters<br>the plugins compile in", "ours")
-    o += card(816, 824, 176, 80, "<b>microphone and<br>audio interface</b>", "hw")
+    o += card(848, 824, 176, 80, "<b>microphone and<br>audio interface</b>", "hw")
     o += arrow(248, 824, 248, 641, "control")
     o += side_label(260, 724, "edits, knobs; meters back", 180)
-    o += arrow(816, 864, 737, 864, "audio")
-    o += label(776, 836, "sweeps", 56)
+    o += arrow(848, 864, 737, 864, "audio")
+    o += label(808, 836, "sweeps", 56)
 
     o += legend(80, 984,
                 [("device", "a device you can touch"), ("hw", "a physical component"),
@@ -236,17 +245,17 @@ def speaker():
                "One board. What runs in user space, what the kernel does, and what is hardware.")
 
     # The three bands.
-    o += band(64, 150, 1344, 390, "#F6F7F9", "User space")
-    o += band(64, 564, 1344, 144, "#EDF0F5", "Kernel space")
-    o += band(64, 732, 1344, 168, "#E4E8EF", "Hardware")
+    o += band(64, 150, 1344, 390, TINT, "User space", name_color=INK)
+    o += band(64, 564, 1344, 144, TINT, "Kernel space", name_color=INK)
+    o += band(64, 732, 1344, 168, TINT, "Hardware", name_color=INK)
 
     # The network, at the left of user space.
-    o += band(80, 196, 120, 324, "#DFE9F6", "The network", radius=10)
+    o += band(80, 196, 120, 324, PAPER, "Network", border=f"1px dashed {INK}")
     o += (f'<div style="position: absolute; left: 96px; top: 240px; width: 92px; font-size: 12px; line-height: 18px; '
-          f'color: {MUTED}">the Snapcast server, the hub, the controller</div>\n')
+          f'font-style: italic; color: {LABEL}">the Snapcast server, the hub, the controller</div>\n')
 
     # User space, row 1: the audio path through PipeWire.
-    o += band(560, 160, 808, 160, "#FFFFFF", "PipeWire, the audio server: its graph", border="1px solid #AEB6C2", radius=12)
+    o += band(560, 160, 808, 160, "transparent", "PipeWire, the audio server: its graph", border=f"1px dashed {INK}")
     o += card(320, 196, 192, 80, f"{name('snapclient')}<br>plays the stream<br>into the sink", "third")
     o += card(592, 196, 160, 80, f"<b>speakerd sink</b><br>the sink players<br>play into", "third")
     o += card(800, 196, 288, 80, f"{name('speakerd')}<br>the headless plugin host:<br>crossover · firConv · loudness", "ours")
@@ -269,7 +278,7 @@ def speaker():
     o += arrow(1120, 392, 1120, 340, "once", head=False)
     o += arrow(1120, 340, 992, 340, "once", head=False)
     o += arrow(992, 340, 992, 277, "once")
-    o += label(1056, 312, "read at boot", 96)
+    o += label(1056, 352, "read at boot", 96)
     o += arrow(800, 432, 201, 432, "control")
     o += label(500, 404, "the controller and the other speaker: TCP, OSC/UDP", 384)
 

@@ -14,9 +14,9 @@ You play music as you always do. The speakers do the rest.
 
 ![The system, from the listener's side: a computer or phone streams to two speakers, each with speakerd, ampd and two amplifiers; the controller on your computer talks to the hub](docs/images/overview.png)
 
-In both pictures a thick dark outline is a device you can touch, a dark card a physical
-component, a teal card software of this repository and a white card third-party software. Blue
-arrows carry audio, orange ones carry settings. The second picture also separates what runs in
+In both pictures a ruled frame is a device you can touch, a solid dark card a physical
+component, a pale blue card software of this repository, a dashed card third-party software and
+a double-ruled card a kernel module. Blue arrows carry audio, dashed orange ones carry settings. The second picture also separates what runs in
 user space from the kernel's drivers and from the hardware itself. The pictures are generated
 from [`docs/diagrams/diagrams.py`](docs/diagrams/diagrams.py).
 
