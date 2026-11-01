@@ -4,7 +4,8 @@ What happens, link by link, when a host built on JUCE bypasses a JUCE plugin it 
 speakerd's `graphNode->setBypassed (true)` for a document node with `"bypassed": true`, or a
 DAW's bypass button. Read in the pinned source and confirmed by `speakerd --render` of firConv
 and crossover bypassed (`dsp/juce_plugins/tests/bypass`). Paths are under
-`dsp/juce_plugins/JUCE/modules/`.
+`dsp/juce_plugins/JUCE/modules/`: since JUCE 8.0.11 the processors, the graph and the plugin
+hosting are in `juce_audio_processors_headless/`, not `juce_audio_processors/`.
 
 ## The chain
 
@@ -19,12 +20,14 @@ flowchart TD
     F -- "a parameter" --> H["setValueNotifyingHost on it every run(), then processBlock"]
 ```
 
-1. **The graph.** `Node::setBypassed` (`juce_AudioProcessorGraph.h`, about line 146) sets the
-   processor's bypass parameter when it has one, and its own flag. When rendering, the graph
+1. **The graph.** `Node::setBypassed`
+   (`juce_audio_processors_headless/processors/juce_AudioProcessorGraph.h`, about line 146) sets
+   the processor's bypass parameter when it has one, and its own flag. When rendering, the graph
    calls `processBlockBypassed` only for a bypassed node whose processor has **no** bypass
-   parameter (`juce_AudioProcessorGraph.cpp`, about line 893); with one, it calls `processBlock`
-   and leaves the bypass to the parameter.
-2. **The host side of LV2.** JUCE's LV2 hosting (`format_types/juce_LV2PluginFormatImpl.h`) looks
+   parameter (`juce_audio_processors_headless/processors/juce_AudioProcessorGraph.cpp`, about
+   line 893); with one, it calls `processBlock` and leaves the bypass to the parameter.
+2. **The host side of LV2.** JUCE's LV2 hosting
+   (`juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h`) looks
    for an input control port designated `lv2:enabled` and, if there is one, makes it the
    instance's bypass parameter: `BypassParameter`, which inverts it (bypass 1 is enabled 0;
    about line 2954), returned by the instance's `getBypassParameter()` (about line 3628). The
@@ -49,14 +52,16 @@ calls `processBlockBypassed` when it is set.
 ## Why our plugins do not declare a bypass parameter
 
 JUCE's own advice for a plugin with a bypass parameter is to return it from
-`getBypassParameter()` and honour it in `processBlock` (`processors/juce_AudioProcessor.h`, the
-comments of `processBlock` and `getBypassParameter`). Under the LV2 wrapper that costs, on the
-audio thread, every cycle whether the bypass changed or not (step 4):
+`getBypassParameter()` and honour it in `processBlock`
+(`juce_audio_processors_headless/processors/juce_AudioProcessor.h`, the comments of
+`processBlock` and `getBypassParameter`). Under the LV2 wrapper that costs, on the audio thread,
+every cycle whether the bypass changed or not (step 4):
 
 - `setValueNotifyingHost`, which takes the parameter's listener lock
-  (`AudioProcessorParameter::sendValueChangedMessageToListeners`) and calls every listener (an
-  APVTS adapter, a `ParameterAttachment`, which posts a message from a thread that is not the
-  message thread);
+  (`AudioProcessorParameter::sendValueChangedMessageToListeners`,
+  `juce_audio_processors_headless/processors/juce_AudioProcessorParameter.cpp`) and calls every
+  listener (an APVTS adapter, a `ParameterAttachment`, which posts a message from a thread that
+  is not the message thread);
 - the wrapper's `ParameterStorage` marks the parameter changed, so the plugin sends the host a
   `patch:Set` for it after every run(), and the host's `LV2Parameter` calls its own listeners
   under its lock (`setDenormalisedValueWithoutTriggeringUpdate`).
@@ -70,8 +75,9 @@ layouts did not change.
 
 - `AudioProcessor::processBlockBypassed`, not overridden, keeps the input channels as they are,
   clears the output channels beyond the inputs, and asserts that the plugin reports no latency
-  (`juce_AudioProcessor.cpp`, `processBypassed`). For firConv (1 in, 1 out) that was the input,
-  unscaled; for the crossover (1 in, 2 out), the input on output 1 and silence on output 2.
+  (`juce_audio_processors_headless/processors/juce_AudioProcessor.cpp`, `processBypassed`). For
+  firConv (1 in, 1 out) that was the input, unscaled; for the crossover (1 in, 2 out), the input
+  on output 1 and silence on output 2.
 - The LV2 host's `getStateInformation` is lilv's state of the instance, which carries the value
   of every input control port (`PortMap::getState`), the `enabled` port included: a state saved
   from a bypassed instance restores the bypass with it. speakerd is not exposed: it moves only
