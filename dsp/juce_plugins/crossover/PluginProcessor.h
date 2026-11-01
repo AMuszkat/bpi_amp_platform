@@ -3,7 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
-#include "BlockFir.h"   // dsp/juce_plugins/shared/blockfir (SHARED in CMakeLists.txt)
+#include "BlockFir.h"             // dsp/juce_plugins/shared/blockfir (SHARED in CMakeLists.txt)
+#include "LevelMatchedBypass.h"   // dsp/juce_plugins/shared/bypass
 
 #include <limits>
 
@@ -30,8 +31,15 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
    #endif
 
-    using juce::AudioProcessor::processBlock;          // keep the double overload visible
+    using juce::AudioProcessor::processBlock;          // keep the double overloads visible
+    using juce::AudioProcessor::processBlockBypassed;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    // Bypassed: the low band's output is the input times the gain, delayed as the FIRs delay it,
+    // and the high band's (the tweeter's) is silence (README.md, "Bypass"). Every host bypasses
+    // through it: JUCE's LV2 wrapper when the host clears the lv2:enabled port (what a node bypass
+    // in speakerd does), AudioProcessorGraph and JUCE's VST3 wrapper with their own bypass. The
+    // plugin has no bypass parameter of its own (getBypassParameter() is nullptr).
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     //==============================================================================
     juce::AudioProcessorEditor* createEditor() override;
@@ -85,7 +93,16 @@ private:
     // size, so processBlock never resizes (allocates) them.
     juce::AudioBuffer<float> lpBuffer;
     juce::AudioBuffer<float> hpBuffer;
+    juce::AudioBuffer<float> dryBuffer;   // the bypassed low band
+    void process (juce::AudioBuffer<float>&, bool bypassed) noexcept;
     void processChunk (juce::AudioBuffer<float>& buffer, int start, int numSamples) noexcept;
+
+    // The bypass: the low band's gained input, delayed by the FIRs' delay (linear phase, the same
+    // length in both bands: (N - 1) / 2 samples), and the fade between the processed and the
+    // bypassed output. Both paths run every block, so either is current when the bypass changes.
+    speaker::DryDelay   dryDelay;
+    speaker::BypassFade bypassFade;
+    static constexpr double gainRampSeconds = 0.01, bypassFadeSeconds = 0.01;
 
     std::vector<double> frequencies;
     std::vector<double> magnitudes;

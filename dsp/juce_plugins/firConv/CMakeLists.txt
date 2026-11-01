@@ -3,7 +3,7 @@
 # build with ../tools/build-podman.sh firConv  (see ../README.md).
 cmake_minimum_required(VERSION 3.22)
 
-project(FIR_CONV_PLUGIN VERSION 0.0.3)
+project(FIR_CONV_PLUGIN VERSION 0.0.4)
 
 find_package(JUCE CONFIG REQUIRED)
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/SpeakerPlugin.cmake)
@@ -20,4 +20,5 @@ speaker_add_plugin(firConv
         juce_dsp
     SHARED
         blockfir
+        bypass
 )

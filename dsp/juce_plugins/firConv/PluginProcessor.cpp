@@ -10,6 +10,11 @@
 #include "PluginEditor.h"
 #include "filters.hpp"  // InvFilter[], HPreLpTaps[], HPreHpSos[] (+ HPreHpNum/Den reference)
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <iterator>
+
 //==============================================================================
 PluginProcessor::PluginProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -41,7 +46,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::create_para
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
-    layout.add(std::make_unique<juce::AudioParameterFloat>("gain", "Gain", juce::NormalisableRange<float>(-60.0f, 0.0f), 0.5f));
+    // The default is 0 dB. It was written 0.5f up to 0.0.3, a value outside the range that every
+    // host and the APVTS already read as 0 dB (the range's end), so the layout is unchanged.
+    layout.add(std::make_unique<juce::AudioParameterFloat>("gain", "Gain", juce::NormalisableRange<float>(-60.0f, 0.0f), 0.0f));
     layout.add(std::make_unique<juce::AudioParameterFloat>("freq", "Freq", juce::NormalisableRange<float>(0.1f, 20000.0f, 0.5f, 0.15f), 0.25f));
 
     return layout;
@@ -120,8 +127,10 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     spec.maximumBlockSize = (juce::uint32) (samplesPerBlock > 0 ? samplesPerBlock : 512);
     spec.numChannels = 1; // mono in/out
 
-    // Gain: the "gain" parameter, applied at the next block.
+    // Gain: the "gain" parameter, applied at the next block, at once on the first block and
+    // over gainRampSeconds after that.
     gain.prepare(spec);
+    gain.setRampDurationSeconds (gainRampSeconds);
     gain.setGainDecibels(0.0f);
     appliedGainDb = std::numeric_limits<float>::quiet_NaN();
 
@@ -133,6 +142,16 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
 
     // Inverse FIR (least-squares magnitude inverse of the summed driver response).
     inv.prepare (InvFilter, (int) (sizeof(InvFilter) / sizeof(InvFilter[0])), (int) spec.maximumBlockSize);
+
+    // The bypass: the gained input delayed as the two FIRs delay it. Both are linear phase
+    // (symmetric taps, which the tuning GUI exports), so each delays by (N - 1) / 2 samples.
+    constexpr int numPreLp = (int) (sizeof (HPreLpTaps) / sizeof (HPreLpTaps[0]));
+    constexpr int numInv = (int) (sizeof (InvFilter) / sizeof (InvFilter[0]));
+    jassert (std::equal (HPreLpTaps, HPreLpTaps + numPreLp, std::reverse_iterator<const float*> (HPreLpTaps + numPreLp)));
+    jassert (std::equal (InvFilter, InvFilter + numInv, std::reverse_iterator<const float*> (InvFilter + numInv)));
+    dryDelay.prepare ((numPreLp - 1) / 2 + (numInv - 1) / 2);
+    dryScratch.assign (spec.maximumBlockSize, 0.0f);
+    bypassFade.prepare (spec.sampleRate, bypassFadeSeconds);
 
     reset();
 }
@@ -159,6 +178,8 @@ void PluginProcessor::reset()
     for (auto& q : preHp)
         q.s1 = q.s2 = 0.0;
     inv.reset();
+    dryDelay.reset();
+    bypassFade.reset();
 }
 
 void PluginProcessor::processPreHp (float* samples, int numSamples) noexcept
@@ -215,6 +236,16 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
+    process (buffer, false);
+}
+
+void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    process (buffer, true);
+}
+
+void PluginProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
+{
     juce::ScopedNoDenormals noDenormals;
 
     // Audio thread: nothing here allocates, locks or makes a syscall.
@@ -222,24 +253,46 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     if (! juce::exactlyEqual (gainDb, appliedGainDb))
     {
+        const bool first = std::isnan (appliedGainDb);
         gain.setGainDecibels (gainDb);
+
+        if (first)
+            gain.reset();          // the first block after prepareToPlay starts at the gain, no ramp
+
         appliedGainDb = gainDb;
     }
 
-    if (buffer.getNumChannels() == 0)
+    bypassFade.setBypassed (bypassed);
+
+    if (buffer.getNumChannels() == 0 || dryScratch.empty())
         return;
 
-    // Mono processing: gain -> pre-LP (FIR) -> pre-HP (IIR biquad cascade) -> inverse (FIR),
-    // in place on channel 0.
-    auto inoutBlock = juce::dsp::AudioBlock<float> (buffer).getSubsetChannelBlock (0, 1);
-    juce::dsp::ProcessContextReplacing<float> context (inoutBlock);
+    // Mono, in place on channel 0, in chunks of the prepared size (the dry path's scratch).
     float* const samples = buffer.getWritePointer (0);
     const int numSamples = buffer.getNumSamples();
+    const int chunk = (int) dryScratch.size();
 
-    gain.process (context);
+    for (int start = 0; start < numSamples; start += chunk)
+        processChunk (samples + start, juce::jmin (chunk, numSamples - start));
+}
+
+void PluginProcessor::processChunk (float* samples, int numSamples) noexcept
+{
+    // gain -> pre-LP (FIR) -> pre-HP (IIR biquad cascade) -> inverse (FIR): the processed path.
+    // The bypassed path: the same gain, then the FIRs' delay. Both run whatever the bypass is.
+    auto block = juce::dsp::AudioBlock<float> (&samples, 1, (size_t) numSamples);
+    gain.process (juce::dsp::ProcessContextReplacing<float> (block));
+
+    float* const dry = dryScratch.data();
+    std::memcpy (dry, samples, sizeof (float) * (size_t) numSamples);
+    dryDelay.process (dry, numSamples);
+
     preLp.process (samples, samples, numSamples);
     processPreHp (samples, numSamples);
     inv.process (samples, samples, numSamples);
+
+    const float* dryChannels[] { dry };
+    bypassFade.mix (&samples, dryChannels, 1, numSamples);
 }
 
 //==============================================================================

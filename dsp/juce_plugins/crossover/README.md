@@ -31,10 +31,40 @@ from `FIR::Filter`'s mix of fused and unfused taps by less than -131 dB re the F
 -129.5 and -132.6 dB re their peak (rendered by `speakerd` from a sweep and noise). A block
 longer than the one prepared is processed in chunks of that size.
 
-| Parameter | Range | |
-|---|---|---|
-| Gain | −30 … 0 dB | applied to both bands |
-| Freq | | unused (left over from the plugin template) |
+| Parameter | Range | Default | |
+|---|---|---|---|
+| Gain | −30 … 0 dB | 0 dB | applied to both bands; a change ramps over 10 ms (since 0.0.3) |
+| Freq | | | unused (left over from the plugin template) |
+
+The gain's default was written `0.5f` up to 0.0.2, a value outside the range, which every host
+and the APVTS read as the range's end, 0 dB; 0.0.3 writes 0 dB, so the layout is unchanged.
+
+## Bypass
+
+Since 0.0.3, a bypassed crossover keeps its gain and splits nothing: **output 1** (the woofer's)
+is the input times the gain, delayed by the FIRs' (259 − 1) / 2 = 129 samples, and **output 2**
+(the tweeter's) is silence, so that a bypassed crossover never gives a tweeter the full range,
+whatever routes it there. Both paths run in every block, so a change fades from one to the other
+over 10 ms (`../shared/bypass/LevelMatchedBypass.h`). It is `processBlockBypassed()`, which every
+host calls for a bypass (JUCE's LV2 wrapper when its `lv2:enabled` port is 0, as a node bypass in
+`speakerd` sets it); the crossover has no bypass parameter of its own, so no saved state carries
+one ([lv2-bypass.md](../../docs/juce-knowledge/hosting/lv2-bypass.md)). The tweeter rule of
+`speakerd`, the installer and `ampd` still treats a bypassed crossover as no crossover: with the
+tweeter on, a document that routes its output 2 to the tweeter does not load.
+
+Up to 0.0.2 a bypass was JUCE's default: output 1 the input as it is, output 2 silence. Measured as
+for firConv ([its README](../firConv/README.md#bypass), `../tests/bypass`), output 1:
+
+| Signal | Gain | Processed | Bypassed, 0.0.2 | Bypassed, 0.0.3 | Bypassed − processed, 0.0.2 | 0.0.3 |
+|---|---|---|---|---|---|---|
+| pink noise | −12 dB | −42.78 dBFS | −29.82 dBFS | −41.82 dBFS | +12.96 dB | +0.96 dB |
+| pink noise | 0 dB | −30.78 dBFS | −29.82 dBFS | −29.82 dBFS | +0.96 dB | +0.96 dB |
+| 1 kHz sine | −12 dB | −35.01 dBFS | −23.01 dBFS | −35.01 dBFS | +12.00 dB | 0.00 dB |
+| 1 kHz sine | 0 dB | −23.01 dBFS | −23.01 dBFS | −23.01 dBFS | 0.00 dB | 0.00 dB |
+
+The +0.96 dB on pink noise is the high band that the low band does not carry. Output 2 is silence
+when bypassed (processed: −49.0 dBFS of pink noise at −12 dB). The processed outputs are the same as
+0.0.2's bit for bit.
 
 The editor plots the combined response of the compiled-in filters.
 

@@ -9,7 +9,10 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "crossover_coefs.hpp" // provides lp[] and hp[] FIR coefficient arrays
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <iterator>
 
 //==============================================================================
 PluginProcessor::PluginProcessor()
@@ -42,7 +45,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::create_para
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
-    layout.add(std::make_unique<juce::AudioParameterFloat>("gain", "Gain", juce::NormalisableRange<float>(-30.0f, 0.0f), 0.5f));
+    // The default is 0 dB. It was written 0.5f up to 0.0.2, a value outside the range that every
+    // host and the APVTS already read as 0 dB (the range's end), so the layout is unchanged.
+    layout.add(std::make_unique<juce::AudioParameterFloat>("gain", "Gain", juce::NormalisableRange<float>(-30.0f, 0.0f), 0.0f));
     layout.add(std::make_unique<juce::AudioParameterFloat>("freq", "Freq", juce::NormalisableRange<float>(0.1f, 20000.0f, 0.5f, 0.15f), 0.25f));
 
     return layout;
@@ -125,18 +130,32 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     // Allocate temporary mono buffers for LP/HP outputs: here, never in processBlock.
     lpBuffer.setSize(1, preparedBlock);
     hpBuffer.setSize(1, preparedBlock);
+    dryBuffer.setSize(1, preparedBlock);
 
     // The low band: its gain, then its FIR.
     lpGain.prepare(spec);
+    lpGain.setRampDurationSeconds(gainRampSeconds);
     lpGain.setGainDecibels(0.0f);
     lpFir.prepare(lp, (int)(sizeof(lp)/sizeof(lp[0])), preparedBlock);
 
     // The high band, the same way.
     hpGain.prepare(spec);
+    hpGain.setRampDurationSeconds(gainRampSeconds);
     hpGain.setGainDecibels(0.0f);
     hpFir.prepare(hp, (int)(sizeof(hp)/sizeof(hp[0])), preparedBlock);
 
-    // The gain parameter is applied again at the next block, whatever it is now.
+    // The bypass: the low band's gained input delayed as its FIR delays it. Both FIRs are
+    // linear phase (symmetric taps, which the tuning GUI exports) and of one length, so each
+    // delays by (N - 1) / 2 samples.
+    constexpr int numLp = (int) (sizeof (lp) / sizeof (lp[0]));
+    static_assert (numLp == (int) (sizeof (hp) / sizeof (hp[0])), "the two bands' FIRs must have one delay");
+    jassert (std::equal (lp, lp + numLp, std::reverse_iterator<const float*> (lp + numLp)));
+    jassert (std::equal (hp, hp + numLp, std::reverse_iterator<const float*> (hp + numLp)));
+    dryDelay.prepare ((numLp - 1) / 2);
+    bypassFade.prepare (spec.sampleRate, bypassFadeSeconds);
+
+    // The gain parameter is applied again at the next block, whatever it is now: at once on the
+    // first block, and over gainRampSeconds after that.
     appliedGainDb = std::numeric_limits<float>::quiet_NaN();
 
     reset();
@@ -148,6 +167,8 @@ void PluginProcessor::reset()
     lpFir.reset();
     hpGain.reset();
     hpFir.reset();
+    dryDelay.reset();
+    bypassFade.reset();
 }
 
 void PluginProcessor::releaseResources()
@@ -181,6 +202,16 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
+    process (buffer, false);
+}
+
+void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    process (buffer, true);
+}
+
+void PluginProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
+{
     juce::ScopedNoDenormals noDenormals;
 
     // Audio thread: nothing here allocates, locks or makes a syscall.
@@ -188,10 +219,20 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     if (! juce::exactlyEqual (gainDb, appliedGainDb))
     {
+        const bool first = std::isnan (appliedGainDb);
         lpGain.setGainDecibels (gainDb);
         hpGain.setGainDecibels (gainDb);
+
+        if (first)
+        {
+            lpGain.reset();        // the first block after prepareToPlay starts at the gain, no ramp
+            hpGain.reset();
+        }
+
         appliedGainDb = gainDb;
     }
+
+    bypassFade.setBypassed (bypassed);
 
     const int numSamples = buffer.getNumSamples();
 
@@ -224,10 +265,20 @@ void PluginProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start,
     // Process LP and HP over the first numSamples of their buffers: the gain, then the FIR.
     auto lpBlock = juce::dsp::AudioBlock<float> (lpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
     lpGain.process (juce::dsp::ProcessContextReplacing<float> (lpBlock));
+
+    // The bypassed low band: the gained input, delayed as the FIR delays it.
+    dryBuffer.copyFrom (0, 0, lpBuffer, 0, 0, numSamples);
+    dryDelay.process (dryBuffer.getWritePointer (0), numSamples);
+
     lpFir.process (lpBuffer.getReadPointer (0), lpBuffer.getWritePointer (0), numSamples);
     auto hpBlock = juce::dsp::AudioBlock<float> (hpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
     hpGain.process (juce::dsp::ProcessContextReplacing<float> (hpBlock));
     hpFir.process (hpBuffer.getReadPointer (0), hpBuffer.getWritePointer (0), numSamples);
+
+    // Processed, bypassed, or the fade between them; bypassed, the high band is silence.
+    float* wet[] { lpBuffer.getWritePointer (0), hpBuffer.getWritePointer (0) };
+    const float* dry[] { dryBuffer.getReadPointer (0), nullptr };
+    bypassFade.mix (wet, dry, 2, numSamples);
 
     // Route: output channel 0 = LP, output channel 1 = HP.
     const int outChs = getTotalNumOutputChannels();

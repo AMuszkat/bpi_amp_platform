@@ -26,6 +26,7 @@ juce_plugins/
 ├── tests/                      tests of shared code, outside every plugin's identity
 │   ├── blockfir/                 the block FIR, bit for bit on x86_64 and aarch64 (rung 1)
 │   ├── buildinfo/                a built bundle and its copy carry the identity of its sources (rung 1)
+│   ├── bypass/                   firConv and crossover bypassed keep their gain (standalone)
 │   ├── firconv-response/         firConv's magnitude response: the design against both builds (standalone)
 │   └── plugin-versions/          plugin-versions.sh check and list on a scratch repository (rung 1)
 ├── tools/                      the build system, shared by every plugin
@@ -211,6 +212,7 @@ a new version. Tests of shared code go in `tests/`, outside every plugin's ident
 
 | Folder | What | Compiled into |
 |---|---|---|
+| `shared/bypass` | `LevelMatchedBypass.h`: the bypass of a plugin made of a gain and linear-phase FIRs, the gained input delayed by the FIRs' delay (`DryDelay`, a ring of exactly that many samples) and a linear fade between the processed and the bypassed output when the bypass changes (`BypassFade`); both allocate only in `prepare()` | `firConv`, `crossover` (their `processBlockBypassed()`) |
 | `shared/blockfir` | `BlockFir.h`: a direct-form FIR that computes 16 outputs per pass over its taps with GCC vector types, each output's taps added in ascending order as `juce::dsp::FIR::Filter` does; a linear history allocated in `prepare()`, longer blocks in chunks. Bit-identical to `FIR::Filter` on x86_64; on aarch64 every tap is a fused multiply-add, within -131 dB of `FIR::Filter`'s output (which mixes fused and unfused taps) | `firConv` (pre-LP, inverse), `crossover` (both bands) |
 
 `tests/blockfir/run.sh` (part of `tools/test.sh unit`) builds its test with the plugins' flags
@@ -249,6 +251,28 @@ changed), and it moves into the development container like the other test script
 - It writes `build/tests/firconv-response/firConv/response.svg` (`svgplot.py`, no plotting
   package), `response.csv` (frequency, then the design, x86_64 and aarch64 in dB) and
   `landmarks.txt`, the three responses at 20 Hz to 10 kHz, which `run.sh` prints.
+
+## The bypass test
+
+`tests/bypass/run.sh` checks the level-matched bypass of firConv and the crossover (their READMEs,
+"Bypass"). Standalone, not part of rung 1, about a minute warm; it moves into the development
+container like the other test scripts, and writes to `build/tests/bypass/`.
+
+- `fade_test.cpp`, built with `-Wall -Wextra -Wconversion -Wshadow -Wfloat-equal -Werror`:
+  `shared/bypass` on its own. The delay is exact in blocks of 1, 7, 64 and 1024; the fade is
+  linear over its 480 samples (10 ms at 48 kHz), the steady states are exactly wet or dry, a
+  null dry channel is silence, a change during a fade reverses it, and the first block after
+  `prepare()` or `reset()` takes its state without a fade.
+- `test_bypass.py` builds `speakerd`, firConv and the crossover (complete, x86_64) with
+  `tools/build.sh` and renders pink noise and a 1 kHz sine through each, processed and with the
+  node `"bypassed": true`, at gains of -12 and 0 dB: the path a bypass takes on a speaker
+  (`speakerd`'s node bypass, JUCE's LV2 hosting and its `lv2:enabled` port, JUCE's LV2 wrapper,
+  the plugin's `processBlockBypassed()`; [lv2-bypass.md](../docs/juce-knowledge/hosting/lv2-bypass.md)).
+  It asserts that bypassed firConv outputs the input times the gain delayed by 1030 samples, and
+  the crossover the same delayed by 129 on output 1 and silence on output 2, each within
+  -120 dB of the input's peak (measured: -147 dB), and that neither bundle declares a parameter
+  of its own for the bypass (its `dsp.ttl` names `gain` and `freq` only). It writes the levels,
+  processed and bypassed, to `levels.txt`, the tables of the two READMEs.
 
 ## Versions and source identity
 
@@ -347,7 +371,10 @@ before them moves that much, and did before P1 ([`firConv/README.md`](firConv/RE
 firConv 0.0.3 runs that high-pass in double, a patch too: its output differs from 0.0.2's by
 -59.7 dB re peak on x86_64 and -57.9 dB on aarch64, all below 50 Hz (that noise, gone), and its
 x86_64 and aarch64 builds now differ by -92 dB re peak (0.0.2: -55.6 dB), 93 % of that above
-20 kHz, where the inverse FIR boosts the pre-LP FIR's float32 rounding.
+20 kHz, where the inverse FIR boosts the pre-LP FIR's float32 rounding. The level-matched
+bypass (firConv 0.0.4, crossover 0.0.3, their READMEs' "Bypass") is a patch as well: the same
+parameters, defaults and state, a new bypassed output, and the processed output bit for bit as
+before at a constant gain (a gain change now ramps over 10 ms).
 
 lilv, which picks the bundle a host runs when two have one URI, sees only a version's last two
 numbers: JUCE writes `x.y.z` as `lv2:minorVersion y`, `lv2:microVersion z`, and lilv runs the
