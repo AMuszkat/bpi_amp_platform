@@ -105,7 +105,11 @@ input times the gain, delayed by the two FIRs' delay, (61 − 1) / 2 + (2001 −
 samples (21.5 ms at 48 kHz; both FIRs are linear phase), so bypassing changes neither the level
 by the gain nor the timing (a pair with one speaker bypassed stays aligned). Both paths run in
 every block, the filters while bypassed too, so either is current when the bypass changes, and a
-change fades from one to the other over 10 ms (`../shared/bypass/LevelMatchedBypass.h`). It is
+change fades from one to the other over 10 ms (`../shared/bypass/LevelMatchedBypass.h`). That
+fade is for a host that toggles the bypass of a running instance (a DAW). `speakerd` does not:
+it applies a bypass, like any document change, by building a new graph for the new revision, and
+the new instance starts in its state, bypassed or not, with no fade (`BypassFade::reset`); what
+covers that switch is `speakerd`'s own fade out and in around the swap. It is
 `processBlockBypassed()`, which every host calls for a bypass: JUCE's LV2 wrapper when its
 `lv2:enabled` port is 0 (a node bypass in `speakerd`, a DAW's bypass), `AudioProcessorGraph`, and
 JUCE's VST3 wrapper. firConv has no bypass parameter of its own, so no saved state carries a
@@ -128,7 +132,8 @@ the end of pink noise at -30 dBFS RMS, 8 s, and of a 1 kHz sine at -20 dBFS peak
 What is left, −5.46 dB on pink noise at either gain, is the correction itself: it boosts the low
 end (+17.5 dB at 28 Hz), where pink noise has its energy. 0.0.4's bypassed output is the input
 times the gain, delayed, within −147 dB of the input's peak (the input's rounding to float32),
-and its processed output is the same as 0.0.3's bit for bit.
+and at a constant gain its processed output is the same as 0.0.3's bit for bit: `../tests/bypass`
+builds 0.0.3 from its sources in git and compares the two renders sample for sample.
 
 The editor's plot does not read the filters: it draws `getMagnitudes()`, which nothing fills,
 so it shows a flat line at the bottom of the plot.

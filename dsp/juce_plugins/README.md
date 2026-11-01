@@ -26,7 +26,7 @@ juce_plugins/
 ├── tests/                      tests of shared code, outside every plugin's identity
 │   ├── blockfir/                 the block FIR, bit for bit on x86_64 and aarch64 (rung 1)
 │   ├── buildinfo/                a built bundle and its copy carry the identity of its sources (rung 1)
-│   ├── bypass/                   firConv and crossover bypassed keep their gain (standalone)
+│   ├── bypass/                   firConv and crossover: bypassed, their gain kept; processed, as before (standalone)
 │   ├── firconv-response/         firConv's magnitude response: the design against both builds (standalone)
 │   └── plugin-versions/          plugin-versions.sh check and list on a scratch repository (rung 1)
 ├── tools/                      the build system, shared by every plugin
@@ -255,8 +255,17 @@ changed), and it moves into the development container like the other test script
 ## The bypass test
 
 `tests/bypass/run.sh` checks the level-matched bypass of firConv and the crossover (their READMEs,
-"Bypass"). Standalone, not part of rung 1, about a minute warm; it moves into the development
-container like the other test scripts, and writes to `build/tests/bypass/`.
+"Bypass"). It moves into the development container like the other test scripts, and writes to
+`build/tests/bypass/`.
+
+It is **standalone, like the response test: not part of rung 1** (`tools/test.sh unit`), so CI
+does not run it; run it by hand after a change to firConv, the crossover or `shared/bypass`.
+Putting it into rung 1 is one more step in `run_unit` of `tools/test.sh`, beside `blockfir`:
+`dsp/juce_plugins/tests/bypass/run.sh`, which exits non-zero on a failure. It took 1 min 7 s the
+first time in a checkout (the previous versions' builds; speakerd, firConv and the crossover
+already built; 24 threads) and 25 s after that, most of it `tools/build.sh` and cmake finding
+nothing to do; the 24 renders take about 4 s. Whether to is the person's decision: `tools/` is
+not this area's.
 
 - `fade_test.cpp`, built with `-Wall -Wextra -Wconversion -Wshadow -Wfloat-equal -Werror`:
   `shared/bypass` on its own. The delay is exact in blocks of 1, 7, 64 and 1024; the fade is
@@ -273,6 +282,15 @@ container like the other test scripts, and writes to `build/tests/bypass/`.
   -120 dB of the input's peak (measured: -147 dB), and that neither bundle declares a parameter
   of its own for the bypass (its `dsp.ttl` names `gain` and `freq` only). It writes the levels,
   processed and bypassed, to `levels.txt`, the tables of the two READMEs.
+- The same renders, processed, through the versions before the bypass, firConv 0.0.3 and the
+  crossover 0.0.2: `run.sh` takes their sources (the plugin folders, `shared/`, `cmake/`) from
+  git at a pinned commit, `PREVIOUS` in `run.sh`, with `git archive`, and builds their complete
+  targets into `build/tests/bypass-previous/` (kept between runs; their copy step pinned inside
+  that build, so they never reach a `~/.lv2`). The test asserts that each processed output, both
+  of the crossover's, is the previous version's bit for bit, at both gains and with both signals,
+  so the comparison depends on no stored output or hash, only on one compiler building both. A
+  later version that changes the processed output on purpose moves `PREVIOUS` to its own last
+  commit, and says so in its README.
 
 ## Versions and source identity
 
@@ -374,7 +392,8 @@ x86_64 and aarch64 builds now differ by -92 dB re peak (0.0.2: -55.6 dB), 93 % o
 20 kHz, where the inverse FIR boosts the pre-LP FIR's float32 rounding. The level-matched
 bypass (firConv 0.0.4, crossover 0.0.3, their READMEs' "Bypass") is a patch as well: the same
 parameters, defaults and state, a new bypassed output, and the processed output bit for bit as
-before at a constant gain (a gain change now ramps over 10 ms).
+before at a constant gain (a gain change now ramps over 10 ms), which the bypass test checks
+against the previous versions built from git.
 
 lilv, which picks the bundle a host runs when two have one URI, sees only a version's last two
 numbers: JUCE writes `x.y.z` as `lv2:minorVersion y`, `lv2:microVersion z`, and lilv runs the

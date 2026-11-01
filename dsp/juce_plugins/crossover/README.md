@@ -45,7 +45,10 @@ Since 0.0.3, a bypassed crossover keeps its gain and splits nothing: **output 1*
 is the input times the gain, delayed by the FIRs' (259 − 1) / 2 = 129 samples, and **output 2**
 (the tweeter's) is silence, so that a bypassed crossover never gives a tweeter the full range,
 whatever routes it there. Both paths run in every block, so a change fades from one to the other
-over 10 ms (`../shared/bypass/LevelMatchedBypass.h`). It is `processBlockBypassed()`, which every
+over 10 ms (`../shared/bypass/LevelMatchedBypass.h`) when a host toggles the bypass of a running
+instance; `speakerd` applies a bypass by building a new graph for the new revision, whose new
+instance starts in its state with no fade (`BypassFade::reset`), under `speakerd`'s own fade
+around the swap. It is `processBlockBypassed()`, which every
 host calls for a bypass (JUCE's LV2 wrapper when its `lv2:enabled` port is 0, as a node bypass in
 `speakerd` sets it); the crossover has no bypass parameter of its own, so no saved state carries
 one ([lv2-bypass.md](../../docs/juce-knowledge/hosting/lv2-bypass.md)). The tweeter rule of
@@ -63,8 +66,9 @@ for firConv ([its README](../firConv/README.md#bypass), `../tests/bypass`), outp
 | 1 kHz sine | 0 dB | −23.01 dBFS | −23.01 dBFS | −23.01 dBFS | 0.00 dB | 0.00 dB |
 
 The +0.96 dB on pink noise is the high band that the low band does not carry. Output 2 is silence
-when bypassed (processed: −49.0 dBFS of pink noise at −12 dB). The processed outputs are the same as
-0.0.2's bit for bit.
+when bypassed (processed: −49.0 dBFS of pink noise at −12 dB). At a constant gain the processed
+outputs are the same as 0.0.2's bit for bit, both of them: `../tests/bypass` builds 0.0.2 from
+its sources in git and compares the two renders sample for sample.
 
 The editor plots the combined response of the compiled-in filters.
 

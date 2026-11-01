@@ -14,6 +14,10 @@ processBlockBypassed). 48 kHz, blocks of 1024, after speakerd's second of silent
   EXACT_DB of the input's peak, sample for sample.
 - crossover bypassed outputs its input times the gain on its low band (output 1), delayed by its
   FIR's (259 - 1) / 2 = 129 samples, and silence on its high band (output 2, the tweeter's).
+- Processed (not bypassed), each plugin's output is the one of its version before the bypass
+  (firConv 0.0.3, crossover 0.0.2, built by run.sh from commit PREVIOUS into BYPASS_PREVIOUS),
+  rendered the same way, bit for bit on every output, at both gains: at a constant gain the
+  bypass's dry path and fade leave the processed path as it was.
 - Neither plugin declares a parameter of its own for the bypass (its bundle's dsp.ttl names only
   gain and freq), so no saved state of the plugin can carry one: the graph document's `bypassed`
   is the one truth. The bypass a host sees is the lv2:enabled port JUCE's LV2 wrapper adds.
@@ -35,6 +39,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[4]
 PLUGINS = ROOT / "dsp/juce_plugins"
 OUT = Path(os.environ.get("BYPASS_OUT", ROOT / "build/tests/bypass"))
+PREVIOUS = Path(os.environ["BYPASS_PREVIOUS"]) if "BYPASS_PREVIOUS" in os.environ else None
 RATE, BLOCK = 48000, 1024
 GAINS_DB = (-12.0, 0.0)
 # The bypassed output against the input times the gain, delayed: the worst sample at most this far
@@ -96,16 +101,18 @@ def read_wav(path):
         return (np.frombuffer(w.readframes(w.getnframes()), "<i4").reshape(-1, w.getnchannels()) / 2.0 ** 31).T
 
 
-def bundle(plugin):
-    return ROOT / f"build/{plugin}/{plugin}_artefacts/Release/LV2/{plugin}.lv2"
+def bundle(plugin, previous=False):
+    """The complete build's bundle: the current one, or the previous version's (run.sh)."""
+    base = PREVIOUS if previous else ROOT / "build"
+    return base / f"{plugin}/{plugin}_artefacts/Release/LV2/{plugin}.lv2"
 
 
-def render(plugin, wav, gain_db, bypassed, name):
+def render(plugin, wav, gain_db, bypassed, name, previous=False):
     """speakerd --render of `wav` through `plugin` as node 16, its gain at `gain_db`: firConv to the
     woofer; crossover's low band to the woofer and its high band to the tweeter (the tweeter on,
     with --allow-tweeter-without-crossover, since a bypassed crossover's high band is refused
-    there otherwise). Returns (woofer, tweeter)."""
-    b = bundle(plugin)
+    there otherwise). `previous`: the version before the bypass. Returns (woofer, tweeter)."""
+    b = bundle(plugin, previous)
     work = OUT / "renders" / name
     shutil.rmtree(work, ignore_errors=True)
     (work / "state").mkdir(parents=True)
@@ -145,8 +152,9 @@ def delayed(x, d):
     return np.concatenate([np.zeros(d), x[:len(x) - d]])
 
 
-def version(plugin):
-    text = (PLUGINS / plugin / "CMakeLists.txt").read_text()
+def version(plugin, previous=False):
+    base = PREVIOUS / "src/dsp/juce_plugins" if previous else PLUGINS
+    text = (base / plugin / "CMakeLists.txt").read_text()
     return re.search(r"project\s*\(\s*\w+\s+VERSION\s+([0-9.]+)", text).group(1)
 
 
@@ -164,6 +172,9 @@ class Bypass(unittest.TestCase):
                     for bypassed in (False, True):
                         name = f"{plugin}-{kind}-{gain:g}dB-{'bypassed' if bypassed else 'processed'}"
                         cls.y[plugin, kind, gain, bypassed] = render(plugin, OUT / f"{kind}.wav", gain, bypassed, name)
+                    if PREVIOUS is not None:
+                        name = f"{plugin}-{version(plugin, True)}-{kind}-{gain:g}dB-processed"
+                        cls.y[plugin, kind, gain, "previous"] = render(plugin, OUT / f"{kind}.wav", gain, False, name, True)
 
         lines = [f"Levels, speakerd --render at {RATE} Hz in blocks of {BLOCK}, after its second of silent settling; "
                  f"RMS from {WINDOW_S[0]:g} s to {WINDOW_S[1]:g} s before the end, dBFS.",
@@ -182,6 +193,13 @@ class Bypass(unittest.TestCase):
                     if plugin == "crossover":
                         row += f" {rms_db(p[1]):>11.2f} {rms_db(b[1]):>10.2f}"
                     lines.append(row)
+        if PREVIOUS is not None:
+            lines.append("")
+            lines.append("Processed against the previous version, every output, both signals and gains: "
+                         + "; ".join(f"{plugin} {version(plugin)} against {version(plugin, True)}: "
+                                     + ("identical" if all(np.array_equal(cls.y[plugin, k, g, False], cls.y[plugin, k, g, "previous"])
+                                                           for k in SIGNALS for g in GAINS_DB) else "DIFFERENT")
+                                     for plugin in ("firConv", "crossover")) + ".")
         (OUT / "levels.txt").write_text("\n".join(lines) + "\n")
 
     def check_exact(self, plugin, kind, gain, out, delay):
@@ -207,6 +225,26 @@ class Bypass(unittest.TestCase):
             for gain in GAINS_DB:
                 with self.subTest(kind=kind, gain=gain):
                     self.check_exact("crossover", kind, gain, self.y["crossover", kind, gain, True][0], CROSSOVER_DELAY)
+
+    def test_processed_is_the_previous_versions_output(self):
+        if PREVIOUS is None:
+            self.skipTest("no BYPASS_PREVIOUS: run.sh builds the previous versions")
+        expected = {"firConv": "0.0.3", "crossover": "0.0.2"}
+        for plugin in ("firConv", "crossover"):
+            self.assertEqual(version(plugin, True), expected[plugin], f"{plugin}: the version run.sh built as the previous one")
+            for kind in SIGNALS:
+                for gain in GAINS_DB:
+                    with self.subTest(plugin=plugin, kind=kind, gain=gain):
+                        now, before = self.y[plugin, kind, gain, False], self.y[plugin, kind, gain, "previous"]
+                        for channel, (a, b) in enumerate(zip(now, before), start=1):
+                            if np.array_equal(a, b):
+                                continue
+                            i = int(np.argmax(a != b))
+                            worst = np.max(np.abs(a - b))
+                            self.fail(f"{plugin} {version(plugin)} processed, {kind}, gain {gain:g} dB, output {channel}: "
+                                      f"not bit for bit {version(plugin, True)}'s. {np.count_nonzero(a != b)} samples "
+                                      f"differ, the first at {i} ({a[i]:.9g} against {b[i]:.9g}), the worst by "
+                                      f"{20 * np.log10(worst / np.max(np.abs(b)) + 1e-30):.1f} dB re its peak")
 
     def test_no_plugin_bypass_parameter(self):
         for plugin in ("firConv", "crossover"):
