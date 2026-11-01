@@ -369,7 +369,7 @@ class ControllerTest(unittest.TestCase):
                reconnect_ms=self.step(steps, "expect-revision")["ms"])
 
 
-    def stalled_run(self, script, extra=(), resume_after=None):
+    def stalled_run(self, script, extra=(), resume_after=None, timeout=60):
         """Runs a script while the hub stops reading the controller's first control connection
         0.5 s after it connected; it reads again `resume_after` seconds later (or never)."""
         hub = self.start_hub(control_rcvbuf=4096)
@@ -382,14 +382,15 @@ class ControllerTest(unittest.TestCase):
                 time.sleep(resume_after)
                 hub.resume_controllers()
 
-        return self.run_script(script, extra=extra, during=stall)
+        return self.run_script(script, extra=extra, during=stall, timeout=timeout)
 
     def test_12_hub_stops_reading_the_ui_keeps_running(self):
         """A hub that stops reading never blocks the message thread; the queued lines go out when
-        it reads again, in order."""
+        it reads again, in order. The hub echoes the thousands of queued sweep lines one by one,
+        which takes more than 30 s on a slow CI runner: the drain may take up to 120 s."""
         code, steps, err = self.stalled_run(
-            "wait-synced\nsweep 16 3\nstate\nset 16 s0_e0_gain 5.5\nwait-echo 16 s0_e0_gain 5.5 30\nstate\n",
-            resume_after=3.0)
+            "wait-synced\nsweep 16 3\nstate\nset 16 s0_e0_gain 5.5\nwait-echo 16 s0_e0_gain 5.5 120\nstate\n",
+            resume_after=3.0, timeout=180)
         self.assertPassed(code, steps, err)
         sweep = self.step(steps, "sweep")
         during = self.step(steps, "state", 0)["state"]
