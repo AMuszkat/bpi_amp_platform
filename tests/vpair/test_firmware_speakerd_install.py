@@ -104,6 +104,11 @@ Pass when:
   client-rt.conf alone, each restarting snapclient; client-rt.conf.orig survives every later run;
   a snapclient that started before its unit was written, or does not run, is restarted with
   nothing written; --routing-only run twice writes nothing the second time and says so;
+  --server example.local lands verbatim in the unit's --host, and --server-ip is the same
+  option; a .local name that getent hosts does not resolve installs libnss-mdns (only when
+  missing, not with --dry-run) and is checked again, one that still does not is refused with
+  nothing written or restarted, a name that is not .local and an address are not looked up, and
+  a server a shell would split is refused;
 - setup.sh checks before it changes: --dry-run changes nothing; --route speakerd without the
   pipewire component and without the sink, and --route plugin-host with the speakerd component,
   are refused before anything changes; and the components pipewire, snapcast (re-routing an
@@ -143,7 +148,7 @@ Pass when:
   judges the status; refused too with no tools/status.py and with one that answers neither 0
   (green) nor 1 (not green); with all of it green it reaches the (stand-in) board;
 - the board script (with --dry-run) refuses `journal -n` that is not a number and a deploy
-  option that is not an agent's (--base-conf, --stop-plugin-host, --server-ip, --no-restart),
+  option that is not an agent's (--base-conf, --stop-plugin-host, --server, --server-ip, --no-restart),
   quotes journal's argument, reads the journal with `journalctl --user-unit` (never `--user -u`,
   which finds nothing on a board's volatile journal), and reads status from the board's
   installed script with a fixed command.
@@ -233,13 +238,17 @@ exec bash -c "$*"
 
 
 # Stand-ins for what snapcast-setup.sh's target mode calls on a board (by the name they are
-# called): systemctl (the system's and --user), loginctl, apt-get, curl, dpkg and dpkg-query. Each
+# called): systemctl (the system's and --user), loginctl, apt-get, curl, dpkg, dpkg-query and
+# getent. Each
 # call is recorded in $FAKE_CLIENT/calls. The user's snapclient unit is $FAKE_CLIENT/active,
 # enabled and started (its main process's start, as systemd shows it), which a restart sets;
 # linger is $FAKE_CLIENT/linger; the packaged system snapclient system-active and system-enabled.
 # curl answers the release's assets (one with-pipewire .deb for this machine's codename) or writes
 # the download; apt-get install puts $FAKE_CLIENT/help-installed into the stand-in snapclient's
-# --help and $FAKE_CLIENT/version-installed into its version.
+# --help and $FAKE_CLIENT/version-installed into its version. mDNS: `getent hosts NAME` answers
+# for a name listed in $FAKE_CLIENT/mdns-names only once $FAKE_CLIENT/nss-mdns exists (libnss-mdns
+# installed: dpkg-query says so, and apt-get install libnss-mdns creates it); every other getent
+# database is the real one's.
 FAKE_CLIENT_TOOLS = r'''#!/bin/bash
 name="$(basename "$0")"; d="${FAKE_CLIENT:?}"
 echo "$name $*" >> "$d/calls"
@@ -259,9 +268,24 @@ case "$name" in
             echo "{\"assets\": [{\"browser_download_url\": \"https://github.invalid/snapclient_0.34.0-1_arm64_${codename}_with-pipewire.deb\"}]}"
         fi ;;
     apt-get)
-        case " $* " in *" install "*) cp "$d/help-installed" "$d/help"; cp "$d/version-installed" "$d/version" ;; esac ;;
+        case " $* " in
+            *" install "*libnss-mdns*) touch "$d/nss-mdns" ;;
+            *" install "*) cp "$d/help-installed" "$d/help"; cp "$d/version-installed" "$d/version" ;;
+        esac ;;
     dpkg) case " $* " in *" --print-architecture "*) echo arm64 ;; esac ;;
-    dpkg-query) state version unknown ;;
+    dpkg-query)
+        case " $* " in
+            *" libnss-mdns "*) [ -e "$d/nss-mdns" ] && printf 'install ok installed' ;;
+            *) state version unknown ;;
+        esac ;;
+    getent)
+        if [ "$1" = hosts ]; then
+            if [ -e "$d/nss-mdns" ] && grep -qxF "$2" "$d/mdns-names" 2> /dev/null; then
+                echo "192.0.2.20      $2"; exit 0
+            fi
+            exit 2
+        fi
+        PATH="${PATH#*:}" exec getent "$@" ;;
     systemctl)
         if [[ " $* " == *" --user "* ]]; then
             case " $* " in
@@ -1253,10 +1277,10 @@ def snapshot(root):
 
 def changing(calls):
     """The calls of FAKE_CLIENT_TOOLS that change something: all but systemctl show, loginctl
-    show-user, dpkg-query and snapclient's --help and --version."""
+    show-user, dpkg-query, getent and snapclient's --help and --version."""
     def reads(call):
         words = call.split()
-        return (words[0] in ("snapclient", "dpkg-query") or words[:2] == ["loginctl", "show-user"]
+        return (words[0] in ("snapclient", "dpkg-query", "getent") or words[:2] == ["loginctl", "show-user"]
                 or (words[0] == "systemctl" and "show" in words))
     return [call for call in calls if not reads(call)]
 
@@ -1272,7 +1296,7 @@ class SnapcastTarget(Setup):
         client-rt.conf. With `running`, snapclient's user unit is enabled and has run since 2020."""
         d = self.tmp / f"client-{name}"
         shutil.rmtree(d, ignore_errors=True)
-        for tool in ("systemctl", "loginctl", "apt-get", "curl", "dpkg", "dpkg-query"):
+        for tool in ("systemctl", "loginctl", "apt-get", "curl", "dpkg", "dpkg-query", "getent"):
             write_script(d / "bin" / tool, FAKE_CLIENT_TOOLS)
         write_script(d / "bin/snapclient", FAKE_SNAPCLIENT.replace("# MARK", mark))
         (d / "help").write_text(help)
@@ -1289,12 +1313,82 @@ class SnapcastTarget(Setup):
         (home / ".config/pipewire/client-rt.conf").write_text(PERSONS_ROUTING)
         return d, home, dict(self.env, FAKE_CLIENT=str(d), PATH=f"{d / 'bin'}:{os.environ['PATH']}")
 
-    def target(self, d, home, env, *args, server=SERVER, route="speakerd"):
-        """One --mode target run; returns its output and the calls it made."""
+    def target(self, d, home, env, *args, server=SERVER, route="speakerd", option="--server-ip", check=True):
+        """One --mode target run; returns its output and the calls it made (with check=False, the
+        completed process instead of its output)."""
         (d / "calls").write_text("")
-        out = firmware("snapcast-setup.sh", "--mode", "target", "--client-home", home, "--server-ip", server,
-                       "--route", route, *args, env=env).stdout
-        return out, (d / "calls").read_text().splitlines()
+        result = firmware("snapcast-setup.sh", "--mode", "target", "--client-home", home, option, server,
+                          "--route", route, *args, env=env, check=check)
+        return (result.stdout if check else result), (d / "calls").read_text().splitlines()
+
+    def test_the_server_by_name(self):
+        """--server takes a name, which lands verbatim in the unit's --host; --server-ip is the same
+        option. A .local name that does not resolve installs libnss-mdns (only when missing) and is
+        checked again; one that still does not is refused, with nothing written."""
+        d, home, env = self.client("by-name")
+        unit = home / ".config/systemd/user/snapclient.service"
+        name = "example.local"           # the server, known to the stand-in mDNS
+        missing = "my-board.local"       # a name nothing answers for
+        (d / "mdns-names").write_text(name + "\n")
+
+        # The name does not resolve without nss-mdns: libnss-mdns is installed, then it does.
+        out, calls = self.target(d, home, env, server=name, option="--server")
+        print("\n  " + "\n  ".join(line for line in out.splitlines() if name in line))
+        self.assertEqual([c for c in calls if c.startswith("apt-get install")], ["apt-get install -y libnss-mdns"], out)
+        self.assertIn(f"The server {name} resolves here (192.0.2.20)", out)
+        self.assertIn(f"ExecStart=/usr/bin/snapclient --host {name} --player pipewire --latency 0\n", unit.read_text())
+        self.assertIn("changed: libnss-mdns installed", out)
+
+        # Again: it resolves, so no apt, nothing written, nothing restarted.
+        before = snapshot(home)
+        out, calls = self.target(d, home, env, server=name, option="--server")
+        self.assertEqual([c for c in calls if c.split()[0] == "apt-get"], [], out)
+        self.assertEqual(changing(calls), [], out)
+        self.assertIn(f"server {name}, route speakerd: already set up, nothing changed", out)
+        self.assertEqual(snapshot(home), before)
+
+        # --server-ip is --server: the same name through it changes nothing either.
+        out, calls = self.target(d, home, env, server=name, option="--server-ip")
+        self.assertEqual(changing(calls), [], out)
+        self.assertEqual(snapshot(home), before)
+
+        # A name that is not a .local one is not looked up (DNS, /etc/hosts: snapclient's own
+        # business), and an address through --server-ip lands verbatim too.
+        for option, server in (("--server", "snapserver.example.com"), ("--server-ip", "192.0.2.11")):
+            with self.subTest(option=option, server=server):
+                out, calls = self.target(d, home, env, server=server, option=option)
+                self.assertEqual([c for c in calls if c.split()[0] in ("apt-get", "getent")], [], out)
+                self.assertIn(f"ExecStart=/usr/bin/snapclient --host {server} --player pipewire --latency 0\n",
+                              unit.read_text())
+
+        # A .local name that does not resolve with libnss-mdns installed: refused, the unit
+        # untouched, nothing installed, snapclient not restarted.
+        before = snapshot(home)
+        result, calls = self.target(d, home, env, server=missing, option="--server", check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"The server {missing} does not resolve here (getent hosts), and libnss-mdns is installed: "
+                      "pass --server <the server's address>, or fix mDNS here", result.stdout)
+        self.assertEqual(changing(calls), [], result.stdout)
+        self.assertEqual(snapshot(home), before)
+
+        # Nor one that still does not resolve once libnss-mdns is installed.
+        (d / "nss-mdns").unlink()
+        result, calls = self.target(d, home, env, server=missing, option="--server", check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"The server {missing} still does not resolve here after installing libnss-mdns", result.stdout)
+        self.assertEqual(snapshot(home), before)
+
+        # With --dry-run nothing is installed; said.
+        (d / "nss-mdns").unlink()
+        out, calls = self.target(d, home, env, "--dry-run", server=name, option="--server")
+        self.assertIn("(dry-run) apt-get install -y libnss-mdns", out)
+        self.assertEqual([c for c in calls if c.split()[0] == "apt-get"], [], out)
+        self.assertFalse((d / "nss-mdns").exists())
+
+        # Something a shell or systemd would split is no server.
+        result, _ = self.target(d, home, env, server="a b", option="--server", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--server 'a b': a host name or an address", result.stdout)
 
     def test_a_second_run_changes_nothing(self):
         d, home, env = self.client("again")
@@ -1871,8 +1965,8 @@ class Remote(Setup):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertIn('ssh -t -- user@bpi-amp.invalid bash "$HOME/.local/lib/speakerd/current/setup/speakerd-setup.sh" status',
                       status.stdout.replace("\\", ""))
-        for option in ("--base-conf", "--stop-plugin-host", "--server-ip", "--no-restart"):
-            refused = board("deploy", option, *(["192.0.2.10"] if option == "--server-ip" else []))
+        for option in ("--base-conf", "--stop-plugin-host", "--server", "--server-ip", "--no-restart"):
+            refused = board("deploy", option, *(["192.0.2.10"] if option.startswith("--server") else []))
             self.assertNotEqual(refused.returncode, 0, option)
             self.assertIn(f"deploy does not take {option}", refused.stderr)
         self.assertNotEqual(board("smoke", "--window", "3; x").returncode, 0)

@@ -35,11 +35,16 @@
 #
 # Usage:
 #   ./snapcast-setup.sh --mode host           [options]   # configure THIS machine as the server
-#   ./snapcast-setup.sh --mode target         [options]   # configure THIS machine as a client (--server-ip required)
+#   ./snapcast-setup.sh --mode target         [options]   # configure THIS machine as a client (--server required)
 #   ./snapcast-setup.sh --mode target-remote  [options]   # ssh to a board, configure a client there
 #   ./snapcast-setup.sh --mode both           [options]   # server here + ssh to board for a client
 #   ./snapcast-setup.sh --mode target --routing-only --route speakerd|plugin-host
 #                                                         # only re-route snapclient on this board
+#
+# The client finds the server by name: the remote modes give the board this machine's mDNS name,
+# $(hostname).local, not its address, which changes with the network. snapclient resolves --host
+# again on every reconnect. On the board a .local name needs nss-mdns (libnss-mdns), which
+# --mode target installs when the name does not resolve without it.
 #
 # Run `./snapcast-setup.sh --help` for the full option list.
 
@@ -50,7 +55,7 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 MODE=""
 TARGET_HOST="root@${BOARD_HOST:-bpi-amp.local}"  # ssh destination of the board; set BOARD_HOST (for target-remote/both)
-SERVER_IP=""                             # address clients connect to; auto-detected for target-remote/both
+SERVER=""                                # the snapserver, a name or an address; target-remote/both: $(hostname).local
 CLIENT_USER=""                           # board user whose PipeWire session runs snapclient (auto; else $BOARD_USER)
 CLIENT_BUFFER_TIME=""                    # snapclient pipewire buffer_time ms (empty => let PipeWire decide)
 CLIENT_LATENCY=0                         # snapclient fine-tune latency in ms (per-client trim)
@@ -91,6 +96,14 @@ ok()    { printf '%s ok%s %s\n' "$c_green"  "$c_off" "$*"; }
 warn()  { printf '%swarn%s %s\n' "$c_yellow" "$c_off" "$*" >&2; }
 die()   { printf '%serr%s  %s\n' "$c_red"    "$c_off" "$*" >&2; exit 1; }
 
+# This machine's mDNS name, as avahi publishes it: the short host name, then .local.
+default_server_name() {
+    local h
+    h="$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)"
+    h="${h%%.*}"
+    if [ -n "$h" ]; then echo "${h}.local"; fi
+}
+
 usage() {
     # Print the leading comment block (everything after the shebang up to the first non-comment line).
     awk 'NR>1 { if ($0 ~ /^#/) { sub(/^# ?/, ""); print } else exit }' "$SELF"
@@ -100,13 +113,20 @@ Options:
   --mode <host|target|target-remote|both>
                               Role to configure (required):
                                 host          - configure THIS machine as the snapserver
-                                target        - configure THIS machine as a snapclient (needs --server-ip)
+                                target        - configure THIS machine as a snapclient (needs --server)
                                 target-remote - ssh to the board and configure a client there
                                 both          - server here + client on the board over ssh
   --target-host <[user@]host> SSH destination of the board (default: $TARGET_HOST). Used by target-remote/both.
                               If given as user@host, that user is also used as --client-user (the board's
                               PipeWire/audio user) unless --client-user is set explicitly.
-  --server-ip <ip>            Address clients connect to (default: auto-detected host IP for remote/both modes).
+  --server <host>             The snapserver clients connect to: a name (example.local) or an address, written
+                              verbatim into the unit's --host (snapclient resolves it on every reconnect).
+                              Default in target-remote/both: this machine's mDNS name, \$(hostname).local
+                              (now $(default_server_name)), not its address, which changes with the network.
+                              With --mode target, a .local name that does not resolve (getent hosts)
+                              installs libnss-mdns (apt, when missing) and is refused if it still does not:
+                              then pass --server <ip>, or fix mDNS (avahi-daemon, nss-mdns) on the board.
+  --server-ip <host>          The same as --server (the old name, kept).
   --client-user <name>        Board user whose PipeWire session runs snapclient (default: auto; else \$BOARD_USER).
   --snapclient-version <v>    Version to install on the board if its snapclient lacks the pipewire player (default: $SNAPCLIENT_VERSION).
                               A snapclient that has it (its --help lists pipewire for --player) is kept.
@@ -129,7 +149,7 @@ Options:
                                               sends snapclient to the amplifier, full range.
                                 plugin-host - into Ap.cap, for an AudioPluginHost (its output to the amp).
   --routing-only              Target only: just rewrite client-rt.conf for --route and restart snapclient
-                              (no install, no --server-ip needed); neither when it routes so already.
+                              (no install, no --server needed); neither when it routes so already.
   --client-home <dir>         Target only, for tests: write into <dir> as if it were the user's home
                               (no root, no chown). --routing-only then touches no service; a full
                               --mode target uses the systemctl and loginctl it finds (the tests'
@@ -146,11 +166,13 @@ Examples:
 
   # Client on the BananaPi, driven from the host over ssh. user@host sets
   # both the ssh login and the board's PipeWire/audio user. Installs a newer
-  # snapclient if the board's one lacks the pipewire player:
+  # snapclient if the board's one lacks the pipewire player. The board finds this machine
+  # by its mDNS name, \$(hostname).local:
   ./snapcast-setup.sh --mode target-remote --target-host user@bpi-amp.local
 
-  # Client configured locally on a board (you supply the server's IP):
-  sudo ./snapcast-setup.sh --mode target --server-ip 192.0.2.10
+  # Client configured locally on a board (you name the server, or give its address):
+  sudo ./snapcast-setup.sh --mode target --server example.local
+  sudo ./snapcast-setup.sh --mode target --server 192.0.2.10
 
   # Only re-route an installed client into speakerd (the speakerd sink must be configured):
   ./snapcast-setup.sh --mode target --routing-only --route speakerd
@@ -164,7 +186,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --mode)            MODE="${2:?}"; shift 2 ;;
         --target-host)     TARGET_HOST="${2:?}"; shift 2 ;;
-        --server-ip)       SERVER_IP="${2:?}"; shift 2 ;;
+        --server | --server-ip) SERVER="${2:?}"; shift 2 ;;
         --client-user)     CLIENT_USER="${2:?}"; shift 2 ;;
         --snapclient-version) SNAPCLIENT_VERSION="${2:?}"; shift 2 ;;
         --client-buffer-time) CLIENT_BUFFER_TIME="${2:?}"; shift 2 ;;
@@ -191,6 +213,11 @@ done
 [ -n "$MODE" ] || { usage; die "--mode is required"; }
 case "$MODE" in host|target|target-remote|both) ;; *) die "--mode must be host, target, target-remote or both" ;; esac
 case "$ROUTE" in speakerd|plugin-host) ;; *) die "--route must be speakerd or plugin-host" ;; esac
+# The server goes verbatim into the unit's ExecStart and the remote command line: a host name
+# or an address (IPv6 included), nothing a shell or systemd would split.
+if [ -n "$SERVER" ] && ! [[ "$SERVER" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    die "--server '$SERVER': a host name or an address (letters, digits, '.', '-', ':')"
+fi
 # Without client-rt.conf (and the unit's PIPEWIRE_CONFIG_NAME) nothing routes snapclient: it
 # plays into the default sink, which a wpctl set-default may have made the amplifier.
 if [ "$ROUTE" = speakerd ] && [ "$TARGET_CLIENT_RT" -eq 0 ]; then
@@ -412,6 +439,38 @@ ensure_snapclient_with_pipewire() {
     fi
 }
 
+# The server, when it is a .local name, must resolve on this machine, or snapclient loops on
+# "No route to host" with no audio. A .local name needs nss-mdns (libnss-mdns: avahi-daemon
+# alone does not answer getent): installed only when the name does not resolve and the package
+# is missing; then the name is checked again. A name that still does not resolve is refused,
+# before anything is changed but that package.
+server_resolves() { getent hosts "$SERVER" >/dev/null 2>&1; }
+ensure_server_resolves() {
+    case "$SERVER" in *.local | *.local.) ;; *) return 0 ;; esac
+    local fix="pass --server <the server's address>, or fix mDNS here (avahi-daemon running, libnss-mdns in /etc/nsswitch.conf)"
+    if server_resolves; then
+        ok "The server $SERVER resolves here ($(getent hosts "$SERVER" 2>/dev/null | awk '{print $1; exit}'))"
+        return 0
+    fi
+    # shellcheck disable=SC2016  # dpkg-query's own format
+    if dpkg-query -W -f='${Status}' libnss-mdns 2>/dev/null | grep -q 'install ok installed'; then
+        die "The server $SERVER does not resolve here (getent hosts), and libnss-mdns is installed: $fix"
+    fi
+    [ "$INSTALL_DEPS" -eq 1 ] || die "The server $SERVER does not resolve here (getent hosts) and libnss-mdns is not installed (--no-install): $fix"
+    command -v apt-get >/dev/null 2>&1 || die "The server $SERVER does not resolve here (getent hosts), libnss-mdns is not installed and there is no apt-get: $fix"
+    info "The server $SERVER does not resolve here: installing libnss-mdns (mDNS names for getent and snapclient)"
+    if dry; then
+        echo "  (dry-run) apt-get install -y libnss-mdns, then getent hosts $SERVER again"
+        changed "libnss-mdns installed"
+        return 0
+    fi
+    run_root apt-get update -y || warn "apt-get update failed; continuing"
+    run_root apt-get install -y libnss-mdns || die "Could not install libnss-mdns: $fix"
+    changed "libnss-mdns installed"
+    server_resolves || die "The server $SERVER still does not resolve here after installing libnss-mdns: $fix"
+    ok "The server $SERVER resolves here ($(getent hosts "$SERVER" 2>/dev/null | awk '{print $1; exit}'))"
+}
+
 # ----------------------------------------------------------------------------
 # File writing helpers
 # ----------------------------------------------------------------------------
@@ -471,7 +530,7 @@ snapclient_exec() {
     # routing the node to a playback device is left to the user / WirePlumber.
     local spec="pipewire"
     [ -n "$CLIENT_BUFFER_TIME" ] && spec="pipewire:buffer_time=$CLIENT_BUFFER_TIME"
-    echo "/usr/bin/snapclient --host $SERVER_IP --player $spec --latency $CLIENT_LATENCY"
+    echo "/usr/bin/snapclient --host $SERVER --player $spec --latency $CLIENT_LATENCY"
 }
 
 # Target client-rt.conf. snapclient (native pipewire player) loads client.conf by
@@ -911,9 +970,9 @@ setup_routing_only() {
         if ! home_cmd grep -q 'PIPEWIRE_CONFIG_NAME=client-rt.conf' "$unit"; then
             local why="$unit does not point snapclient at client-rt.conf (no Environment=PIPEWIRE_CONFIG_NAME=client-rt.conf), so these rules would not reach it"
             if [ "$ROUTE" = speakerd ] && [ "$DRY_RUN" -eq 0 ]; then
-                die "--route speakerd: $why. Not routing: re-run --mode target with --server-ip (it rewrites the unit), or add that line."
+                die "--route speakerd: $why. Not routing: re-run --mode target with --server (it rewrites the unit), or add that line."
             fi
-            warn "$why: re-run --mode target with --server-ip"
+            warn "$why: re-run --mode target with --server"
         fi
     else
         warn "no snapclient user unit ($unit): these rules apply only to a snapclient started with PIPEWIRE_CONFIG_NAME=client-rt.conf"
@@ -1130,16 +1189,17 @@ ${c_green}Server ready.${c_off}
   - Route audio to the "Snapcast/$SOURCE_NAME" sink (pavucontrol / qpwgraph), or make it default:
         wpctl set-default \$(wpctl status | grep -iE 'snapcast|/$SOURCE_NAME' | grep -oE '[0-9]+' | head -1)
   - Web UI / control: http://$(detect_host_ip):$HTTP_PORT
-  - Clients should connect to this host at: ${SERVER_IP:-$(detect_host_ip)}
+  - Clients should connect to this host at: ${SERVER:-$(default_server_name)} (by name; its address now: $(detect_host_ip))
 EOF
 }
 
 setup_target_local() {
     if [ "$ROUTING_ONLY" -eq 1 ]; then setup_routing_only; return; fi
-    [ -n "$SERVER_IP" ] || die "--mode target requires --server-ip <snapserver host IP>"
+    [ -n "$SERVER" ] || die "--mode target requires --server <the snapserver's name or address>"
     resolve_client_user
-    info "Configuring this machine as a PipeWire-native Snapcast CLIENT (server $SERVER_IP, user $CLIENT_USER, route $ROUTE)"
+    info "Configuring this machine as a PipeWire-native Snapcast CLIENT (server $SERVER, user $CLIENT_USER, route $ROUTE)"
     [ "$TARGET_CLIENT_RT" -eq 0 ] || check_route_target
+    ensure_server_resolves
     # Each step checks first and changes only what differs (CHANGED says what it changed).
     ensure_snapclient_with_pipewire
     # Migration: older versions wrote a channel-split fragment (null-sink + loopback)
@@ -1155,7 +1215,7 @@ setup_target_local() {
     local unit_written=0
     if ! user_file_is "$CLIENT_HOME/.config/systemd/user/snapclient.service" "$(snapclient_unit)"; then
         write_user_file ".config/systemd/user/snapclient.service" "$(snapclient_unit)"
-        unit_written=1; changed "the snapclient unit (server $SERVER_IP)"; SNAPCLIENT_RESTART+=("its unit changed")
+        unit_written=1; changed "the snapclient unit (server $SERVER)"; SNAPCLIENT_RESTART+=("its unit changed")
     fi
     # Only a PipeWire daemon configuration of the user needs PipeWire restarted; then
     # snapclient's stream went with it.
@@ -1163,7 +1223,7 @@ setup_target_local() {
     apply_snapclient "$unit_written"
     local what="snapclient ${SNAPCLIENT_FOUND:-(not installed)} with"
     [ "$SNAPCLIENT_PLAYER" = yes ] || what="$what""out"
-    what="$what the pipewire player, server $SERVER_IP, "
+    what="$what the pipewire player, server $SERVER, "
     if [ "$TARGET_CLIENT_RT" -eq 1 ]; then what="${what}route $ROUTE"; else what="${what}no client-rt.conf (--no-client-rt)"; fi
     summary "$what"
     [ ${#CHANGED[@]} -gt 0 ] && ! dry || return 0
@@ -1177,8 +1237,13 @@ EOF
 }
 
 setup_target_remote() {
-    [ -n "$SERVER_IP" ] || SERVER_IP="$(detect_host_ip)"
-    [ -n "$SERVER_IP" ] || die "Could not auto-detect the server IP; pass --server-ip"
+    if [ -n "$SERVER" ]; then
+        info "The board connects to the server $SERVER (--server)"
+    else
+        SERVER="$(default_server_name)"
+        [ -n "$SERVER" ] || die "Could not find this machine's host name; pass --server <name or address>"
+        info "The board connects to the server $SERVER: this machine's mDNS name (its address now: $(detect_host_ip); --server <ip> to use an address)"
+    fi
     # If --target-host is given as user@host and --client-user wasn't set, that ssh
     # user is also the board's PipeWire/audio user (e.g. user@bpi-amp.local -> user).
     # Skip 'root' -- root has no PipeWire session, so fall back to $BOARD_USER if set.
@@ -1187,15 +1252,15 @@ setup_target_remote() {
         [ "$ruser" != "$TARGET_HOST" ] && [ "$ruser" != "root" ] && CLIENT_USER="$ruser"
     fi
     if [ -z "$CLIENT_USER" ]; then CLIENT_USER="${BOARD_USER:-}"; fi
-    info "Configuring the board ($TARGET_HOST) as a Snapcast CLIENT over ssh (server $SERVER_IP${CLIENT_USER:+, user $CLIENT_USER})"
+    info "Configuring the board ($TARGET_HOST) as a Snapcast CLIENT over ssh (server $SERVER${CLIENT_USER:+, user $CLIENT_USER})"
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "  (dry-run) scp $SELF $TARGET_HOST:/tmp/snapcast-setup.sh"
-        echo "  (dry-run) ssh -t $TARGET_HOST sudo bash /tmp/snapcast-setup.sh --mode target --server-ip $SERVER_IP ..."
+        echo "  (dry-run) ssh -t $TARGET_HOST sudo bash /tmp/snapcast-setup.sh --mode target --server $SERVER ..."
         return 0
     fi
     command -v ssh >/dev/null 2>&1 || die "ssh not found; cannot configure the remote board"
     scp -q "$SELF" "$TARGET_HOST:/tmp/snapcast-setup.sh" || die "Failed to copy script to $TARGET_HOST"
-    local rargs="--mode target --server-ip $SERVER_IP --client-latency $CLIENT_LATENCY --snapclient-version $SNAPCLIENT_VERSION --scope system --route $ROUTE"
+    local rargs="--mode target --server $SERVER --client-latency $CLIENT_LATENCY --snapclient-version $SNAPCLIENT_VERSION --scope system --route $ROUTE"
     [ -n "$CLIENT_USER" ]        && rargs="$rargs --client-user $CLIENT_USER"
     [ -n "$CLIENT_BUFFER_TIME" ] && rargs="$rargs --client-buffer-time $CLIENT_BUFFER_TIME"
     [ "$INSTALL_DEPS" -eq 0 ]    && rargs="$rargs --no-install"

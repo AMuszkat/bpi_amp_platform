@@ -30,6 +30,13 @@ any, and builds nothing. Each component also has its own installer:
 | [`ampd-setup.sh`](ampd-setup.sh) | `ampd`: `ampd.json` and its unit, as the hub on the left speaker or the agent on the right |
 | [`snapcast-setup.sh`](snapcast-setup.sh) | Synchronized network audio: Snapcast over PipeWire, server on the host and client on the board |
 
+`snapclient` finds the snapserver by name: `snapcast-setup.sh --server` (or its old name
+`--server-ip`) takes a name or an address, and from the development machine the default is that
+machine's mDNS name, `$(hostname).local` (like `example.local`), so a speaker keeps finding the
+server when the network changes. On the board a `.local` name needs `libnss-mdns`, which the
+client setup installs when the name does not resolve without it; a name that still does not is
+refused (pass `--server <ip>`). `setup.sh --server` passes it on.
+
 The remote modes refuse to touch a board unless the commit they run from has passed the tests
 (`tools/status.py gate` says why); the root [`CLAUDE.md`](../CLAUDE.md) has the rule. A first
 deploy, step by step, and what the board measured are in [`CLAUDE.md`](CLAUDE.md).

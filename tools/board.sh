@@ -79,7 +79,7 @@ case "$command" in
     deploy)
         # Only what an agent may choose. Anything that changes the board's PipeWire config
         # (--base-conf, --rate), stops or disables the old plugin host (--stop-plugin-host),
-        # installs packages (--server-ip, --snapcast-arg) or leaves the cap unapplied
+        # installs packages (--server, --server-ip, --snapcast-arg) or leaves the cap unapplied
         # (--no-restart) is a person's: they run firmware/setup.sh themselves.
         while [ $# -gt 0 ]; do
             case "$1" in

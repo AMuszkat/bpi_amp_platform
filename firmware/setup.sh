@@ -42,7 +42,7 @@ NO_SYSTEMD=0
 HOME_OVERRIDE=""
 BUNDLE=""
 ROUTE=speakerd
-SERVER_IP=""
+SERVER=""
 SNAPCAST_ARGS=()
 BASE_CONF=0
 RATE=""
@@ -87,8 +87,11 @@ Options:
   --route <speakerd|plugin-host>
                               where snapclient plays (default speakerd; plugin-host: Ap.cap, for an
                               AudioPluginHost).
-  --server-ip <ip>            the snapserver: a full client setup (snapcast-setup.sh --mode target).
-                              Without it, an installed snapclient is only re-routed (--routing-only).
+  --server <host>             the snapserver, by name (example.local: it survives a change of network) or
+                              address: a full client setup (snapcast-setup.sh --mode target --server, which
+                              installs libnss-mdns on the board when a .local name needs it). Without it, an
+                              installed snapclient is only re-routed (--routing-only).
+  --server-ip <host>          the same as --server (the old name, kept).
   --snapcast-arg <arg>        one more argument for snapcast-setup.sh, repeatable.
 
   speakerd (see speakerd-setup.sh --help):
@@ -98,7 +101,7 @@ Options:
   --import-filtergraph <file> an AudioPluginHost .filtergraph on the board, converted into factory.json.
   --stop-plugin-host          stop a running AudioPluginHost (and disable its systemd units) instead of
                               refusing. Checked for every component that may restart PipeWire into
-                              the speakerd route (pipewire, speakerd, and snapcast --server-ip, which
+                              the speakerd route (pipewire, speakerd, and snapcast --server, which
                               restarts it only to remove the old split fragment), not only speakerd.
   --plugin <plugin[:build]>   target-remote: a plugin bundle to copy, repeatable (default ${DEFAULT_PLUGINS[*]}).
   --arch <aarch64|native>     target-remote: the build tree the bundle comes from (default aarch64).
@@ -142,7 +145,7 @@ while [ $# -gt 0 ]; do
         --base-conf)       BASE_CONF=1; remote "$1"; shift ;;
         --rate)            RATE="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --route)           ROUTE="${2:?}"; remote "$1" "$2"; shift 2 ;;
-        --server-ip)       SERVER_IP="${2:?}"; remote "$1" "$2"; shift 2 ;;
+        --server | --server-ip) SERVER="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --snapcast-arg)    SNAPCAST_ARGS+=("${2:?}"); remote "$1" "$2"; shift 2 ;;
         --role)            SPEAKERD_ARGS+=("$1" "${2:?}"); AMPD_ARGS+=("$1" "$2"); remote "$1" "$2"; shift 2 ;;
         --amplifier | --woofer-port | --tweeter-port | --import-filtergraph)
@@ -397,20 +400,20 @@ if selected snapcast; then
     if [ "$ROUTE" = speakerd ] && ! selected pipewire && [ ! -f "$DROPIN" ]; then
         die "--route speakerd needs the speakerd sink, which is not configured ($DROPIN): include the pipewire component"
     fi
-    if [ -z "$SERVER_IP" ] && [ ! -f "$SNAPCLIENT_UNIT" ]; then
-        die "snapclient is not set up here ($SNAPCLIENT_UNIT): give --server-ip for a full client setup, or --skip snapcast"
+    if [ -z "$SERVER" ] && [ ! -f "$SNAPCLIENT_UNIT" ]; then
+        die "snapclient is not set up here ($SNAPCLIENT_UNIT): give --server for a full client setup, or --skip snapcast"
     fi
 fi
 
 # A running AudioPluginHost must not see PipeWire restart under it into the speakerd sink's
 # configuration: it would be linked to the amplifier again beside speakerd, full range. The
 # components that may restart PipeWire: pipewire, speakerd (its sink) and snapcast's full setup
-# (--server-ip, which restarts it only when it removes the old 60-snapcast-split.conf). With
+# (--server, which restarts it only when it removes the old 60-snapcast-split.conf). With
 # --route plugin-host and no speakerd, the plugin host is what plays: it stays.
 STOP_PLUGIN_HOST=0
 [[ " ${SPEAKERD_ARGS[*]} " != *" --stop-plugin-host "* ]] || STOP_PLUGIN_HOST=1
 NO_PLUGIN_HOST=0
-if { selected pipewire || selected speakerd || { selected snapcast && [ -n "$SERVER_IP" ]; }; } \
+if { selected pipewire || selected speakerd || { selected snapcast && [ -n "$SERVER" ]; }; } \
    && { [ "$ROUTE" = speakerd ] || selected speakerd; }; then
     NO_PLUGIN_HOST=1
     info "Checking for the old plugin host (PipeWire restarts)"
@@ -449,9 +452,9 @@ for c in "${CHOSEN[@]}"; do
             fi
             ;;
         snapcast)
-            if [ -n "$SERVER_IP" ]; then
-                info "snapcast: a snapclient of $SERVER_IP, routed into $([ "$ROUTE" = speakerd ] && echo the speakerd sink || echo Ap.cap)"
-                snapcast_setup --mode target --server-ip "$SERVER_IP" --route "$ROUTE"
+            if [ -n "$SERVER" ]; then
+                info "snapcast: a snapclient of $SERVER, routed into $([ "$ROUTE" = speakerd ] && echo the speakerd sink || echo Ap.cap)"
+                snapcast_setup --mode target --server "$SERVER" --route "$ROUTE"
             else
                 info "snapcast: re-routing the installed snapclient into $([ "$ROUTE" = speakerd ] && echo the speakerd sink || echo Ap.cap)"
                 snapcast_setup --mode target --routing-only --route "$ROUTE"
