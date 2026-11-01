@@ -448,6 +448,14 @@ details, [protocol.md](protocol.md) the messages):
   headless, not a control build, not bypassed; only its output channel 1 may lead to the
   tweeter). With the tweeter muted nothing is checked. The virtual pair's measurements, which
   route one plugin to both channels, run with `--allow-tweeter-without-crossover`.
+- **A bypassed node is the plugin's own bypass.** `speakerd` bypasses a node with JUCE's
+  `Node::setBypassed`, which for a hosted LV2 plugin clears its `lv2:enabled` port, and JUCE's LV2
+  wrapper then calls the plugin's `processBlockBypassed()`
+  ([lv2-bypass.md](../dsp/docs/juce-knowledge/hosting/lv2-bypass.md)). firConv (from 0.0.4) and
+  the crossover (from 0.0.3) keep their gain there and skip only their filters: the input times
+  the gain, delayed as the filters delay it, and silence on the crossover's high band. Neither
+  has a bypass parameter of its own, so no saved state carries a bypass: the document's
+  `bypassed` is the only one.
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it receives parameter changes and graph revisions,

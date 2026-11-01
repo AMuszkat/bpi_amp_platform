@@ -3,7 +3,8 @@
 The speaker's **magnitude-correction** filter chain. Mono in, mono out.
 
 ```
-in ─ gain ─ pre-LP FIR (HPreLpTaps) ─ pre-HP biquads (HPreHpSos) ─ inverse FIR (InvFilter) ─ out
+in ─ gain ─┬─ pre-LP FIR (HPreLpTaps) ─ pre-HP biquads (HPreHpSos) ─ inverse FIR (InvFilter) ─┬─ out
+           └─ delay, 1030 samples (bypassed) ──────────────────────────────────────────────────┘
 ```
 
 All coefficients come from `filters.hpp`, compiled in. The tuning GUI's *Export C++
@@ -88,10 +89,46 @@ are within 0.00002 dB.
 ../tools/build-podman.sh firConv              # then -install to deploy
 ```
 
-| Parameter | Range | |
-|---|---|---|
-| Gain | −60 … 0 dB | input gain, headroom for the correction's boost |
-| Freq | | unused (left over from the plugin template) |
+| Parameter | Range | Default | |
+|---|---|---|---|
+| Gain | −60 … 0 dB | 0 dB | input gain, headroom for the correction's boost; a change ramps over 10 ms (since 0.0.4) |
+| Freq | | | unused (left over from the plugin template) |
+
+The gain's default was written `0.5f` up to 0.0.3, a value outside the range, which every host
+and the APVTS read as the range's end, 0 dB; 0.0.4 writes 0 dB, so the layout is unchanged. The
+factory graph and the board's graph set the gain to -12 dB.
+
+## Bypass
+
+Since 0.0.4, a bypassed firConv skips its filters only and keeps its gain: its output is the
+input times the gain, delayed by the two FIRs' delay, (61 − 1) / 2 + (2001 − 1) / 2 = 1030
+samples (21.5 ms at 48 kHz; both FIRs are linear phase), so bypassing changes neither the level
+by the gain nor the timing (a pair with one speaker bypassed stays aligned). Both paths run in
+every block, the filters while bypassed too, so either is current when the bypass changes, and a
+change fades from one to the other over 10 ms (`../shared/bypass/LevelMatchedBypass.h`). It is
+`processBlockBypassed()`, which every host calls for a bypass: JUCE's LV2 wrapper when its
+`lv2:enabled` port is 0 (a node bypass in `speakerd`, a DAW's bypass), `AudioProcessorGraph`, and
+JUCE's VST3 wrapper. firConv has no bypass parameter of its own, so no saved state carries a
+bypass (why not: [lv2-bypass.md](../../docs/juce-knowledge/hosting/lv2-bypass.md)). The latency
+it reports stays 0 in both states.
+
+Up to 0.0.3 a bypass was JUCE's default, the input as it is, so with the gain at -12 dB a bypass
+raised the level by 12 dB besides removing the correction. Measured with `speakerd --render`
+(48 kHz, blocks of 1024, after speakerd's second of silent settling; RMS from 1 s to 0.25 s before
+the end of pink noise at -30 dBFS RMS, 8 s, and of a 1 kHz sine at -20 dBFS peak, 4 s;
+`../tests/bypass`):
+
+| Signal | Gain | Processed | Bypassed, 0.0.3 | Bypassed, 0.0.4 | Bypassed − processed, 0.0.3 | 0.0.4 |
+|---|---|---|---|---|---|---|
+| pink noise | −12 dB | −36.36 dBFS | −29.82 dBFS | −41.82 dBFS | +6.54 dB | −5.46 dB |
+| pink noise | 0 dB | −24.36 dBFS | −29.82 dBFS | −29.82 dBFS | −5.46 dB | −5.46 dB |
+| 1 kHz sine | −12 dB | −35.03 dBFS | −23.01 dBFS | −35.01 dBFS | +12.02 dB | +0.02 dB |
+| 1 kHz sine | 0 dB | −23.03 dBFS | −23.01 dBFS | −23.01 dBFS | +0.02 dB | +0.02 dB |
+
+What is left, −5.46 dB on pink noise at either gain, is the correction itself: it boosts the low
+end (+17.5 dB at 28 Hz), where pink noise has its energy. 0.0.4's bypassed output is the input
+times the gain, delayed, within −147 dB of the input's peak (the input's rounding to float32),
+and its processed output is the same as 0.0.3's bit for bit.
 
 The editor's plot does not read the filters: it draws `getMagnitudes()`, which nothing fills,
 so it shows a flat line at the bottom of the plot.

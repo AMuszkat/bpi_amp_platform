@@ -3,7 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
-#include "BlockFir.h"   // dsp/juce_plugins/shared/blockfir (SHARED in CMakeLists.txt)
+#include "BlockFir.h"             // dsp/juce_plugins/shared/blockfir (SHARED in CMakeLists.txt)
+#include "LevelMatchedBypass.h"   // dsp/juce_plugins/shared/bypass
 
 #include <limits>
 #include <vector>
@@ -31,8 +32,14 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
    #endif
 
-    using juce::AudioProcessor::processBlock;          // keep the double overload visible
+    using juce::AudioProcessor::processBlock;          // keep the double overloads visible
+    using juce::AudioProcessor::processBlockBypassed;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    // Bypassed: the gain stage only, delayed by the FIRs' delay (README.md, "Bypass"). Every host
+    // bypasses through it: JUCE's LV2 wrapper when the host clears the lv2:enabled port (what a
+    // node bypass in speakerd does), AudioProcessorGraph and JUCE's VST3 wrapper with their own
+    // bypass. The plugin has no bypass parameter of its own (getBypassParameter() is nullptr).
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     //==============================================================================
     juce::AudioProcessorEditor* createEditor() override;
@@ -85,7 +92,7 @@ private:
     // so it is exported as second-order sections (HPreHpSos) and run here as a cascade of biquads.
     // The FIRs are the shared block FIR (BlockFir.h), which processes a block longer than the
     // prepared size in chunks of it.
-    juce::dsp::Gain<float>        gain;
+    juce::dsp::Gain<float>        gain;    // ramps over gainRampSeconds when the parameter moves
     speaker::BlockFir             preLp;   // HPreLpTaps  (remez low-pass, HF band-limit)
     speaker::BlockFir             inv;     // InvFilter   (least-squares magnitude inverse)
 
@@ -107,6 +114,17 @@ private:
     // The pre-HP in place on `numSamples` floats: each sample promoted to double, through every
     // section, rounded to float once.
     void processPreHp (float* samples, int numSamples) noexcept;
+
+    // The bypass: the gained input, delayed by the two FIRs' delay (both linear phase, so their
+    // delay is (N - 1) / 2 each, 30 + 1000 samples), and the fade between the processed and the
+    // bypassed output. Both paths run every block, so either is current when the bypass changes.
+    speaker::DryDelay             dryDelay;
+    speaker::BypassFade           bypassFade;
+    std::vector<float>            dryScratch;   // a chunk of the dry path, sized in prepareToPlay
+    static constexpr double       gainRampSeconds = 0.01, bypassFadeSeconds = 0.01;
+
+    void process (juce::AudioBuffer<float>&, bool bypassed) noexcept;
+    void processChunk (float* samples, int numSamples) noexcept;
 
     std::vector<double> frequencies;
     std::vector<double> magnitudes;
