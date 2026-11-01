@@ -141,7 +141,11 @@ Pass when:
   --allow-tweeter-without-crossover is refused before the stand-in ssh is called; setup.sh
   --mode target-remote --only speakerd ends with hints that name
   ~/.local/lib/speakerd/current/setup/speakerd-setup.sh (smoke, rollback), not the bundle's
-  copy in ~/.cache, which is gone; and, for a
+  copy in ~/.cache, which is gone; snapcast-setup.sh --mode target-remote copies the script with
+  speakerd/setup-helper.py and tweeter_rule.py to a fresh mktemp -d folder on the board, where a
+  --route speakerd run finds the helper and checks the running PipeWire's sink with it (passing
+  with the drop-in's sink, refusing without one), the folder removed afterwards either way, and
+  its --dry-run prints those steps and contacts nothing; and, for a
   host that is not a test's (.invalid), the remote mode applies the deploy gate before it calls
   ssh: refused outside a git checkout, without a readable test status for HEAD, with a red one or
   one from a dirty tree, on a dirty tree, and while a lab lock exists, as tools/status.py gate
@@ -1833,6 +1837,71 @@ class Remote(Setup):
         self.assertIn(f"no .filtergraph at {given}", result.stdout)
         self.assertFalse(marker.exists(), "an argument ran as a command on the board")
         self.assertEqual(list((board / "home/.cache").iterdir()), [])
+
+    def test_snapcast_remote_ships_the_route_check(self):
+        """snapcast-setup.sh --mode target-remote: the board gets the script and what its target
+        mode loads from beside it (speakerd/setup-helper.py and the tweeter_rule.py it imports) in
+        a fresh mktemp -d folder, in the same layout; a --route speakerd run there finds the helper
+        and checks the running PipeWire's speakerd sink with it, either way; the folder is gone
+        afterwards; --dry-run says so and contacts nothing."""
+        board, env = self.board("snapcast")
+        # The board's sudo (the remote command runs the script under it) and its PipeWire.
+        write_script(board / "bin/sudo",
+                     '#!/bin/bash\nwhile [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done\nexec "$@"\n')
+        write_script(board / "bin/pw-dump", '#!/bin/bash\ncat "${FAKE_BOARD:?}/dump.json"\n')
+        tmp = board / "tmp"          # the board's /tmp, where its mktemp -d makes the folder
+        tmp.mkdir()
+        home = board / "home/client"
+        firmware("speakerd-setup.sh", "sink", "--home", home, "--no-systemd", env=self.env)
+        crt = home / ".config/pipewire/client-rt.conf"
+        crt.write_text(PERSONS_ROUTING)
+        if os.geteuid() == 0:
+            for path in (tmp, board / "home", *(board / "home").rglob("*")):
+                shutil.chown(path, 65534, 65534)
+        env = dict(env, TMPDIR=str(tmp))
+        host = "user@bpi-amp.invalid"
+
+        def dump(props):
+            nodes = [{"id": 30, "type": "PipeWire:Interface:Node",
+                      "info": {"props": dict({"node.name": "speakerd"}, **props)}}] if props is not None else []
+            (board / "dump.json").write_text(json.dumps(nodes))
+
+        def remote(*args):
+            (board / "hosts").write_text("")
+            return firmware("snapcast-setup.sh", "--mode", "target-remote", "--target-host", host,
+                            "--server", "192.0.2.10", "--routing-only", "--route", "speakerd",
+                            "--client-home", home, *args, env=env, check=False)
+
+        # --dry-run: what it would copy and run, nothing contacted.
+        result = remote("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"(dry-run) ssh {host} mktemp -d", result.stdout)
+        self.assertIn("snapcast-setup.sh speakerd/setup-helper.py speakerd/tweeter_rule.py | ssh", result.stdout)
+        self.assertIn(f"(dry-run) ssh -t {host} sudo bash DIR/snapcast-setup.sh --mode target", result.stdout)
+        self.assertEqual((board / "hosts").read_text(), "", "--dry-run contacted the board")
+
+        # The running PipeWire has the drop-in's sink: the helper, run on the board, says so.
+        dump({"factory.name": "support.null-audio-sink", "media.class": "Audio/Sink",
+              "priority.session": 1500, "priority.driver": 0})
+        result = remote()
+        print("\n  " + "\n  ".join(result.stdout.splitlines()[-6:]))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("is missing", result.stdout)
+        self.assertIn("The running PipeWire has the drop-in's speakerd sink", result.stdout)
+        self.assertIn('target.object = "speakerd"', crt.read_text())
+        self.assertEqual((board / "hosts").read_text().split(), [host] * 4)
+        self.assertEqual(list(tmp.iterdir()), [], "the copy was left on the board")
+
+        # Without it the check, made there all the same, refuses; the copy is removed all the same.
+        crt.write_text(PERSONS_ROUTING)
+        dump(None)
+        result = remote()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("is missing", result.stdout)
+        self.assertIn("--route speakerd: the running PipeWire has no speakerd sink", result.stdout)
+        self.assertIn("Remote client setup failed on " + host, result.stdout)
+        self.assertEqual(crt.read_text(), PERSONS_ROUTING)
+        self.assertEqual(list(tmp.iterdir()), [], "the copy was left on the board")
 
     def test_the_remote_mode_has_the_deploy_gate(self):
         """The installers' remote mode refuses, as tools/board.sh does, before it calls ssh: while a

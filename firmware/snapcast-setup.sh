@@ -723,7 +723,8 @@ check_route_target() {
 # load ~/.config/pipewire/pipewire.conf.d (another config name, PIPEWIRE_CONFIG_DIR) has at
 # most a sink speakerd made itself, which is gone after the next restart of PipeWire: then
 # snapclient would fall back to the amplifier. With --dry-run this only says what it finds;
-# the tests (--client-home) skip it when no PipeWire is reachable.
+# the tests (--client-home) skip it when no PipeWire is reachable. The helper runs with -B: no
+# root-owned __pycache__ beside it, which the remote mode's cleanup (as the ssh user) could not remove.
 check_live_speakerd_sink() {
     local helper dump out present="" dropin="" differs="" default_sink=""
     helper="$(cd "$(dirname "$SELF")" && pwd)/speakerd/setup-helper.py"
@@ -740,7 +741,7 @@ check_live_speakerd_sink() {
         if [ -n "$CLIENT_HOME_OVERRIDE" ]; then warn "no PipeWire reachable: the live speakerd sink is not checked (test mode)"; return 0; fi
         die "--route speakerd: cannot reach $CLIENT_USER's PipeWire to check that its speakerd sink exists"
     fi
-    out="$(python3 "$helper" sink "$dump")" || { rm -f "$dump"; die "--route speakerd: cannot read the running PipeWire's nodes"; }
+    out="$(python3 -B "$helper" sink "$dump")" || { rm -f "$dump"; die "--route speakerd: cannot read the running PipeWire's nodes"; }
     rm -f "$dump"
     eval "$out"
     : "$default_sink"
@@ -1253,25 +1254,56 @@ setup_target_remote() {
     fi
     if [ -z "$CLIENT_USER" ]; then CLIENT_USER="${BOARD_USER:-}"; fi
     info "Configuring the board ($TARGET_HOST) as a Snapcast CLIENT over ssh (server $SERVER${CLIENT_USER:+, user $CLIENT_USER})"
+    # Target mode reads files beside the script (the speakerd sink's live check runs
+    # speakerd/setup-helper.py, which imports tweeter_rule.py from beside it): all of them go,
+    # in the same layout, to a fresh private folder on the board (mktemp -d there), which is
+    # removed afterwards whatever happens.
+    local here; here="$(dirname "$SELF")"
+    local -a files=(snapcast-setup.sh speakerd/setup-helper.py speakerd/tweeter_rule.py)
+    local -a rargs=(--mode target --server "$SERVER" --client-latency "$CLIENT_LATENCY"
+                    --snapclient-version "$SNAPCLIENT_VERSION" --scope system --route "$ROUTE")
+    [ -n "$CLIENT_USER" ]        && rargs+=(--client-user "$CLIENT_USER")
+    [ -n "$CLIENT_BUFFER_TIME" ] && rargs+=(--client-buffer-time "$CLIENT_BUFFER_TIME")
+    [ "$INSTALL_DEPS" -eq 0 ]    && rargs+=(--no-install)
+    [ "$DO_RESTART" -eq 0 ]      && rargs+=(--no-restart)
+    [ "$TARGET_CLIENT_RT" -eq 0 ] && rargs+=(--no-client-rt)
+    [ "$ROUTING_ONLY" -eq 1 ]    && rargs+=(--routing-only)
+    # The tests' hook: a folder on the (stand-in) board as the user's home.
+    [ -n "$CLIENT_HOME_OVERRIDE" ] && rargs+=(--client-home "$CLIENT_HOME_OVERRIDE")
+    local quoted; quoted="$(printf ' %q' "${rargs[@]}")"
     if [ "$DRY_RUN" -eq 1 ]; then
-        echo "  (dry-run) scp $SELF $TARGET_HOST:/tmp/snapcast-setup.sh"
-        echo "  (dry-run) ssh -t $TARGET_HOST sudo bash /tmp/snapcast-setup.sh --mode target --server $SERVER ..."
+        echo "  (dry-run) ssh $TARGET_HOST mktemp -d                      # a private folder on the board: DIR"
+        echo "  (dry-run) tar -C $here -cf - ${files[*]} | ssh $TARGET_HOST tar -C DIR -xf -"
+        echo "  (dry-run) ssh -t $TARGET_HOST sudo bash DIR/snapcast-setup.sh$quoted"
+        echo "  (dry-run) ssh $TARGET_HOST rm -rf DIR"
         return 0
     fi
     command -v ssh >/dev/null 2>&1 || die "ssh not found; cannot configure the remote board"
-    scp -q "$SELF" "$TARGET_HOST:/tmp/snapcast-setup.sh" || die "Failed to copy script to $TARGET_HOST"
-    local rargs="--mode target --server $SERVER --client-latency $CLIENT_LATENCY --snapclient-version $SNAPCLIENT_VERSION --scope system --route $ROUTE"
-    [ -n "$CLIENT_USER" ]        && rargs="$rargs --client-user $CLIENT_USER"
-    [ -n "$CLIENT_BUFFER_TIME" ] && rargs="$rargs --client-buffer-time $CLIENT_BUFFER_TIME"
-    [ "$INSTALL_DEPS" -eq 0 ]    && rargs="$rargs --no-install"
-    [ "$DO_RESTART" -eq 0 ]      && rargs="$rargs --no-restart"
-    [ "$TARGET_CLIENT_RT" -eq 0 ] && rargs="$rargs --no-client-rt"
-    [ "$ROUTING_ONLY" -eq 1 ]    && rargs="$rargs --routing-only"
-    # -t allocates a TTY so sudo on the board can prompt for a password; run the whole
-    # remote script under sudo (it needs root for /etc + services; --client-user keeps
-    # snapclient in the right user's PipeWire session).
+    local f
+    for f in "${files[@]}"; do [ -f "$here/$f" ] || die "$here/$f is missing: cannot configure the remote board"; done
+    local rdir
+    rdir="$(ssh -- "$TARGET_HOST" 'mktemp -d')" || die "Could not make a temporary folder on $TARGET_HOST"
+    case "$rdir" in
+        /*) ;;
+        *) die "mktemp -d on $TARGET_HOST answered '$rdir', not a folder" ;;
+    esac
+    [[ "$rdir" != *[[:space:]]* ]] || die "mktemp -d on $TARGET_HOST answered '$rdir', not a folder"
+    local qdir; qdir="$(printf '%q' "$rdir")"
+    local rc=0
     # shellcheck disable=SC2029
-    ssh -t "$TARGET_HOST" "sudo bash /tmp/snapcast-setup.sh $rargs" || die "Remote client setup failed on $TARGET_HOST"
+    if tar -C "$here" -cf - "${files[@]}" | ssh -- "$TARGET_HOST" "tar -C $qdir -xf -"; then
+        # -t allocates a TTY so sudo on the board can prompt for a password; run the whole
+        # remote script under sudo (it needs root for /etc + services; --client-user keeps
+        # snapclient in the right user's PipeWire session).
+        # shellcheck disable=SC2029
+        ssh -t -- "$TARGET_HOST" "sudo bash $qdir/snapcast-setup.sh$quoted" || rc=$?
+    else
+        rc=-1
+    fi
+    # shellcheck disable=SC2029
+    ssh -- "$TARGET_HOST" "rm -rf -- $qdir" || warn "Could not remove $rdir on $TARGET_HOST"
+    [ "$rc" -ne -1 ] || die "Failed to copy the script and its helpers to $TARGET_HOST"
+    [ "$rc" -eq 0 ] || die "Remote client setup failed on $TARGET_HOST"
     ok "Board configured as client"
 }
 
