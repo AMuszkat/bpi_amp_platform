@@ -22,10 +22,13 @@ Pass when, on each speaker:
 - the client's first `board/cpu` value and its first `speakerd/timing` value arrive within 5 s of
   subscribing;
 - every `board/cpu` value is `{"busy": b, "cores": [...], "seconds": s}`: `b` in [0, 1], `cores`
-  os.cpu_count() numbers each in [0, 1], `s` 0.05 to 0.5 s, and the median of `s` over the window
-  within 10 % of the 0.1 s period; its `t` is within 1 s of the client's monotonic clock at arrival
-  (one machine: the same CLOCK_MONOTONIC as speakerd's `t`); the window has at least 20 of them
-  (10 Hz asked, 3 s);
+  as many numbers, each in [0, 1], as there are `cpuN` lines in /proc/stat both when the test reads
+  it before subscribing and when it reads it after the window (ampd's own rule: /proc/stat lists
+  only the online CPUs, and a core missing from either of two readings is dropped; not
+  os.cpu_count(), which can disagree with /proc/stat under hot-plug, lxcfs or a container), `s`
+  0.05 to 0.5 s, and the median of `s` over the window within 10 % of the 0.1 s period; its `t` is
+  within 1 s of the client's monotonic clock at arrival (one machine: the same CLOCK_MONOTONIC as
+  speakerd's `t`); the window has at least 20 of them (10 Hz asked, 3 s);
 - every `speakerd/timing` value has the documented shape (docs/protocol.md, "Monitoring"):
   `cycles`, `late`, `jumps` and the four `*_total` counters whole numbers of 0 or more, `cycles`
   more than 0, `cycle` and `graph` objects with `mean` and `max` numbers of 0 or more, `nodes` a
@@ -42,7 +45,6 @@ one it fails, saying so.
     python3 -m unittest -v tests.vpair.test_board_cpu
 """
 
-import os
 import shutil
 import tempfile
 import time
@@ -65,6 +67,13 @@ CLOCK_TOLERANCE = 1.0
 STOP_WITHIN, GRACE, QUIET = 2.0, 0.3, 1.5
 FREQ, LEVEL, TONE = 200.0, -20.0, 40.0
 COUNTERS = ("cycles", "late", "jumps", "cycles_total", "late_total", "jumps_total", "dropped_total")
+
+
+def online_cpus():
+    """The `cpuN` names /proc/stat lists now (the online CPUs; not the `cpu` total line)."""
+    with open("/proc/stat") as f:
+        return {line.split()[0] for line in f
+                if line.startswith("cpu") and line.split()[0][3:].isdigit()}
 
 
 def whole(x):
@@ -111,7 +120,6 @@ class BoardCpu(unittest.TestCase):
         require_speakerd_local_link(self)
         tmp = Path(tempfile.mkdtemp(prefix="vpair-board-cpu-"))
         self.addCleanup(shutil.rmtree, tmp, True)
-        cores = os.cpu_count()
         failures = []
         with SpeakerPair(tmp, {"left": DOCUMENT, "right": DOCUMENT}, [built("loudness", "headless")]) as pair, \
                 Player(pair["left"], tone(FREQ, LEVEL, TONE), target="speakerd"), \
@@ -120,6 +128,7 @@ class BoardCpu(unittest.TestCase):
             for name in ("left", "right"):
                 if pair.ampd[name].lines_starting("board/cpu: sampling"):
                     failures.append(f"{name}: ampd sampled /proc/stat with nobody subscribed")
+            cpus_before = online_cpus()
             clients = {name: MonitorClient(ADDRESS[name], name=f"board-cpu-{name}") for name in ("left", "right")}
             try:
                 subscribed = {}
@@ -139,6 +148,7 @@ class BoardCpu(unittest.TestCase):
                                             f"{arrived - subscribed[name]:.2f} s after subscribing")
                         firsts[name, stream] = arrived
                 time.sleep(WINDOW)
+                cores = len(cpus_before & online_cpus())
                 windows = {name: (firsts[name, CPU], firsts[name, CPU] + WINDOW) for name in clients}
                 for name, client in clients.items():
                     start, end = windows[name]
