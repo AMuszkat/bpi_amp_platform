@@ -33,8 +33,18 @@ Pass when:
   (60; 100, 0, -1 and 0.05 Hz are refused with an error, never clamped), each gets values at its own rate (within 30 %), the rate falls back when
   the faster one leaves and an unsubscribe goes to speakerd when the last one does; speakerd/timing
   is relayed at its rate with speakerd's object unchanged; a stream that is not output/level,
-  speakerd/timing or node/<uid>/mon_<id> (speakerd/timings, speakerd/timing/, Speakerd/timing,
-  speakerd/) is answered with an error;
+  speakerd/timing, board/cpu or node/<uid>/mon_<id> (speakerd/timings, speakerd/timing/,
+  Speakerd/timing, speakerd/) is answered with an error;
+- board/cpu, ampd's own stream (from --proc-stat, a file the test writes): ampd reads nothing
+  before a subscription (no `board/cpu: sampling` line), samples at 10 Hz for a subscriber of 30;
+  readings with no tick between them give no value; the one reading that follows a change of the
+  counters gives exactly one value, `busy` 1 - (idle + iowait) / total of the `cpu` line's first
+  eight fields (guest and guest_nice not added), `cores` the same per cpuN in N order, `seconds`
+  near the period; a new subscriber gets that value at once; neither stand-in speakerd hears of
+  the stream; when the last subscriber goes ampd says it stopped sampling; a file it cannot read
+  is the subscriber's error (`cannot read <path>`), it loses the subscription, sampling stops, and
+  the client goes on (output/level comes); board/cpus, board/cpu/ and Board/cpu are refused with
+  the reason that lists board/cpu;
 - the monitor relay, on the hub's monitor link and on an agent's alike: a new subscription gets
   the newest value at once (with the union at 1 Hz, a value sampled before it subscribed, within
   0.1 s, the one the other client got); beside a client of 60 Hz, one of 45 and one of 30 each get
@@ -79,7 +89,7 @@ Pass when:
   neither;
 - limits: a document with more than 64 nodes or 512 connections is rejected; a 400-digit number
   is answered with an error and the next value goes through; a stream that is not exactly
-  output/level, speakerd/timing or node/<16 and up>/mon_<1 to 64 characters> is refused, the 33rd subscription of
+  output/level, speakerd/timing, board/cpu or node/<16 and up>/mon_<1 to 64 characters> is refused, the 33rd subscription of
   a client is refused, and speakerd's refusal of a subscription reaches the subscriber;
 - a revision time that is not protocol.md's format counts as no time (not newer);
 - a value set while a revision applies (the right's speakerd takes 1.5 s) is kept by the new
@@ -416,6 +426,80 @@ class Protocol(unittest.TestCase):
                 self.assertTrue(slow.errors and slow.errors[0]["about"] == "subscribe", slow.errors)
             sd.wait_event(lambda e: e.get("op") == "unsubscribe" and e["stream"] == "output/level",
                           what="the unsubscribe when the last subscriber left")
+
+    def test_board_cpu(self):
+        """board/cpu: ampd's own stream, from a /proc/stat the test writes (--proc-stat)."""
+        stat = self.tmp / "proc-stat"
+
+        def write_stat(text):
+            temporary = self.tmp / "proc-stat.new"
+            temporary.write_text(text)
+            os.replace(temporary, stat)
+
+        # user nice system idle iowait irq softirq steal guest guest_nice
+        write_stat("cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 50 0 50 400 0 0 0 0 0 0\n"
+                   "cpu1 50 0 50 400 0 0 0 0 0 0\nintr 12345 1 2\nctxt 99\n")
+        with StandInPair(self.tmp, documents(), ampd_args=("--proc-stat", str(stat))) as pair:
+            time.sleep(0.5)
+            for name in ("left", "right"):
+                self.assertEqual(pair.ampd[name].lines_starting("board/cpu: sampling"), [],
+                                 f"{name}: sampled board/cpu with nobody subscribed")
+            agent = pair.ampd["right"]
+            with MonitorClient(ADDRESS["right"]) as first:
+                first.subscribe("board/cpu", 30)
+                agent.wait_for(f"board/cpu: sampling {stat} at 10 Hz", timeout=5)
+                time.sleep(0.6)
+                self.assertEqual(first.of("board/cpu"), [], "a value from readings with no tick between them")
+                # 50 user and 50 system ticks on cpu0, 100 idle and 100 iowait on cpu1; guest (inside
+                # user already) jumps by 1000 and must not count.
+                write_stat("cpu  150 0 150 900 100 0 0 0 1000 0\ncpu0 100 0 100 400 0 0 0 0 1000 0\n"
+                           "cpu1 50 0 50 500 100 0 0 0 0 0\nintr 12399 1 2\nctxt 120\n")
+                _, value = first.wait_value("board/cpu", timeout=3)
+                v = value["v"]
+                print(f"\n  board/cpu: {v}", end="")
+                self.assertEqual(set(value), {"op", "stream", "t", "v"}, value)
+                self.assertEqual(set(v), {"busy", "cores", "seconds"}, value)
+                self.assertAlmostEqual(v["busy"], 1 / 3, places=3)
+                self.assertEqual(v["cores"], [1.0, 0.0])
+                self.assertTrue(0.05 < v["seconds"] < 0.3, value)
+                self.assertTrue(abs(value["t"] - time.monotonic()) < 2.0, value)   # CLOCK_MONOTONIC
+                time.sleep(0.6)
+                self.assertEqual(len(first.of("board/cpu")), 1, "more than the one value of the one change")
+                with MonitorClient(ADDRESS["right"]) as second:
+                    start = time.monotonic()
+                    second.subscribe("board/cpu", 1)
+                    arrived, stored = second.wait_value("board/cpu", timeout=2)
+                    self.assertLess(arrived - start, 0.2, "a new subscription waited for the newest value")
+                    self.assertEqual(stored, value)
+            agent.wait_for("board/cpu: stopped sampling after ", timeout=5)
+            # The hub's: a file it cannot read is the subscriber's error, and ends the subscription.
+            stat.unlink()
+            hub = pair.ampd["left"]
+            with MonitorClient(ADDRESS["left"]) as meter:
+                meter.subscribe("board/cpu", 5)
+                deadline = time.monotonic() + 5
+                while not meter.errors and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual(len(meter.errors), 1, meter.errors)
+                error = meter.errors[0]
+                self.assertEqual((error["about"], error["stream"]), ("subscribe", "board/cpu"), error)
+                self.assertIn(f"cannot read {stat}", error["reason"])
+                hub.wait_for("board/cpu: stopped sampling after 0 reading(s)", timeout=5)
+                # The client goes on: another stream comes, and the near names are refused.
+                meter.subscribe("output/level", 10)
+                meter.wait_value("output/level", timeout=5)
+                for near in ("board/cpus", "board/cpu/", "Board/cpu"):
+                    meter.subscribe(near)
+                deadline = time.monotonic() + 5
+                while len(meter.errors) < 4 and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual([e["stream"] for e in meter.errors[1:]], ["board/cpus", "board/cpu/", "Board/cpu"])
+                for e in meter.errors[1:]:
+                    self.assertIn("board/cpu", e["reason"], e)
+                self.assertEqual(meter.of("board/cpu"), [])
+            for name in ("left", "right"):
+                heard = [e for e in pair.sd[name].events() if "board" in json.dumps(e)]
+                self.assertEqual(heard, [], f"the {name} stand-in speakerd heard of board/cpu")
 
     def test_monitor_relay(self):
         """The relay of docs/protocol.md, "Monitoring" (each value as it arrives, at most at the

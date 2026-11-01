@@ -40,7 +40,7 @@ for _folder in (_HERE, os.path.join(os.path.dirname(_HERE), "speakerd")):
         break
 import tweeter_rule  # noqa: E402
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 PROTOCOL = 1
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
 LINE_LIMIT = 32 * 1024 * 1024          # a longer line closes the connection
@@ -52,14 +52,18 @@ GESTURE_TIMEOUT = 5.0                  # a gesture with no end ends by itself
 PERSIST_INTERVAL = 1.0                 # graph.json at most once a second while parameters change
 LKG_AFTER = 60.0                       # graph.json -> graph.lkg.json after this long with no restart
 MAX_MONITOR_RATE = 60.0
+BOARD_CPU = "board/cpu"                # the stream ampd makes itself, from /proc/stat (BoardCpu)
+MAX_BOARD_CPU_RATE = 10.0              # /proc/stat counts in 10 ms ticks: faster is noise
+PROC_STAT = "/proc/stat"
 MONITOR_BACKLOG = 256 * 1024           # a monitor client further behind than this skips values
 MONITOR_TOKENS = 2.0                   # a monitor subscription's bucket holds at most this (Subscription)
 LAYER_FILES = {"current": "graph.json", "last-known-good": "graph.lkg.json", "factory": "factory.json"}
 SEQ_MASK = 0xFFFFFFFF
 BIG = 2 ** 63 - 1
 TIME_FORMAT = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z")
-# The streams, exactly as speakerd reads them (used with fullmatch).
-STREAMS = (re.compile(r"output/level"), re.compile(r"speakerd/timing"), re.compile(r"node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}"))
+# The streams (used with fullmatch): speakerd's, exactly as it reads them, and ampd's own board/cpu.
+STREAMS = (re.compile(r"output/level"), re.compile(r"speakerd/timing"), re.compile(r"node/(1[6-9]|[2-9][0-9]|[1-9][0-9]{2,8})/mon_[A-Za-z0-9_]{1,64}"),
+           re.compile(r"board/cpu"))
 SECRET_FORMAT = re.compile(r"[\x21-\x7e]{16,256}")
 MAX_NODES, MAX_CONNECTIONS = 64, 512           # a document with more is refused
 MAX_CONTROL_PEERS = 32                         # controllers and agents on the hub's control link
@@ -1710,6 +1714,118 @@ class Agent(Role):
 # ---------------------------------------------------------------------------------------------
 # Monitoring: subscriptions go to speakerd as their union, each value to the clients as it arrives
 
+def proc_stat_counters(data):
+    """/proc/stat's bytes -> (whole, {N: core}), each (total, idle): total the sum of user, nice,
+    system, idle, iowait, irq, softirq and steal (guest and guest_nice are inside user and nice
+    already), idle that of idle and iowait. A kernel that gives fewer fields counts the missing
+    as 0. ValueError when there is no `cpu` line."""
+    whole, cores = None, {}
+    for line in data.split(b"\n"):
+        if not line.startswith(b"cpu"):
+            if whole is not None or cores:
+                break                    # the cpu lines come first, together
+            continue
+        fields = line.split()
+        ticks = [int(f) for f in fields[1:9]] + [0] * (9 - len(fields))
+        counters = (sum(ticks), ticks[3] + ticks[4])
+        if fields[0] == b"cpu":
+            whole = counters
+        elif fields[0][3:].isdigit():
+            cores[int(fields[0][3:])] = counters
+    if whole is None:
+        raise ValueError("no cpu line")
+    return whole, cores
+
+
+def busy_fraction(now, then):
+    """1 - idle / total between two (total, idle), within 0 to 1 (iowait can step back); None
+    when no tick passed."""
+    total, idle = now[0] - then[0], now[1] - then[1]
+    if total <= 0:
+        return None
+    return min(1.0, max(0.0, 1.0 - idle / total))
+
+
+class BoardCpu:
+    """The stream board/cpu: the whole board's CPU use, which ampd makes itself from /proc/stat
+    (speakerd never hears of it). It reads the file only while somebody subscribes, at the
+    highest rate any subscriber asks (Monitor.update_union), at most MAX_BOARD_CPU_RATE, on the
+    loop's timer: one small read of procfs, synchronously, nothing else. Each reading after the
+    first gives a value over the time since the previous one; a period in which no tick passed
+    gives none. The value goes through Monitor.on_value, as speakerd's do. A file it cannot read
+    is the subscribers' error (Monitor.on_error), which ends their subscriptions and so the
+    sampling."""
+
+    def __init__(self, monitor, path):
+        self.monitor, self.path = monitor, path
+        self.rate = None          # sampling at, or None
+        self.handle = None        # the next reading's timer
+        self.due = 0.0            # when the next reading is due (monotonic)
+        self.previous = None      # (time, whole, cores) of the last reading
+        self.readings = 0         # since sampling started
+
+    def set_rate(self, rate):
+        """The union's rate of board/cpu, or None when nobody subscribes: sampling stops."""
+        if rate is not None:
+            rate = min(float(rate), MAX_BOARD_CPU_RATE)
+        if rate == self.rate:
+            return
+        loop = asyncio.get_running_loop()
+        if rate is None:
+            if self.handle is not None:
+                self.handle.cancel()
+            self.rate, self.handle, self.previous = None, None, None
+            log(f"{BOARD_CPU}: stopped sampling after {self.readings} reading(s)")
+            return
+        starting = self.rate is None
+        self.rate = rate
+        log(f"{BOARD_CPU}: sampling {self.path} at {rate:g} Hz")
+        if starting:
+            self.readings = 0
+            self.handle = loop.call_soon(self.sample)
+        elif self.previous is not None:
+            # The next reading a period of the new rate after the last one.
+            if self.handle is not None:
+                self.handle.cancel()
+            self.due = max(self.previous[0] + 1.0 / rate, time.monotonic())
+            self.handle = loop.call_at(self.due, self.sample)
+
+    def sample(self):
+        self.handle = None
+        if self.rate is None:
+            return
+        try:
+            with open(self.path, "rb") as f:
+                data = f.read()
+            whole, cores = proc_stat_counters(data)
+        except (OSError, ValueError) as e:
+            reason = f"cannot read {self.path}: {getattr(e, 'strerror', None) or e}"
+            THROTTLED.say(("board-cpu",), f"{BOARD_CPU}: {reason}: its subscribers lose it")
+            self.monitor.on_error({"op": "error", "about": "subscribe", "stream": BOARD_CPU, "reason": reason})
+            return
+        now = time.monotonic()
+        self.readings += 1
+        previous, self.previous = self.previous, (now, whole, cores)
+        period = 1.0 / self.rate
+        # On a fixed schedule from the first reading; one held up more than a period starts again.
+        self.due = now + period if previous is None or now - self.due > period else self.due + period
+        self.handle = asyncio.get_running_loop().call_at(self.due, self.sample)
+        if previous is None:
+            return
+        then, was_whole, was_cores = previous
+        busy = busy_fraction(whole, was_whole)
+        if busy is None:
+            return
+        per_core = []
+        for n in sorted(cores):
+            if n in was_cores:
+                core = busy_fraction(cores[n], was_cores[n])
+                per_core.append(round(core, 4) if core is not None else 0.0)
+        obj = {"op": "value", "stream": BOARD_CPU, "t": now,
+               "v": {"busy": round(busy, 4), "cores": per_core, "seconds": round(now - then, 4)}}
+        self.monitor.on_value(obj, json.dumps(obj, separators=(",", ":")).encode() + b"\n")
+
+
 class Subscription:
     """One client's subscription to one stream: its rate, and a token bucket that lets a value
     through when it holds a token. It fills at the rate and holds at most MONITOR_TOKENS (two):
@@ -1756,6 +1872,7 @@ class Monitor:
         self.arrived = set()             # streams whose newest line has not been flushed yet
         self.flush_scheduled = False
         self.values = 0                  # the values kept so far, which numbers them
+        self.board_cpu = BoardCpu(self, getattr(core.args, "proc_stat", None) or PROC_STAT)
 
     def on_error(self, obj):
         """speakerd refused a subscription: every subscriber of that stream is told, and loses it."""
@@ -1767,8 +1884,9 @@ class Monitor:
         self.update_union()
 
     def on_value(self, obj, line):
-        """A value from speakerd, `line` as it came. That line is what the clients get (it is not
-        encoded again for each), so it is kept only when a client may get it as it is: a value
+        """A value from speakerd, `line` as it came (or one of board/cpu, from BoardCpu). That line
+        is what the clients get (it is not encoded again for each), so it is kept only when a
+        client may get it as it is: a value
         (dispatch) of a stream some client subscribed to, that starts with its object and holds
         no NaN or Infinity (Python's json reads them, a controller does not: such a line is
         encoded again, which a value that is not a number fails), and at most 64 KiB long (the
@@ -1850,23 +1968,26 @@ class Monitor:
                 want[stream] = max(want.get(stream, 0), sub.rate)
         sd = self.core.sd
         for stream, rate in want.items():
-            if self.union.get(stream) != rate:
+            if self.union.get(stream) != rate and stream != BOARD_CPU:
                 sd.send({"op": "subscribe", "stream": stream, "rate_hz": rate})
         for stream in self.union:
             if stream not in want:
-                sd.send({"op": "unsubscribe", "stream": stream})
+                if stream != BOARD_CPU:
+                    sd.send({"op": "unsubscribe", "stream": stream})
                 self.latest.pop(stream, None)
         self.union = want
+        self.board_cpu.set_rate(want.get(BOARD_CPU))      # ampd's own: speakerd never hears of it
 
     def resubscribe(self):
         """speakerd (re)connected: it knows no subscription."""
         for stream, rate in self.union.items():
-            self.core.sd.send({"op": "subscribe", "stream": stream, "rate_hz": rate})
+            if stream != BOARD_CPU:
+                self.core.sd.send({"op": "subscribe", "stream": stream, "rate_hz": rate})
 
     def on_speakerd_lost(self):
         """The newest values were a speakerd's that is gone: a window opened now waits for the
-        next one's."""
-        self.latest.clear()
+        next one's. board/cpu's is ampd's own, and stays."""
+        self.latest = {stream: newest for stream, newest in self.latest.items() if stream == BOARD_CPU}
 
     async def serve(self, reader, writer):
         conn = Conn(reader, writer)
@@ -1907,7 +2028,7 @@ class Monitor:
         if op == "subscribe":
             if not valid_stream(stream):
                 conn.send({"op": "error", "about": "subscribe", "stream": stream,
-                           "reason": "a stream is output/level, speakerd/timing or node/<uid>/mon_<id> (uid 16 or more)"})
+                           "reason": "a stream is output/level, speakerd/timing, board/cpu or node/<uid>/mon_<id> (uid 16 or more)"})
                 return
             if stream not in client.subs and len(client.subs) >= MAX_SUBSCRIPTIONS:
                 conn.send({"op": "error", "about": "subscribe", "stream": stream,
@@ -2086,6 +2207,8 @@ def main(argv=None):
     parser.add_argument("--knob-port", type=int, default=KNOB_PORT)
     parser.add_argument("--monitor-port", type=int, default=MONITOR_PORT)
     parser.add_argument("--hub-control-port", type=int, default=CONTROL_PORT, help="the hub's control port (an agent)")
+    parser.add_argument("--proc-stat", default=PROC_STAT, help=f"where board/cpu reads the CPU counters "
+                        f"(default {PROC_STAT}; a test hook)")
     parser.add_argument("--lkg-after", type=float, default=LKG_AFTER,
                         help=f"seconds a revision plays with no speakerd restart before graph.json becomes "
                              f"graph.lkg.json (default {LKG_AFTER:g})")
