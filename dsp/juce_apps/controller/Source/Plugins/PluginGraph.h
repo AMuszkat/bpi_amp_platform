@@ -66,7 +66,8 @@ namespace bpi
         /** The canvas as a structure, to compare with the document's. */
         document::Structure structure() const;
 
-        /** A node's parameters as a document's `params`, monitors left out. */
+        /** A node's parameters as a document's `params`, monitors and the plugin's own bypass
+            parameter (the node's `bypassed`) left out. */
         juce::var currentParams (NodeID) const;
 
         //==============================================================================

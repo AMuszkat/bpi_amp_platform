@@ -29,8 +29,13 @@ namespace bpi
           when the hub says `applied`, undoes it and says why when `rejected`, and applies the
           `graph` messages of other controllers;
         - connects to each speaker's monitor link, subscribes to the `mon_` streams of the
-          plugins whose windows are open (from one speaker each, chosen per node) and to the
-          output level of every speaker, and fills the control builds' `mon_` parameters.
+          plugins whose windows are open (from one speaker each, chosen per node), to the
+          output level of every speaker and, while the speakers panel shows it, to every
+          speaker's load (`speakerd/timing`, `board/cpu`), and fills the control builds' `mon_`
+          parameters;
+        - treats a node's bypass only as the document's `bypassed`: a control build's own bypass
+          parameter (getBypassParameter()) is never sent as a parameter, never kept in `params`,
+          and a change of it is a bypass edit, proposed as a revision.
 
         Everything runs on the message thread. */
     class Bridge final : private juce::Timer,
@@ -81,6 +86,33 @@ namespace bpi
             std::array<float, 4> level { -120.0f, -120.0f, -120.0f, -120.0f };   // woofer peak, rms, tweeter peak, rms
             double levelTime = -1.0;        // speakerd's clock; < 0: none yet
             int levelCount = 0;
+
+            /** speakerd/timing: what the audio cycles since the previous value cost, as fractions
+                of the cycle's length (docs/protocol.md, "Monitoring"). */
+            struct Timing
+            {
+                int count = 0;                  // values received; 0: none (yet, or since the link went)
+                double t = 0.0, receivedMs = 0.0;
+                double cycleMean = 0.0, cycleMax = 0.0, graphMean = 0.0, graphMax = 0.0;
+                int cycles = 0, late = 0, jumps = 0;
+                juce::int64 cyclesTotal = -1, lateTotal = -1, jumpsTotal = -1, droppedTotal = -1;   // -1: not given
+                struct NodeLoad { double mean = 0.0, max = 0.0; };
+                std::map<juce::uint32, NodeLoad> nodes;   // by the document's uid
+                juce::String refusal;           // the speaker refused the subscription: why
+            };
+
+            /** board/cpu: the whole board's busy fraction over the last `seconds`, and per core. */
+            struct Cpu
+            {
+                int count = 0;
+                double t = 0.0, receivedMs = 0.0;
+                double busy = 0.0, seconds = 0.0;
+                std::vector<double> cores;
+                juce::String refusal;           // an ampd without board/cpu: shown as n/a
+            };
+
+            Timing timing;
+            Cpu cpu;
         };
 
         const std::vector<Speaker>& getSpeakers() const noexcept   { return speakers; }
@@ -93,6 +125,24 @@ namespace bpi
         /** Every speaker's output level, for the speakers panel: counted, so the panel and a
             script can both want it. */
         void wantOutputLevels (bool);
+
+        /** Every speaker's load, for the speakers panel and the canvas: `speakerd/timing` and
+            `board/cpu` at loadRateHz, counted like the output levels. */
+        void wantSpeakerLoad (bool);
+        static constexpr int loadRateHz = 2;
+        static constexpr double loadStaleMs = 3000.0;   // no value for this long: shown as stale
+
+        /** The load as the speakers panel shows it, one line each: the audio cycle, the late
+            cycles, the board's CPU ("n/a" when the speaker refused board/cpu). */
+        juce::String audioLoadText (const Speaker&) const;
+        juce::String lateCyclesText (const Speaker&) const;
+        juce::String cpuText (const Speaker&) const;
+
+        /** A node's share of each speaker's cycle, as the canvas shows it under the node's name:
+            "L 3.1 % / R 3.0 %" (the mean), empty when no speaker has timed it. The tooltip has
+            the mean and the max per speaker. */
+        juce::String nodeLoadText (juce::uint32 uid) const;
+        juce::String nodeLoadTooltip (juce::uint32 uid) const;
 
         /** A subscription by hand (the test mode). Counted with the windows' own. */
         void subscribe (const juce::String& speakerName, const juce::String& stream);
@@ -113,12 +163,17 @@ namespace bpi
         /** The controller's view as one JSON object: what `--script` prints. */
         juce::var describe() const;
 
+        /** A speaker's load as the test mode prints it (`state`, `wait-load`): the numbers in %,
+            "n/a" for a stream the speaker refused, and the panel's lines as `text`. */
+        juce::var describeLoad (const Speaker&) const;
+
         //==============================================================================
         struct Listener
         {
             virtual ~Listener() = default;
             virtual void bridgeStatusChanged() {}            // connection, revision, speakers, status
             virtual void outputLevelsChanged() {}
+            virtual void speakerLoadChanged() {}             // a timing or CPU value, or a refusal
             virtual void proposalRejected (juce::int64 /*revision*/, const juce::String& /*reason*/) {}
         };
 
@@ -205,8 +260,17 @@ namespace bpi
         void updateSpeakers (const juce::var& list);
         MonitorLink* monitorFor (const juce::String& speakerName);
         void updateNodeSubscriptions (juce::uint32 uid);
-        void updateOutputLevelSubscriptions();
+        void updateSpeakerWideSubscriptions();
         void handleMonitorValue (const juce::String& speakerName, const juce::var&);
+        void handleMonitorRefusal (const juce::String& speakerName, const juce::String& stream, const juce::String& reason);
+        void monitorLinkLost (const juce::String& speakerName);
+        Speaker* speakerNamed (const juce::String&);
+        bool isFresh (double receivedMs) const   { return nowMs() - receivedMs < loadStaleMs; }
+
+        /** A control build's own bypass parameter moved: maybe a bypass edit (a knob, or
+            Node::setBypassed). Looked at once the message loop is idle, like a canvas edit. */
+        void bypassParameterChanged();
+        void scheduleCanvasCheck();
 
         void timerCallback() override;
         void changeListenerCallback (juce::ChangeBroadcaster*) override;
@@ -264,8 +328,19 @@ namespace bpi
         std::map<juce::uint32, int> openWindows;                 // per node: windows that show monitors
         std::map<juce::uint32, std::pair<juce::String, juce::StringArray>> nodeSubscriptions;  // what each node holds
         std::map<std::pair<juce::String, juce::String>, MonitorValue> monitorValues;   // (speaker, stream)
-        int outputLevelWanted = 0;
-        std::set<juce::String> outputLevelSubscribed;            // speakers
+        /** Streams every speaker gets while something wants them: the output level, the load. */
+        struct SpeakerWide
+        {
+            SpeakerWide (juce::StringArray s, int rate = 0) : streams (std::move (s)), rateHz (rate) {}
+
+            juce::StringArray streams;
+            int rateHz = 0;                     // 0: the --monitor-rate
+            int wanted = 0;
+            std::set<juce::String> subscribed;  // speakers
+        };
+
+        SpeakerWide outputLevels { juce::StringArray { "output/level" } };
+        SpeakerWide speakerLoad { juce::StringArray { "speakerd/timing", "board/cpu" }, loadRateHz };
 
         juce::ListenerList<Listener> listeners;
 

@@ -178,7 +178,7 @@ namespace bpi
             {
                 const auto id = params::idOf (*p);
 
-                if (id.isNotEmpty() && ! params::isMonitor (id))
+                if (id.isNotEmpty() && ! params::isMonitor (id) && ! params::isBypass (*n->getProcessor(), *p))
                     object->setProperty (id, params::toJson (*p, params::plainValue (*p)));
             }
         }
@@ -321,6 +321,11 @@ namespace bpi
                             problems.add ("node " + juce::String (uid) + ": no parameter " + id);
                             continue;
                         }
+
+                        // The plugin's own bypass is the node's `bypassed`, set above: a value of
+                        // it in `params` (a document from before the plugin had one) is ignored.
+                        if (params::isBypass (processor, *p))
+                            continue;
 
                         if (const auto normalised = params::normalisedFor (*p, property.value))
                         {

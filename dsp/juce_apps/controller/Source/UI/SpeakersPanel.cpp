@@ -15,21 +15,41 @@ namespace bpi
     SpeakersPanel::SpeakersPanel (Bridge& b) : bridge (b)
     {
         bridge.addListener (this);
-        bridge.wantOutputLevels (true);
         startTimerHz (30);
     }
 
     SpeakersPanel::~SpeakersPanel()
     {
-        bridge.wantOutputLevels (false);
+        if (subscribed)
+        {
+            bridge.wantOutputLevels (false);
+            bridge.wantSpeakerLoad (false);
+        }
+
         bridge.removeListener (this);
+    }
+
+    void SpeakersPanel::updateSubscriptions()
+    {
+        // Only what is on screen is produced (docs/remote-plugin-host.md, section 5).
+        if (const auto showing = isShowing(); showing != subscribed)
+        {
+            subscribed = showing;
+            bridge.wantOutputLevels (showing);
+            bridge.wantSpeakerLoad (showing);
+            repaint();
+        }
     }
 
     void SpeakersPanel::timerCallback()
     {
-        if (dirty)
+        updateSubscriptions();   // isShowing() changes with no call when the window is minimised
+
+        // Once a second anyway, so that a load that stopped coming shows as stale.
+        if (dirty || ++loadRepaintTicks >= 30)
         {
             dirty = false;
+            loadRepaintTicks = 0;
             repaint();
         }
     }
@@ -83,7 +103,7 @@ namespace bpi
 
         for (const auto& s : bridge.getSpeakers())
         {
-            auto box = r.removeFromTop (96);
+            auto box = r.removeFromTop (150);
             r.removeFromTop (8);
 
             g.setColour (juce::Colours::black.withAlpha (0.25f));
@@ -110,6 +130,17 @@ namespace bpi
 
             drawBar (g, box.removeFromTop (17), "woofer",  s.level[0], s.level[1]);
             drawBar (g, box.removeFromTop (17), "tweeter", s.level[2], s.level[3]);
+            box.removeFromTop (4);
+
+            // The load: the audio cycle (speakerd/timing) and the whole board (board/cpu).
+            const auto late = s.timing.count > 0 && s.timing.late > 0;
+            g.setFont (juce::FontOptions (12.0f));
+            g.setColour (juce::Colours::white.withAlpha (0.75f));
+            g.drawText (bridge.audioLoadText (s), box.removeFromTop (17), juce::Justification::centredLeft);
+            g.setColour (late ? juce::Colours::orange : juce::Colours::white.withAlpha (0.75f));
+            g.drawText (bridge.lateCyclesText (s), box.removeFromTop (17), juce::Justification::centredLeft);
+            g.setColour (juce::Colours::white.withAlpha (0.75f));
+            g.drawText (bridge.cpuText (s), box.removeFromTop (17), juce::Justification::centredLeft);
         }
     }
 }
