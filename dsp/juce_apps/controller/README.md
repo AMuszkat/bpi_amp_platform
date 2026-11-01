@@ -102,7 +102,12 @@ docs/protocol.md asks of a controller:
   node's `params` (a document's value of it is ignored), and a `param` echo of it is ignored. A
   change of it, from *Toggle Bypass* or from a knob in the plugin's window, is a bypass edit and
   proposed as a revision like one (undone when the hub rejects it, or while there is no hub);
-  a mirrored document sets it through `Node::setBypassed` without echoing anything.
+  a mirrored document sets it through `Node::setBypassed` without echoing anything. The rule
+  only guards a plugin that returns a `getBypassParameter()`; our plugins deliberately do not
+  (their bypass is `processBlockBypassed`, reached through the LV2 host's `lv2:enabled`), since
+  JUCE's LV2 wrapper sets such a parameter on every `run()`, a listener lock and a `patch:Set`
+  per cycle on the audio thread (`dsp/docs/juce-knowledge/hosting/lv2-bypass.md`). Do not add
+  one to a real plugin; only the test's bypass probe has one.
 - **Echoes.** A `param` from the hub (control or OSC) is applied unless its `seq` is not newer
   than the last one applied for that parameter (UDP may reorder; a new `state` starts the
   count again), or it is the controller's own while its gesture on that parameter is active,
@@ -147,16 +152,23 @@ docs/protocol.md asks of a controller:
 - **Speakers panel.** Beside the canvas: each speaker of the hub's `state` with its role,
   online or offline, the state layer it plays, its monitor link, its output level bar
   (woofer and tweeter: RMS as the bar, peak as the tick) and its load: the audio cycle's mean
-  and largest processing time as % of the cycle (`speakerd/timing`, over the cycles since its
-  previous value: about 0.5 s at 2 Hz), the
-  late cycles in that period and since `speakerd` started (orange when any were late), and the
-  whole board's CPU with each core's (`board/cpu`; n/a from an `ampd` without it).
+  and largest processing time as % of the cycle (`speakerd/timing`), the late cycles since the
+  panel's previous value and since `speakerd` started (orange when any were late), and the
+  whole board's CPU with each core's (`board/cpu`; n/a from an `ampd` without it). `speakerd`
+  measures at the fastest rate any client of the speaker asked for, and `ampd` passes the panel
+  every few of its values, so a value's mean, max and node shares cover `speakerd`'s last period
+  only (0.5 s while the panel is the only client, less when another asks faster). The late
+  cycles do not miss the periods in between: they are the change in `late_total` out of the
+  change in `cycles_total` since the panel's previous value. The first value after the monitor
+  link came (or came back), and one whose totals went down (`speakerd` restarted), shows its own
+  period's `late` of `cycles` instead.
 - **Each node's load on the canvas.** Under a plugin node's name, its share of each speaker's
   audio cycle, the mean as `L 1.2 % / R 1.1 %` (the speaker's role; `-` for a speaker that did
   not time that node, nothing before any speaker's timing arrived); its tooltip, in the status
-  bar, has the mean and the max per speaker. The canvas is the hub's one document for both
-  speakers, so a node shows both speakers' numbers rather than the selected one's: the two run
-  the same graph, and a difference between them is itself worth seeing.
+  bar, has the mean and the max per speaker (of `speakerd`'s last period, as above). The canvas
+  is the hub's one document for both speakers, so a node shows both speakers' numbers rather
+  than the selected one's: the two run the same graph, and a difference between them is itself
+  worth seeing.
 
 The canvas's pins are the speaker's: the stream in (node 1) has FL, FR and Mine (channels 0, 1,
 2), the amplifier out (node 2) has woofer and tweeter (0, 1). Plugin nodes have the document's
@@ -192,7 +204,7 @@ timeout (in seconds, the last argument where shown; default 5) passes.
 | `subscribe SPEAKER STREAM`, `unsubscribe SPEAKER STREAM` | a subscription by hand |
 | `output-levels on/off` | every speaker's `output/level`, as the speakers panel does |
 | `speaker-load on/off` | every speaker's `speakerd/timing` and `board/cpu` at 2 Hz, as the speakers panel does |
-| `wait-load SPEAKER [s]` | until the speaker's load has a timing value and a CPU value or a refusal (n/a); prints it as `load` (below) |
+| `wait-load SPEAKER [s] [N]` | until the speaker's load has a timing value (N of them since its monitor link came, default 1) and a CPU value or a refusal (n/a); prints it as `load` (below) |
 | `wait-value SPEAKER STREAM [s]` | until a new `value` of that stream arrives; prints `v` and `t` |
 | `expect-speaker NAME online/offline [s]` | |
 | `main-window X Y W H` | places the main window (`--gui`) |
@@ -224,7 +236,9 @@ level_count, subscriptions, `load`) and `gestures` (other controllers' active ge
 plugin node also has `load`, the text the canvas shows under it. A speaker's `load` is
 `{"timing": {...} | "n/a" | null, "timing_refusal", "cpu": {...} | "n/a" | null, "cpu_refusal",
 "text": [three lines]}`: `timing` has `cycle_mean_pct`, `cycle_max_pct`, `graph_mean_pct`,
-`graph_max_pct`, `cycles`, `late`, `jumps`, `late_total`, `cycles_total` (-1 when not given),
+`graph_max_pct`, `cycles` and `late` (the panel's, over its interval), `from_totals` (whether
+they are the change in the totals), `period_cycles` and `period_late` (`speakerd`'s last
+period, as sent), `jumps`, `late_total`, `cycles_total` (-1 when not given),
 `nodes` (`{"16": {"mean_pct", "max_pct"}}`) and `values`; `cpu` has `busy_pct`, `cores_pct`,
 `seconds` and `values`; `text` is what the speakers panel shows, for example
 `["audio cycle: 3.1 % mean, 5.2 % max", "late cycles: 1 of 23, 3 since start", "board CPU: 23.0 % (cores 31 12 20 29)"]`.
@@ -290,7 +304,10 @@ refused, then believed with `--insecure` and shown as such; and a speaker whose 
 claims its partner's name, or a hub with another name than the configured one, refused and
 shown; each speaker's load: `speakerd/timing` and `board/cpu` subscribed on both speakers at
 2 Hz and withdrawn, the values and the panel's lines in the state, the node's share on the
-canvas, and a speaker that refuses `board/cpu` shown as n/a while its timing still comes; and a
+canvas, a speaker that refuses `board/cpu` shown as n/a while its timing still comes, and the
+late cycles counted over the panel's interval from the totals (including those of periods sent
+only to a faster client), with a `speakerd` restart and a reconnect falling back to the value's
+own period; and a
 plugin's own bypass parameter (the bypass probe) as the node's bypass: *Toggle Bypass* and a
 knob on it proposed as revisions with `bypassed`, never a `param` and never in `params`, a
 mirrored revision applied without an echo, and another controller's `param` of it ignored.

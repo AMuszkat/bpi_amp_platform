@@ -177,6 +177,18 @@ class FakeHub:
                       "board/cpu": {"busy": 0.4, "cores": [0.5, 0.3, 0.4, 0.4], "seconds": 0.5}},
         }
         self.refuse_streams = {}          # speaker -> {stream: reason}: refused on subscribe, as an older ampd
+        # speakerd/timing as speakerd counts it: every value sent adds its cycles and late to the
+        # speaker's totals (kept across monitor connections, as speakerd's are), so the template's
+        # totals are those of the first value. timing_steps[speaker] is a list consumed one per
+        # value sent, each a dict of overrides of the template, and:
+        #   "skipped": [(cycles, late), ...]  periods counted in the totals but never delivered
+        #                                     (speakerd's faster rate for another client)
+        #   "restart": True                   speakerd restarted: the totals start again from 0
+        #   "after_s": s                      sent no sooner than s after the previous value
+        #   "stop": True                      no more values of the stream (the step stays)
+        self.timing_steps = {}
+        self._timing_totals = {}          # speaker -> [cycles_total, late_total]
+        self._monitor_conns = {}          # speaker -> its monitor link's open connection
         self.received = []                # (link, message): every line and datagram in
         self.sent = []                    # (link, message): every line and datagram out
         self.controllers = {}             # name -> {"conn", "osc": (host, port)}
@@ -354,6 +366,41 @@ class FakeHub:
                 if s["name"] == name:
                     s["online"] = online
         self._to_controllers(self.state_message())
+
+    def drop_monitor(self, speaker):
+        """Closes the speaker's monitor link, as a network that went: the controller reconnects."""
+        with self.lock:
+            conn = self._monitor_conns.pop(speaker, None)
+        if conn is not None:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _next_timing(self, speaker, template, since_previous):
+        """The next speakerd/timing value of the speaker, with its totals; None: not yet, or no more."""
+        with self.lock:
+            steps = self.timing_steps.get(speaker) or []
+            step = steps[0] if steps else {}
+            if step.get("stop") or since_previous < step.get("after_s", 0):
+                return None
+            if steps:
+                steps.pop(0)
+            v = copy.deepcopy(template)
+            v.update({k: x for k, x in step.items() if k not in ("skipped", "restart", "after_s")})
+            if speaker not in self._timing_totals:
+                self._timing_totals[speaker] = [template["cycles_total"] - template["cycles"],
+                                                template["late_total"] - template["late"]]
+            totals = self._timing_totals[speaker]
+            if step.get("restart"):
+                totals[:] = [0, 0]
+            for cycles, late in step.get("skipped", []):
+                totals[0] += cycles
+                totals[1] += late
+            totals[0] += v["cycles"]
+            totals[1] += v["late"]
+            v["cycles_total"], v["late_total"] = totals
+            return v
 
     def received_ops(self, link, op=None):
         with self.lock:
@@ -533,13 +580,20 @@ class FakeHub:
                 for stream, rate in items:
                     if now - last.get(stream, 0) < 1.0 / max(1, min(60, rate)):
                         continue
-                    last[stream] = now
                     values = self.monitor_values[speaker]
-                    v = values["output/level"] if stream == "output/level" else values.get(stream, values["mon"])
+                    if stream == "speakerd/timing":
+                        v = self._next_timing(speaker, values[stream], now - last.get(stream, 0))
+                        if v is None:
+                            continue
+                    else:
+                        v = values["output/level"] if stream == "output/level" else values.get(stream, values["mon"])
+                    last[stream] = now
                     self._send_line(conn, "monitor " + speaker,
                                     {"op": "value", "stream": stream, "t": round(now - t0, 3), "v": v})
                 time.sleep(0.005)
 
+        with self.lock:
+            self._monitor_conns[speaker] = conn.connection
         nonce = secrets.token_hex(16)
         claimed = self.monitor_names.get(speaker, speaker)
         self._send_line(conn, "monitor " + speaker, {"op": "hello", "role": "speaker", "name": claimed,

@@ -264,7 +264,12 @@ namespace bpi
             if (! normalised)
                 return edit (false, arg (3) + " does not fit " + arg (2));
 
-            outcomesBefore = bridge.getProposalOutcomes();   // a plugin's own bypass parameter is a proposal
+            // A plugin's own bypass parameter is a proposal: a later expect-applied waits for its
+            // outcome. Any other parameter is a `param`, and leaves the count alone, so an earlier
+            // edit's outcome that arrives after this still satisfies its expect-applied.
+            if (auto* n = graph.graph.getNodeForId (NodeID { uidArg (arg (1)) }); n != nullptr && params::isBypass (*n->getProcessor(), *p))
+                outcomesBefore = bridge.getProposalOutcomes();
+
             p->setValueNotifyingHost (*normalised);
             return edit (true, {}, object ({ { "value", params::toJson (*p, params::plainValue (*p)) } }));
         }
@@ -547,8 +552,9 @@ namespace bpi
 
         if (cmd == "wait-load")
         {
-            // wait-load <speaker> [s]: until the speaker's load has a timing value and a CPU
-            // value or a refusal (n/a); prints it as `state` does.
+            // wait-load <speaker> [s] [values]: until the speaker's load has a timing value (or
+            // that many since its monitor link came) and a CPU value or a refusal (n/a); prints it
+            // as `state` does.
             if (! need (1)) return true;
             setTimeout (2, defaultTimeoutSeconds);
 
@@ -560,7 +566,9 @@ namespace bpi
                 const auto load = bridge.describeLoad (s);
                 waitDetail = object ({ { "load", load } });
 
-                if ((s.timing.count > 0 || s.timing.refusal.isNotEmpty()) && (s.cpu.count > 0 || s.cpu.refusal.isNotEmpty()))
+                const auto values = juce::jmax (1, arg (3).getIntValue());
+
+                if ((s.timing.count >= values || s.timing.refusal.isNotEmpty()) && (s.cpu.count > 0 || s.cpu.refusal.isNotEmpty()))
                     return edit (true, {}, object ({ { "load", load } }));
             }
 
