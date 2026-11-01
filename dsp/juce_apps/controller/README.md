@@ -34,7 +34,7 @@ controller --self-test
 | `--speaker NAME=HOST` | where speaker NAME's monitor link listens. Repeatable. Without it, the hub's own speaker (the hub's `hello` name) is at the hub's address, and a speaker the hub lists with an `address` key is there |
 | `--osc-port PORT` | the UDP port the hub sends OSC echoes to (the hello's `osc_port`); default 0: any free port |
 | `--control-port`, `--knobs-port`, `--monitor-port` | default 7450, 7451, 7452 (docs/protocol.md) |
-| `--monitor-rate HZ` | the `rate_hz` of subscriptions (default 30, at most 60) |
+| `--monitor-rate HZ` | the `rate_hz` of the plugin windows' and the output levels' subscriptions (default 30, at most 60); a speaker's load goes at 2 Hz |
 | `--script FILE` | the test mode (below) |
 | `--gui` | with `--script`: open the windows too |
 | `--test-probe` | add the test probe to the plugins (below) |
@@ -95,6 +95,14 @@ docs/protocol.md asks of a controller:
   change with no gesture (a typed value, a preset) goes over the control link only, at the same
   rate at most. Gestures (`begin`, `end`) go over the control link. `seq` is 0, `origin` its
   name.
+- **A plugin's own bypass is the node's bypass.** A control build whose `getBypassParameter()`
+  returns a parameter (a plugin with a level-matched bypass of its own) has that parameter moved
+  by JUCE's `Node::setBypassed`, and `Node::isBypassed()` reads it. The bridge treats it only as
+  the document's `bypassed`: it is never sent as a `param` or a gesture, never written into a
+  node's `params` (a document's value of it is ignored), and a `param` echo of it is ignored. A
+  change of it, from *Toggle Bypass* or from a knob in the plugin's window, is a bypass edit and
+  proposed as a revision like one (undone when the hub rejects it, or while there is no hub);
+  a mirrored document sets it through `Node::setBypassed` without echoing anything.
 - **Echoes.** A `param` from the hub (control or OSC) is applied unless its `seq` is not newer
   than the last one applied for that parameter (UDP may reorder; a new `state` starts the
   count again), or it is the controller's own while its gesture on that parameter is active,
@@ -128,11 +136,27 @@ docs/protocol.md asks of a controller:
   with `mon_`) on one speaker, chosen by the L / R buttons at the top of the window (the left
   speaker first); closing the last window of a node, or switching speaker, unsubscribes. The
   values are written into the control build's `mon_` parameters, which its getters read; the
-  window's header also shows them as text. The speakers panel subscribes to every speaker's
-  `output/level`.
+  window's header also shows them as text. While it is showing (not while its window is
+  minimised or hidden), the speakers panel subscribes to every speaker's `output/level` (at
+  `--monitor-rate`) and to its load, `speakerd/timing` and `board/cpu`, at 2 Hz: these are
+  summaries, not meters. A speaker that refuses a subscription (`{"op":"error","about":
+  "subscribe",...}`, an `ampd` older than `board/cpu`) is not asked again on that connection, and
+  the refused stream shows as n/a while the rest works. When a monitor link goes, its speaker's
+  load is cleared, and a value older than 3 s shows as stale. A stream wanted at two rates (by a
+  script and the panel) goes at the higher one.
 - **Speakers panel.** Beside the canvas: each speaker of the hub's `state` with its role,
-  online or offline, the state layer it plays, its monitor link, and its output level bar
-  (woofer and tweeter: RMS as the bar, peak as the tick).
+  online or offline, the state layer it plays, its monitor link, its output level bar
+  (woofer and tweeter: RMS as the bar, peak as the tick) and its load: the audio cycle's mean
+  and largest processing time as % of the cycle (`speakerd/timing`, over the cycles since its
+  previous value: about 0.5 s at 2 Hz), the
+  late cycles in that period and since `speakerd` started (orange when any were late), and the
+  whole board's CPU with each core's (`board/cpu`; n/a from an `ampd` without it).
+- **Each node's load on the canvas.** Under a plugin node's name, its share of each speaker's
+  audio cycle, the mean as `L 1.2 % / R 1.1 %` (the speaker's role; `-` for a speaker that did
+  not time that node, nothing before any speaker's timing arrived); its tooltip, in the status
+  bar, has the mean and the max per speaker. The canvas is the hub's one document for both
+  speakers, so a node shows both speakers' numbers rather than the selected one's: the two run
+  the same graph, and a difference between them is itself worth seeing.
 
 The canvas's pins are the speaker's: the stream in (node 1) has FL, FR and Mine (channels 0, 1,
 2), the amplifier out (node 2) has woofer and tweeter (0, 1). Plugin nodes have the document's
@@ -167,6 +191,8 @@ timeout (in seconds, the last argument where shown; default 5) passes.
 | `monitor-speaker UID SPEAKER` | the window's L / R choice |
 | `subscribe SPEAKER STREAM`, `unsubscribe SPEAKER STREAM` | a subscription by hand |
 | `output-levels on/off` | every speaker's `output/level`, as the speakers panel does |
+| `speaker-load on/off` | every speaker's `speakerd/timing` and `board/cpu` at 2 Hz, as the speakers panel does |
+| `wait-load SPEAKER [s]` | until the speaker's load has a timing value and a CPU value or a refusal (n/a); prints it as `load` (below) |
 | `wait-value SPEAKER STREAM [s]` | until a new `value` of that stream arrives; prints `v` and `t` |
 | `expect-speaker NAME online/offline [s]` | |
 | `main-window X Y W H` | places the main window (`--gui`) |
@@ -194,7 +220,14 @@ welcome checked), `insecure`, `osc_dropped`, `synced`, `hub`, `revision`, `seq`,
 identifier, bypassed, `params` and `monitors` in the plugin's units, `monitor_speaker`),
 `connections` (`[src, channel, dst, channel]`), `speakers` (name, role, online, layer, address,
 monitor_connected, `level` as `[woofer peak, woofer rms, tweeter peak, tweeter rms]`,
-level_count, subscriptions) and `gestures` (other controllers' active gestures).
+level_count, subscriptions, `load`) and `gestures` (other controllers' active gestures). A
+plugin node also has `load`, the text the canvas shows under it. A speaker's `load` is
+`{"timing": {...} | "n/a" | null, "timing_refusal", "cpu": {...} | "n/a" | null, "cpu_refusal",
+"text": [three lines]}`: `timing` has `cycle_mean_pct`, `cycle_max_pct`, `graph_mean_pct`,
+`graph_max_pct`, `cycles`, `late`, `jumps`, `late_total`, `cycles_total` (-1 when not given),
+`nodes` (`{"16": {"mean_pct", "max_pct"}}`) and `values`; `cpu` has `busy_pct`, `cores_pct`,
+`seconds` and `values`; `text` is what the speakers panel shows, for example
+`["audio cycle: 3.1 % mean, 5.2 % max", "late cycles: 1 of 23, 3 since start", "board CPU: 23.0 % (cores 31 12 20 29)"]`.
 
 A scenario on the virtual pair runs it against the real hub, for example:
 
@@ -214,6 +247,8 @@ tests: LV2 identifier `urn:bpi-amp:controller:test-probe`, mono in and out, para
 (dB), `mode` (Auto, Force 1, Force 2), `bypass`, and a monitor `mon_level` (dBFS, -120 to 0),
 declared as docs/protocol.md says (last, not automatable, an output meter). It tests the monitor
 path before a real plugin publishes a monitor. A hub must know its identifier to accept it.
+With it comes `test-probe-bypass` (`urn:bpi-amp:controller:test-probe-bypass`), the same whose
+`bypass` is its own bypass parameter (`getBypassParameter()`), for the rule above.
 
 ## Tests
 
@@ -226,7 +261,8 @@ its `welcome` proof (a wrong one when a test sets `wrong_welcome`), takes OSC on
 of an authenticated connection from its address, and stamps each controller's echoes with that
 controller's token. `forge_echo()` sends echoes without a token or with a wrong one. It stamps `seq`, echoes, relays gestures, applies or rejects proposals
 (stale base, an unknown plugin, or a reason a test sets), and produces monitor values at the
-rate asked for. Run alone (`python3 fake_hub.py --probe --trace`) it serves a document until
+rate asked for: `output/level`, `speakerd/timing` and `board/cpu` per speaker, and a node's
+monitor; a stream in `refuse_streams` is refused as an `ampd` refuses one it does not know. Run alone (`python3 fake_hub.py --probe --trace`) it serves a document until
 interrupted.
 
 ```sh
@@ -252,9 +288,16 @@ never applied, only hellos sent to it, retried every 5 s); forged OSC echoes (no
 one, another secret's) ignored while the hub's own are applied; and a hub without a secret
 refused, then believed with `--insecure` and shown as such; and a speaker whose monitor link
 claims its partner's name, or a hub with another name than the configured one, refused and
-shown. Each test prints its numbers.
+shown; each speaker's load: `speakerd/timing` and `board/cpu` subscribed on both speakers at
+2 Hz and withdrawn, the values and the panel's lines in the state, the node's share on the
+canvas, and a speaker that refuses `board/cpu` shown as n/a while its timing still comes; and a
+plugin's own bypass parameter (the bypass probe) as the node's bypass: *Toggle Bypass* and a
+knob on it proposed as revisions with `bypassed`, never a `param` and never in `params`, a
+mirrored revision applied without an echo, and another controller's `param` of it ignored.
+Each test prints its numbers.
 
-The screenshot run opens the loudness control editor and the test probe beside the canvas and
+The screenshot run opens the loudness control editor and the test probe beside the canvas (the
+speakers panel with the fake hub's levels and load, and node 16's share on the canvas) and
 writes `build/controller-check/controller-screen.png` (the X screen) and `controller-juce.png`
 (JUCE's own rendering of the windows).
 

@@ -15,7 +15,7 @@ namespace bpi
         class TestProbe final : public juce::AudioProcessor
         {
         public:
-            TestProbe()
+            explicit TestProbe (bool ownBypass)
                 : AudioProcessor (BusesProperties().withInput  ("Input",  juce::AudioChannelSet::mono(), true)
                                                    .withOutput ("Output", juce::AudioChannelSet::mono(), true))
             {
@@ -24,7 +24,8 @@ namespace bpi
                                                              juce::AudioParameterFloatAttributes().withLabel ("dB")));
                 addParameter (new juce::AudioParameterChoice (juce::ParameterID { "mode", 1 }, "Mode",
                                                               juce::StringArray { "Auto", "Force 1", "Force 2" }, 0));
-                addParameter (new juce::AudioParameterBool (juce::ParameterID { "bypass", 1 }, "Bypass", false));
+                addParameter (bypass = new juce::AudioParameterBool (juce::ParameterID { "bypass", 1 }, "Bypass", false));
+                hasOwnBypass = ownBypass;
                 // A monitor, declared as docs/protocol.md says: last, not automatable, a meter.
                 addParameter (new juce::AudioParameterFloat (juce::ParameterID { "mon_level", 1 }, "Level",
                                                              juce::NormalisableRange<float> { -120.0f, 0.0f }, -120.0f,
@@ -34,7 +35,8 @@ namespace bpi
                                                                  .withCategory (juce::AudioProcessorParameter::outputMeter)));
             }
 
-            const juce::String getName() const override                  { return "test-probe"; }
+            const juce::String getName() const override                  { return hasOwnBypass ? "test-probe-bypass" : "test-probe"; }
+            juce::AudioProcessorParameter* getBypassParameter() const override   { return hasOwnBypass ? bypass : nullptr; }
             void prepareToPlay (double, int) override {}
             void releaseResources() override {}
             void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
@@ -51,6 +53,10 @@ namespace bpi
             void changeProgramName (int, const juce::String&) override   {}
             void getStateInformation (juce::MemoryBlock&) override       {}
             void setStateInformation (const void*, int) override         {}
+
+        private:
+            juce::AudioParameterBool* bypass = nullptr;
+            bool hasOwnBypass = false;
         };
 
         std::vector<ControlPluginType> makeTypes()
@@ -73,7 +79,13 @@ namespace bpi
                 t.name = "test-probe";
                 t.headlessUri = ControlPlugins::testProbeUri;
                 t.uris = { ControlPlugins::testProbeUri };
-                t.create = [] { return std::make_unique<TestProbe>(); };
+                t.create = [] { return std::make_unique<TestProbe> (false); };
+                types.push_back (t);
+
+                t.name = "test-probe-bypass";
+                t.headlessUri = ControlPlugins::testProbeBypassUri;
+                t.uris = { ControlPlugins::testProbeBypassUri };
+                t.create = [] { return std::make_unique<TestProbe> (true); };
                 types.push_back (std::move (t));
             }
 
@@ -169,6 +181,11 @@ namespace bpi
         }
 
         bool isMonitor (const juce::String& id)    { return id.startsWith ("mon_"); }
+
+        bool isBypass (const juce::AudioProcessor& processor, const juce::AudioProcessorParameter& p)
+        {
+            return processor.getBypassParameter() == &p;
+        }
 
         juce::AudioProcessorParameter* find (juce::AudioProcessor& processor, const juce::String& id)
         {

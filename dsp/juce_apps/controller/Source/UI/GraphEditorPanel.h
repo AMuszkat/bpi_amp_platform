@@ -4,9 +4,10 @@
    Derived from JUCE's extras/AudioPluginHost/Source/UI/GraphEditorPanel.h
    (Raw Material Software Limited, JUCE 8; AGPLv3 or the JUCE licence).
 
-   Changes for the controller: the canvas, pins and connection dragging are unchanged. The
-   document component around it has no audio player, MIDI keyboard or device settings;
-   it shows the speakers panel and the bridge's status instead.
+   Changes for the controller: the canvas, pins and connection dragging are unchanged; a
+   plugin node also shows its share of each speaker's audio cycle (speakerd/timing) under its
+   name. The document component around it has no audio player, MIDI keyboard or device
+   settings; it shows the speakers panel and the bridge's status instead.
 
   ==============================================================================
 */
@@ -23,10 +24,12 @@ namespace bpi
 
     /** A panel that displays and edits a PluginGraph. */
     class GraphEditorPanel final : public juce::Component,
-                                   public juce::ChangeListener
+                                   public juce::ChangeListener,
+                                   private juce::Timer
     {
     public:
-        explicit GraphEditorPanel (PluginGraph& graph);
+        /** With a bridge, each plugin node shows its load on every speaker. */
+        explicit GraphEditorPanel (PluginGraph& graph, Bridge* bridge = nullptr);
         ~GraphEditorPanel() override;
 
         void createNewPlugin (const ControlPluginType&, juce::Point<int> position);
@@ -48,8 +51,11 @@ namespace bpi
         void endDraggingConnector (const juce::MouseEvent&);
 
         PluginGraph& graph;
+        Bridge* const bridge;
 
     private:
+        void timerCallback() override;
+
         struct PluginComponent;
         struct ConnectorComponent;
         struct PinComponent;

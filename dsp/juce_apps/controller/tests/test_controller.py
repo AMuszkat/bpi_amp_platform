@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The controller's bridge against the fake hub (fake_hub.py): connection and state, parameters
 and their echoes, gestures over OSC at 50 Hz, proposals applied and rejected (undone), revisions
-from other controllers, monitor subscriptions. Each test runs the controller in its test mode
+from other controllers, monitor subscriptions, each speaker's load (speakerd/timing, board/cpu),
+a plugin's own bypass parameter as the node's bypass. Each test runs the controller in its test mode
 (--script) and checks both what it printed and what the hub received. Standard library only.
 
     python3 -m unittest discover -s dsp/juce_apps/controller/tests -v
@@ -20,7 +21,7 @@ import threading
 import time
 import unittest
 
-from fake_hub import FakeHub, LOUDNESS_URI, SECRET, client_proof, default_document, hmac_hex, osc_token, server_proof
+from fake_hub import FakeHub, LOUDNESS_URI, PROBE_BYPASS_URI, SECRET, client_proof, default_document, hmac_hex, osc_token, server_proof
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
@@ -583,6 +584,113 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(got, expected)
         report("vector", client_proof=expected["client_proof"][:16] + "...", server_proof=expected["server_proof"][:16] + "...",
                K=expected["session_key"][:16] + "...", token=expected["osc_token"])
+
+
+    def test_21_speaker_load(self):
+        """The speakers panel's load: speakerd/timing and board/cpu from both speakers at 2 Hz
+        while shown, withdrawn after; the values in the display state; a speaker whose ampd has
+        no board/cpu shows n/a, and its timing still comes."""
+        hub = self.start_hub()
+        reason = "a stream is output/level, speakerd/timing or node/<uid>/mon_<id> (uid 16 or more)"
+        hub.refuse_streams = {"right": {"board/cpu": reason}}
+        code, steps, err = self.run_script(
+            "wait-synced\nspeaker-load on\nwait-load left\nwait-load right\nsleep 2000\nstate\n"
+            "speaker-load off\nsleep 500\nstate\n",
+            extra=["--speaker", "right=" + RIGHT])
+        self.assertPassed(code, steps, err)
+
+        load_streams = ("speakerd/timing", "board/cpu")
+        lines = {name: [(m["op"], m["stream"], m.get("rate_hz")) for m, _ in hub.received_ops("monitor " + name)
+                        if m["op"] in ("subscribe", "unsubscribe")]
+                 for name in ("left", "right")}
+        self.assertEqual(lines["left"], [("subscribe", "speakerd/timing", 2), ("subscribe", "board/cpu", 2),
+                                         ("unsubscribe", "speakerd/timing", None), ("unsubscribe", "board/cpu", None)])
+        # The refused stream is not asked for again on that connection, nor withdrawn (ampd dropped it).
+        self.assertEqual(lines["right"], [("subscribe", "speakerd/timing", 2), ("subscribe", "board/cpu", 2),
+                                          ("unsubscribe", "speakerd/timing", None)])
+        self.assertEqual(hub.subscriptions, {"left": {}, "right": {}})
+
+        shown = {s["name"]: s for s in self.step(steps, "state", 0)["state"]["speakers"]}
+        left, right = shown["left"]["load"], shown["right"]["load"]
+        self.assertEqual((left["timing"]["cycle_mean_pct"], left["timing"]["cycle_max_pct"]), (3.1, 5.2))
+        self.assertEqual((left["timing"]["late"], left["timing"]["late_total"], left["timing"]["cycles"]), (1, 3, 23))
+        self.assertEqual(left["timing"]["nodes"]["16"], {"mean_pct": 1.2, "max_pct": 2.0})
+        self.assertEqual(left["cpu"]["busy_pct"], 23.0)
+        self.assertEqual(left["cpu"]["cores_pct"], [31.0, 12.0, 20.0, 29.0])
+        self.assertEqual(left["text"], ["audio cycle: 3.1 % mean, 5.2 % max", "late cycles: 1 of 23, 3 since start",
+                                        "board CPU: 23.0 % (cores 31 12 20 29)"])
+        self.assertEqual(right["cpu"], "n/a")
+        self.assertEqual(right["cpu_refusal"], reason)
+        self.assertEqual(right["text"][2], "board CPU: n/a")
+        self.assertEqual(right["timing"]["cycle_mean_pct"], 2.9, "the rest still works")
+        node = [n for n in self.step(steps, "state", 0)["state"]["nodes"] if n["uid"] == 16][0]
+        self.assertEqual(node["load"], "L 1.2 % / R 1.1 %")
+        self.assertNotIn("output/level", shown["left"]["subscriptions"])
+        self.assertEqual(sorted(shown["left"]["subscriptions"]), sorted(load_streams))
+
+        # At about 2 a second: no more than ampd's bound (2 + T x rate) over the subscription.
+        def sent(name, stream):
+            return [t for l, m, t in hub.sent if l == "monitor " + name and m.get("op") == "value" and m.get("stream") == stream]
+        times = sent("left", "speakerd/timing")
+        subscribed = [t for m, t in hub.received_ops("monitor left") if m["op"] in ("subscribe", "unsubscribe")
+                      and m["stream"] == "speakerd/timing"]
+        span = subscribed[1] - subscribed[0]
+        self.assertLessEqual(len(times), 2 + span * 2)
+        self.assertGreaterEqual(len(times), 4)
+        after = {s["name"]: s for s in self.step(steps, "state", 1)["state"]["speakers"]}
+        self.assertEqual(after["left"]["subscriptions"], [])
+        report("load", rate_hz=2, timing_values_left=len(times), over_s=round(span, 2),
+               cpu_values_left=len(sent("left", "board/cpu")), cpu_right="n/a", node_16=node["load"])
+
+    def test_22_a_plugins_own_bypass_is_the_nodes_bypass(self):
+        """A control build whose getBypassParameter() is a parameter (a level-matched bypass):
+        Node::setBypassed and a knob on that parameter both become the document's `bypassed`, a
+        revision; never a `param`, never in `params`. A mirrored revision sets it without an echo,
+        and another controller's `param` of it is ignored."""
+        doc = default_document()
+        doc["nodes"].append({"uid": 21, "name": "test-probe-bypass", "plugin": {"format": "LV2", "identifier": PROBE_BYPASS_URI},
+                             "params": {"gain": -3.0, "bypass": 1}, "ui": {"x": 0.7, "y": 0.5}})
+        hub = self.start_hub(document=doc)
+
+        def other():
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and hub.revision < 10:
+                time.sleep(0.02)
+            time.sleep(0.3)
+            mirrored = copy.deepcopy(hub.document)
+            [n for n in mirrored["nodes"] if n["uid"] == 21][0]["bypassed"] = False
+            hub.new_revision(mirrored)                     # revision 11, from another controller
+            time.sleep(0.5)
+            hub.change_param(21, "bypass", 1)              # an older controller's param of it
+
+        code, steps, err = self.run_script(
+            "wait-synced\nstate\n"
+            "bypass 21 on\nexpect-applied\nexpect-revision 8\nwait-param 21 bypass 1\n"
+            "set 21 bypass false\nexpect-applied\nexpect-revision 9\n"
+            "set 21 bypass true\nexpect-applied\nexpect-revision 10\nstate\n"
+            "expect-revision 11 10\nwait-param 21 bypass 0\nsleep 1200\nwait-param 21 bypass 0 0.1\nstate\n",
+            extra=["--test-probe"], during=other)
+        self.assertPassed(code, steps, err)
+
+        first = [n for n in self.step(steps, "state", 0)["state"]["nodes"] if n["uid"] == 21][0]
+        self.assertFalse(first["bypassed"], "a document's params never bypass the node: only `bypassed` does")
+        self.assertNotIn("bypass", first["params"])
+        self.assertEqual(first["params"]["gain"], -3.0)
+
+        self.assertEqual([m for m, _ in hub.received_ops("control", "param")], [], "a bypass is never a param")
+        self.assertEqual([m for m, _ in hub.received_ops("control", "gesture")], [])
+        self.assertEqual(hub.received_ops("knobs"), [])
+        proposals = [m for m, _ in hub.received_ops("control", "graph")]
+        self.assertEqual([p["revision"] for p in proposals], [8, 9, 10], "the mirror is never echoed as a proposal")
+        probe = [[n for n in p["document"]["nodes"] if n["uid"] == 21][0] for p in proposals]
+        self.assertEqual([n.get("bypassed", False) for n in probe], [True, False, True])
+        self.assertTrue(all("bypass" not in n["params"] for n in probe), "never persisted as a param")
+        bypassed = [n for n in self.step(steps, "state", 1)["state"]["nodes"] if n["uid"] == 21][0]
+        self.assertTrue(bypassed["bypassed"])
+        last = [n for n in self.step(steps, "state", 2)["state"]["nodes"] if n["uid"] == 21][0]
+        self.assertFalse(last["bypassed"], "canvas and document agree after the mirror and the ignored param")
+        report("own bypass", proposals=[p["revision"] for p in proposals], params_sent=0, mirrored_revision=11,
+               ignored_param_echo=True)
 
 
 if __name__ == "__main__":

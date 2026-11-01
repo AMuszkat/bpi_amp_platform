@@ -7,7 +7,8 @@ It speaks the controller's side of three links, well enough for the controller's
   (relayed), graph proposals (applied or rejected), graph to every controller, error;
 - knobs (UDP, OSC): /bpi/param and /bpi/gesture in, echoes out to each controller's osc_port;
 - monitor (TCP, JSON lines), one listener per speaker: subscribe, unsubscribe, and value lines
-  at the rate asked for, for output/level and node/<uid>/<mon_id>.
+  at the rate asked for, for output/level, speakerd/timing, board/cpu and node/<uid>/<mon_id>;
+  a stream in `refuse_streams` is refused as an older ampd refuses one it does not know.
 
 Standard library only. Every line and datagram it receives is kept in `received`, so a test can
 check what the controller sent. Run alone, it serves a document until interrupted:
@@ -29,6 +30,7 @@ import time
 
 LOUDNESS_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/loudness_headless"
 PROBE_URI = "urn:bpi-amp:controller:test-probe"
+PROBE_BYPASS_URI = "urn:bpi-amp:controller:test-probe-bypass"   # the probe whose switch is its own bypass
 SECRET = "test-pair-secret-0123456789"   # the tests' shared secret (docs/protocol.md, "Authentication")
 
 
@@ -133,6 +135,14 @@ def default_document(revision=7, probe=False):
             "nodes": nodes, "connections": connections}
 
 
+def timing_value(mean, peak, late=0, late_total=0, node_mean=0.01, node_max=0.02, cycles=23):
+    """A speakerd/timing value as speakerd sends it (docs/protocol.md, "Monitoring"), with node 16."""
+    return {"cycles": cycles, "late": late, "jumps": 0, "cycle": {"mean": mean, "max": peak},
+            "graph": {"mean": mean * 0.9, "max": peak * 0.9},
+            "nodes": [{"uid": 16, "name": "loudness_headless", "mean": node_mean, "max": node_max}],
+            "cycles_total": 1000, "late_total": late_total, "jumps_total": 0, "dropped_total": 0}
+
+
 class _LineServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -155,13 +165,18 @@ class FakeHub:
             {"name": "left", "role": "left", "online": True, "layer": "current"},
             {"name": "right", "role": "right", "online": True, "layer": "current"},
         ]
-        self.known_plugins = {LOUDNESS_URI, PROBE_URI}
+        self.known_plugins = {LOUDNESS_URI, PROBE_URI, PROBE_BYPASS_URI}
         self.reject_next = None           # a reason: the next proposal is rejected with it
         self.echo_delay = 0.0             # seconds before an OSC echo leaves (to test reordering)
         self.monitor_values = {           # per speaker: stream -> value
-            "left": {"output/level": [-6.0, -12.0, -60.0, -66.0], "mon": -20.5},
-            "right": {"output/level": [-9.0, -15.0, -70.0, -76.0], "mon": -30.25},
+            "left": {"output/level": [-6.0, -12.0, -60.0, -66.0], "mon": -20.5,
+                     "speakerd/timing": timing_value(0.031, 0.052, late=1, late_total=3, node_mean=0.012, node_max=0.02),
+                     "board/cpu": {"busy": 0.23, "cores": [0.31, 0.12, 0.20, 0.29], "seconds": 0.5}},
+            "right": {"output/level": [-9.0, -15.0, -70.0, -76.0], "mon": -30.25,
+                      "speakerd/timing": timing_value(0.029, 0.047, late=0, late_total=0, node_mean=0.011, node_max=0.018),
+                      "board/cpu": {"busy": 0.4, "cores": [0.5, 0.3, 0.4, 0.4], "seconds": 0.5}},
         }
+        self.refuse_streams = {}          # speaker -> {stream: reason}: refused on subscribe, as an older ampd
         self.received = []                # (link, message): every line and datagram in
         self.sent = []                    # (link, message): every line and datagram out
         self.controllers = {}             # name -> {"conn", "osc": (host, port)}
@@ -547,7 +562,11 @@ class FakeHub:
                     threading.Thread(target=produce, daemon=True).start()
                     continue
                 with self.lock:
-                    if message.get("op") == "subscribe":
+                    refusal = self.refuse_streams.get(speaker, {}).get(message.get("stream"))
+                    if message.get("op") == "subscribe" and refusal is not None:
+                        self._send_line(conn, "monitor " + speaker, {"op": "error", "about": "subscribe",
+                                                                     "stream": message.get("stream"), "reason": refusal})
+                    elif message.get("op") == "subscribe":
                         subs[message["stream"]] = int(message.get("rate_hz", 30))
                         self.subscriptions[speaker][message["stream"]] = subs[message["stream"]]
                     elif message.get("op") == "unsubscribe":

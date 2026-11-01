@@ -1,5 +1,6 @@
 #include "Bridge.h"
 
+#include <cmath>
 #include <iostream>
 
 namespace bpi
@@ -58,13 +59,21 @@ namespace bpi
         void parameterValueChanged (int index, float value) override
         {
             if (auto* p = node->getProcessor()->getParameters()[index])
-                bridge.parameterChanged (node->nodeID.uid, *p, value);
+            {
+                // The plugin's own bypass is the node's bypass: the document's `bypassed`, a
+                // structural edit, never a parameter (whether Node::setBypassed or a knob moved it).
+                if (params::isBypass (*node->getProcessor(), *p))
+                    bridge.bypassParameterChanged();
+                else
+                    bridge.parameterChanged (node->nodeID.uid, *p, value);
+            }
         }
 
         void parameterGestureChanged (int index, bool starting) override
         {
             if (auto* p = node->getProcessor()->getParameters()[index])
-                bridge.gestureChanged (node->nodeID.uid, *p, starting);
+                if (! params::isBypass (*node->getProcessor(), *p))
+                    bridge.gestureChanged (node->nodeID.uid, *p, starting);
         }
 
         Bridge& bridge;
@@ -81,11 +90,13 @@ namespace bpi
         {
             // The speaker speaks first; nothing is subscribed, and no value believed, before
             // its welcome proves it knows the pair's secret.
-            link.onConnected = [this] { handshake = {}; bridge.notifyStatus(); };
+            link.onConnected = [this] { handshake = {}; refused.clear(); bridge.notifyStatus(); };
 
             link.onDisconnected = [this] (const juce::String&)
             {
                 handshake = {};
+                refused.clear();
+                bridge.monitorLinkLost (speaker);
                 bridge.notifyStatus();
             };
 
@@ -98,6 +109,19 @@ namespace bpi
                 if (op == "error" && m["about"].toString() == "hello")
                 {
                     fail ("refused this controller: " + m["reason"].toString(), false);
+                }
+                else if (op == "error" && m["about"].toString() == "subscribe" && proven())
+                {
+                    // The speaker (or its speakerd) cannot give that stream: ampd has dropped the
+                    // subscription. It stays counted here and is asked for again on the next
+                    // connection (an upgraded ampd may have it); until then, not again.
+                    const auto stream = m["stream"].toString();
+
+                    if (counts.count (stream) > 0)
+                    {
+                        refused.insert (stream);
+                        bridge.handleMonitorRefusal (speaker, stream, m["reason"].toString());
+                    }
                 }
                 else if (handshake.phase == Handshake::Phase::waitingHello)
                 {
@@ -124,8 +148,8 @@ namespace bpi
                     {
                         refusal.clear();
 
-                        for (const auto& [stream, count] : counts)
-                            send (subscribeMessage (stream));
+                        for (const auto& [stream, rates] : counts)
+                            send (subscribeMessage (stream, rateOf (stream)));
 
                         bridge.notifyStatus();
                     }
@@ -139,34 +163,56 @@ namespace bpi
             link.start();
         }
 
-        void subscribe (const juce::String& stream)
+        /** Counted: each holder asks at its own rate, and the stream goes at the highest of
+            them (a second subscribe of a stream only changes its rate, docs/protocol.md). */
+        void subscribe (const juce::String& stream, int rateHz)
         {
-            if (++counts[stream] == 1 && proven())
-                send (subscribeMessage (stream));
+            const auto before = rateOf (stream);
+            counts[stream].insert (rateHz);
+
+            if (proven() && refused.count (stream) == 0 && rateOf (stream) != before)
+                send (subscribeMessage (stream, rateOf (stream)));
         }
 
-        void unsubscribe (const juce::String& stream)
+        void unsubscribe (const juce::String& stream, int rateHz)
         {
             const auto it = counts.find (stream);
 
             if (it == counts.end())
                 return;
 
-            if (--it->second <= 0)
+            const auto before = rateOf (stream);
+            const auto one = it->second.find (rateHz);
+            it->second.erase (one != it->second.end() ? one : it->second.begin());
+
+            if (it->second.empty())
             {
                 counts.erase (it);
 
-                if (proven())
+                if (proven() && refused.count (stream) == 0)
                     send (object ({ { "op", "unsubscribe" }, { "stream", stream } }));
+
+                refused.erase (stream);
+            }
+            else if (proven() && refused.count (stream) == 0 && rateOf (stream) != before)
+            {
+                send (subscribeMessage (stream, rateOf (stream)));
             }
         }
 
         juce::StringArray streams() const
         {
             juce::StringArray s;
-            for (const auto& [stream, count] : counts)
+            for (const auto& [stream, rates] : counts)
                 s.add (stream);
             return s;
+        }
+
+        /** The rate a stream is asked for: the highest any holder wants; 0 when none. */
+        int rateOf (const juce::String& stream) const
+        {
+            const auto it = counts.find (stream);
+            return it == counts.end() || it->second.empty() ? 0 : *it->second.rbegin();
         }
 
         bool isConnected() const   { return link.isConnected() && proven(); }
@@ -190,9 +236,9 @@ namespace bpi
             bridge.notifyStatus();
         }
 
-        juce::var subscribeMessage (const juce::String& stream) const
+        static juce::var subscribeMessage (const juce::String& stream, int rateHz)
         {
-            return object ({ { "op", "subscribe" }, { "stream", stream }, { "rate_hz", bridge.options.monitorRateHz } });
+            return object ({ { "op", "subscribe" }, { "stream", stream }, { "rate_hz", rateHz } });
         }
 
         void send (const juce::var& m)
@@ -204,7 +250,8 @@ namespace bpi
         Bridge& bridge;
         const juce::String speaker;
         JsonLineLink link;
-        std::map<juce::String, int> counts;
+        std::map<juce::String, std::multiset<int>> counts;   // stream -> the rate of each holder
+        std::set<juce::String> refused;                      // refused on this connection
         Handshake handshake;
         juce::String refusal;
     };
@@ -800,6 +847,20 @@ namespace bpi
     {
         // The graph says it changed: maybe a user's edit. Look once the message loop is idle,
         // so that one gesture of several changes ("Disconnect all pins") is one proposal.
+        scheduleCanvasCheck();
+    }
+
+    void Bridge::bypassParameterChanged()
+    {
+        // Our own mirror of a document sets it (Node::setBypassed under `applying`): no edit.
+        // Otherwise the canvas's bypass moved (Node::isBypassed() reads the parameter), and the
+        // check proposes it as the document's `bypassed`, or undoes it when it cannot.
+        if (applying == 0)
+            scheduleCanvasCheck();
+    }
+
+    void Bridge::scheduleCanvasCheck()
+    {
         if (! checkScheduled)
         {
             checkScheduled = true;
@@ -1008,7 +1069,9 @@ namespace bpi
 
         auto* p = params::find (*node->getProcessor(), id);
 
-        if (p == nullptr)
+        // The plugin's own bypass follows the document's `bypassed` only: a `param` of it (an
+        // older controller's) would leave the canvas and the document disagreeing.
+        if (p == nullptr || params::isBypass (*node->getProcessor(), *p))
             return;
 
         auto& st = paramStates[key];
@@ -1162,6 +1225,8 @@ namespace bpi
                         s.level = old.level;
                         s.levelTime = old.levelTime;
                         s.levelCount = old.levelCount;
+                        s.timing = old.timing;
+                        s.cpu = old.cpu;
                     }
 
                 // Where its monitor link is: the command line or settings, a newer hub's
@@ -1186,7 +1251,7 @@ namespace bpi
         for (const auto& [uid, count] : std::map<juce::uint32, int> (openWindows))
             updateNodeSubscriptions (uid);
 
-        updateOutputLevelSubscriptions();
+        updateSpeakerWideSubscriptions();
         notifyStatus();
     }
 
@@ -1248,7 +1313,7 @@ namespace bpi
 
         if (auto* m = monitorFor (held.first))
             for (const auto& s : held.second)
-                m->unsubscribe (s);
+                m->unsubscribe (s, options.monitorRateHz);
 
         if (speaker.isEmpty() || streams.isEmpty())
         {
@@ -1260,7 +1325,7 @@ namespace bpi
 
         if (auto* m = monitorFor (speaker))
             for (const auto& s : streams)
-                m->subscribe (s);
+                m->subscribe (s, options.monitorRateHz);
         else
             held = { {}, {} };   // no link to that speaker yet: retried when the speakers change
     }
@@ -1277,27 +1342,40 @@ namespace bpi
 
     void Bridge::wantOutputLevels (bool want)
     {
-        outputLevelWanted += want ? 1 : -1;
-        updateOutputLevelSubscriptions();
+        outputLevels.wanted += want ? 1 : -1;
+        updateSpeakerWideSubscriptions();
     }
 
-    void Bridge::updateOutputLevelSubscriptions()
+    void Bridge::wantSpeakerLoad (bool want)
     {
-        for (auto& [name, link] : monitors)
-        {
-            const auto wanted = outputLevelWanted > 0
-                                && std::any_of (speakers.begin(), speakers.end(), [&, n = name] (const Speaker& s) { return s.name == n; });
-            const auto has = outputLevelSubscribed.count (name) > 0;
+        speakerLoad.wanted += want ? 1 : -1;
+        updateSpeakerWideSubscriptions();
+    }
 
-            if (wanted && ! has)
+    void Bridge::updateSpeakerWideSubscriptions()
+    {
+        for (auto* set : { &outputLevels, &speakerLoad })
+        {
+            const auto rate = set->rateHz > 0 ? set->rateHz : options.monitorRateHz;
+
+            for (auto& [name, link] : monitors)
             {
-                link->subscribe ("output/level");
-                outputLevelSubscribed.insert (name);
-            }
-            else if (! wanted && has)
-            {
-                link->unsubscribe ("output/level");
-                outputLevelSubscribed.erase (name);
+                const auto wanted = set->wanted > 0
+                                    && std::any_of (speakers.begin(), speakers.end(), [&, n = name] (const Speaker& s) { return s.name == n; });
+                const auto has = set->subscribed.count (name) > 0;
+
+                if (wanted && ! has)
+                {
+                    for (const auto& stream : set->streams)
+                        link->subscribe (stream, rate);
+                    set->subscribed.insert (name);
+                }
+                else if (! wanted && has)
+                {
+                    for (const auto& stream : set->streams)
+                        link->unsubscribe (stream, rate);
+                    set->subscribed.erase (name);
+                }
             }
         }
     }
@@ -1305,13 +1383,13 @@ namespace bpi
     void Bridge::subscribe (const juce::String& speakerName, const juce::String& stream)
     {
         if (auto* m = monitorFor (speakerName))
-            m->subscribe (stream);
+            m->subscribe (stream, options.monitorRateHz);
     }
 
     void Bridge::unsubscribe (const juce::String& speakerName, const juce::String& stream)
     {
         if (auto* m = monitorFor (speakerName))
-            m->unsubscribe (stream);
+            m->unsubscribe (stream, options.monitorRateHz);
     }
 
     juce::StringArray Bridge::getSubscriptions (const juce::String& speakerName) const
@@ -1363,6 +1441,65 @@ namespace bpi
             return;
         }
 
+        if (stream == "speakerd/timing" || stream == "board/cpu")
+        {
+            auto* s = speakerNamed (speakerName);
+
+            if (s == nullptr || ! v.isObject())
+                return;
+
+            const auto number = [] (const juce::var& x, double fallback)
+            {
+                return (x.isDouble() || x.isInt() || x.isInt64()) && std::isfinite ((double) x) ? (double) x : fallback;
+            };
+
+            if (stream == "speakerd/timing")
+            {
+                auto& timing = s->timing;
+                timing.t = t;
+                timing.receivedMs = nowMs();
+                timing.refusal.clear();
+                timing.cycleMean = number (v["cycle"]["mean"], 0.0);
+                timing.cycleMax = number (v["cycle"]["max"], 0.0);
+                timing.graphMean = number (v["graph"]["mean"], 0.0);
+                timing.graphMax = number (v["graph"]["max"], 0.0);
+                timing.cycles = (int) number (v["cycles"], 0.0);
+                timing.late = (int) number (v["late"], 0.0);
+                timing.jumps = (int) number (v["jumps"], 0.0);
+                timing.cyclesTotal = (juce::int64) number (v["cycles_total"], -1.0);
+                timing.lateTotal = (juce::int64) number (v["late_total"], -1.0);
+                timing.jumpsTotal = (juce::int64) number (v["jumps_total"], -1.0);
+                timing.droppedTotal = (juce::int64) number (v["dropped_total"], -1.0);
+                timing.nodes.clear();
+
+                if (auto* nodes = v["nodes"].getArray())
+                    for (const auto& n : *nodes)
+                        if (isInteger (n["uid"]))
+                            timing.nodes[(juce::uint32) (juce::int64) n["uid"]] = { number (n["mean"], 0.0), number (n["max"], 0.0) };
+
+                ++timing.count;
+            }
+            else
+            {
+                auto& cpu = s->cpu;
+                cpu.t = t;
+                cpu.receivedMs = nowMs();
+                cpu.refusal.clear();
+                cpu.busy = juce::jlimit (0.0, 1.0, number (v["busy"], 0.0));
+                cpu.seconds = number (v["seconds"], 0.0);
+                cpu.cores.clear();
+
+                if (auto* cores = v["cores"].getArray())
+                    for (const auto& c : *cores)
+                        cpu.cores.push_back (juce::jlimit (0.0, 1.0, number (c, 0.0)));
+
+                ++cpu.count;
+            }
+
+            listeners.call ([] (Listener& l) { l.speakerLoadChanged(); });
+            return;
+        }
+
         // node/<uid>/<mon_id>: the value of the node's monitor, when this is the speaker its
         // windows show.
         const auto parts = juce::StringArray::fromTokens (stream, "/", "");
@@ -1388,6 +1525,150 @@ namespace bpi
         }
     }
 
+    void Bridge::handleMonitorRefusal (const juce::String& speakerName, const juce::String& stream, const juce::String& reason)
+    {
+        std::cerr << "[bridge] speaker " << speakerName << " refused " << stream << ": " << reason << std::endl;
+
+        if (auto* s = speakerNamed (speakerName))
+        {
+            const auto why = reason.isNotEmpty() ? reason : juce::String ("refused");
+
+            if (stream == "board/cpu")
+            {
+                s->cpu = {};
+                s->cpu.refusal = why;
+            }
+            else if (stream == "speakerd/timing")
+            {
+                s->timing = {};
+                s->timing.refusal = why;
+            }
+            else
+            {
+                return;
+            }
+
+            listeners.call ([] (Listener& l) { l.speakerLoadChanged(); });
+        }
+    }
+
+    void Bridge::monitorLinkLost (const juce::String& speakerName)
+    {
+        // Nothing of a link that went is shown as if it were now; the next connection asks again.
+        if (auto* s = speakerNamed (speakerName))
+        {
+            s->timing = {};
+            s->cpu = {};
+            listeners.call ([] (Listener& l) { l.speakerLoadChanged(); });
+        }
+    }
+
+    Bridge::Speaker* Bridge::speakerNamed (const juce::String& name)
+    {
+        for (auto& s : speakers)
+            if (s.name == name)
+                return &s;
+
+        return nullptr;
+    }
+
+    //==============================================================================
+    namespace
+    {
+        juce::String percent (double fraction)
+        {
+            return juce::String (fraction * 100.0, 1) + " %";
+        }
+    }
+
+    juce::String Bridge::audioLoadText (const Speaker& s) const
+    {
+        const auto& timing = s.timing;
+        juce::String text ("audio cycle: ");
+
+        if (timing.refusal.isNotEmpty())
+            return text + "n/a";
+
+        if (timing.count == 0)
+            return text + (s.monitorConnected ? "waiting" : "-");
+
+        return text + percent (timing.cycleMean) + " mean, " + percent (timing.cycleMax) + " max"
+                    + (isFresh (timing.receivedMs) ? "" : " (stale)");
+    }
+
+    juce::String Bridge::lateCyclesText (const Speaker& s) const
+    {
+        const auto& timing = s.timing;
+
+        if (timing.count == 0)
+            return "late cycles: -";
+
+        auto text = "late cycles: " + juce::String (timing.late) + " of " + juce::String (timing.cycles);
+
+        if (timing.lateTotal >= 0)
+            text << ", " << juce::String (timing.lateTotal) << " since start";
+
+        return text;
+    }
+
+    juce::String Bridge::cpuText (const Speaker& s) const
+    {
+        const auto& cpu = s.cpu;
+        juce::String text ("board CPU: ");
+
+        if (cpu.refusal.isNotEmpty())
+            return text + "n/a";
+
+        if (cpu.count == 0)
+            return text + (s.monitorConnected ? "waiting" : "-");
+
+        text << percent (cpu.busy);
+
+        if (! cpu.cores.empty())
+        {
+            juce::StringArray cores;
+            for (auto c : cpu.cores)
+                cores.add (juce::String (juce::roundToInt (c * 100.0)));
+            text << " (cores " << cores.joinIntoString (" ") << ")";
+        }
+
+        return text + (isFresh (cpu.receivedMs) ? "" : " (stale)");
+    }
+
+    juce::String Bridge::nodeLoadText (juce::uint32 uid) const
+    {
+        juce::StringArray parts;
+
+        for (const auto& s : speakers)
+        {
+            if (s.timing.count == 0)
+                continue;
+
+            const auto it = s.timing.nodes.find (uid);
+            parts.add (roleLabel (s.role, s.name) + " " + (it != s.timing.nodes.end() ? percent (it->second.mean) : juce::String ("-")));
+        }
+
+        return parts.joinIntoString (" / ");
+    }
+
+    juce::String Bridge::nodeLoadTooltip (juce::uint32 uid) const
+    {
+        juce::StringArray parts;
+
+        for (const auto& s : speakers)
+        {
+            if (s.timing.count == 0)
+                continue;
+
+            const auto it = s.timing.nodes.find (uid);
+            parts.add ("speaker " + s.name + ": " + (it != s.timing.nodes.end()
+                                                         ? percent (it->second.mean) + " mean, " + percent (it->second.max) + " max"
+                                                         : juce::String ("not timed")));
+        }
+
+        return parts.isEmpty() ? juce::String() : "Share of the audio cycle, " + parts.joinIntoString ("; ");
+    }
+
     //==============================================================================
     std::optional<Bridge::Echo> Bridge::getLastEcho (juce::uint32 uid, const juce::String& id) const
     {
@@ -1408,6 +1689,47 @@ namespace bpi
     juce::Component* Bridge::createMonitorSelector (juce::uint32 uid)
     {
         return new MonitorSelector (*this, uid);
+    }
+
+    juce::var Bridge::describeLoad (const Speaker& s) const
+    {
+        const auto rounded = [] (double fraction) { return std::round (fraction * 1000.0) / 10.0; };   // % to 0.1
+        juce::var timing, cpu;
+
+        if (s.timing.count > 0)
+        {
+            auto* nodeObject = new juce::DynamicObject();
+            for (const auto& [uid, load] : s.timing.nodes)
+                nodeObject->setProperty (juce::String (uid), object ({ { "mean_pct", rounded (load.mean) }, { "max_pct", rounded (load.max) } }));
+
+            timing = object ({ { "cycle_mean_pct", rounded (s.timing.cycleMean) }, { "cycle_max_pct", rounded (s.timing.cycleMax) },
+                               { "graph_mean_pct", rounded (s.timing.graphMean) }, { "graph_max_pct", rounded (s.timing.graphMax) },
+                               { "cycles", s.timing.cycles }, { "late", s.timing.late }, { "jumps", s.timing.jumps },
+                               { "late_total", s.timing.lateTotal }, { "cycles_total", s.timing.cyclesTotal },
+                               { "nodes", juce::var (nodeObject) }, { "values", s.timing.count } });
+        }
+        else if (s.timing.refusal.isNotEmpty())
+        {
+            timing = "n/a";
+        }
+
+        if (s.cpu.count > 0)
+        {
+            juce::Array<juce::var> cores;
+            for (auto c : s.cpu.cores)
+                cores.add (rounded (c));
+
+            cpu = object ({ { "busy_pct", rounded (s.cpu.busy) }, { "cores_pct", cores }, { "seconds", s.cpu.seconds },
+                            { "values", s.cpu.count } });
+        }
+        else if (s.cpu.refusal.isNotEmpty())
+        {
+            cpu = "n/a";
+        }
+
+        return object ({ { "timing", timing }, { "timing_refusal", s.timing.refusal },
+                         { "cpu", cpu }, { "cpu_refusal", s.cpu.refusal },
+                         { "text", juce::Array<juce::var> { audioLoadText (s), lateCyclesText (s), cpuText (s) } } });
     }
 
     juce::var Bridge::describe() const
@@ -1440,6 +1762,9 @@ namespace bpi
                 o->setProperty ("monitor_speaker", getMonitorSpeaker (n->nodeID.uid));
             }
 
+            if (PluginGraph::isPluginNode (*n))
+                o->setProperty ("load", nodeLoadText (n->nodeID.uid));
+
             nodes.add (juce::var (o));
         }
 
@@ -1460,7 +1785,8 @@ namespace bpi
             speakerList.add (object ({ { "name", s.name }, { "role", s.role }, { "online", s.online }, { "layer", s.layer },
                                        { "address", s.address }, { "monitor_connected", s.monitorConnected },
                                        { "monitor_refusal", s.monitorRefusal },
-                                       { "level", level }, { "level_count", s.levelCount }, { "subscriptions", subs } }));
+                                       { "level", level }, { "level_count", s.levelCount }, { "subscriptions", subs },
+                                       { "load", describeLoad (s) } }));
         }
 
         for (const auto& [key, origin] : remoteGestures)

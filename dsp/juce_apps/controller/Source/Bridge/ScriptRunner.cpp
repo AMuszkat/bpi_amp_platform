@@ -264,6 +264,7 @@ namespace bpi
             if (! normalised)
                 return edit (false, arg (3) + " does not fit " + arg (2));
 
+            outcomesBefore = bridge.getProposalOutcomes();   // a plugin's own bypass parameter is a proposal
             p->setValueNotifyingHost (*normalised);
             return edit (true, {}, object ({ { "value", params::toJson (*p, params::plainValue (*p)) } }));
         }
@@ -333,8 +334,8 @@ namespace bpi
 
             for (auto* p : n->getProcessor()->getParameters())
             {
-                if (params::isMonitor (params::idOf (*p)))
-                    continue;
+                if (params::isMonitor (params::idOf (*p)) || params::isBypass (*n->getProcessor(), *p))
+                    continue;   // a preset morph moves values, not the node's bypass
 
                 p->setValueNotifyingHost ((sweepTicks % 2) != 0 ? 0.25f : 0.75f);
                 ++sweepValues;
@@ -535,6 +536,35 @@ namespace bpi
             if (! need (1)) return true;
             bridge.wantOutputLevels (arg (1) == "on");
             return edit (true, {});
+        }
+
+        if (cmd == "speaker-load")
+        {
+            if (! need (1)) return true;
+            bridge.wantSpeakerLoad (arg (1) == "on");
+            return edit (true, {});
+        }
+
+        if (cmd == "wait-load")
+        {
+            // wait-load <speaker> [s]: until the speaker's load has a timing value and a CPU
+            // value or a refusal (n/a); prints it as `state` does.
+            if (! need (1)) return true;
+            setTimeout (2, defaultTimeoutSeconds);
+
+            for (const auto& s : bridge.getSpeakers())
+            {
+                if (s.name != arg (1))
+                    continue;
+
+                const auto load = bridge.describeLoad (s);
+                waitDetail = object ({ { "load", load } });
+
+                if ((s.timing.count > 0 || s.timing.refusal.isNotEmpty()) && (s.cpu.count > 0 || s.cpu.refusal.isNotEmpty()))
+                    return edit (true, {}, object ({ { "load", load } }));
+            }
+
+            return false;
         }
 
         if (cmd == "wait-value")

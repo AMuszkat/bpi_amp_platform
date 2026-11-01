@@ -31,11 +31,14 @@ namespace bpi
         static const ControlPluginType* forIdentifier (const juce::String& identifier);
         static const ControlPluginType* forName (const juce::String& name);
 
-        /** Adds the test probe (README.md, "Test mode"): a control processor with a gain, a
+        /** Adds the test probes (README.md, "Test mode"): a control processor with a gain, a
             choice, a switch and a monitor, mon_level, so the bridge's monitor path can be
-            tested before a plugin publishes one. Call before the first all(). */
+            tested before a plugin publishes one; and the same whose switch is its own bypass
+            parameter (getBypassParameter()), as a plugin with a level-matched bypass has. Call
+            before the first all(). */
         static void enableTestProbe();
         static constexpr const char* testProbeUri = "urn:bpi-amp:controller:test-probe";
+        static constexpr const char* testProbeBypassUri = "urn:bpi-amp:controller:test-probe-bypass";
     };
 
     //==============================================================================
@@ -113,6 +116,10 @@ namespace bpi
 
         /** A monitor: read-only, never sent, never in a document. */
         bool isMonitor (const juce::String& id);
+
+        /** The processor's own bypass parameter (getBypassParameter()): the node's bypass, so
+            the document's `bypassed`, never a parameter: never sent, never in `params`. */
+        bool isBypass (const juce::AudioProcessor&, const juce::AudioProcessorParameter&);
 
         juce::AudioProcessorParameter* find (juce::AudioProcessor&, const juce::String& id);
 

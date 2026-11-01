@@ -79,7 +79,8 @@ namespace bpi
     };
 
     //==============================================================================
-    struct GraphEditorPanel::PluginComponent final : public juce::Component
+    struct GraphEditorPanel::PluginComponent final : public juce::Component,
+                                                     public juce::SettableTooltipClient
     {
         PluginComponent (GraphEditorPanel& p, AudioProcessorGraph::NodeID id) : panel (p), graph (p.graph), pluginID (id)
         {
@@ -159,8 +160,35 @@ namespace bpi
             }
 
             g.setColour (findColour (juce::TextEditor::textColourId));
+
+            if (loadText.isNotEmpty())
+            {
+                // The node's share of each speaker's audio cycle, under its name.
+                g.setFont (juce::FontOptions (11.0f));
+                g.drawFittedText (loadText, boxArea.removeFromBottom (15).reduced (2, 0), juce::Justification::centred, 1);
+            }
+
             g.setFont (font);
             g.drawFittedText (getName() + (isBypassed ? "\n(bypassed)" : ""), boxArea, juce::Justification::centred, 2);
+        }
+
+        /** The load text from the bridge: true when it changed. */
+        bool setLoad (const juce::String& text, const juce::String& tooltip)
+        {
+            setTooltip (tooltip);
+
+            if (text == loadText)
+                return false;
+
+            const auto resize = text.isEmpty() != loadText.isEmpty();
+            loadText = text;
+
+            if (resize)
+                update();
+            else
+                repaint();
+
+            return true;
         }
 
         void resized() override
@@ -217,6 +245,12 @@ namespace bpi
             w = juce::jmax (w, 16 + juce::jmin (textWidth, 300));
             if (textWidth > 300)
                 h = 100;
+
+            if (loadText.isNotEmpty())
+            {
+                w = juce::jmax (w, 16 + juce::GlyphArrangement::getStringWidthInt (juce::FontOptions (11.0f), loadText));
+                h += 14;
+            }
 
             setSize (w, h);
             setName (name);
@@ -310,6 +344,7 @@ namespace bpi
         int numIns = 0, numOuts = 0;
         juce::DropShadowEffect shadow;
         std::unique_ptr<juce::PopupMenu> menu;
+        juce::String loadText;
     };
 
     //==============================================================================
@@ -489,10 +524,20 @@ namespace bpi
     };
 
     //==============================================================================
-    GraphEditorPanel::GraphEditorPanel (PluginGraph& g) : graph (g)
+    GraphEditorPanel::GraphEditorPanel (PluginGraph& g, Bridge* b) : graph (g), bridge (b)
     {
         graph.graph.addChangeListener (this);
         setOpaque (true);
+
+        if (bridge != nullptr)
+            startTimerHz (2);   // the load comes at Bridge::loadRateHz
+    }
+
+    void GraphEditorPanel::timerCallback()
+    {
+        for (auto* fc : nodes)
+            if (auto* n = fc->getNode(); n != nullptr && PluginGraph::isPluginNode (*n))
+                fc->setLoad (bridge->nodeLoadText (n->nodeID.uid), bridge->nodeLoadTooltip (n->nodeID.uid));
     }
 
     GraphEditorPanel::~GraphEditorPanel()
@@ -751,7 +796,7 @@ namespace bpi
     GraphDocumentComponent::GraphDocumentComponent (PluginGraph& g, Bridge& b)
         : graph (g), bridge (b)
     {
-        graphPanel.reset (new GraphEditorPanel (graph));
+        graphPanel.reset (new GraphEditorPanel (graph, &bridge));
         addAndMakeVisible (graphPanel.get());
 
         speakersPanel.reset (new SpeakersPanel (bridge));
