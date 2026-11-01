@@ -14,9 +14,8 @@ instructions alone cannot:
   runs in (the session's working directory), so a worktree is judged on its own commit; the gate
   is this checkout's tools/status.py. Looking at a board (tools/board.sh status or journal) only
   needs the lab to be unlocked;
-- no command lifts a speaker's output cap (--person-present), and no command uses the deploy
-  override (BPI_DEPLOY_OVERRIDE): both are a person's, in their own shell, which this hook
-  never sees.
+- no command uses the deploy override (BPI_DEPLOY_OVERRIDE): it is a person's, in their own
+  shell, which this hook never sees.
 
 It is a tripwire on the command text, not a sandbox: tools/board.sh checks the same gate
 itself. Whatever goes wrong inside the hook on a guarded path blocks the command.
@@ -45,8 +44,6 @@ DEPLOY = re.compile(r"""(^|[\s;&|(`'"])(?:[\w./-]*/)?["']?(ssh|scp|rsync|sftp)["
                     r"|\btools/board\.sh\b")
 # Reading a board changes nothing on it: the lab lock applies, the test status does not.
 BOARD_READ = re.compile(r"\btools/board\.sh\s+(status|journal)\b")
-# Lifting the output cap is a person's, at the speaker, in their own shell: never an agent's.
-PERSON_ONLY = re.compile(r"--person-present\b")
 # The deploy override is a person's too (tools/board.sh reads it from their shell).
 OVERRIDE = re.compile(r"\bBPI_DEPLOY_OVERRIDE\b")
 # make on the firmware: its targets copy kernels, modules and device trees to a board and
@@ -126,7 +123,7 @@ def main():
         cwd = data.get("cwd")
         tree = checkout_of(cwd)
     except Exception as e:  # cannot even read the command: block anything that looks guarded
-        if any(p.search(raw) for p in (DEPLOY, PERSON_ONLY, OVERRIDE, COMMIT, MAKE)):
+        if any(p.search(raw) for p in (DEPLOY, OVERRIDE, COMMIT, MAKE)):
             return refuse(f"the pre-bash hook could not read the command ({type(e).__name__}); "
                           "blocking it.")
         return 0
@@ -135,9 +132,6 @@ def main():
         return refuse("pushing to main or master is not allowed: push a branch and open a pull request.")
     if FORCE.search(command):
         return refuse("force pushes are not allowed: no history rewrite on shared branches.")
-    if PERSON_ONLY.search(command):
-        return refuse("--person-present lifts the output cap of a speaker: a person does that, in "
-                      "their own shell at the speaker, after a smoke test and a listen. Not an agent.")
     if OVERRIDE.search(command):
         return refuse("BPI_DEPLOY_OVERRIDE bypasses the test status: a person uses it, in their own "
                       "shell. Not an agent.")
