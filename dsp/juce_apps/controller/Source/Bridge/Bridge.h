@@ -87,14 +87,21 @@ namespace bpi
             double levelTime = -1.0;        // speakerd's clock; < 0: none yet
             int levelCount = 0;
 
-            /** speakerd/timing: what the audio cycles since the previous value cost, as fractions
-                of the cycle's length (docs/protocol.md, "Monitoring"). */
+            /** speakerd/timing: what the audio cycles of speakerd's last period cost, as
+                fractions of the cycle's length (docs/protocol.md, "Monitoring"). speakerd's
+                period is the fastest rate any client asked for, so a value can cover less than
+                the time since this controller's previous one: `cycles` and `late` are counted
+                over the panel's own interval, from the change in the `*_total` counters. */
             struct Timing
             {
                 int count = 0;                  // values received; 0: none (yet, or since the link went)
                 double t = 0.0, receivedMs = 0.0;
-                double cycleMean = 0.0, cycleMax = 0.0, graphMean = 0.0, graphMax = 0.0;
-                int cycles = 0, late = 0, jumps = 0;
+                double cycleMean = 0.0, cycleMax = 0.0, graphMean = 0.0, graphMax = 0.0;   // speakerd's last period
+                juce::int64 cycles = 0, late = 0;   // since the previous value received (or speakerd's last period, below)
+                bool fromTotals = false;        // cycles and late are the change in the totals; false: the first
+                                                // value since the link came, after a speakerd restart (totals
+                                                // went down), or totals not given: speakerd's last period's
+                int periodCycles = 0, periodLate = 0, jumps = 0;   // speakerd's last period, as sent
                 juce::int64 cyclesTotal = -1, lateTotal = -1, jumpsTotal = -1, droppedTotal = -1;   // -1: not given
                 struct NodeLoad { double mean = 0.0, max = 0.0; };
                 std::map<juce::uint32, NodeLoad> nodes;   // by the document's uid

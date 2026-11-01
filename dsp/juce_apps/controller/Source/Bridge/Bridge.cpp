@@ -1456,6 +1456,10 @@ namespace bpi
             if (stream == "speakerd/timing")
             {
                 auto& timing = s->timing;
+                // The totals of the previous value, if one came on this link (a link that went
+                // reset the timing, so a reconnect starts again from the first value).
+                const auto hadValue = timing.count > 0;
+                const auto previousCycles = timing.cyclesTotal, previousLate = timing.lateTotal;
                 timing.t = t;
                 timing.receivedMs = nowMs();
                 timing.refusal.clear();
@@ -1463,11 +1467,23 @@ namespace bpi
                 timing.cycleMax = number (v["cycle"]["max"], 0.0);
                 timing.graphMean = number (v["graph"]["mean"], 0.0);
                 timing.graphMax = number (v["graph"]["max"], 0.0);
-                timing.cycles = (int) number (v["cycles"], 0.0);
-                timing.late = (int) number (v["late"], 0.0);
+                timing.periodCycles = (int) number (v["cycles"], 0.0);
+                timing.periodLate = (int) number (v["late"], 0.0);
                 timing.jumps = (int) number (v["jumps"], 0.0);
                 timing.cyclesTotal = (juce::int64) number (v["cycles_total"], -1.0);
                 timing.lateTotal = (juce::int64) number (v["late_total"], -1.0);
+
+                // speakerd sends at the fastest rate any client asked for and ampd passes this
+                // controller every few of its values, so the late cycles of the periods between
+                // are only in the totals (firmware/CLAUDE.md). Totals that went down are a
+                // speakerd that restarted: its last period is all there is.
+                const auto deltaCycles = timing.cyclesTotal - previousCycles;
+                const auto deltaLate = timing.lateTotal - previousLate;
+                timing.fromTotals = hadValue && previousCycles >= 0 && previousLate >= 0
+                                     && timing.cyclesTotal >= 0 && timing.lateTotal >= 0
+                                     && deltaCycles >= 0 && deltaLate >= 0 && deltaLate <= deltaCycles;
+                timing.cycles = timing.fromTotals ? deltaCycles : (juce::int64) timing.periodCycles;
+                timing.late = timing.fromTotals ? deltaLate : (juce::int64) timing.periodLate;
                 timing.jumpsTotal = (juce::int64) number (v["jumps_total"], -1.0);
                 timing.droppedTotal = (juce::int64) number (v["dropped_total"], -1.0);
                 timing.nodes.clear();
@@ -1704,7 +1720,9 @@ namespace bpi
 
             timing = object ({ { "cycle_mean_pct", rounded (s.timing.cycleMean) }, { "cycle_max_pct", rounded (s.timing.cycleMax) },
                                { "graph_mean_pct", rounded (s.timing.graphMean) }, { "graph_max_pct", rounded (s.timing.graphMax) },
-                               { "cycles", s.timing.cycles }, { "late", s.timing.late }, { "jumps", s.timing.jumps },
+                               { "cycles", s.timing.cycles }, { "late", s.timing.late }, { "from_totals", s.timing.fromTotals },
+                               { "period_cycles", s.timing.periodCycles }, { "period_late", s.timing.periodLate },
+                               { "jumps", s.timing.jumps },
                                { "late_total", s.timing.lateTotal }, { "cycles_total", s.timing.cyclesTotal },
                                { "nodes", juce::var (nodeObject) }, { "values", s.timing.count } });
         }

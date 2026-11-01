@@ -589,14 +589,37 @@ class ControllerTest(unittest.TestCase):
     def test_21_speaker_load(self):
         """The speakers panel's load: speakerd/timing and board/cpu from both speakers at 2 Hz
         while shown, withdrawn after; the values in the display state; a speaker whose ampd has
-        no board/cpu shows n/a, and its timing still comes."""
+        no board/cpu shows n/a, and its timing still comes. Late cycles are counted over the
+        panel's own interval from the totals: those of periods speakerd sent at a faster rate for
+        another client count too; a speakerd restart (totals down) and a reconnect fall back to
+        speakerd's last period."""
         hub = self.start_hub()
         reason = "a stream is output/level, speakerd/timing or node/<uid>/mon_<id> (uid 16 or more)"
         hub.refuse_streams = {"right": {"board/cpu": reason}}
+        hub.timing_steps = {"right": [
+            {},                                                         # 1: the first value: its own period
+            {"skipped": [(23, 2), (23, 0), (23, 1)]},                   # 2: three faster periods in between
+            {"after_s": 3, "restart": True, "late": 1},                 # 3: speakerd restarted
+            {"after_s": 2, "skipped": [(23, 5)] * 10},                  # 4: the first value on a new link
+            {"stop": True}]}
+
+        def other():
+            # Drop the right speaker's monitor link 0.8 s after value 3 (once the script has
+            # looked at it, before value 4 is due): the controller reconnects, and value 4 goes
+            # at once on the new link.
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                if len([1 for l, m, _ in hub.sent if l == "monitor right" and m.get("stream") == "speakerd/timing"]) >= 3:
+                    time.sleep(0.8)
+                    hub.drop_monitor("right")
+                    return
+                time.sleep(0.02)
+
         code, steps, err = self.run_script(
-            "wait-synced\nspeaker-load on\nwait-load left\nwait-load right\nsleep 2000\nstate\n"
+            "wait-synced\nspeaker-load on\nwait-load left\nwait-load right 10 2\nstate\n"
+            "wait-load right 10 3\nstate\nsleep 3000\nwait-load right 20 1\nstate\n"
             "speaker-load off\nsleep 500\nstate\n",
-            extra=["--speaker", "right=" + RIGHT])
+            extra=["--speaker", "right=" + RIGHT], during=other)
         self.assertPassed(code, steps, err)
 
         load_streams = ("speakerd/timing", "board/cpu")
@@ -605,19 +628,23 @@ class ControllerTest(unittest.TestCase):
                  for name in ("left", "right")}
         self.assertEqual(lines["left"], [("subscribe", "speakerd/timing", 2), ("subscribe", "board/cpu", 2),
                                          ("unsubscribe", "speakerd/timing", None), ("unsubscribe", "board/cpu", None)])
-        # The refused stream is not asked for again on that connection, nor withdrawn (ampd dropped it).
-        self.assertEqual(lines["right"], [("subscribe", "speakerd/timing", 2), ("subscribe", "board/cpu", 2),
-                                          ("unsubscribe", "speakerd/timing", None)])
+        # The refused stream is not asked for again on that connection, nor withdrawn (ampd dropped
+        # it); the new connection asks for both again (in either order).
+        self.assertEqual(lines["right"][:2], [("subscribe", "speakerd/timing", 2), ("subscribe", "board/cpu", 2)])
+        self.assertEqual(sorted(lines["right"][2:4]), [("subscribe", "board/cpu", 2), ("subscribe", "speakerd/timing", 2)])
+        self.assertEqual(lines["right"][4:], [("unsubscribe", "speakerd/timing", None)])
         self.assertEqual(hub.subscriptions, {"left": {}, "right": {}})
 
         shown = {s["name"]: s for s in self.step(steps, "state", 0)["state"]["speakers"]}
         left, right = shown["left"]["load"], shown["right"]["load"]
         self.assertEqual((left["timing"]["cycle_mean_pct"], left["timing"]["cycle_max_pct"]), (3.1, 5.2))
-        self.assertEqual((left["timing"]["late"], left["timing"]["late_total"], left["timing"]["cycles"]), (1, 3, 23))
+        self.assertEqual((left["timing"]["late"], left["timing"]["cycles"]), (1, 23))
+        since = left["timing"]["late_total"]
+        self.assertGreaterEqual(since, 3)
         self.assertEqual(left["timing"]["nodes"]["16"], {"mean_pct": 1.2, "max_pct": 2.0})
         self.assertEqual(left["cpu"]["busy_pct"], 23.0)
         self.assertEqual(left["cpu"]["cores_pct"], [31.0, 12.0, 20.0, 29.0])
-        self.assertEqual(left["text"], ["audio cycle: 3.1 % mean, 5.2 % max", "late cycles: 1 of 23, 3 since start",
+        self.assertEqual(left["text"], ["audio cycle: 3.1 % mean, 5.2 % max", "late cycles: 1 of 23, %d since start" % since,
                                         "board CPU: 23.0 % (cores 31 12 20 29)"])
         self.assertEqual(right["cpu"], "n/a")
         self.assertEqual(right["cpu_refusal"], reason)
@@ -628,6 +655,21 @@ class ControllerTest(unittest.TestCase):
         self.assertNotIn("output/level", shown["left"]["subscriptions"])
         self.assertEqual(sorted(shown["left"]["subscriptions"]), sorted(load_streams))
 
+        # Value 2: its own period had no late cycle, the three periods before it had three.
+        t = right["timing"]
+        self.assertEqual(right["timing"]["values"], 2)
+        self.assertEqual((t["late"], t["cycles"], t["from_totals"]), (3, 92, True))
+        self.assertEqual((t["period_late"], t["period_cycles"]), (0, 23))
+        self.assertEqual(right["text"][1], "late cycles: 3 of 92, 3 since start")
+        # Value 3: the totals went down (speakerd restarted): its own period.
+        t = {s["name"]: s for s in self.step(steps, "state", 1)["state"]["speakers"]}["right"]["load"]["timing"]
+        self.assertEqual((t["values"], t["late"], t["cycles"], t["from_totals"], t["late_total"]), (3, 1, 23, False, 1))
+        # Value 4, the first after a reconnect: never a difference across the gap.
+        r = {s["name"]: s for s in self.step(steps, "state", 2)["state"]["speakers"]}["right"]["load"]
+        t = r["timing"]
+        self.assertEqual((t["values"], t["late"], t["cycles"], t["from_totals"], t["late_total"]), (1, 0, 23, False, 51))
+        self.assertEqual(r["text"][1], "late cycles: 0 of 23, 51 since start")
+
         # At about 2 a second: no more than ampd's bound (2 + T x rate) over the subscription.
         def sent(name, stream):
             return [t for l, m, t in hub.sent if l == "monitor " + name and m.get("op") == "value" and m.get("stream") == stream]
@@ -637,10 +679,11 @@ class ControllerTest(unittest.TestCase):
         span = subscribed[1] - subscribed[0]
         self.assertLessEqual(len(times), 2 + span * 2)
         self.assertGreaterEqual(len(times), 4)
-        after = {s["name"]: s for s in self.step(steps, "state", 1)["state"]["speakers"]}
+        after = {s["name"]: s for s in self.step(steps, "state", 3)["state"]["speakers"]}
         self.assertEqual(after["left"]["subscriptions"], [])
         report("load", rate_hz=2, timing_values_left=len(times), over_s=round(span, 2),
-               cpu_values_left=len(sent("left", "board/cpu")), cpu_right="n/a", node_16=node["load"])
+               cpu_values_left=len(sent("left", "board/cpu")), cpu_right="n/a", node_16=node["load"],
+               right_late_over_interval="3 of 92", restart="1 of 23", reconnect="0 of 23")
 
     def test_22_a_plugins_own_bypass_is_the_nodes_bypass(self):
         """A control build whose getBypassParameter() is a parameter (a level-matched bypass):
