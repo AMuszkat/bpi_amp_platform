@@ -286,7 +286,7 @@ do_install() {
     cat <<EOF
 
 ${c_green}ampd installed.${c_off} The speaker plays with or without it.
-  - Check it: $(dirname "$SELF")/ampd-setup.sh smoke
+  - Check it: $(installed_setup ampd-setup.sh) smoke
   - Its log:  journalctl --user-unit ampd -b
 EOF
 }

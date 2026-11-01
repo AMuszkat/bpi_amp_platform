@@ -2,23 +2,31 @@
 
 *Explainer for P1 of the first optimiser report (October 2026). P1 is built: firConv and
 crossover use it from version 0.0.2 (section 10.2 of [remote-plugin-host.md](remote-plugin-host.md)).
-The board's numbers come from a benchmark of its real filters and a pipeline simulation, the
-x86_64 numbers from measurements; see [How the numbers were obtained](#how-the-numbers-were-obtained).*
+The board's numbers come from a benchmark of its real filters and a pipeline simulation, and one
+measurement on the board since, after the first deploy; the x86_64 numbers from measurements; see
+[How the numbers were obtained](#how-the-numbers-were-obtained).*
 
 `firConv` and `crossover` run every sample through four FIR filters. Today they use JUCE's
 `juce::dsp::FIR::Filter`, which computes one output sample at a time. P1 replaces it with a
 **block FIR** that computes sixteen outputs at once. The filters, the coefficients and the
-order of the arithmetic inside each output stay the same; the board's processor does about
-sixteen times less work. The block FIR is `speaker::BlockFir`, one header in
-`dsp/juce_plugins/shared/blockfir/` that both plugins compile.
+order of the arithmetic inside each output stay the same; simulated on the board's two kinds
+of core, the filters need 11 to 16 times less time. The block FIR is `speaker::BlockFir`, one
+header in `dsp/juce_plugins/shared/blockfir/` that both plugins compile.
 
-![P1 takes the board's FIR filters from 28 % of a core to 1.7 %](images/p1/p1-result.svg)
+![What P1 costs: simulated, measured, and on the board](images/p1/p1-result.svg)
 
 | Share of one core, 48 kHz | Today | P1 | |
 |---|---|---|---|
 | Cortex-A73 at 2.2 GHz, the board's fast cores (simulated) | 28.2 % | 1.7 % | 16× less |
 | Cortex-A53 at 1.8 GHz, the board's small cores (simulated) | 61.9 % | 5.6 % | 11× less |
 | x86_64 development machine (measured) | 18.6 % | 1.3 % | 15× less |
+| The board, measured: firConv and crossover in `speakerd`'s cycle, the core not known | not measured | 5.5–5.9 % | |
+
+The first three rows are the four FIRs alone; the board's row is the two plugin nodes' mean
+share of `speakerd`'s audio cycle, which is all of their processing, not only their FIRs
+([How the numbers were obtained](#how-the-numbers-were-obtained), "On the board"). The figure is drawn from this table by
+`docs/images/p1/p1-result.py` (Python, standard library only):
+`python3 docs/images/p1/p1-result.py` writes `p1-result.svg` again.
 
 Measured again with P1 built, on the x86_64 development machine:
 
@@ -184,7 +192,16 @@ P1's tests check the FIRs bit for bit, and the plugins' outputs only where round
   filter and matters a little for the 61-tap one.
 - **The calibration.** The same simulation of the x86_64 build (Zen 4 model) predicted the
   measured times within 5 % for today's filter and for P1.
-- **At 44.1 kHz**, the rate `firmware/pipewire/pipewire.conf` sets today, every share is 8 %
-  lower.
-- **The board will tell.** `/board smoke` reports each plugin node's share of the cycle on the
-  real speaker after the first deploy.
+- **At 44.1 kHz**, the rate the repository's `firmware/pipewire/pipewire.conf` sets (the board
+  measured runs its own configuration, at 48 kHz), every share is 8 % lower.
+- **On the board.** After the first deploy (2026-11-01), `speakerd`'s own timing on the board,
+  over two 60 s windows and the smoke check's, with the graph at 48 kHz and a quantum of
+  1024, put firConv's mean share of the cycle at 4.4–4.7 % and the crossover's at 1.1–1.2 %:
+  5.5–5.9 % together. The simulation predicted 5.6 % for the four FIRs on a Cortex-A53 and 1.7 %
+  on a Cortex-A73: the measurement matches the A53's figure, and the A73's stated uncertainty
+  (±30–50 %) does not reach it. Which of the board's cores `speakerd` ran on was not measured. A
+  node's share is all of its processing, not only its FIRs; on x86_64 the two agree (firConv
+  1.1 % and crossover 0.3 % in the cycle, the four FIRs alone 1.3 %). After a reboot the same
+  shares came back from the third minute on; the first two minutes cost about twice as much,
+  for a reason not established. The whole measurement, the graph's and the cycle's and the
+  reboot's included: `firmware/CLAUDE.md`, "The board measured".

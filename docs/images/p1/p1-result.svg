@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="342" viewBox="0 0 760 342" role="img" aria-labelledby="title desc">
-<title id="title">P1 takes the board's FIR filters from 28 % of a core to 1.7 %</title>
-<desc id="desc">Bars: share of one core for the four FIR filters at 48 kHz. Cortex-A73 simulated: today 28.2 %, P1 1.7 %. Cortex-A53 simulated: today 61.9 %, P1 5.6 %. x86_64 measured: today 18.6 %, P1 1.3 %.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="533" viewBox="0 0 760 533" role="img" aria-labelledby="title desc">
+<title id="title">What P1 costs: simulated, measured, and on the board</title>
+<desc id="desc">Share of one CPU core at 48 kHz, today's code (juce::dsp::FIR::Filter) against P1. Simulated, the four FIRs alone: Cortex-A73 28.2 % and 1.7 %, Cortex-A53 61.9 % and 5.6 %. Measured on x86_64, the four FIRs alone: 18.6 % and 1.3 %. Measured on the board with P1: the firConv and crossover nodes together 5.5 to 5.9 % of speakerd's cycle, the core not known; today's code not measured there.</desc>
 <style>
 text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace}
@@ -21,44 +21,57 @@ text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Aria
 .arrow{fill:#9a9993}
 }
 </style>
-<rect class="bg" x="0.5" y="0.5" width="759" height="341" rx="8"/>
-<text x="24.0" y="34.0" class="t1" font-size="17" text-anchor="start" font-weight="600">P1 takes the board's FIR filters from 28 % of a core to 1.7 %</text>
-<text x="24.0" y="56.0" class="t2" font-size="13" text-anchor="start">Share of one CPU core the four FIR filters need at 48 kHz. Lower is better.</text>
+<rect class="bg" x="0.5" y="0.5" width="759" height="532" rx="8"/>
+<text x="24.0" y="34.0" class="t1" font-size="17" text-anchor="start" font-weight="600">What P1 costs: simulated, measured, and on the board</text>
+<text x="24.0" y="56.0" class="t2" font-size="13" text-anchor="start">Share of one CPU core at 48 kHz, today's code against P1. Lower is better.</text>
 <path d="M24.0,70.0 H32.0 A4.0,4.0 0 0 1 36.0,74.0 V78.0 A4.0,4.0 0 0 1 32.0,82.0 H24.0 Z" class="today"></path>
-<text x="42.0" y="81.0" class="t2" font-size="12" text-anchor="start">Today: juce::dsp::FIR::Filter</text>
-<path d="M262.0,70.0 H270.0 A4.0,4.0 0 0 1 274.0,74.0 V78.0 A4.0,4.0 0 0 1 270.0,82.0 H262.0 Z" class="p1"></path>
-<text x="280.0" y="81.0" class="t2" font-size="12" text-anchor="start">P1: block FIR with GCC vector types</text>
-<line x1="230.0" y1="104.0" x2="230.0" y2="276.0" class="grid" />
-<text x="230.0" y="294.0" class="t3" font-size="12" text-anchor="middle">0 %</text>
-<line x1="345.0" y1="104.0" x2="345.0" y2="276.0" class="grid" />
-<text x="345.0" y="294.0" class="t3" font-size="12" text-anchor="middle">25 %</text>
-<line x1="460.0" y1="104.0" x2="460.0" y2="276.0" class="ref" />
-<text x="460.0" y="294.0" class="t3" font-size="12" text-anchor="middle">50 %</text>
-<line x1="575.0" y1="104.0" x2="575.0" y2="276.0" class="grid" />
-<text x="575.0" y="294.0" class="t3" font-size="12" text-anchor="middle">75 %</text>
-<line x1="690.0" y1="104.0" x2="690.0" y2="276.0" class="ref" />
-<text x="690.0" y="294.0" class="t3" font-size="12" text-anchor="middle">100 %</text>
-<text x="460.0" y="100.0" class="t2" font-size="11" text-anchor="middle">smoke check fails above 50 %</text>
+<text x="42.0" y="81.0" class="t2" font-size="12" text-anchor="start">Today: juce::dsp::FIR::Filter, before 0.0.2</text>
+<path d="M352.0,70.0 H360.0 A4.0,4.0 0 0 1 364.0,74.0 V78.0 A4.0,4.0 0 0 1 360.0,82.0 H352.0 Z" class="p1"></path>
+<text x="370.0" y="81.0" class="t2" font-size="12" text-anchor="start">P1: block FIR with GCC vector types, 0.0.2 on</text>
+<line x1="250.0" y1="106.0" x2="250.0" y2="394.0" class="grid" />
+<text x="250.0" y="412.0" class="t3" font-size="12" text-anchor="middle">0 %</text>
+<line x1="360.0" y1="106.0" x2="360.0" y2="394.0" class="grid" />
+<text x="360.0" y="412.0" class="t3" font-size="12" text-anchor="middle">25 %</text>
+<line x1="470.0" y1="106.0" x2="470.0" y2="394.0" class="ref" />
+<text x="470.0" y="412.0" class="t3" font-size="12" text-anchor="middle">50 %</text>
+<line x1="580.0" y1="106.0" x2="580.0" y2="394.0" class="grid" />
+<text x="580.0" y="412.0" class="t3" font-size="12" text-anchor="middle">75 %</text>
+<line x1="690.0" y1="106.0" x2="690.0" y2="394.0" class="ref" />
+<text x="690.0" y="412.0" class="t3" font-size="12" text-anchor="middle">100 %</text>
+<text x="470.0" y="100.0" class="t2" font-size="11" text-anchor="middle">smoke check's limit</text>
 <text x="690.0" y="100.0" class="t2" font-size="11" text-anchor="end">the whole cycle</text>
-<text x="24.0" y="126.0" class="t1" font-size="13" text-anchor="start">Cortex-A73, 2.2 GHz</text>
-<text x="24.0" y="143.0" class="t3" font-size="12" text-anchor="start">simulated</text>
-<path d="M230.0,112.0 H355.7 A4.0,4.0 0 0 1 359.7,116.0 V126.0 A4.0,4.0 0 0 1 355.7,130.0 H230.0 Z" class="today"><title>Cortex-A73, 2.2 GHz, today: 28.2 %</title></path>
-<text x="365.7" y="125.0" class="t1" font-size="12" text-anchor="start">28.2 %</text>
-<path d="M230.0,134.0 H233.9 A3.9099999999999997,3.9099999999999997 0 0 1 237.8,137.9 V148.1 A3.9099999999999997,3.9099999999999997 0 0 1 233.9,152.0 H230.0 Z" class="p1"><title>Cortex-A73, 2.2 GHz, P1: 1.7 %</title></path>
-<text x="243.8" y="147.0" class="t1" font-size="12" text-anchor="start" font-weight="600">1.7 %   (16× less)</text>
-<text x="24.0" y="184.0" class="t1" font-size="13" text-anchor="start">Cortex-A53, 1.8 GHz</text>
-<text x="24.0" y="201.0" class="t3" font-size="12" text-anchor="start">simulated</text>
-<path d="M230.0,170.0 H510.7 A4.0,4.0 0 0 1 514.7,174.0 V184.0 A4.0,4.0 0 0 1 510.7,188.0 H230.0 Z" class="today"><title>Cortex-A53, 1.8 GHz, today: 61.9 %</title></path>
-<text x="520.7" y="183.0" class="t1" font-size="12" text-anchor="start">61.9 %</text>
-<path d="M230.0,192.0 H251.8 A4.0,4.0 0 0 1 255.8,196.0 V206.0 A4.0,4.0 0 0 1 251.8,210.0 H230.0 Z" class="p1"><title>Cortex-A53, 1.8 GHz, P1: 5.6 %</title></path>
-<text x="261.8" y="205.0" class="t1" font-size="12" text-anchor="start" font-weight="600">5.6 %   (11× less)</text>
-<text x="24.0" y="242.0" class="t1" font-size="13" text-anchor="start">x86_64 development machine</text>
-<text x="24.0" y="259.0" class="t3" font-size="12" text-anchor="start">measured</text>
-<path d="M230.0,228.0 H311.6 A4.0,4.0 0 0 1 315.6,232.0 V242.0 A4.0,4.0 0 0 1 311.6,246.0 H230.0 Z" class="today"><title>x86_64 development machine, today: 18.6 %</title></path>
-<text x="321.6" y="241.0" class="t1" font-size="12" text-anchor="start">18.6 %</text>
-<path d="M230.0,250.0 H233.0 A2.9899999999999998,2.9899999999999998 0 0 1 236.0,253.0 V265.0 A2.9899999999999998,2.9899999999999998 0 0 1 233.0,268.0 H230.0 Z" class="p1"><title>x86_64 development machine, P1: 1.3 %</title></path>
-<text x="242.0" y="263.0" class="t1" font-size="12" text-anchor="start" font-weight="600">1.3 %   (15× less)</text>
-<line x1="230.0" y1="104.0" x2="230.0" y2="276.0" class="axis" />
-<text x="24.0" y="316.0" class="t3" font-size="11" text-anchor="start">Simulated: llvm-mca on the compiled loops. LLVM models the A73 with its Cortex-A57 model,</text>
-<text x="24.0" y="331.0" class="t3" font-size="11" text-anchor="start">so read the A73 values as ±30–50 %; the ratios hold.</text>
+<text x="24.0" y="126.0" class="t2" font-size="12" text-anchor="start" font-weight="600">Simulated</text>
+<text x="24.0" y="150.0" class="t1" font-size="13" text-anchor="start">Cortex-A73, 2.2 GHz</text>
+<text x="24.0" y="167.0" class="t3" font-size="11" text-anchor="start">the four FIRs alone</text>
+<path d="M250.0,136.0 H370.1 A4.0,4.0 0 0 1 374.1,140.0 V150.0 A4.0,4.0 0 0 1 370.1,154.0 H250.0 Z" class="today"><title>Cortex-A73, 2.2 GHz, today: 28.2 %</title></path>
+<text x="380.1" y="149.0" class="t1" font-size="12" text-anchor="start">28.2 %</text>
+<path d="M250.0,158.0 H253.7 A3.7,3.7 0 0 1 257.5,161.7 V172.3 A3.7,3.7 0 0 1 253.7,176.0 H250.0 Z" class="p1"><title>Cortex-A73, 2.2 GHz, P1: 1.7 %</title></path>
+<text x="263.5" y="171.0" class="t1" font-size="12" text-anchor="start"><tspan font-weight="600">1.7 %</tspan><tspan class="t2" dx="10">(16× less)</tspan></text>
+<text x="24.0" y="208.0" class="t1" font-size="13" text-anchor="start">Cortex-A53, 1.8 GHz</text>
+<text x="24.0" y="225.0" class="t3" font-size="11" text-anchor="start">the four FIRs alone</text>
+<path d="M250.0,194.0 H518.4 A4.0,4.0 0 0 1 522.4,198.0 V208.0 A4.0,4.0 0 0 1 518.4,212.0 H250.0 Z" class="today"><title>Cortex-A53, 1.8 GHz, today: 61.9 %</title></path>
+<text x="528.4" y="207.0" class="t1" font-size="12" text-anchor="start">61.9 %</text>
+<path d="M250.0,216.0 H270.6 A4.0,4.0 0 0 1 274.6,220.0 V230.0 A4.0,4.0 0 0 1 270.6,234.0 H250.0 Z" class="p1"><title>Cortex-A53, 1.8 GHz, P1: 5.6 %</title></path>
+<text x="280.6" y="229.0" class="t1" font-size="12" text-anchor="start"><tspan font-weight="600">5.6 %</tspan><tspan class="t2" dx="10">(11× less)</tspan></text>
+<text x="24.0" y="272.0" class="t2" font-size="12" text-anchor="start" font-weight="600">Measured</text>
+<text x="24.0" y="296.0" class="t1" font-size="13" text-anchor="start">x86_64 development machine</text>
+<text x="24.0" y="313.0" class="t3" font-size="11" text-anchor="start">the four FIRs alone</text>
+<path d="M250.0,282.0 H327.8 A4.0,4.0 0 0 1 331.8,286.0 V296.0 A4.0,4.0 0 0 1 327.8,300.0 H250.0 Z" class="today"><title>x86_64 development machine, today: 18.6 %</title></path>
+<text x="337.8" y="295.0" class="t1" font-size="12" text-anchor="start">18.6 %</text>
+<path d="M250.0,304.0 H252.9 A2.9,2.9 0 0 1 255.7,306.9 V319.1 A2.9,2.9 0 0 1 252.9,322.0 H250.0 Z" class="p1"><title>x86_64 development machine, P1: 1.3 %</title></path>
+<text x="261.7" y="317.0" class="t1" font-size="12" text-anchor="start"><tspan font-weight="600">1.3 %</tspan><tspan class="t2" dx="10">(15× less)</tspan></text>
+<text x="24.0" y="354.0" class="t1" font-size="13" text-anchor="start">The board</text>
+<text x="24.0" y="371.0" class="t3" font-size="11" text-anchor="start">firConv and crossover nodes,</text>
+<text x="24.0" y="385.0" class="t3" font-size="11" text-anchor="start">the core not known</text>
+<text x="256.0" y="353.0" class="t3" font-size="12" text-anchor="start" font-style="italic">not measured</text>
+<path d="M250.0,362.0 H272.0 A4.0,4.0 0 0 1 276.0,366.0 V376.0 A4.0,4.0 0 0 1 272.0,380.0 H250.0 Z" class="p1" opacity="0.45"><title>The board, P1: 5.5–5.9 %, the range of the windows</title></path>
+<path d="M250.0,362.0 H270.2 A4.0,4.0 0 0 1 274.2,366.0 V376.0 A4.0,4.0 0 0 1 270.2,380.0 H250.0 Z" class="p1"><title>The board, P1: 5.5–5.9 %</title></path>
+<text x="282.0" y="375.0" class="t1" font-size="12" text-anchor="start"><tspan font-weight="600">5.5–5.9 %</tspan><tspan class="t2" dx="10">together</tspan></text>
+<line x1="250.0" y1="106.0" x2="250.0" y2="394.0" class="axis" />
+<text x="24.0" y="440.0" class="t3" font-size="11" text-anchor="start">Simulated: llvm-mca 18 on the compiled inner loops. LLVM models the A73 with its Cortex-A57 model, so</text>
+<text x="24.0" y="455.0" class="t3" font-size="11" text-anchor="start">read the A73 values as ±30–50 %; the ratios hold. x86_64: dsp/juce_plugins/tests/blockfir/run.sh --time,</text>
+<text x="24.0" y="470.0" class="t3" font-size="11" text-anchor="start">blocks of 1024. The board: speakerd's own timing after the first deploy (2026-11-01), the mean share of</text>
+<text x="24.0" y="485.0" class="t3" font-size="11" text-anchor="start">the 1024-sample cycle over two 60 s windows and the smoke check's. A node's share is all of its processing,</text>
+<text x="24.0" y="500.0" class="t3" font-size="11" text-anchor="start">not only its FIRs. Today's code was not measured on the board. The smoke check fails when the graph's</text>
+<text x="24.0" y="515.0" class="t3" font-size="11" text-anchor="start">longest cycle takes more than half of it. Drawn by docs/images/p1/p1-result.py.</text>
 </svg>

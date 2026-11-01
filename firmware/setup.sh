@@ -7,7 +7,7 @@
 #
 #   pipewire   the board's PipeWire configuration: the persistent speakerd sink
 #              (pipewire.conf.d/60-speakerd-sink.conf); with --base-conf also the
-#              repository's pipewire.conf, and with --rate its sample rate
+#              repository's pipewire.conf (48000 Hz), and with --rate another sample rate
 #   snapcast   snapclient, routed into the speakerd sink (snapcast-setup.sh --route speakerd)
 #   speakerd   the headless plugin host (speakerd-setup.sh install), its output capped
 #   ampd       the speaker's network agent, and the hub on the left speaker (ampd-setup.sh install):
@@ -73,10 +73,15 @@ Options:
 
   pipewire:
   --base-conf                 also install firmware/pipewire/pipewire.conf as ~/.config/pipewire/pipewire.conf
-                              (the one there is kept as .orig once). Off by default: a running board keeps
-                              its own, which may name the amplifier differently.
+                              (the board's own is kept as .orig once). Off by default: a running board keeps
+                              its own, which may name the amplifier differently. The file runs the graph
+                              (default.clock.rate) and the amplifier (its audio.rate) at 48000 Hz, the rate
+                              snapcast streams and the shipped crossover and firConv filters are designed
+                              for; its AirPlay sink is at 44100 Hz.
   --rate <44100|48000>        with --base-conf: the graph's default.clock.rate and the amplifier's
-                              audio.rate. The repository's pipewire.conf has 44100; snapcast streams 48000.
+                              audio.rate, changed together (the AirPlay sink stays at 44100). Default: the
+                              file's, 48000. At 44100 PipeWire resamples snapcast's 48000 Hz stream and the
+                              shipped filters run with every frequency scaled by 44100/48000.
 
   snapcast:
   --route <speakerd|plugin-host>
@@ -92,8 +97,9 @@ Options:
   --factory <file>            a graph document for factory.json (in target-remote mode, a local file).
   --import-filtergraph <file> an AudioPluginHost .filtergraph on the board, converted into factory.json.
   --stop-plugin-host          stop a running AudioPluginHost (and disable its systemd units) instead of
-                              refusing. Checked whenever PipeWire restarts into the speakerd route
-                              (pipewire, speakerd, snapcast --server-ip), not only for speakerd.
+                              refusing. Checked for every component that may restart PipeWire into
+                              the speakerd route (pipewire, speakerd, and snapcast --server-ip, which
+                              restarts it only to remove the old split fragment), not only speakerd.
   --plugin <plugin[:build]>   target-remote: a plugin bundle to copy, repeatable (default ${DEFAULT_PLUGINS[*]}).
   --arch <aarch64|native>     target-remote: the build tree the bundle comes from (default aarch64).
   --bundle <dir>              target: the bundle (default: the folder above this script, when it is one).
@@ -172,6 +178,7 @@ done
 CHOSEN=()
 for c in "${COMPONENTS[@]}"; do selected "$c" && CHOSEN+=("$c"); done
 [ ${#CHOSEN[@]} -gt 0 ] || die "no component selected"
+[ "$BASE_CONF" -eq 0 ] || selected pipewire || die "--base-conf${RATE:+ and --rate} belong to the pipewire component, which is not chosen: nothing would install pipewire.conf"
 
 # ----------------------------------------------------------------------------
 # The remote mode
@@ -255,34 +262,123 @@ restart_pipewire() {
     fi
 }
 
-# --base-conf: the repository's pipewire.conf, with --rate in default.clock.rate and in the
-# amplifier's (the api.alsa.pcm.sink object's) audio.rate. Sets BASE_CHANGED.
-BASE_CHANGED=0
-install_base_conf() {
-    local dst="$H/.config/pipewire/pipewire.conf" conf
-    conf="$(mktemp)"
+# --base-conf: the repository's pipewire.conf, at its own rate (48000) or at --rate's.
+#
+# The rates a pipewire.conf ($1) sets, one per line: "graph <rate>" (default.clock.rate),
+# "allowed <rates>" (default.clock.allowed-rates when it is set, without spaces) and
+# "object <factory.name> <node.name> <rate>" for each object that sets audio.rate, whatever the
+# order of its keys. Commented lines are not read; the keys are one per line, as the
+# repository's file has them (and as --rate rewrites them).
+conf_rates() {
+    awk '
+        function value(line) {
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            if (line ~ /^"/) { sub(/^"/, "", line); sub(/".*$/, "", line) } else sub(/[[:space:]].*$/, "", line)
+            return line
+        }
+        /^[[:space:]]*#/ { next }
+        /\{[[:space:]]*factory[[:space:]]*=/ { n++; factory[n] = "?"; name[n] = "?" }
+        /^[[:space:]]*factory\.name[[:space:]]*=/ { factory[n] = value($0) }
+        /^[[:space:]]*node\.name[[:space:]]*=/ { name[n] = value($0) }
+        /^[[:space:]]*default\.clock\.rate[[:space:]]*=/ { print "graph " value($0) }
+        /^[[:space:]]*default\.clock\.allowed-rates[[:space:]]*=/ {
+            v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/\].*$/, "]", v); gsub(/[[:space:]]/, "", v); print "allowed " v
+        }
+        /^[[:space:]]*audio\.rate[[:space:]]*=/ { rate[n] = value($0) }
+        END { for (i = 1; i <= n; i++) if (i in rate) print "object " factory[i] " " name[i] " " rate[i] }
+    ' "$1"
+}
+
+# The rate PipeWire runs at now (its settings metadata), or nothing when it cannot be asked.
+running_rate() {
+    command -v pw-metadata > /dev/null 2>&1 || return 0
+    { timeout 5 pw-metadata -n settings 0 clock.rate 2> /dev/null || true; } \
+        | sed -n "s/.*key:'clock.rate' value:'\([0-9]*\)'.*/\1/p" | head -n 1
+}
+
+# Makes the file to install, BASE_FILE: the repository's pipewire.conf, with --rate in
+# default.clock.rate, in default.clock.allowed-rates when it is set, and in the amplifier's
+# (each api.alsa.pcm.sink object's) audio.rate; nothing else, so the AirPlay sink stays at
+# 44100 (the person's decision). Then checks that the graph and the amplifier run at one rate,
+# BASE_RATE, and refuses otherwise: an amplifier at another rate than the graph resamples
+# everything it plays. Called with the checks, before anything changes. Sets BASE_FILE,
+# BASE_RATE and BASE_WHAT ("the graph and <amplifier> at <rate> Hz, <object> at <rate> Hz",
+# for the messages).
+BASE_FILE=""
+BASE_RATE=""
+BASE_WHAT=""
+prepare_base_conf() {
+    local src="$FIRMWARE_DIR/pipewire/pipewire.conf" rates bad
+    [ -f "$src" ] || die "no $src"
+    BASE_FILE="$(mktemp)"
+    trap 'rm -f "$BASE_FILE"' EXIT
     if [ -n "$RATE" ]; then
         awk -v rate="$RATE" '
+            /^[[:space:]]*#/ { print; next }
+            /\{[[:space:]]*factory[[:space:]]*=/ { alsa = 0 }
+            /^[[:space:]]*factory\.name[[:space:]]*=[[:space:]]*"?api\.alsa\.pcm\.sink/ { alsa = 1 }
             /^[[:space:]]*default\.clock\.rate[[:space:]]*=/ { sub(/=[[:space:]]*[0-9]+/, "= " rate) }
-            /factory\.name[[:space:]]*=[[:space:]]*api\.alsa\.pcm\.sink/ { alsa = 1 }
-            alsa && /^[[:space:]]*audio\.rate[[:space:]]*=/ { sub(/=[[:space:]]*[0-9]+/, "= " rate); alsa = 0 }
-            { print }' "$FIRMWARE_DIR/pipewire/pipewire.conf" > "$conf"
+            /^[[:space:]]*default\.clock\.allowed-rates[[:space:]]*=/ { sub(/=[[:space:]]*\[[^]]*\]/, "= [ " rate " ]") }
+            alsa && /^[[:space:]]*audio\.rate[[:space:]]*=/ { sub(/=[[:space:]]*[0-9]+/, "= " rate) }
+            { print }' "$src" > "$BASE_FILE"
     else
-        cp "$FIRMWARE_DIR/pipewire/pipewire.conf" "$conf"
+        cp "$src" "$BASE_FILE"
     fi
-    if [ -f "$dst" ] && cmp -s "$conf" "$dst"; then ok "$dst is the repository's already"; rm -f "$conf"; return 0; fi
-    if [ "$DRY_RUN" -eq 1 ]; then info "(dry-run) would install firmware/pipewire/pipewire.conf${RATE:+ at $RATE Hz} as $dst"; rm -f "$conf"; return 0; fi
+    rates="$(conf_rates "$BASE_FILE")"
+    BASE_RATE="$(awk '$1 == "graph" { r = $2 } END { print r }' <<< "$rates")"
+    [ -n "$BASE_RATE" ] || die "$src sets no default.clock.rate: the graph's rate would be PipeWire's default, not the file's. Nothing was changed."
+    [ -z "$RATE" ] || [ "$BASE_RATE" = "$RATE" ] || die "--rate $RATE did not reach default.clock.rate in $src (it says $BASE_RATE). Nothing was changed."
+    bad="$(awk -v r="$BASE_RATE" '
+        $1 == "graph" && $2 != r { printf "%sdefault.clock.rate %s", sep, $2; sep = ", " }
+        $1 == "allowed" && $2 != "[" r "]" { printf "%sdefault.clock.allowed-rates %s", sep, $2; sep = ", " }
+        $1 == "object" && $2 == "api.alsa.pcm.sink" && $4 != r { printf "%sthe amplifier %s at %s Hz", sep, $3, $4; sep = ", " }' <<< "$rates")"
+    [ -z "$bad" ] || die "$src${RATE:+ at --rate $RATE} would run the graph at $BASE_RATE Hz but $bad: the amplifier runs at the graph's rate (firmware/CLAUDE.md, 'Rates'). Nothing was changed."
+    BASE_WHAT="$(awk -v r="$BASE_RATE" '
+        $1 == "object" && $2 == "api.alsa.pcm.sink" { amp[++a] = $3; next }
+        $1 == "object" { other = other ", " $3 " at " $4 " Hz" }
+        END { s = "the graph"; for (i = 1; i <= a; i++) s = s (i == a ? " and " : ", ") amp[i]; print s " at " r " Hz" other }' <<< "$rates")"
+    ok "pipewire.conf to install: $BASE_WHAT"
+    if [ "$BASE_RATE" != 48000 ]; then
+        warn "at $BASE_RATE Hz PipeWire resamples snapcast's 48000 Hz stream, and speakerd's plugins run at $BASE_RATE Hz:"
+        warn "the shipped crossover and firConv filters, designed for 48000 Hz, run with every frequency scaled by"
+        warn "$BASE_RATE/48000 (firmware/CLAUDE.md, 'Rates')"
+    fi
+}
+
+# A pipewire.conf that this script installed (any --rate, any version that carries the line)
+# is never kept as the board's own.
+is_repository_conf() { grep -qF "The BPI AMP Platform's PipeWire configuration (firmware/pipewire/pipewire.conf)" "$1"; }
+
+# Installs BASE_FILE as ~/.config/pipewire/pipewire.conf, keeping the board's own as .orig
+# once. Sets BASE_CHANGED.
+BASE_CHANGED=0
+install_base_conf() {
+    local dst="$H/.config/pipewire/pipewire.conf" now
+    if [ -f "$dst" ] && cmp -s "$BASE_FILE" "$dst"; then ok "$dst is the repository's already: $BASE_WHAT"; return 0; fi
+    now="$(running_rate)"
+    if [ -n "$now" ] && [ "$now" != "$BASE_RATE" ]; then
+        info "PipeWire runs at $now Hz now; with this pipewire.conf it runs at $BASE_RATE Hz once it restarts"
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then info "(dry-run) would install firmware/pipewire/pipewire.conf as $dst: $BASE_WHAT"; return 0; fi
     mkdir -p "$(dirname "$dst")"
-    if [ -f "$dst" ] && [ ! -f "$dst.orig" ]; then cp -a "$dst" "$dst.orig" && ok "Kept the board's own as $dst.orig"; fi
-    mv -f "$conf" "$dst" && chmod 644 "$dst"
+    if [ -f "$dst" ] && [ ! -f "$dst.orig" ] && ! is_repository_conf "$dst"; then
+        cp -a "$dst" "$dst.orig" && ok "Kept the board's own as $dst.orig"
+    fi
+    # Written whole: a temporary file beside it, then a rename.
+    { cp "$BASE_FILE" "$dst.tmp.$$" && chmod 644 "$dst.tmp.$$" && mv -f "$dst.tmp.$$" "$dst"; } \
+        || { rm -f "$dst.tmp.$$"; die "cannot write $dst"; }
     BASE_CHANGED=1
-    ok "Wrote $dst${RATE:+ ($RATE Hz)}"
+    ok "Wrote $dst: $BASE_WHAT"
 }
 
 # ----------------------------------------------------------------------------
 # Check every chosen component before changing any
 # ----------------------------------------------------------------------------
 info "Components, in boot order: ${CHOSEN[*]} (home $H)"
+if selected pipewire && [ "$BASE_CONF" -eq 1 ]; then
+    info "Checking the repository's pipewire.conf${RATE:+ at --rate $RATE}"
+    prepare_base_conf
+fi
 if selected speakerd && [ "$ROUTE" = plugin-host ] && selected snapcast; then
     die "--route plugin-host with the speakerd component would leave the AudioPluginHost's rule pointing at the amplifier while speakerd plays it too: route into speakerd, or skip one of them"
 fi
@@ -308,9 +404,9 @@ fi
 
 # A running AudioPluginHost must not see PipeWire restart under it into the speakerd sink's
 # configuration: it would be linked to the amplifier again beside speakerd, full range. The
-# components that restart PipeWire: pipewire, speakerd (its sink) and snapcast's full setup
-# (--server-ip). With --route plugin-host and no speakerd, the plugin host is what plays: it
-# stays.
+# components that may restart PipeWire: pipewire, speakerd (its sink) and snapcast's full setup
+# (--server-ip, which restarts it only when it removes the old 60-snapcast-split.conf). With
+# --route plugin-host and no speakerd, the plugin host is what plays: it stays.
 STOP_PLUGIN_HOST=0
 [[ " ${SPEAKERD_ARGS[*]} " != *" --stop-plugin-host "* ]] || STOP_PLUGIN_HOST=1
 NO_PLUGIN_HOST=0

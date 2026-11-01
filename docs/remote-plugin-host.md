@@ -45,6 +45,7 @@ flowchart TB
     classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
     classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
     classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+    classDef plan fill:#fdf4ec,stroke:#b4642a,color:#1d1d1d,stroke-dasharray:5 3
 
     subgraph CTRL["Controller app"]
         direction LR
@@ -54,13 +55,13 @@ flowchart TB
         gui --- cb --- br
     end
 
-    local["Knob, IR remote,<br/>phone web page"]:::ctl
+    local["Knob, IR remote,<br/>phone web page<br/>(planned)"]:::plan
     src["Audio source<br/>Snapcast server"]:::aud
 
     subgraph SR["Speaker R"]
         direction TB
         subgraph AR["ampd"]
-            agR["network agent<br/>persists, applies, mDNS"]:::ctl
+            agR["network agent<br/>persists, applies,<br/>hub at hub_address<br/>(mDNS planned)"]:::ctl
         end
         stR[("state files<br/>graph, device role")]:::sto
         subgraph SDR["speakerd"]
@@ -77,7 +78,7 @@ flowchart TB
         direction TB
         subgraph AL["ampd"]
             hub["hub role<br/>graph document, parameters,<br/>catalogue, fan-out"]:::ctl
-            agL["network agent<br/>persists, applies, mDNS"]:::ctl
+            agL["network agent<br/>persists, applies<br/>(mDNS planned)"]:::ctl
         end
         stL[("state files<br/>graph, device role")]:::sto
         subgraph SDL["speakerd"]
@@ -104,7 +105,8 @@ How to read it:
 
 - **Orange is control, blue is audio, green is hardware, grey is files on disk.** Thick
   arrows carry audio, thin arrows carry settings. Dotted arrows carry data that is only read:
-  state files at boot, and monitoring.
+  state files at boot, and monitoring. **A dashed outline, or "planned" in a label, is designed
+  but not built:** the knob, IR remote and phone web page, and mDNS discovery (section 2).
 - **The controller holds no audio.** It is a plugin host whose plugins are editors only. Every
   edit leaves through the bridge to the hub.
 - **Each speaker runs two daemons.** `speakerd` is the **headless plugin host**: it runs the
@@ -205,18 +207,20 @@ flowchart LR
     classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
     classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
     classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+    classDef plan fill:#fdf4ec,stroke:#b4642a,color:#1d1d1d,stroke-dasharray:5 3
 
     net["Network<br/>hub, controllers,<br/>other speaker"]:::ctl
-    knob["Knob, IR,<br/>web page"]:::ctl
+    knob["Knob, IR,<br/>web page<br/>(planned)"]:::plan
 
     subgraph SPK["One speaker"]
         direction LR
         subgraph AMPD["ampd: network agent"]
             direction TB
-            disc["mDNS<br/>advertise, find the hub"]:::ctl
+            find["an agent finds the hub<br/>at hub_address (ampd.json)"]:::ctl
+            disc["mDNS (planned)<br/>advertise, find the hub"]:::plan
             rx["receive parameters (OSC from controllers,<br/>TCP from the hub) and graph revisions (TCP)"]:::ctl
             hubrole["hub role<br/>(left speaker only)"]:::ctl
-            cat["plugin catalogue<br/>from ~/.lv2"]:::ctl
+            cat["plugin catalogue (hub)<br/>the plugins a speaker loaded;<br/>builds, versions: step 4"]:::ctl
             persist["persist state<br/>atomic writes"]:::ctl
             msrv["monitor server<br/>subscriptions, credits"]:::ctl
         end
@@ -237,6 +241,7 @@ flowchart LR
         files -. "read at boot,<br/>first layer that loads" .-> eng
     end
 
+    net <--> find
     net <--> disc
     net <--> rx
     net <--> hubrole
@@ -251,7 +256,7 @@ flowchart LR
 | What it is | the headless plugin host | the speaker's network agent |
 | Job | runs the plugin graph | everything that talks to the outside |
 | Owns | the running graph, its parameter values, the monitor producers | the state files, the network, the hub role, the catalogue, monitoring subscriptions |
-| Talks to | PipeWire, and the local socket | the hub, controllers, mDNS, the web page, `speakerd` |
+| Talks to | PipeWire, and the local socket | the hub, controllers, `speakerd`; planned: mDNS, the web page |
 | Threads | one real-time audio thread that never blocks, plus a normal-priority monitor thread | ordinary threads, may block on network and disk |
 | Needed for sound | yes | no |
 | Starts | right after PipeWire, no network dependency | after `speakerd` |
@@ -445,16 +450,24 @@ details, [protocol.md](protocol.md) the messages):
   route one plugin to both channels, run with `--allow-tweeter-without-crossover`.
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
-does everything that talks to the outside: it advertises the speaker over mDNS, receives
-parameter changes and graph revisions, hands them to `speakerd`, persists the state files that
-`speakerd` reads at boot, builds the plugin catalogue, serves the monitoring subscriptions of open plugin windows, and
-serves the knob, IR receiver and web page. It never touches audio.
+does everything that talks to the outside: it receives parameter changes and graph revisions,
+hands them to `speakerd`, persists the state files that `speakerd` reads at boot, and serves
+the monitoring subscriptions of open plugin windows. It never touches audio. Nothing is
+discovered yet: an agent finds the hub at the `hub_address` its `ampd.json` names, written at
+install ([protocol.md](protocol.md#ampds-configuration)); the controller finds the hub at the
+host it is given (`--hub`, or *Hub > Connect to a Hub...*:
+[its README](../dsp/juce_apps/controller/README.md#command-line)), and the other speaker at the
+address the hub reports for it. **Planned, not built, and in no roadmap step yet:** `ampd`
+advertising the speaker over mDNS, so that an agent finds the hub without a `hub_address`, and
+serving a knob, an IR receiver and the hub's web page (rule 4, section 8).
 
 **The hub** is a role of `ampd` on the left speaker: the one place that holds the truth. The
 truth has two parts, the **graph document** with a revision number and the **parameter
-values** keyed by node uid and parameter ID. The hub also keeps the **catalogue** (which plugin
-builds each speaker has installed, each with its version and source identity, section 7) and
-refuses a graph that references a plugin a speaker lacks.
+values** keyed by node uid and parameter ID. The hub also keeps the **catalogue**: today the
+plugins some speaker has loaded, and it refuses a graph that names a plugin no speaker has
+loaded (`no speaker has loaded ...`). Step 4's catalogue adds which plugin builds each speaker
+has installed, each with its version and source identity (section 7), so that the hub refuses a
+graph that names a plugin one speaker lacks.
 
 ## 3. A knob in a fake GUI
 
@@ -681,7 +694,8 @@ lock-free ring, under 1 us per cycle with eight nodes on x86_64. The clock read 
 (45 ns on x86_64) on most kernels; on the board's Cortex-A73 the kernel's workaround for ARM
 erratum 858921 very likely makes each one a real syscall, short and non-blocking (about a
 microsecond), which is kept as a named exception to the no-syscall rule (`dsp/CLAUDE.md`):
-`speakerd` logs the measured cost of a read at start. The monitor thread turns the ring into
+`speakerd` logs the measured cost of a read at start (296 ns on the board of the first deploy,
+`firmware/CLAUDE.md`, "The board measured"). The monitor thread turns the ring into
 the `speakerd/timing` stream, the `timing` of `status` (the last minute) and a log summary once
 a minute, so the journal has the numbers without a controller.
 
@@ -947,8 +961,8 @@ flowchart LR
     subgraph layers["state layers on the speaker, tried in order"]
         direction LR
         cur[("Layer 1: current<br/>graph.json<br/>last revision applied")]:::sto
-        lkg[("Layer 2: last known good<br/>graph.lkg.json<br/>played cleanly for 60 s")]:::sto
-        fac[("Layer 3: factory<br/>factory.json<br/>read-only, ships with the plugins")]:::sto
+        lkg[("Layer 2: last known good<br/>graph.lkg.json<br/>played 60 s, no speakerd restart")]:::sto
+        fac[("Layer 3: factory<br/>factory.json<br/>written by the installer")]:::sto
         pass["Layer 4: passthrough<br/>woofer only, tweeter muted,<br/>level capped at -20 dB"]:::sto
         cur -- "fails to load" --> lkg -- "fails to load" --> fac -- "fails to load" --> pass
     end
@@ -962,11 +976,15 @@ flowchart LR
 
 - **Current** is written on every accepted change, atomically (write a temporary file,
   `fsync`, rename), so a power cut can never leave half a file.
-- **Last known good** is promoted from current once a revision has played for a minute
-  without a crash or an xrun storm. A bad graph sent from the controller therefore costs one
-  restart, not a silent speaker.
-- **Factory** ships with the plugin build, so a freshly flashed speaker plays its measured
-  tuning out of the box.
+- **Last known good** is promoted from current by `ampd` once a revision has played for a
+  minute (`--lkg-after`, 60 s) with no `speakerd` restart. A bad graph sent from the controller
+  therefore costs one restart, not a silent speaker. Holding the promotion back on an xrun
+  storm as well is not built.
+- **Factory** is written by the installer, from a graph document (`--factory`) or the board's
+  AudioPluginHost session (`--import-filtergraph`), and kept by every later install that gives
+  neither; `speakerd` and `ampd` never write it. So a speaker plays its measured tuning with
+  nothing else on it. Shipping it with the plugin build, for a freshly flashed speaker, is not
+  built.
 - **Passthrough** is the last resort when no plugin loads at all. With no crossover running,
   a full-range signal would reach the tweeter, so this mode sends the Mine pin to the woofer
   output only, mutes the tweeter and caps the level. Mine is FL on a left speaker, FR on a
@@ -988,28 +1006,70 @@ plays mono at the same fail-safe. Lifting the limits is written in the file, nev
 its absence.
 
 **Rule 2: nothing on the audio path waits for the network.** The boot order is fixed and
-local:
+local. Everything below is a systemd user unit of the audio user, started at boot because
+linger is on:
 
 <!-- diagram: boot -->
 ```mermaid
 sequenceDiagram
-    participant SD as systemd
+    participant SD as systemd (the audio user's)
     participant PW as PipeWire
+    participant WP as WirePlumber
+    participant C as snapclient
     participant S as speakerd
-    participant A as ampd (agent / hub)
     SD->>PW: start
-    SD->>S: start (After=pipewire, no network dependency)
-    S->>S: load device.json + the first working graph layer
-    S->>PW: register the pw_filter node, link it to the input sink and the amplifier, audio flows
-    Note over S,PW: the speaker plays from here on,<br/>whatever happens below
-    SD->>A: start (After=speakerd)
-    A->>A: look for the hub (left speaker) over mDNS
-    alt hub found and its revision is newer
-        A->>S: apply the hub's revision, under the fade
-    else no hub, or the hub is older
-        A->>A: keep the local revision, offer it to an older hub,<br/>retry in the background
+    PW->>PW: create the speakerd sink (the drop-in's null sink)
+    SD->>WP: start
+    WP->>PW: give the sinks their ports, make speakerd the default sink
+    par no order between snapclient and speakerd
+        SD->>C: start (After=pipewire, wireplumber)
+        C->>PW: a stream, target.object speakerd (client-rt.conf)
+        WP->>PW: link the stream to the speakerd sink
+        Note over C,PW: until speakerd links,<br/>nothing reaches the amplifier
+    and
+        SD->>S: start speakerd-run (After=pipewire, wireplumber, no network)
+        S->>S: wait while an AudioPluginHost runs, choose the layer from the crash history
+        S->>S: read device.json
+        S->>PW: connect, every second until PipeWire answers
+        S->>S: load the first working layer, at the graph's rate
+        S->>PW: adopt the speakerd sink, create speakerd-dsp,<br/>link the sink's monitor and the amplifier's ports
+    end
+    Note over PW,S: the output fades in once every link is active:<br/>the speaker plays from here on, whatever happens below
+```
+
+The sink exists before both players and `speakerd`, so snapclient and `speakerd` may start in
+either order: a stream that comes first plays into the sink, and nothing reaches the amplifier
+until `speakerd` has linked it and faded in; a `speakerd` that comes first waits for the sink's
+and the amplifier's ports. `ampd` starts after `speakerd` and is not on the audio path:
+
+<!-- diagram: boot-ampd -->
+```mermaid
+sequenceDiagram
+    participant SD as systemd
+    participant S as speakerd
+    participant A as ampd (an agent)
+    participant H as ampd (the hub, left speaker)
+    Note over A,H: the hub only listens (7450, 7451, 7452)
+    SD->>A: start (After=speakerd, no network dependency)
+    A->>S: connect to the local link, every second until it answers
+    S-->>A: hello: the layer and revision it plays
+    A->>H: connect to hub_address (ampd.json), every second until it answers
+    H-->>A: hello, with a nonce
+    A->>H: hello proving the secret, with its revision, time and origin
+    H-->>A: welcome, proving the secret
+    alt the agent's revision is newer (by time, then origin)
+        H->>H: adopt it, apply it on every speaker
+    else the revisions differ
+        H->>A: the hub's revision, then every value
+        A->>S: apply, under the 30 ms fade
+    else the same revision
+        H->>A: every value
     end
 ```
+
+The agent finds the hub at the `hub_address` its `ampd.json` names, written at install; finding
+it over mDNS is not built yet (`firmware/CLAUDE.md`, "Not supported yet"). Whatever the agent
+and the hub decide, `speakerd` has been playing since the first diagram ended.
 
 **Rule 3: the hub is a speaker, and a pair has a fixed leader.** The left speaker is the hub.
 A pair needs no election; dynamic election is only needed with more than two speakers. The
@@ -1024,6 +1084,9 @@ are reachable without the controller app:
 - the small web page the hub serves, for a phone with nothing installed;
 - the last volume is persisted like every other value, and comes back at a safe ceiling
   after a power cycle.
+
+The knob, button, IR receiver and web page are planned, not built, and in no roadmap step yet
+(section 2).
 
 **What happens when something is missing:**
 
@@ -1049,8 +1112,8 @@ already have (`MorphPad`, the plot components, `ampScope`'s views). A web contro
 mean rewriting each of them in JavaScript and keeping the two in step forever. A JUCE
 controller runs on Linux, macOS, Windows, iOS and Android from the same code.
 
-A web page keeps one job: a small status and preset page served by the hub, for the phone that
-has nothing installed. It shows the chain, master volume, mute and presets. It does not try to
+A web page keeps one job (planned, not built: section 2): a small status and preset page served
+by the hub, for the phone that has nothing installed. It shows the chain, master volume, mute and presets. It does not try to
 be the plugin host.
 
 ## 10. The software stack: modules, threads and how the layers talk
@@ -1445,7 +1508,7 @@ per step; the virtual pair's `test_controller_end_to_end` and the controller's o
 | `speakerd` to a plugin | in process: JUCE's LV2 hosting, `AudioProcessorGraph::processBlock` | `speakerd`, when a graph is built | audio buffers; parameters in as `patch:Set` inside `run()`; monitors out on the atom port | a bundle that does not load fails the layer or the `apply`; the old graph plays on |
 | `speakerd` to PipeWire | libpipewire: the `speakerd-dsp` `pw_filter` node, the registry, four links of its own; `client-rt.conf` for the real-time thread | `speakerd`, at start; relinks whenever the ports come back | the stream in from the `speakerd` sink's monitors, the two amplifier channels out; the quantum and rate | the amplifier away: the output gate holds 0 and the plugins run on; PipeWire away: exit 3, systemd restarts on the same layer |
 | players to the `speakerd` sink | a PipeWire stream (snapclient, `client-rt.conf`'s target) | WirePlumber links it | the stereo stream | nothing plays; `speakerd` keeps its node and its links |
-| PipeWire to the amplifier | the ALSA sink of the MAX98397 driver, `priority.driver` 1000: the hardware clock drives the graph | PipeWire | 48 kHz, quantum 1024 on the boards | |
+| PipeWire to the amplifier | the ALSA sink of the MAX98397 driver (`bpi-alsa-playback-pcm` on the board measured): the hardware clock drives the graph, by its `priority.driver` (1000 in the repository's `pipewire.conf`) or, where it has none, because it is created before the `speakerd` sink | PipeWire | the graph's rate and quantum, from the board's own PipeWire configuration: 48000 Hz and 1024 on the board measured; the repository's `pipewire.conf`, which only `setup.sh --base-conf` installs, pins 44100 Hz (`firmware/CLAUDE.md`, "Rates") | |
 | systemd to `speakerd` | `speakerd.service`: `ExecStart` `speakerd-run`, `ExecStopPost` `speakerd-run --record-exit` | systemd, at boot with linger; `Restart=on-failure` in 1 s, no start limit | the layer to start from (`--from`), chosen from a history of starts and exits on tmpfs: a crash steps down a layer, exit 3 (PipeWire) stays, a clean stop goes back to `current` | |
 | `ampd` and `speakerd` to disk | `~/.local/state/speakerd/`: `graph.json`, `graph.lkg.json`, `factory.json`, `ampd.json`, `device.json`, written atomically | `ampd` writes the graph layers; the installer writes `device.json`, `factory.json` and `ampd.json`; `speakerd` only reads, at boot | the document, the role, the amplifier's ports, the limits, the secret | a layer that does not load is skipped for the next one |
 | the installer to a board | `ssh`/`scp` of a bundle; the installed `setup/` scripts run on the board | a person (`firmware/setup.sh --mode target-remote`), or `tools/board.sh` behind the deploy gate | one version under `~/.local/lib/speakerd/<id>/` (`bin/`, `lv2/`, `setup/`, `extra/`), the `current` and `previous` symlinks, the units, the drop-in | `rollback` switches the symlink back, capped |
@@ -1594,7 +1657,12 @@ going away (`test_speakerd_start_order`).
 the AudioPluginHost session a board plays today (section 2), and `firmware/` installs it with
 its persistent sink, its systemd unit and its crash rule, capped (section 2, "Installed on a
 board"). The first deploy to a real board stays with a person
-([autonomous-development.md](autonomous-development.md), section 8).
+([autonomous-development.md](autonomous-development.md), section 8). It was made on one board
+on 2026-11-01: `speakerd` installed capped and playing, snapclient routed into it, the smoke
+check passing with `speakerd`'s graph under 10 % of its cycle, a reboot after which everything
+came back by itself and played, and only the woofer sounding, by ear, with the cap on
+(`firmware/CLAUDE.md`, "The board measured"). Lifting the cap and the second stage have not run
+on a board yet.
 
 Step 3 is done. On the virtual pair the real controller, in its script test mode, drives the
 real `ampd` and `speakerd` of both speakers (`test_controller_end_to_end`): a knob turned in the

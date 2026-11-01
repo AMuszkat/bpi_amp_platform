@@ -20,7 +20,8 @@ Pass when:
   speaker it writes ampd.json exactly {"version": 1, "name": "left", "hub": true, "listen":
   "0.0.0.0", "hub_address": null} and the unit byte for byte; on the right, with --hub-address,
   {"name": "right", "hub": false, ..., "hub_address": <it>}; a reinstall keeps what is not given
-  and --listen changes only itself; ampd accepts the ampd.json the installer writes;
+  and --listen changes only itself; ampd accepts the ampd.json the installer writes; its closing
+  hint names the installed copy (.local/lib/speakerd/current/setup/ampd-setup.sh smoke);
 - the unit: after speakerd.service, no network unit, Restart=on-failure, RestartSec=1, no restart
   after exit 2 and no start limit;
 - under (stand-in) systemd, install fails unless ampd says it listens after its start;
@@ -151,6 +152,8 @@ class AmpdInstall(unittest.TestCase):
         unit = folder / ".config/systemd/user/ampd.service"
         self.assertEqual(unit.read_bytes(), (FIRMWARE / "ampd/ampd.service").read_bytes())
         self.assertIn("left, the hub, listening on 0.0.0.0", result.stdout)
+        # The closing hint names the installed copy, never the folder the installer ran from.
+        self.assertIn(f"Check it: {folder}/.local/lib/speakerd/current/setup/ampd-setup.sh smoke", result.stdout)
 
         sections = unit_sections(unit)
         print(f"\n  [Unit] {sections['Unit']}\n  [Service] Restart {sections['Service']['Restart']}, "

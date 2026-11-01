@@ -725,14 +725,19 @@ choose_amplifier() {
     fi
 }
 
+# The graph's rate, said when it is not 48000 Hz: the rate snapcast streams and the shipped
+# crossover and firConv filters are designed for (firmware/CLAUDE.md, "Rates"). It changes
+# nothing: the rate is the board's PipeWire configuration's.
 note_rates() {
     local rate
     rate="$(graph_rate)"
     [ -n "$rate" ] || return 0
     if [ "$rate" != 48000 ]; then
-        info "PipeWire runs at $rate Hz; snapcast streams 48000 Hz (snapcast-setup.sh --sampleformat), so PipeWire"
-        info "resamples the stream, and speakerd's plugins run at $rate Hz: the factory graph's filters must be"
-        info "designed for $rate Hz. Nothing here changes the rate (firmware/CLAUDE.md, 'Rates')."
+        warn "PipeWire runs at $rate Hz, not 48000: snapcast streams 48000 Hz (snapcast-setup.sh --sampleformat), so"
+        warn "PipeWire resamples the stream, and speakerd's plugins run at $rate Hz, where the shipped crossover and"
+        warn "firConv filters, designed for 48000 Hz, run with every frequency scaled by $rate/48000. Nothing here"
+        warn "changes the rate: the board's PipeWire configuration does (setup.sh --base-conf installs the"
+        warn "repository's, at 48000 Hz; firmware/CLAUDE.md, 'Rates')."
     fi
 }
 
@@ -1055,9 +1060,9 @@ do_install() {
     cat <<EOF
 
 ${c_green}speakerd $BUNDLE_ID installed.${c_off} The output is capped: -20 dB, tweeter muted.
-  - Check it, without a sound, with a quiet stream playing: $(dirname "$SELF")/speakerd-setup.sh smoke
+  - Check it, without a sound, with a quiet stream playing: $(installed_setup speakerd-setup.sh) smoke
   - Its log:                      journalctl --user-unit speakerd -b
-  - Back to the previous version: $(dirname "$SELF")/speakerd-setup.sh rollback
+  - Back to the previous version: $(installed_setup speakerd-setup.sh) rollback
 EOF
 }
 
@@ -1422,10 +1427,21 @@ do_smoke() {
     elif [ -n "$amp" ] && [ "$DEFAULT_SINK" = "$amp" ]; then
         failed "the default sink is the amplifier '$amp' (chosen with wpctl?): a stream with no target plays straight into it, full range and uncapped. wpctl set-default <the id of 'speakerd input' in wpctl status>"
     else noted "the default sink is '${DEFAULT_SINK:-unknown}', not speakerd: a stream with no target plays into it"; fi
-    snap="$(grep -E '^[^ ]*([Ss]napcast|[Ss]napclient)[^ ]*:output_' <<< "$links")"
-    if [ -z "$snap" ]; then said "no snapclient stream in PipeWire now"
-    elif ! grep -qv ' -> speakerd:playback_' <<< "$snap"; then pass "snapclient plays into the speakerd sink"
-    else noted "snapclient plays into: $(awk '{ printf "%s ", $3 }' <<< "$snap")"; fi
+    # snapclient's stream by its application.name, its links from pw-dump: snapclient 0.34.0's
+    # stream has no node.name, so pw-link lists its ports under an empty name.
+    local nodes="" targets="" rc
+    if ! pw_dump "$WORK/smoke-streams.json"; then said "where snapclient plays is not checked: PipeWire is not reachable"
+    else
+        rc=0; snap="$(helper stream "$WORK/smoke-streams.json" Snapclient Snapcast 2>&1)" || rc=$?
+        if [ "$rc" -eq 3 ]; then said "no snapclient stream in PipeWire now"
+        elif [ "$rc" -ne 0 ]; then noted "where snapclient plays is not checked: $snap"
+        else
+            eval "$snap"
+            if [ -z "$targets" ]; then noted "snapclient's stream (node $nodes) is linked to nothing"
+            elif ! tr ' ' '\n' <<< "$targets" | grep -qv '^speakerd:playback_'; then pass "snapclient plays into the speakerd sink"
+            else noted "snapclient plays into: $targets"; fi
+        fi
+    fi
 
     # No AudioPluginHost.
     local pids; pids="$(plugin_host_pids)"

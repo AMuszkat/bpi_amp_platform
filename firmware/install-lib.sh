@@ -5,7 +5,8 @@
 #   logging            info, ok, warn, die, loud (a warning nobody can miss)
 #   the board          board_target: [user@]host from BOARD_USER / BOARD_HOST, in the
 #                      environment or in firmware/local.mk (read, never executed)
-#   the bundle         make_bundle: what the installers copy to a board, from the build tree
+#   the bundle         make_bundle: what the installers copy to a board, from the build tree;
+#                      installed_setup: an installer's installed copy, for the hints
 #   the remote mode    remote_run: copy one bundle to the board, run an installer there
 #
 # The bundle is a folder:
@@ -165,6 +166,17 @@ copy_installers() {
 # A key of a bundle's VERSION file.
 version_value() {   # $1 = VERSION file, $2 = key
     sed -n "s/^$2=//p" "$1" 2> /dev/null | head -n 1
+}
+
+# An installer's installed copy, setup/ of the current version ($LIB/current/setup/$1, with the
+# caller's LIB and H), as a person types it on the board: with ~ when H is this user's home.
+# Never the running script's own path for a hint: it may be a bundle's, and the remote mode's
+# copy of the bundle (in ~/.cache) is removed when the run ends.
+installed_setup() {   # $1 = the script
+    local path="$LIB/current/setup/$1"
+    # shellcheck disable=SC2088  # a tilde for a person to read, not to expand here
+    if [ -n "${HOME:-}" ] && [ "$H" = "${HOME%/}" ]; then path="~/${path#"$H"/}"; fi
+    echo "$path"
 }
 
 # ---------------------------------------------------------------------------------------------

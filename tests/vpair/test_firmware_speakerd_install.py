@@ -32,7 +32,8 @@ Pass when:
   and graph.json and graph.lkg.json, there before, unchanged byte for byte; and it says every
   library speakerd and its plugins need is there; VERSION records speakerd's whole --version
   line (speakerd_build), the installed scripts are executable, and the installed
-  speakerd-setup.sh, called directly, says the status;
+  speakerd-setup.sh, called directly, says the status; its closing hints name the installed copy
+  (.local/lib/speakerd/current/setup/speakerd-setup.sh smoke and rollback), never the bundle's;
 - installing the same bundle again adds no version and changes nothing, but a device.json whose
   limits a person lifted (0 dB, tweeter on) is capped again, keeping its role and amplifier;
   --role right changes the role alone; one of --amplifier, --woofer-port, --tweeter-port
@@ -67,6 +68,10 @@ Pass when:
   device.json has those limits, and reports, each as a failure: a `device.json: FAILED` line,
   the limits line with either fail-safe suffix (or any other), speakerd's `NO INPUT SINK
   CONFIGURED` line, and no limits line at all;
+- smoke finds snapclient's stream by its application.name in pw-dump (snapclient 0.34.0's has no
+  node.name, so pw-link lists its ports under an empty name) and reads its links there: into the
+  speakerd sink passes, into another node (the amplifier) or into nothing warns, none is said; an
+  application.name on its client only, or a node.name naming it, counts too;
 - smoke reports speakerd's timing: from its status on the local link, read before and after the
   window, or (the link busy: ampd holds it) from its log's last `timing: last <n> s:` line, it
   prints each node's and the graph's mean and max; it fails when the graph's longest cycle took
@@ -87,15 +92,40 @@ Pass when:
   no temporary file is left beside client-rt.conf; with a running PipeWire, uninstall stops and
   disables snapclient when the restored routing's target (Ap.cap) is not there, and says the
   target exists when it is;
+- snapcast-setup.sh --mode target, through stand-ins for systemctl, loginctl, apt-get, curl, dpkg
+  and snapclient: a snapclient whose --help lists pipewire for --player has the player (said so,
+  with that line); without the line its program's text decides, and a --player line without
+  pipewire wins over it; it is downloaded and installed (the packaged system service disabled,
+  linger enabled) only when it lacks the player; the first run keeps a person's client-rt.conf as
+  client-rt.conf.orig, writes client-rt.conf and the unit and restarts snapclient, never
+  PipeWire; a second run with the same options downloads nothing, runs no apt, calls nothing that
+  changes anything, leaves every file of the home as it was and says "already set up, nothing
+  changed" in one line; another server address writes the unit alone, another route
+  client-rt.conf alone, each restarting snapclient; client-rt.conf.orig survives every later run;
+  a snapclient that started before its unit was written, or does not run, is restarted with
+  nothing written; --routing-only run twice writes nothing the second time and says so;
 - setup.sh checks before it changes: --dry-run changes nothing; --route speakerd without the
   pipewire component and without the sink, and --route plugin-host with the speakerd component,
   are refused before anything changes; and the components pipewire, snapcast (re-routing an
   installed snapclient) and speakerd install in that order;
+- setup.sh --only pipewire --base-conf installs the repository's pipewire.conf byte for byte,
+  whose graph (default.clock.rate) and amplifier (its audio.rate) are 48000 Hz and whose AirPlay
+  sink is 44100 Hz (the person's decision), and says those rates (with --dry-run too, which
+  writes nothing); --rate 44100 gives 44100 for the graph and the amplifier, leaves the AirPlay
+  sink at 44100, changes no other line, and warns that the shipped filters are designed for
+  48000 Hz; --rate 48000 gives the repository's file again, and the same run twice writes
+  nothing; it says when the running PipeWire runs at another rate; with --no-restart nothing is
+  restarted; the board's own pipewire.conf is kept as .orig once, and one the script installed
+  never is; a pipewire.conf whose amplifier runs at another rate than its graph is refused,
+  writing nothing, unless --rate sets both; --rate without --base-conf and --base-conf without
+  the pipewire component are refused;
 - under (stand-in) systemd, install fails unless speakerd, after its start, runs and says
   exactly the limits device.json gives: no line within the wait, an inactive service, a
   fail-safe suffix, a FAILED line and NO INPUT SINK CONFIGURED each fail it; `limits` and
   `rollback` restarting a speakerd that runs pass, although the old instance's `speakerd ended`
-  line precedes the new start, and fail on a `speakerd ended` after it; setup.sh stops on a
+  line precedes the new start, and fail on a `speakerd ended` after it; the same install again
+  (speakerd-setup.sh install, and setup.sh --only pipewire,speakerd) restarts neither PipeWire
+  nor speakerd and writes no file of the home; setup.sh stops on a
   PipeWire restart that fails, before anything is routed into speakerd; and, the whole
   architecture and --only pipewire alike, it refuses while the plugin host runs, restarting
   nothing, and with --stop-plugin-host stops it before it restarts PipeWire;
@@ -103,7 +133,10 @@ Pass when:
   side there, also for check (with the artifacts) and for --dry-run (the board-side dry run,
   which installs nothing), every argument arriving as given (a path with a space, a value with a
   semicolon that runs nothing), and the copy is removed afterwards; ssh as root is refused;
-  --allow-tweeter-without-crossover is refused before the stand-in ssh is called; and, for a
+  --allow-tweeter-without-crossover is refused before the stand-in ssh is called; setup.sh
+  --mode target-remote --only speakerd ends with hints that name
+  ~/.local/lib/speakerd/current/setup/speakerd-setup.sh (smoke, rollback), not the bundle's
+  copy in ~/.cache, which is gone; and, for a
   host that is not a test's (.invalid), the remote mode applies the deploy gate before it calls
   ssh: refused outside a git checkout, without a readable test status for HEAD, with a red one or
   one from a dirty tree, on a dirty tree, and while a lab lock exists, as tools/status.py gate
@@ -137,6 +170,9 @@ CAPPED = {"gain_db": -20.0, "tweeter": "muted"}
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
 LIMITS = "speakerd: device: limits: output at -20 dB, tweeter muted"
 AMPD_LISTENING = "ampd: listening on 0.0.0.0: control 7450, knobs 7451, monitor 7452"
+# A client-rt.conf a person wrote, before any of the installers ran.
+PERSONS_ROUTING = ('# a person\'s own routing\nstream.rules = [ { matches = [ { application.name = "Snapclient" } ] '
+                   'actions = { update-props = { target.object = "Ap.cap" } } } ]\n')
 
 # Stand-ins for systemctl, journalctl and loginctl (by the name they are called), for the
 # installers' systemd path: each call is recorded in $FAKE_SYSTEMD/calls; is-active answers
@@ -192,6 +228,81 @@ cd "$HOME" || exit 255
 if [ "$(id -u)" = 0 ]; then exec setpriv --reuid=65534 --regid=65534 --clear-groups bash -c "$*"; fi
 exec bash -c "$*"
 '''
+
+
+# Stand-ins for what snapcast-setup.sh's target mode calls on a board (by the name they are
+# called): systemctl (the system's and --user), loginctl, apt-get, curl, dpkg and dpkg-query. Each
+# call is recorded in $FAKE_CLIENT/calls. The user's snapclient unit is $FAKE_CLIENT/active,
+# enabled and started (its main process's start, as systemd shows it), which a restart sets;
+# linger is $FAKE_CLIENT/linger; the packaged system snapclient system-active and system-enabled.
+# curl answers the release's assets (one with-pipewire .deb for this machine's codename) or writes
+# the download; apt-get install puts $FAKE_CLIENT/help-installed into the stand-in snapclient's
+# --help and $FAKE_CLIENT/version-installed into its version.
+FAKE_CLIENT_TOOLS = r'''#!/bin/bash
+name="$(basename "$0")"; d="${FAKE_CLIENT:?}"
+echo "$name $*" >> "$d/calls"
+state() { cat "$d/$1" 2> /dev/null || echo "$2"; }
+case "$name" in
+    loginctl)
+        case " $* " in
+            *" show-user "*) state linger no ;;
+            *" enable-linger "*) echo yes > "$d/linger" ;;
+        esac ;;
+    curl)
+        out=""; prev=""
+        for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
+        if [ -n "$out" ]; then echo "a .deb" > "$out"
+        else
+            codename="$(. /etc/os-release; echo "$VERSION_CODENAME")"
+            echo "{\"assets\": [{\"browser_download_url\": \"https://github.invalid/snapclient_0.34.0-1_arm64_${codename}_with-pipewire.deb\"}]}"
+        fi ;;
+    apt-get)
+        case " $* " in *" install "*) cp "$d/help-installed" "$d/help"; cp "$d/version-installed" "$d/version" ;; esac ;;
+    dpkg) case " $* " in *" --print-architecture "*) echo arm64 ;; esac ;;
+    dpkg-query) state version unknown ;;
+    systemctl)
+        if [[ " $* " == *" --user "* ]]; then
+            case " $* " in
+                *" show "*snapclient*)
+                    echo "ActiveState=$(state active inactive)"; echo "UnitFileState=$(state enabled disabled)"
+                    echo "NeedDaemonReload=no"; echo "ExecMainStartTimestamp=$(state started n/a)" ;;
+                *" restart "*snapclient*)
+                    echo active > "$d/active"; TZ=UTC date '+%a %Y-%m-%d %H:%M:%S UTC' > "$d/started" ;;
+                *" enable "*snapclient*) echo enabled > "$d/enabled" ;;
+            esac
+        else
+            case " $* " in
+                *" show "*snapclient*)
+                    echo "ActiveState=$(state system-active inactive)"; echo "UnitFileState=$(state system-enabled disabled)" ;;
+                *" disable "*snapclient*) echo inactive > "$d/system-active"; echo disabled > "$d/system-enabled" ;;
+            esac
+        fi ;;
+esac
+exit 0
+'''
+
+# A stand-in snapclient: its --help is $FAKE_CLIENT/help, its --version says $FAKE_CLIENT/version
+# as snapclient does. MARK is replaced by a line of its program's text.
+FAKE_SNAPCLIENT = r'''#!/bin/bash
+d="${FAKE_CLIENT:?}"
+echo "snapclient $*" >> "$d/calls"
+# MARK
+case " $* " in
+    *" --help "*) cat "$d/help" ;;
+    *" --version "*) echo "snapclient v$(cat "$d/version")"; echo "Copyright (C) 2014-2025 BadAix." ;;
+esac
+'''
+
+# snapclient 0.34.0's --help (the with-pipewire build), around its --player line, and an older
+# one's without the pipewire player.
+HELP_WITH_PIPEWIRE = """Usage: snapclient [options...] [url]
+
+ --logsink arg                 log sink [null,system,stdout,stderr,file:<filename>]
+  -p, --player arg (=alsa)     alsa|pipewire|file[:<options>|?]
+  -s, --soundcard arg (=default)
+                               index or name of the pcm device
+"""
+HELP_WITHOUT_PIPEWIRE = HELP_WITH_PIPEWIRE.replace("alsa|pipewire|file", "alsa|file")
 
 
 def tree(root):
@@ -419,6 +530,10 @@ class Install(Setup):
                          (FIRMWARE / "pipewire/pipewire.conf.d/60-speakerd-sink.conf").read_bytes())
         self.assertEqual((state / "graph.json").read_text(), '{"ampd": "current"}')
         self.assertEqual((state / "graph.lkg.json").read_text(), '{"ampd": "last known good"}')
+        # The closing hints name the installed copy, never the bundle the installer ran from.
+        for action in ("smoke", "rollback"):
+            self.assertIn(f"{home}/.local/lib/speakerd/current/setup/speakerd-setup.sh {action}", result.stdout)
+        self.assertNotIn(f"{FIRMWARE}/speakerd-setup.sh smoke", result.stdout)
 
     def test_a_reinstall_keeps_the_device_and_caps_it_again(self):
         home = self.fresh_home("reinstall")
@@ -785,6 +900,73 @@ class Install(Setup):
         self.assertIn("FAIL device.json cannot be read", result.stdout)
         self.assertRegex(result.stdout, r"smoke: \d+ failed")
 
+    def test_smoke_finds_snapclient_by_its_application_name(self):
+        """snapclient 0.34.0's stream has no node.name (pw-link lists its ports under an empty
+        name): smoke finds it by application.name in pw-dump and reads its links there."""
+        home = self.fresh_home("smoke-snapclient")
+        self.install(home, "--role", "left")
+        log = self.tmp / "smoke-snapclient.log"
+        log.write_text("speakerd-run: starting speakerd x from layer current (test)\n" + LIMITS + "\n")
+
+        def node(i, **props):
+            return {"id": i, "type": "PipeWire:Interface:Node", "info": {"props": props}}
+
+        def port(i, node_id, direction, name):
+            return {"id": i, "type": "PipeWire:Interface:Port",
+                    "info": {"direction": direction, "props": {"node.id": node_id, "port.name": name}}}
+
+        def link(i, src, src_port, dst, dst_port):
+            return {"id": i, "type": "PipeWire:Interface:Link",
+                    "info": {"output-node-id": src, "output-port-id": src_port, "input-node-id": dst,
+                             "input-port-id": dst_port, "state": "active"}}
+
+        sinks = [node(30, **{"node.name": "speakerd", "factory.name": "support.null-audio-sink",
+                             "media.class": "Audio/Sink", "priority.session": 1500, "priority.driver": 0}),
+                 port(31, 30, "input", "playback_FL"), port(32, 30, "input", "playback_FR"),
+                 node(40, **{"node.name": "amplifier", "factory.name": "support.null-audio-sink",
+                             "media.class": "Audio/Sink"}),
+                 port(41, 40, "input", "playback_FL"), port(42, 40, "input", "playback_FR"),
+                 {"id": 70, "type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"},
+                  "metadata": [{"subject": 0, "key": "default.audio.sink", "value": {"name": "speakerd"}}]}]
+        # As on the board: no node.name, application.name Snapclient.
+        stream = [node(50, **{"application.name": "Snapclient", "media.class": "Stream/Output/Audio",
+                              "target.object": "speakerd"}),
+                  port(51, 50, "output", "output_FL"), port(52, 50, "output", "output_FR")]
+        pw = self.tmp / "smoke-snapclient-pipewire"
+        for tool in ("pw-dump", "pw-link", "pw-profiler"):
+            write_script(pw / "bin" / tool, '#!/bin/bash\nd="${FAKE_PIPEWIRE:?}"\ncase "$(basename "$0")" in\n'
+                                            '    pw-dump) cat "$d/dump.json" ;;\n    pw-link) cat "$d/links" ;;\nesac\n')
+        env = dict(self.env, FAKE_PIPEWIRE=str(pw), PATH=f"{pw / 'bin'}:{os.environ['PATH']}")
+        cases = {"into speakerd": (stream + [link(60, 50, 51, 30, 31), link(61, 50, 52, 30, 32)],
+                                   "\n  |-> speakerd:playback_FL\n\n  |-> speakerd:playback_FR\n",
+                                   "pass snapclient plays into the speakerd sink"),
+                 "elsewhere": (stream + [link(60, 50, 51, 40, 41), link(61, 50, 52, 40, 42)],
+                               "\n  |-> amplifier:playback_FL\n\n  |-> amplifier:playback_FR\n",
+                               "warn snapclient plays into: amplifier:playback_FL amplifier:playback_FR"),
+                 "linked to nothing": (stream, "", "warn snapclient's stream (node 50) is linked to nothing"),
+                 "none": ([], "", "info no snapclient stream in PipeWire now")}
+        for name, (extra, links, said) in cases.items():
+            with self.subTest(name):
+                (pw / "dump.json").write_text(json.dumps(sinks + extra))
+                (pw / "links").write_text(links)
+                result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                                  "--window", "0", env=env, check=False)
+                print(f"\n  {name}: " + next((line.strip() for line in result.stdout.splitlines() if "snapclient" in line), "-"))
+                self.assertIn(said, result.stdout)
+                if name != "none":
+                    self.assertNotIn("no snapclient stream", result.stdout)
+
+        # Its application.name may be on its client only; a node.name naming it, with none, counts too.
+        dump = self.tmp / "stream-dump.json"
+        for props, client in (({"client.id": 80, "media.class": "Stream/Output/Audio"}, {"application.name": "Snapclient"}),
+                              ({"node.name": "Snapcast", "media.class": "Stream/Output/Audio"}, {})):
+            dump.write_text(json.dumps([node(50, **props), {"id": 80, "type": "PipeWire:Interface:Client",
+                                                            "info": {"props": client}}]))
+            found = subprocess.run(["python3", str(FIRMWARE / "speakerd/setup-helper.py"), "stream", str(dump),
+                                    "Snapclient", "Snapcast"], capture_output=True, text=True)
+            self.assertEqual(found.returncode, 0, found.stderr)
+            self.assertIn("nodes='50'", found.stdout)
+
     def test_smoke_reports_the_timing(self):
         home = self.fresh_home("smoke-timing")
         self.install(home, "--role", "left")
@@ -1021,6 +1203,215 @@ class Install(Setup):
         self.assertTrue((home / ".local/lib/speakerd/current").is_symlink())
 
 
+def pipewire_conf_rates(text):
+    """The rates a pipewire.conf sets, read here, not with setup.sh's reader: (default.clock.rate,
+    default.clock.allowed-rates or None, [{factory.name, node.name, audio.rate}] of each object
+    that sets audio.rate). Commented lines are skipped."""
+    graph, allowed, objects, current = None, None, [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if re.match(r"\{?\s*factory\s*=", line):
+            current = {"factory.name": None, "node.name": None, "audio.rate": None}
+            objects.append(current)
+        for key in ("factory.name", "node.name", "audio.rate"):
+            m = re.match(re.escape(key) + r'\s*=\s*"?([^"\s]+)"?', line)
+            if m and current is not None:
+                current[key] = m.group(1)
+        m = re.match(r"default\.clock\.rate\s*=\s*(\d+)", line)
+        if m:
+            graph = int(m.group(1))
+        m = re.match(r"default\.clock\.allowed-rates\s*=\s*\[([^\]]*)\]", line)
+        if m:
+            allowed = [int(x) for x in m.group(1).split()]
+    return graph, allowed, [o for o in objects if o["audio.rate"] is not None]
+
+
+def snapshot(root):
+    """Every file under `root` with its modification time and content: what a run that writes
+    nothing leaves as it was."""
+    return {str(p.relative_to(root)): (p.stat().st_mtime_ns, p.read_bytes())
+            for p in sorted(Path(root).rglob("*")) if p.is_file()}
+
+
+def changing(calls):
+    """The calls of FAKE_CLIENT_TOOLS that change something: all but systemctl show, loginctl
+    show-user, dpkg-query and snapclient's --help and --version."""
+    def reads(call):
+        words = call.split()
+        return (words[0] in ("snapclient", "dpkg-query") or words[:2] == ["loginctl", "show-user"]
+                or (words[0] == "systemctl" and "show" in words))
+    return [call for call in calls if not reads(call)]
+
+
+class SnapcastTarget(Setup):
+    """snapcast-setup.sh --mode target (the client on a board) through stand-ins for what it calls
+    there: it checks before it changes, and a second run with the same options changes nothing."""
+
+    SERVER = "192.0.2.10"
+
+    def client(self, name, help=HELP_WITH_PIPEWIRE, version="0.34.0", mark="", linger="yes", running=True):
+        """The stand-ins, and a home with the speakerd sink configured and a person's own
+        client-rt.conf. With `running`, snapclient's user unit is enabled and has run since 2020."""
+        d = self.tmp / f"client-{name}"
+        shutil.rmtree(d, ignore_errors=True)
+        for tool in ("systemctl", "loginctl", "apt-get", "curl", "dpkg", "dpkg-query"):
+            write_script(d / "bin" / tool, FAKE_CLIENT_TOOLS)
+        write_script(d / "bin/snapclient", FAKE_SNAPCLIENT.replace("# MARK", mark))
+        (d / "help").write_text(help)
+        (d / "version").write_text(version)
+        (d / "help-installed").write_text(HELP_WITH_PIPEWIRE)
+        (d / "version-installed").write_text("0.34.0")
+        (d / "linger").write_text(linger)
+        if running:
+            (d / "active").write_text("active")
+            (d / "enabled").write_text("enabled")
+            (d / "started").write_text("Mon 2020-01-06 10:00:00 UTC")
+        home = self.fresh_home(f"home-client-{name}")
+        firmware("speakerd-setup.sh", "sink", "--home", home, "--no-systemd", env=self.env)
+        (home / ".config/pipewire/client-rt.conf").write_text(PERSONS_ROUTING)
+        return d, home, dict(self.env, FAKE_CLIENT=str(d), PATH=f"{d / 'bin'}:{os.environ['PATH']}")
+
+    def target(self, d, home, env, *args, server=SERVER, route="speakerd"):
+        """One --mode target run; returns its output and the calls it made."""
+        (d / "calls").write_text("")
+        out = firmware("snapcast-setup.sh", "--mode", "target", "--client-home", home, "--server-ip", server,
+                       "--route", route, *args, env=env).stdout
+        return out, (d / "calls").read_text().splitlines()
+
+    def test_a_second_run_changes_nothing(self):
+        d, home, env = self.client("again")
+        crt = home / ".config/pipewire/client-rt.conf"
+        orig = home / ".config/pipewire/client-rt.conf.orig"
+        unit = home / ".config/systemd/user/snapclient.service"
+
+        # The board as the person found it: snapclient 0.34.0 with the pipewire player, running.
+        out, calls = self.target(d, home, env)
+        self.assertIn("snapclient 0.34.0 has the pipewire player (its --help: -p, --player arg (=alsa) "
+                      "alsa|pipewire|file[:<options>|?]): nothing to install", out)
+        self.assertEqual([c for c in calls if c.split()[0] in ("curl", "apt-get", "dpkg")], [], out)
+        # client-rt.conf and the unit are snapclient's: PipeWire is not restarted for them.
+        self.assertEqual([c for c in calls if "pipewire" in c or "wireplumber" in c], [], out)
+        self.assertEqual(changing(calls), ["systemctl --user daemon-reload", "systemctl --user restart snapclient.service"],
+                         out)
+        self.assertEqual(orig.read_text(), PERSONS_ROUTING)
+        self.assertIn('target.object = "speakerd"', crt.read_text())
+        self.assertIn(f"--host {self.SERVER} --player pipewire", unit.read_text())
+        self.assertIn("Environment=PIPEWIRE_CONFIG_NAME=client-rt.conf", unit.read_text())
+
+        # Again, the same: nothing downloaded, no apt, nothing written, nothing restarted; said so.
+        before = snapshot(home)
+        out, calls = self.target(d, home, env)
+        print("\n  " + "\n  ".join(out.splitlines()[-3:]))
+        self.assertIn(f"snapclient 0.34.0 with the pipewire player, server {self.SERVER}, route speakerd: already set up, "
+                      "nothing changed", out)
+        self.assertEqual(changing(calls), [], out)
+        for said in ("Wrote ", "Kept ", "Backed up", "restarted", "Enabled"):
+            self.assertNotIn(said, out)
+        self.assertEqual(snapshot(home), before)
+
+        # Another server: the unit alone, and snapclient restarted for it.
+        out, calls = self.target(d, home, env, server="192.0.2.11")
+        self.assertIn(f"Wrote {unit}", out)
+        self.assertNotIn(f"Wrote {crt}", out)
+        self.assertEqual(changing(calls), ["systemctl --user daemon-reload", "systemctl --user restart snapclient.service"],
+                         out)
+        self.assertIn("server 192.0.2.11, route speakerd: changed: the snapclient unit (server 192.0.2.11); "
+                      "snapclient restarted", out)
+
+        # Another route: client-rt.conf alone; the person's .orig survives every run.
+        out, calls = self.target(d, home, env, server="192.0.2.11", route="plugin-host")
+        self.assertIn(f"Wrote {crt}", out)
+        self.assertNotIn(f"Wrote {unit}", out)
+        self.assertEqual(changing(calls), ["systemctl --user restart snapclient.service"], out)
+        self.assertIn('target.object = "Ap.cap"', crt.read_text())
+        self.assertEqual(orig.read_text(), PERSONS_ROUTING)
+        self.target(d, home, env, server="192.0.2.11")
+        self.assertEqual(orig.read_text(), PERSONS_ROUTING, "a later run overwrote the person's client-rt.conf.orig")
+
+        # A snapclient that started before what it reads was written (a run with --no-restart, a
+        # person's edit), or that does not run, is restarted; nothing is written.
+        for state, said in (("started", "it started before snapclient.service was last written"),
+                            ("active", "it does not run")):
+            (d / "active").write_text("active")
+            (d / "started").write_text("Mon 2020-01-06 10:00:00 UTC" if state == "started" else
+                                       subprocess.run(["date", "-u", "+%a %Y-%m-%d %H:%M:%S UTC"], capture_output=True,
+                                                      text=True).stdout.strip())
+            if state == "active":
+                (d / "active").write_text("inactive")
+            before = snapshot(home)
+            out, calls = self.target(d, home, env, server="192.0.2.11")
+            self.assertEqual(changing(calls), ["systemctl --user restart snapclient.service"], out)
+            self.assertIn(said, out)
+            self.assertEqual(snapshot(home), before)
+
+    def test_snapclient_is_installed_once(self):
+        """A snapclient without the pipewire player: the with-pipewire .deb is downloaded and
+        installed, the packaged system service disabled and linger enabled, once."""
+        d, home, env = self.client("install", help=HELP_WITHOUT_PIPEWIRE, version="0.26.0", linger="no", running=False)
+        (d / "system-active").write_text("active")
+        (d / "system-enabled").write_text("enabled")
+        out, calls = self.target(d, home, env)
+        print("\n  " + "\n  ".join(line for line in out.splitlines() if "snapclient" in line and "pipewire player" in line))
+        self.assertIn("snapclient 0.26.0 lacks the pipewire player (its --help: -p, --player arg (=alsa) "
+                      "alsa|file[:<options>|?])", out)
+        self.assertIn("Installed snapclient 0.34.0 with the pipewire player (its --help: -p, --player arg (=alsa) "
+                      "alsa|pipewire|file[:<options>|?])", out)
+        for want in ("curl", "apt-get", "dpkg", "systemctl disable --now snapclient.service", "loginctl enable-linger",
+                     "systemctl --user enable snapclient.service", "systemctl --user restart snapclient.service"):
+            self.assertTrue([c for c in calls if c.startswith(want)], f"no {want}:\n{out}")
+
+        before = snapshot(home)
+        out, calls = self.target(d, home, env)
+        self.assertEqual(changing(calls), [], out)
+        self.assertIn(f"snapclient 0.34.0 with the pipewire player, server {self.SERVER}, route speakerd: already set up, "
+                      "nothing changed", out)
+        self.assertEqual(snapshot(home), before)
+
+    def test_how_the_player_is_found(self):
+        """Its --help's --player line decides; without one, its program's text (or its libraries)."""
+        cases = (("no-player-line", "Usage: snapclient [options...]\n  -h, --help  this help\n",
+                  "# a build with pipewire_player", "has the pipewire player (its --help names no --player; its "
+                  "program names pipewire_player)"),
+                 ("help-wins", HELP_WITHOUT_PIPEWIRE, "# a build with pipewire_player",
+                  "lacks the pipewire player (its --help: -p, --player arg (=alsa) alsa|file[:<options>|?])"),
+                 ("nothing", "Usage: snapclient [options...]\n", "",
+                  "lacks the pipewire player (its --help names no --player, it does not link libpipewire-0.3 and its "
+                  "program does not name pipewire_player)"))
+        for name, help, mark, said in cases:
+            with self.subTest(name):
+                d, home, env = self.client(f"player-{name}", help=help, mark=mark)
+                out, calls = self.target(d, home, env, "--no-install")
+                self.assertIn(said, out)
+                self.assertEqual([c for c in calls if c.split()[0] in ("curl", "apt-get")], [], out)
+
+    def test_routing_only_twice_changes_nothing(self):
+        home = self.fresh_home("routing-twice")
+        unit = home / ".config/systemd/user/snapclient.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=client-rt.conf\nExecStart=/usr/bin/snapclient\n")
+        firmware("speakerd-setup.sh", "sink", "--home", home, "--no-systemd", env=self.env)
+        crt = home / ".config/pipewire/client-rt.conf"
+        crt.write_text(PERSONS_ROUTING)
+
+        def route(name):
+            return firmware("snapcast-setup.sh", "--mode", "target", "--routing-only", "--route", name,
+                            "--client-home", home, env=self.env).stdout
+
+        first = route("speakerd")
+        self.assertIn(f"Wrote {crt}", first)
+        before = snapshot(home)
+        again = route("speakerd")
+        self.assertIn("snapclient's routing into speakerd (client-rt.conf, --route speakerd): already set up, nothing "
+                      "changed", again)
+        self.assertNotIn("Wrote ", again)
+        self.assertEqual(snapshot(home), before)
+        route("plugin-host")
+        route("speakerd")
+        self.assertEqual((home / ".config/pipewire/client-rt.conf.orig").read_text(), PERSONS_ROUTING)
+
+
 class Systemd(Setup):
     """The systemd path, with stand-ins for systemctl, journalctl and loginctl."""
 
@@ -1106,6 +1497,30 @@ class Systemd(Setup):
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("speakerd is not running after its start", result.stdout)
 
+    def test_a_reinstall_restarts_nothing(self):
+        """The same bundle and options again, through speakerd-setup.sh and through setup.sh: the
+        drop-in is the same, so PipeWire is not restarted; nothing speakerd reads changed, so it is
+        not restarted either; no file of the home is written."""
+        d, env = self.systemd("reinstall", ["speakerd-run: starting speakerd x from layer current (test)", LIMITS])
+        home = self.fresh_home("home-reinstall")
+        install = ("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home, "--role", "left",
+                   "--amplifier", "amplifier")
+        firmware(*install, env=env)
+        calls = (d / "calls").read_text()
+        self.assertIn("systemctl --user restart pipewire.service wireplumber.service", calls)
+        self.assertIn("systemctl --user restart speakerd.service", calls)
+        for again in (install, ("setup.sh", "--only", "pipewire,speakerd", "--bundle", self.bundle, "--home", home,
+                                "--role", "left", "--amplifier", "amplifier")):
+            with self.subTest(again[0]):
+                (d / "calls").write_text("")
+                before = snapshot(home)
+                result = firmware(*again, env=env)
+                calls = (d / "calls").read_text().splitlines()
+                self.assertEqual([c for c in calls if re.search(r" (restart|daemon-reload|stop|start)( |$)", c)], [],
+                                 result.stdout)
+                self.assertIn("Nothing changed: speakerd keeps running", result.stdout)
+                self.assertEqual(snapshot(home), before)
+
     def test_setup_stops_on_a_failed_pipewire_restart(self):
         d, env = self.systemd("restart-fails", fail=["restart pipewire.service"])
         home = self.fresh_home("home-restart-fails")
@@ -1150,6 +1565,115 @@ class Systemd(Setup):
                 self.assertTrue(restarts, calls)
                 self.assertTrue(all(line.endswith("runs: no") for line in restarts), calls)
 
+    def test_setup_installs_the_base_conf_at_its_rate(self):
+        """setup.sh --only pipewire --base-conf: the repository's pipewire.conf, the graph and the
+        amplifier at 48000 Hz or at --rate's, the AirPlay sink at 44100 whatever --rate says;
+        nothing restarts with --no-restart (the stand-in systemctl records every call)."""
+        repo = (FIRMWARE / "pipewire/pipewire.conf").read_text()
+
+        def rates(text):
+            graph, allowed, objects = pipewire_conf_rates(text)
+            amplifier = [o["audio.rate"] for o in objects if o["factory.name"] == "api.alsa.pcm.sink"]
+            airplay = [o["audio.rate"] for o in objects if o["node.name"] == "AirPlay-sink"]
+            return graph, allowed, amplifier, airplay, len(objects)
+
+        # The repository's file itself (the person's decisions, 2026-11-01): the graph and the
+        # amplifier at 48000, the AirPlay sink left at 44100; no other object sets a rate.
+        self.assertEqual(rates(repo), (48000, None, ["48000"], ["44100"], 2))
+
+        d, env = self.systemd("base-conf")
+        # PipeWire says it runs at 44100 now (a stand-in pw-metadata).
+        write_script(d / "bin/pw-metadata", "#!/bin/sh\necho 'Found \"settings\" metadata 32'\n"
+                     "echo \"update: id:0 key:'clock.rate' value:'44100' type:''\"\n")
+        boards_own = "# the board's own pipewire.conf\ncontext.properties = { default.clock.rate = 48000 }\n"
+        for name, folder, own in (("no own file", "home-base-conf-new", None),
+                                  ("the board's own", "home-base-conf-own", boards_own)):
+            with self.subTest(name):
+                home = self.fresh_home(folder)
+                conf = home / ".config/pipewire/pipewire.conf"
+                conf.parent.mkdir(parents=True)
+                if own:
+                    conf.write_text(own)
+                args = ("setup.sh", "--home", home, "--only", "pipewire", "--base-conf", "--no-restart")
+
+                before = snapshot(home)
+                dry = firmware(*args, "--dry-run", env=env).stdout
+                self.assertRegex(dry, r"\(dry-run\) would install firmware/pipewire/pipewire\.conf as \S+: "
+                                      r"the graph and \S+ at 48000 Hz, AirPlay-sink at 44100 Hz")
+                self.assertEqual(snapshot(home), before)
+
+                for rate, expected in ((None, 48000), ("44100", 44100), ("48000", 48000)):
+                    out = firmware(*args, *(("--rate", rate) if rate else ()), env=env).stdout
+                    text = conf.read_text()
+                    self.assertEqual(rates(text), (expected, None, [str(expected)], ["44100"], 2), out)
+                    # Only the graph's rate and the amplifier's differ from the repository's file.
+                    self.assertEqual(len(text.splitlines()), len(repo.splitlines()))
+                    changed = [(a, b) for a, b in zip(repo.splitlines(), text.splitlines()) if a != b]
+                    self.assertEqual(len(changed), 0 if expected == 48000 else 2, changed)
+                    for a, b in changed:
+                        self.assertEqual(a.replace("48000", str(expected)), b)
+                    if expected == 48000:
+                        self.assertEqual(text, repo)
+                    self.assertRegex(out, rf"Wrote \S+pipewire\.conf: the graph and \S+ at {expected} Hz, "
+                                          r"AirPlay-sink at 44100 Hz")
+                    if expected != 48000:
+                        self.assertIn("filters, designed for 48000 Hz, run with every frequency scaled by", out)
+                    if expected != 44100:
+                        self.assertIn("PipeWire runs at 44100 Hz now; with this pipewire.conf it runs at "
+                                      f"{expected} Hz once it restarts", out)
+                    else:
+                        self.assertNotIn("PipeWire runs at 44100 Hz now", out)
+                    self.assertIn("PipeWire needs a restart for the new configuration (not done", out)
+
+                # The same again writes nothing.
+                before = snapshot(home)
+                out = firmware(*args, env=env).stdout
+                self.assertIn("pipewire.conf is the repository's already: the graph and", out)
+                self.assertEqual(snapshot(home), before)
+                orig = conf.with_name("pipewire.conf.orig")
+                if own:
+                    self.assertEqual(orig.read_text(), own)
+                else:
+                    self.assertFalse(orig.exists(), "the repository's pipewire.conf was kept as the board's own")
+        calls = (d / "calls").read_text() if (d / "calls").exists() else ""
+        self.assertEqual([c for c in calls.splitlines() if re.search(r" (restart|try-restart|reload|stop|start)( |$)", c)],
+                         [], calls)
+
+        # A pipewire.conf whose amplifier runs at another rate than its graph is refused, writing
+        # nothing; --rate sets both. A copy of setup.sh with such a file beside it, routed to the
+        # plugin host so that it needs no speakerd sink (and no speakerd-setup.sh).
+        copy = self.tmp / "firmware-mixed-rates"
+        shutil.rmtree(copy, ignore_errors=True)
+        (copy / "pipewire").mkdir(parents=True)
+        for script in ("setup.sh", "install-lib.sh"):
+            shutil.copy2(FIRMWARE / script, copy / script)
+        at = repo.index("api.alsa.pcm.sink")
+        at = repo.index("audio.rate             = 48000", at)
+        mixed = repo[:at] + "audio.rate             = 44100" + repo[at + len("audio.rate             = 48000"):]
+        (copy / "pipewire/pipewire.conf").write_text(mixed)
+        home = self.fresh_home("home-base-conf-mixed")
+        home.mkdir()
+
+        def run(*extra):
+            return subprocess.run(["bash", str(copy / "setup.sh"), "--home", str(home), "--only", "pipewire",
+                                   "--route", "plugin-host", "--base-conf", "--no-restart", "--no-systemd", *extra],
+                                  env={**os.environ, **TEST_ENV, **self.env}, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+        refused = run()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertRegex(refused.stdout, r"would run the graph at 48000 Hz but the amplifier \S+ at 44100 Hz")
+        self.assertEqual(snapshot(home), {})
+        accepted = run("--rate", "48000")
+        self.assertEqual(accepted.returncode, 0, accepted.stdout)
+        self.assertEqual((home / ".config/pipewire/pipewire.conf").read_text(), repo)
+
+        # --rate is --base-conf's, and --base-conf the pipewire component's.
+        for extra, said in ((("--only", "pipewire", "--rate", "44100"), "--rate needs --base-conf"),
+                            (("--only", "speakerd", "--base-conf"), "belong to the pipewire component")):
+            refused = firmware("setup.sh", "--home", self.fresh_home("home-base-conf-refused"), *extra,
+                               env=self.env, check=False)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn(said, refused.stdout)
 
 class Remote(Setup):
     """The remote mode through a stand-in ssh, and the board script with --dry-run."""
@@ -1261,6 +1785,34 @@ class Remote(Setup):
         result = status()
         self.assertIn(host, (board / "hosts").read_text(), result.stdout)
         self.assertIn("the deploy gate: green", result.stdout)
+
+    def test_the_hints_name_the_installed_copy(self):
+        """setup.sh --mode target-remote --only speakerd, as the person ran it: the closing hints
+        name ~/.local/lib/speakerd/current/setup/, not the bundle's copy in ~/.cache, which is
+        gone when the run ends. The board's side runs with stand-ins for systemctl, journalctl and
+        loginctl, and for getent, whose passwd gives the stand-in board's home."""
+        board, env = self.board("hints")
+        write_script(board / "bin/getent", '#!/bin/bash\nif [ "$1" = passwd ]; then\n'
+                                           '    echo "$(id -un):x:$(id -u):$(id -g)::${FAKE_BOARD:?}/home:/bin/bash"; exit 0\n'
+                                           'fi\nexec /usr/bin/getent "$@"\n')
+        for tool in ("systemctl", "journalctl", "loginctl"):
+            write_script(board / "bin" / tool, FAKE_SYSTEMD)
+        state = board / "systemd"
+        state.mkdir()
+        if os.geteuid() == 0:
+            shutil.chown(state, 65534, 65534)
+        result = firmware("setup.sh", "--mode", "target-remote", "--target-host", "user@bpi-amp.invalid", "--only",
+                          "speakerd", "--role", "left", "--amplifier", "amplifier", "--no-restart", "--arch", "native",
+                          "--plugin", "loudness:headless", env=dict(env, FAKE_SYSTEMD=str(state)), check=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        hints = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("- ")]
+        print("\n  " + "\n  ".join(hints))
+        installed = "~/.local/lib/speakerd/current/setup/speakerd-setup.sh"
+        self.assertTrue(any(line.endswith(f": {installed} smoke") for line in hints), result.stdout)
+        self.assertTrue(any(line.endswith(f": {installed} rollback") for line in hints), result.stdout)
+        self.assertFalse([line for line in hints if ".cache" in line], result.stdout)
+        self.assertTrue((board / "home/.local/lib/speakerd/current/setup/speakerd-setup.sh").is_file())
+        self.assertEqual(list((board / "home/.cache").iterdir()), [], "the bundle was left on the board")
 
     def test_not_as_root(self):
         board, env = self.board("root")

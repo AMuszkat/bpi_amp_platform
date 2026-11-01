@@ -11,6 +11,8 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
     setup-helper.py write FILE                     stdin to FILE, atomically
     setup-helper.py drivers PROFILER_OUTPUT DUMP   which node drives which, from pw-profiler
     setup-helper.py sink DUMP                      the live speakerd sink: the drop-in's? the default sink
+    setup-helper.py stream DUMP NAME...            an application's playback streams (application.name
+                                                   NAME) and what their outputs are linked to (exit 3: none)
     setup-helper.py status SOCKET                  speakerd's `status` through its local link, as JSON
                                                    (exits 3 when another client holds the link: ampd)
     setup-helper.py timing --limit F [--before FILE] [--after FILE] [--window-log FILE]
@@ -194,6 +196,44 @@ def cmd_sink(args):
     print(f"dropin={'yes' if node_id is not None and not wrong else 'no'}")
     print(f"differs={quote('; '.join(wrong))}")
     print(f"default_sink={quote(default)}")
+
+
+def cmd_stream(args):
+    """Where an application's playback streams play: its Stream/Output nodes and the node and port
+    each of their output ports is linked to, all from the pw-dump (never from pw-link, which
+    names a port by its node's node.name: snapclient 0.34.0's stream has none, so pw-link prints
+    its ports under an empty name). A stream is the application's when its node's (or its
+    client's) application.name is one of NAMES, case aside, or, with no application.name, its
+    node.name contains one. Exits 3 when it has none."""
+    dump = load_json(args[0], "the pw-dump")
+    names = [name.lower() for name in args[1:]]
+    nodes, ports = nodes_and_ports(dump)
+    clients = {obj["id"]: (obj.get("info") or {}).get("props") or {}
+               for obj in dump if obj.get("type") == "PipeWire:Interface:Client"}
+
+    def application(props):
+        name = props.get("application.name") or clients.get(props.get("client.id"), {}).get("application.name")
+        if name:
+            return str(name).lower() in names
+        return any(n in str(props.get("node.name", "")).lower() for n in names)
+
+    streams = sorted(i for i, p in nodes.items()
+                     if str(p.get("media.class", "")).startswith("Stream/Output") and application(p))
+    if not streams:
+        sys.exit(3)
+    targets = []
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Link":
+            continue
+        info = obj.get("info") or {}
+        if info.get("output-node-id") not in streams:
+            continue
+        node = nodes.get(info.get("input-node-id"), {})
+        port = ports.get(info.get("input-port-id"), (None, {}))[1]
+        targets.append(f"{node.get('node.name') or 'node ' + str(info.get('input-node-id'))}:"
+                       f"{port.get('port.name') or 'port ' + str(info.get('input-port-id'))}")
+    print(f"nodes={quote(' '.join(map(str, streams)))}")
+    print(f"targets={quote(' '.join(sorted(targets)))}")
 
 
 def cmd_drivers(args):
@@ -550,7 +590,7 @@ def cmd_write(args):
 
 COMMANDS = {"amp": (cmd_amp, 1), "node": (cmd_node, 2), "device": (cmd_device, 1), "sink": (cmd_sink, 1),
             "graph": (cmd_graph, 1), "write": (cmd_write, 1), "drivers": (cmd_drivers, 2),
-            "status": (cmd_status, 1), "timing": (cmd_timing, 0)}
+            "stream": (cmd_stream, 2), "status": (cmd_status, 1), "timing": (cmd_timing, 0)}
 
 
 def main():

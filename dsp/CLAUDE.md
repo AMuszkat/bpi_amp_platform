@@ -117,9 +117,9 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   `juce_apps/speakerd/TimedNode.h`) 4 + 2 × plugin nodes times per cycle. On most kernels that is
   the vDSO's, no syscall; on the board's Cortex-A73 the kernel's workaround for ARM erratum
   858921 (`CONFIG_ARM64_ERRATUM_858921`) disables the vDSO clock, and each read is a real
-  syscall. Why acceptable: it is bounded and never blocks (no lock, no wait, about a
-  microsecond), a few microseconds per cycle against 21 ms at the speaker's quantum, and it is
-  what gives the board per-node CPU numbers. speakerd logs the measured cost of a read at start
+  syscall. Why acceptable: it is bounded and never blocks (no lock, no wait; 296 ns measured on
+  the board, 2026-11-01), about 3 µs per cycle with three plugin nodes against 21 ms at the
+  speaker's quantum, and it is what gives the board per-node CPU numbers. speakerd logs the measured cost of a read at start
   (`timing: a clock read costs <x> ns`) and the installer's smoke check reports it. No other
   syscall is allowed, and nothing else may read a clock on the audio thread.
 - `crossover` and `firConv` compile in the generated headers; `loudness` and `ampScope` are

@@ -22,6 +22,11 @@
 #                       --player pipewire (e.g. 0.26.0), a newer release is
 #                       installed automatically.
 #
+# The client side checks before it changes: a snapclient with the pipewire player is not
+# installed again, a unit or a client-rt.conf that already says what this run would write is
+# not written, and snapclient is restarted only when something it reads changed (or it does
+# not run). A second run with the same options changes nothing, and says so in one line.
+#
 # Both server and client run as systemd *user* services so they share the
 # session's PipeWire instance (that is what the native sources/players need;
 # the packaged system services can't reach /run/user/UID). The server writes a
@@ -50,6 +55,7 @@ CLIENT_USER=""                           # board user whose PipeWire session run
 CLIENT_BUFFER_TIME=""                    # snapclient pipewire buffer_time ms (empty => let PipeWire decide)
 CLIENT_LATENCY=0                         # snapclient fine-tune latency in ms (per-client trim)
 SNAPCLIENT_VERSION="0.34.0"              # version to install on the board if its snapclient lacks the pipewire player
+                                         # (one that has it is kept, whatever its version)
 
 # Server stream parameters
 SAMPLEFORMAT="48000:32:2"                # rate:bits:channels of the snapserver stream
@@ -103,6 +109,7 @@ Options:
   --server-ip <ip>            Address clients connect to (default: auto-detected host IP for remote/both modes).
   --client-user <name>        Board user whose PipeWire session runs snapclient (default: auto; else \$BOARD_USER).
   --snapclient-version <v>    Version to install on the board if its snapclient lacks the pipewire player (default: $SNAPCLIENT_VERSION).
+                              A snapclient that has it (its --help lists pipewire for --player) is kept.
   --client-buffer-time <ms>   snapclient PipeWire buffer_time (default: PipeWire decides).
   --client-latency <ms>       Per-client latency trim passed to snapclient (default: $CLIENT_LATENCY).
   --codec <flac|pcm|opus|ogg> Stream codec; pcm = lowest latency (default: $CODEC).
@@ -122,9 +129,11 @@ Options:
                                               sends snapclient to the amplifier, full range.
                                 plugin-host - into Ap.cap, for an AudioPluginHost (its output to the amp).
   --routing-only              Target only: just rewrite client-rt.conf for --route and restart snapclient
-                              (no install, no --server-ip needed).
+                              (no install, no --server-ip needed); neither when it routes so already.
   --client-home <dir>         Target only, for tests: write into <dir> as if it were the user's home
-                              (no root, no chown, no services).
+                              (no root, no chown). --routing-only then touches no service; a full
+                              --mode target uses the systemctl and loginctl it finds (the tests'
+                              stand-ins), and none with --no-restart.
   --no-install                Skip dependency installation.
   --open-firewall             Open server TCP ports ($STREAM_PORT,$CONTROL_PORT,$HTTP_PORT) with ufw.
   --no-restart                Do not (re)start services after writing config.
@@ -193,8 +202,10 @@ fi
 # Privilege / scope helpers
 # ----------------------------------------------------------------------------
 SUDO=""
-if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+# --client-home (the tests) never uses root.
+if [ "$(id -u)" -ne 0 ] && [ -z "$CLIENT_HOME_OVERRIDE" ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
 run_root() { if [ -n "$SUDO" ]; then $SUDO "$@"; else "$@"; fi; }
+dry() { [ "$DRY_RUN" -eq 1 ]; }
 
 resolve_scope() {
     if [ "$SCOPE" = "auto" ]; then
@@ -237,6 +248,19 @@ as_user() {
     if [ "$(id -un)" = "$CLIENT_USER" ]; then XDG_RUNTIME_DIR="/run/user/$CLIENT_UID" "$@"
     elif [ "$(id -u)" -eq 0 ]; then runuser -u "$CLIENT_USER" -- env "XDG_RUNTIME_DIR=/run/user/$CLIENT_UID" "$@"
     else sudo -u "$CLIENT_USER" env "XDG_RUNTIME_DIR=/run/user/$CLIENT_UID" "$@"; fi
+}
+
+# Runs a command on a file of CLIENT_HOME: as ourselves in our own home or the test's folder,
+# else as root.
+home_cmd() {
+    if [ -n "$CLIENT_HOME_OVERRIDE" ] || [ "$(id -un)" = "$CLIENT_USER" ]; then "$@"; else run_root "$@"; fi
+}
+
+# Whether the file $1 (under CLIENT_HOME) holds exactly what write_user_file writes for the
+# content $2: then it is not written again.
+user_file_is() {   # $1 = path   $2 = content
+    home_cmd test -f "$1" || return 1
+    printf '%s\n' "$2" | home_cmd cmp -s - "$1"
 }
 
 # Write a file under CLIENT_HOME, owned by CLIENT_USER.
@@ -287,18 +311,69 @@ install_pkgs() {
     fi
 }
 
-# True if the installed snapclient has the native PipeWire player backend.
+# Whether the installed snapclient has the native PipeWire player, and how that was found
+# (PLAYER_HOW, for the messages). Its --help lists the players on the --player line
+# ("-p, --player arg (=alsa)  alsa|pipewire|file[:<options>|?]", snapclient 0.34.0), which is
+# what it can play with. A snapclient whose help has no such line (an old one, or one that
+# cannot run) is asked its libraries (the player links libpipewire-0.3), then its program's
+# text. `strings` is not used: binutils is not on every board, and without it every snapclient
+# looked as if it lacked the player.
+PLAYER_HOW=""
 snapclient_has_pipewire() {
-    command -v snapclient >/dev/null 2>&1 || return 1
-    strings "$(command -v snapclient)" 2>/dev/null | grep -q 'pipewire_player'
+    local bin help line
+    PLAYER_HOW=""
+    bin="$(command -v snapclient 2>/dev/null)" || { PLAYER_HOW="snapclient is not installed"; return 1; }
+    help="$(timeout 10 "$bin" --help 2>&1 || true)"
+    # The --player line, with the lines its description wraps onto (up to the next option).
+    line="$(awk '/^[[:space:]]*(-[[:alnum:]],[[:space:]]+)?--player([[:space:]]|$)/ { p = 1; print; next }
+                 p && (NF == 0 || /^[[:space:]]*-/) { exit }
+                 p { print }' <<< "$help" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+    if [ -n "$line" ]; then
+        PLAYER_HOW="its --help: $line"
+        grep -qE '(^|[^[:alnum:]_])pipewire([^[:alnum:]_]|$)' <<< "${line#*--player}"
+        return
+    fi
+    if ldd "$bin" 2>/dev/null | grep -qE 'libpipewire-0\.3[^[:space:]]* => /'; then
+        PLAYER_HOW="its --help names no --player; it links libpipewire-0.3 (ldd)"
+        return 0
+    fi
+    if grep -aqF 'pipewire_player' "$bin" 2>/dev/null; then
+        PLAYER_HOW="its --help names no --player; its program names pipewire_player"
+        return 0
+    fi
+    PLAYER_HOW="its --help names no --player, it does not link libpipewire-0.3 and its program does not name pipewire_player"
+    return 1
+}
+
+# The installed snapclient's version: what `snapclient --version` says (snapclient v0.34.0), else
+# the package's.
+snapclient_version() {
+    local v
+    v="$({ timeout 10 snapclient --version 2>&1 || true; } | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+    # shellcheck disable=SC2016  # dpkg-query's own format
+    [ -n "$v" ] || v="$(dpkg-query -W -f='${Version}' snapclient 2>/dev/null | sed 's/-[^-]*$//' || true)"
+    echo "${v:-unknown}"
 }
 
 # Distro snapclient may be too old for --player pipewire (e.g. 0.26.0 on bullseye).
-# If so, install a newer official release that includes the PipeWire player.
+# If so, install a newer official release that includes the PipeWire player. One that has the
+# player is kept, whatever its version: nothing is downloaded and apt is not run. Sets
+# SNAPCLIENT_FOUND (its version) and SNAPCLIENT_PLAYER (yes/no) for the summary.
+SNAPCLIENT_FOUND=""; SNAPCLIENT_PLAYER=no
 ensure_snapclient_with_pipewire() {
     if snapclient_has_pipewire; then
-        ok "snapclient already supports --player pipewire ($(snapclient --version 2>/dev/null | awk '{print $NF}'))"
+        SNAPCLIENT_FOUND="$(snapclient_version)"; SNAPCLIENT_PLAYER=yes
+        ok "snapclient $SNAPCLIENT_FOUND has the pipewire player ($PLAYER_HOW): nothing to install"
+        if [ "$SNAPCLIENT_FOUND" != "$SNAPCLIENT_VERSION" ]; then
+            info "(--snapclient-version $SNAPCLIENT_VERSION is installed only where snapclient lacks the pipewire player: keeping $SNAPCLIENT_FOUND)"
+        fi
         return 0
+    fi
+    if command -v snapclient >/dev/null 2>&1; then
+        SNAPCLIENT_FOUND="$(snapclient_version)"
+        info "snapclient $SNAPCLIENT_FOUND lacks the pipewire player ($PLAYER_HOW)"
+    else
+        info "$PLAYER_HOW"
     fi
     if [ "$INSTALL_DEPS" -eq 0 ]; then
         warn "Current snapclient lacks the pipewire player and --no-install was given; --player pipewire will fail."
@@ -310,6 +385,7 @@ ensure_snapclient_with_pipewire() {
     info "Installing snapclient v$SNAPCLIENT_VERSION ($arch/$codename) with PipeWire player from GitHub"
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "  (dry-run) fetch snapclient_${SNAPCLIENT_VERSION}-*_${arch}_${codename}_with-pipewire.deb and apt-install it"
+        changed "snapclient $SNAPCLIENT_VERSION installed"; SNAPCLIENT_RESTART+=("snapclient is installed")
         return 0
     fi
     [ -n "$codename" ] && [ -n "$arch" ] || die "Could not detect distro codename/arch for the snapclient download"
@@ -325,10 +401,13 @@ ensure_snapclient_with_pipewire() {
     run_root apt-get update -y || warn "apt-get update failed; continuing"
     run_root apt-get install -y "$deb" || run_root dpkg -i "$deb" || { rm -rf "$tmp"; die "Failed to install snapclient .deb"; }
     rm -rf "$tmp"
+    SNAPCLIENT_FOUND="$(snapclient_version)"
+    changed "snapclient $SNAPCLIENT_FOUND installed"; SNAPCLIENT_RESTART+=("snapclient was installed")
     if snapclient_has_pipewire; then
-        ok "Installed snapclient $(snapclient --version 2>/dev/null | awk '{print $NF}') with PipeWire player"
+        SNAPCLIENT_PLAYER=yes
+        ok "Installed snapclient $SNAPCLIENT_FOUND with the pipewire player ($PLAYER_HOW)"
     else
-        warn "Installed snapclient $SNAPCLIENT_VERSION but it lacks the pipewire player (built without libpipewire on $codename)."
+        warn "Installed snapclient $SNAPCLIENT_FOUND but it lacks the pipewire player ($PLAYER_HOW)."
         warn "Options: use a newer board OS, or a build with PipeWire enabled. --player pipewire will not work."
     fi
 }
@@ -619,28 +698,217 @@ check_live_speakerd_sink() {
 # Before the first route into speakerd, keeps the routing there was as
 # client-rt.conf.before-speakerd, which the speakerd uninstall restores.
 save_routing_before_speakerd() {
-    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" as=run_root
+    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf"
     [ "$ROUTE" = speakerd ] && [ "$DRY_RUN" -eq 0 ] || return 0
-    # Our own home (or the test's) needs no root.
-    if [ -n "$CLIENT_HOME_OVERRIDE" ] || [ "$(id -un)" = "$CLIENT_USER" ]; then as=""; fi
-    $as test -f "$crt" || return 0
-    $as grep -q 'target.object *= *"speakerd"' "$crt" && return 0
-    $as cp -a "$crt" "$crt.before-speakerd" && ok "Kept the routing from before speakerd as $crt.before-speakerd"
+    home_cmd test -f "$crt" || return 0
+    home_cmd grep -q 'target.object *= *"speakerd"' "$crt" && return 0
+    home_cmd cp -a "$crt" "$crt.before-speakerd" && ok "Kept the routing from before speakerd as $crt.before-speakerd"
 }
 
 route_target() { if [ "$ROUTE" = speakerd ]; then echo speakerd; else echo Ap.cap; fi; }
 
-# --routing-only: rewrite client-rt.conf for --route and restart snapclient.
+# ----------------------------------------------------------------------------
+# The client, checked before it is changed: each step changes only what differs
+# ----------------------------------------------------------------------------
+CHANGED=()              # what this run changed (with --dry-run: would change), for the summary
+SNAPCLIENT_RESTART=()   # why snapclient must (re)start; none: it runs with what it reads
+PIPEWIRE_RESTART=0      # a PipeWire daemon configuration of the user changed
+changed() { CHANGED+=("$1"); }
+joined() { local IFS=';'; printf '%s' "$*" | sed 's/;/; /g'; }
+
+# Whether this run may use systemctl and loginctl: always on a board; with --client-home (the
+# tests) only without --no-restart, and then they are the tests' stand-ins.
+services() { [ -z "$CLIENT_HOME_OVERRIDE" ] || [ "$DO_RESTART" -eq 1 ]; }
+
+# client-rt.conf is about to be replaced: the one there was is kept as client-rt.conf.orig, once.
+# An existing .orig is never overwritten (it is the person's), and a client-rt.conf this script
+# wrote is not kept (it is no one's original).
+backup_client_rt_once() {
+    local crt="$1"
+    dry && return 0
+    home_cmd test -f "$crt" || return 0
+    home_cmd test -e "$crt.orig" && return 0
+    home_cmd grep -q 'managed by snapcast-setup.sh' "$crt" && return 0
+    home_cmd cp -a "$crt" "$crt.orig" || die "cannot keep $crt as $crt.orig: not replacing it"
+    ok "Kept the client-rt.conf there was as $crt.orig (once: never overwritten)"
+}
+
+# client-rt.conf for --route, written only when it differs (CHANGED and SNAPCLIENT_RESTART say
+# whether it was).
+write_client_rt() {
+    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" content
+    content="$(target_client_rt_conf)"
+    if user_file_is "$crt" "$content"; then return 0; fi
+    backup_client_rt_once "$crt"
+    save_routing_before_speakerd
+    write_user_file ".config/pipewire/client-rt.conf" "$content"
+    changed "client-rt.conf (into $(route_target))"
+    SNAPCLIENT_RESTART+=("client-rt.conf changed")
+}
+
+# Linger keeps the user's services (PipeWire, snapclient) running with nobody logged in.
+ensure_linger() {
+    services || return 0
+    if [ "$(loginctl show-user "$CLIENT_USER" -p Linger --value 2>/dev/null || true)" = yes ]; then return 0; fi
+    if dry; then info "(dry-run) would enable linger for $CLIENT_USER"; changed "linger for $CLIENT_USER"; return 0; fi
+    if run_root loginctl enable-linger "$CLIENT_USER" 2>/dev/null; then
+        ok "Enabled linger for $CLIENT_USER (snapclient plays with nobody logged in)"; changed "linger for $CLIENT_USER"
+    else
+        warn "Could not enable linger for $CLIENT_USER: snapclient plays only while $CLIENT_USER is logged in (sudo loginctl enable-linger $CLIENT_USER)"
+    fi
+}
+
+# The packaged system service cannot reach the user's PipeWire and would take the stream from
+# the user's snapclient: stopped and disabled, when it is enabled or runs.
+disable_packaged_snapclient() {
+    services || return 0
+    local key value active="" file=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState) case "$value" in active | activating | reloading) active="$value" ;; esac ;;
+            UnitFileState) case "$value" in enabled | enabled-runtime | linked | linked-runtime) file="$value" ;; esac ;;
+        esac
+    done < <(systemctl show snapclient.service -p ActiveState -p UnitFileState 2>/dev/null || true)
+    [ -n "$active$file" ] || return 0
+    if dry; then info "(dry-run) would stop and disable the packaged system snapclient (${file:-not enabled}, ${active:-not running})"
+    elif run_root systemctl disable --now snapclient.service 2>/dev/null; then
+        ok "Stopped and disabled the packaged system snapclient: $CLIENT_USER's runs instead"
+    else
+        warn "Could not stop and disable the packaged system snapclient (sudo systemctl disable --now snapclient)"; return 0
+    fi
+    changed "the packaged system snapclient stopped and disabled"
+}
+
+# Older versions wrote a channel-split fragment (a null sink and a loopback in PipeWire's own
+# configuration): it goes, and that is the one change here that needs PipeWire restarted.
+# client-rt.conf and the unit are snapclient's alone, read at its start.
+remove_stale_split() {
+    local stale="$CLIENT_HOME/.config/pipewire/pipewire.conf.d/60-snapcast-split.conf"
+    home_cmd test -f "$stale" || return 0
+    if dry; then info "(dry-run) would remove the old channel-split fragment $stale and restart PipeWire"
+    else home_cmd rm -f "$stale" && ok "Removed the old channel-split fragment $stale"; fi
+    changed "the old channel-split fragment removed"
+    PIPEWIRE_RESTART=1
+}
+
+restart_client_pipewire() {
+    [ "$PIPEWIRE_RESTART" -eq 1 ] || return 0
+    if dry || [ "$DO_RESTART" -eq 0 ]; then
+        info "PipeWire needs a restart without the old channel-split fragment (not done: --dry-run/--no-restart)"; return 0
+    fi
+    # pipewire-pulse apart, and only if it runs: a board may have none, and one systemctl call
+    # naming a unit that does not exist fails although it restarted the others.
+    if as_user systemctl --user restart pipewire.service wireplumber.service 2>/dev/null; then
+        as_user systemctl --user try-restart pipewire-pulse.service 2>/dev/null || true
+        ok "Restarted PipeWire and WirePlumber for $CLIENT_USER, without the old channel-split fragment"
+        changed "PipeWire restarted"
+        SNAPCLIENT_RESTART+=("PipeWire restarted")
+    else
+        warn "Could not restart PipeWire and WirePlumber for $CLIENT_USER (systemctl --user --machine=$CLIENT_USER@ status pipewire wireplumber): the old channel-split sink stays until PipeWire restarts"
+    fi
+}
+
+# What systemd says about CLIENT_USER's snapclient unit: SNAP_ACTIVE and SNAP_ENABLED (yes or
+# no), SNAP_RELOAD (yes: the unit file changed since systemd read it), SNAP_STARTED (epoch
+# seconds of its main process's start; empty when unknown).
+read_user_snapclient() {
+    local key value
+    SNAP_ACTIVE=no; SNAP_ENABLED=no; SNAP_RELOAD=no; SNAP_STARTED=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState) if [ "$value" = active ]; then SNAP_ACTIVE=yes; fi ;;
+            UnitFileState) case "$value" in enabled | enabled-runtime | linked | linked-runtime) SNAP_ENABLED=yes ;; esac ;;
+            NeedDaemonReload) if [ "$value" = yes ]; then SNAP_RELOAD=yes; fi ;;
+            ExecMainStartTimestamp)
+                if [ -n "$value" ] && [ "$value" != n/a ]; then SNAP_STARTED="$(TZ=UTC date -d "$value" +%s 2>/dev/null || true)"; fi ;;
+        esac
+    # TZ=UTC: systemctl prints the time in UTC, which date -d reads whatever the board's zone.
+    done < <(as_user env TZ=UTC systemctl --user show snapclient.service -p ActiveState -p UnitFileState \
+                 -p NeedDaemonReload -p ExecMainStartTimestamp 2>/dev/null || true)
+    return 0
+}
+
+# Adds to SNAPCLIENT_RESTART why the running snapclient does not run with the files it reads
+# ($@): it does not run, or it started before one of them was last written (an earlier run with
+# --no-restart, a person's edit).
+snapclient_runs_with() {
+    local f m
+    if [ "$SNAP_ACTIVE" = no ]; then SNAPCLIENT_RESTART+=("it does not run"); return 0; fi
+    if [ -z "$SNAP_STARTED" ]; then SNAPCLIENT_RESTART+=("systemd does not say when it started"); return 0; fi
+    for f in "$@"; do
+        m="$(home_cmd stat -c %Y "$f" 2>/dev/null || true)"
+        [ -n "$m" ] || continue
+        if [ "$m" -gt "$SNAP_STARTED" ]; then SNAPCLIENT_RESTART+=("it started before $(basename "$f") was last written"); return 0; fi
+    done
+    return 0
+}
+
+# Enables snapclient's user unit and (re)starts it when SNAPCLIENT_RESTART says why, or when it
+# does not run with its unit and client-rt.conf. $1 = 1 when this run wrote the unit.
+apply_snapclient() {
+    local unit_written="$1" unit="$CLIENT_HOME/.config/systemd/user/snapclient.service"
+    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" reload=0
+    if ! services; then
+        if [ ${#SNAPCLIENT_RESTART[@]} -gt 0 ]; then info "snapclient not restarted (--no-restart): $(joined "${SNAPCLIENT_RESTART[@]}"); it reads the new files at its next start"; fi
+        return 0
+    fi
+    read_user_snapclient
+    [ "$unit_written" -eq 0 ] || reload=1
+    if [ "$SNAP_RELOAD" = yes ] && [ "$reload" -eq 0 ]; then reload=1; SNAPCLIENT_RESTART+=("systemd had not read its unit as it is"); fi
+    [ ${#SNAPCLIENT_RESTART[@]} -gt 0 ] || snapclient_runs_with "$unit" "$crt"
+    if dry; then
+        [ "$SNAP_ENABLED" = yes ] || { info "(dry-run) would enable snapclient"; changed "snapclient enabled"; }
+        if [ ${#SNAPCLIENT_RESTART[@]} -gt 0 ]; then
+            info "(dry-run) would (re)start snapclient: $(joined "${SNAPCLIENT_RESTART[@]}")"
+            changed "snapclient restarted"
+        fi
+        return 0
+    fi
+    if [ "$DO_RESTART" -eq 0 ]; then
+        [ "$SNAP_ENABLED" = yes ] || info "snapclient is not enabled (not done: --no-restart)"
+        [ ${#SNAPCLIENT_RESTART[@]} -eq 0 ] || info "snapclient needs a (re)start, not done (--no-restart): $(joined "${SNAPCLIENT_RESTART[@]}")"
+        return 0
+    fi
+    if [ "$reload" -eq 1 ]; then as_user systemctl --user daemon-reload 2>/dev/null || warn "systemctl --user daemon-reload failed for $CLIENT_USER"; fi
+    if [ "$SNAP_ENABLED" = no ]; then
+        if as_user systemctl --user enable snapclient.service 2>/dev/null; then ok "Enabled snapclient: it starts with $CLIENT_USER's services, at boot"; changed "snapclient enabled"
+        else warn "Could not enable snapclient (systemctl --user --machine=$CLIENT_USER@ enable snapclient)"; fi
+    fi
+    [ ${#SNAPCLIENT_RESTART[@]} -gt 0 ] || return 0
+    # A stream's target is read when it is created: restart (not enable --now), so that a change
+    # applies.
+    if as_user systemctl --user restart snapclient.service 2>/dev/null; then
+        ok "snapclient (re)started as $CLIENT_USER's user service ($(joined "${SNAPCLIENT_RESTART[@]}")): it plays into $(route_target)"
+        changed "snapclient restarted"
+    else
+        warn "Could not start snapclient; check: systemctl --user --machine=$CLIENT_USER@ status snapclient"
+    fi
+}
+
+# The one line that ends a client setup: what is there, and what this run changed.
+summary() {   # $1 = what is set up
+    if [ ${#CHANGED[@]} -eq 0 ]; then
+        if dry; then ok "$1: already set up, nothing would change"; else ok "$1: already set up, nothing changed"; fi
+    elif dry; then
+        info "$1: (dry-run) would change: $(joined "${CHANGED[@]}")"
+    else
+        ok "$1: changed: $(joined "${CHANGED[@]}")"
+    fi
+}
+
+# --routing-only: rewrite client-rt.conf for --route and restart snapclient, each only when
+# needed.
 setup_routing_only() {
     resolve_client_user
     info "Routing snapclient into $(route_target) (--route $ROUTE; client-rt.conf only, user $CLIENT_USER)"
     check_route_target
-    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" unit="$CLIENT_HOME/.config/systemd/user/snapclient.service" as=run_root
-    if [ -n "$CLIENT_HOME_OVERRIDE" ] || [ "$(id -un)" = "$CLIENT_USER" ]; then as=""; fi
+    local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf" unit="$CLIENT_HOME/.config/systemd/user/snapclient.service"
     # The rules reach snapclient only through its unit's PIPEWIRE_CONFIG_NAME=client-rt.conf.
     # Into speakerd that is not optional: without it snapclient plays into the default sink.
-    if $as test -f "$unit"; then
-        if ! $as grep -q 'PIPEWIRE_CONFIG_NAME=client-rt.conf' "$unit"; then
+    local has_unit=0
+    if home_cmd test -f "$unit"; then
+        has_unit=1
+        if ! home_cmd grep -q 'PIPEWIRE_CONFIG_NAME=client-rt.conf' "$unit"; then
             local why="$unit does not point snapclient at client-rt.conf (no Environment=PIPEWIRE_CONFIG_NAME=client-rt.conf), so these rules would not reach it"
             if [ "$ROUTE" = speakerd ] && [ "$DRY_RUN" -eq 0 ]; then
                 die "--route speakerd: $why. Not routing: re-run --mode target with --server-ip (it rewrites the unit), or add that line."
@@ -650,21 +918,27 @@ setup_routing_only() {
     else
         warn "no snapclient user unit ($unit): these rules apply only to a snapclient started with PIPEWIRE_CONFIG_NAME=client-rt.conf"
     fi
-    if [ "$DRY_RUN" -eq 0 ] && [ -f "$crt" ] && [ ! -f "$crt.orig" ]; then
-        cp -a "$crt" "$crt.orig" && ok "Backed up existing client-rt.conf -> $crt.orig"
-    fi
-    save_routing_before_speakerd
-    write_user_file ".config/pipewire/client-rt.conf" "$(target_client_rt_conf)"
-    if [ "$DO_RESTART" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ -z "$CLIENT_HOME_OVERRIDE" ]; then
-        # A stream's target is read when it is created: restart snapclient.
-        if as_user systemctl --user restart snapclient 2>/dev/null; then
-            ok "snapclient restarted: it plays into $(route_target)"
-        else
-            warn "Could not restart snapclient; check: systemctl --user --machine=$CLIENT_USER@ status snapclient"
-        fi
+    write_client_rt
+    if [ -n "$CLIENT_HOME_OVERRIDE" ]; then
+        [ ${#SNAPCLIENT_RESTART[@]} -eq 0 ] || info "snapclient not restarted (--client-home: no services): the new routing applies at its next start"
+    elif [ "$has_unit" -eq 0 ]; then
+        :
+    elif [ "$DO_RESTART" -eq 0 ] || dry; then
+        [ ${#SNAPCLIENT_RESTART[@]} -eq 0 ] || info "snapclient not restarted (--no-restart/--dry-run): the new routing applies at its next start"
     else
-        info "snapclient not restarted (--no-restart/--dry-run): the new routing applies at its next start"
+        read_user_snapclient
+        [ ${#SNAPCLIENT_RESTART[@]} -gt 0 ] || snapclient_runs_with "$crt"
+        if [ ${#SNAPCLIENT_RESTART[@]} -gt 0 ]; then
+            # A stream's target is read when it is created: restart snapclient.
+            if as_user systemctl --user restart snapclient.service 2>/dev/null; then
+                ok "snapclient restarted ($(joined "${SNAPCLIENT_RESTART[@]}")): it plays into $(route_target)"
+                changed "snapclient restarted"
+            else
+                warn "Could not restart snapclient; check: systemctl --user --machine=$CLIENT_USER@ status snapclient"
+            fi
+        fi
     fi
+    summary "snapclient's routing into $(route_target) (client-rt.conf, --route $ROUTE)"
 }
 
 snapclient_unit() {
@@ -866,52 +1140,37 @@ setup_target_local() {
     resolve_client_user
     info "Configuring this machine as a PipeWire-native Snapcast CLIENT (server $SERVER_IP, user $CLIENT_USER, route $ROUTE)"
     [ "$TARGET_CLIENT_RT" -eq 0 ] || check_route_target
+    # Each step checks first and changes only what differs (CHANGED says what it changed).
     ensure_snapclient_with_pipewire
     # Migration: older versions wrote a channel-split fragment (null-sink + loopback)
     # that now just clutters the graph and loops audio. Remove it if present.
-    local stale="$CLIENT_HOME/.config/pipewire/pipewire.conf.d/60-snapcast-split.conf"
-    if [ "$DRY_RUN" -eq 0 ] && run_root test -f "$stale"; then
-        run_root rm -f "$stale" && ok "Removed stale channel-split fragment: $stale"
-    fi
+    remove_stale_split
     # snapclient plays through PipeWire (--player pipewire) and runs in the user's
     # session, so disable the packaged system service and run a per-user one instead.
-    if [ "$DRY_RUN" -eq 0 ]; then
-        run_root systemctl disable --now snapclient 2>/dev/null || true
-        run_root loginctl enable-linger "$CLIENT_USER" 2>/dev/null && ok "Enabled linger for $CLIENT_USER" || true
+    disable_packaged_snapclient
+    ensure_linger
+    # Deploy the client-rt.conf auto-routing config (snapclient is pointed at it via
+    # PIPEWIRE_CONFIG_NAME in the unit), keeping the one there was as .orig, once.
+    if [ "$TARGET_CLIENT_RT" -eq 1 ]; then write_client_rt; fi
+    local unit_written=0
+    if ! user_file_is "$CLIENT_HOME/.config/systemd/user/snapclient.service" "$(snapclient_unit)"; then
+        write_user_file ".config/systemd/user/snapclient.service" "$(snapclient_unit)"
+        unit_written=1; changed "the snapclient unit (server $SERVER_IP)"; SNAPCLIENT_RESTART+=("its unit changed")
     fi
-    # Deploy the client-rt.conf auto-routing config (snapclient is pointed at it
-    # via PIPEWIRE_CONFIG_NAME in the unit). Back up any existing one to .orig.
-    if [ "$TARGET_CLIENT_RT" -eq 1 ]; then
-        local crt="$CLIENT_HOME/.config/pipewire/client-rt.conf"
-        if [ "$DRY_RUN" -eq 0 ] && run_root test -f "$crt" && ! run_root test -f "$crt.orig"; then
-            run_root cp -a "$crt" "$crt.orig" && ok "Backed up existing client-rt.conf -> $crt.orig"
-        fi
-        save_routing_before_speakerd
-        write_user_file ".config/pipewire/client-rt.conf" "$(target_client_rt_conf)"
-    fi
-    write_user_file ".config/systemd/user/snapclient.service" "$(snapclient_unit)"
-    if [ "$DO_RESTART" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
-        as_user systemctl --user daemon-reload 2>/dev/null || true
-        # restart the audio stack so snapclient attaches to a fresh PipeWire graph.
-        if as_user systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null; then
-            ok "Restarted PipeWire/WirePlumber for $CLIENT_USER"
-        else
-            warn "Could not restart PipeWire/WirePlumber for $CLIENT_USER (check: systemctl --user --machine=$CLIENT_USER@ status pipewire)"
-        fi
-        as_user systemctl --user enable snapclient 2>/dev/null || true
-        # restart (not just enable --now) so a re-run picks up config changes.
-        if as_user systemctl --user restart snapclient 2>/dev/null; then
-            ok "snapclient (re)started as $CLIENT_USER's user service"
-        else
-            warn "Could not start snapclient; check: systemctl --user --machine=$CLIENT_USER@ status snapclient"
-        fi
-    else
-        info "Service written but not started (--no-restart/--dry-run)"
-    fi
+    # Only a PipeWire daemon configuration of the user needs PipeWire restarted; then
+    # snapclient's stream went with it.
+    restart_client_pipewire
+    apply_snapclient "$unit_written"
+    local what="snapclient ${SNAPCLIENT_FOUND:-(not installed)} with"
+    [ "$SNAPCLIENT_PLAYER" = yes ] || what="$what""out"
+    what="$what the pipewire player, server $SERVER_IP, "
+    if [ "$TARGET_CLIENT_RT" -eq 1 ]; then what="${what}route $ROUTE"; else what="${what}no client-rt.conf (--no-client-rt)"; fi
+    summary "$what"
+    [ ${#CHANGED[@]} -gt 0 ] && ! dry || return 0
     cat <<EOF
 
 ${c_green}Client ready.${c_off}
-  - snapclient runs as a PipeWire node ("Snapcast") in $CLIENT_USER's session.
+  - snapclient plays as a PipeWire stream in $CLIENT_USER's session (application.name Snapclient; it has no node.name).
   - client-rt.conf routes it into $(route_target) (--route $ROUTE); see wpctl status / qpwgraph.
   - Verify:  systemctl --user --machine=$CLIENT_USER@ status snapclient
 EOF

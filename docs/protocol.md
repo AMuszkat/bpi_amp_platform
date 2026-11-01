@@ -240,7 +240,9 @@ from the hub, never by `ampd`:
 {"version":1,"name":"right","hub":false,"listen":"0.0.0.0","hub_address":"bpi-amp.local","secret":"<the pair's secret>"}
 ```
 
-Discovery over mDNS replaces `hub_address` later; until then it is written at install.
+Discovery over mDNS is planned, not built, and in no roadmap step yet: it would replace
+`hub_address`, which until then is written at install and is the only way an agent finds the
+hub.
 
 ## Clarifications (from the first implementations)
 

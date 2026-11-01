@@ -12,6 +12,10 @@ tools for the rest of the audio chain.
 | [`loudness`](loudness/README.md) | 1 → 1 | Level-dependent loudness contour from two low-shelf EQs per setting, four settings | live parameters |
 | [`ampScope`](ampScope/README.md) | 1 → 1 | Oscilloscope for a MAX98397 amplifier's own voltage/current/supply telemetry (audio passes through) | live parameters |
 
+The shipped `crossover_coefs.hpp` and `filters.hpp` are designed at 48 kHz (the person,
+2026-11-01); the headers themselves record no rate. In a graph at another rate every frequency
+of the two filters moves by the ratio of the rates (`firmware/CLAUDE.md`, "Rates").
+
 ## Layout
 
 ```
