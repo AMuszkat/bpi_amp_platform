@@ -12,31 +12,13 @@ speakers make a stereo pair, tuned from one controller application on a computer
 
 You play music as you always do. The speakers do the rest.
 
-<!-- diagram: overview -->
-```mermaid
-flowchart LR
-    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
-    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
-    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+![The system, from the listener's side: a computer or phone streams to two speakers, each with speakerd, ampd and two amplifiers; the controller on your computer talks to the hub](docs/images/overview.png)
 
-    tune["Measurement and tuning GUIs<br/>measure the drivers,<br/>design the filters"]:::ctl
-    music["Your music<br/>Snapcast server or AirPlay,<br/>on a computer or a phone"]:::aud
-    ctl["Controller app<br/>add plugins, wire them,<br/>turn the knobs"]:::ctl
-
-    L["Left speaker, the hub<br/>speakerd runs the plugins,<br/>ampd keeps the pair in step<br/>2 x MAX98397: woofer, tweeter"]:::hw
-    R["Right speaker<br/>speakerd runs the plugins,<br/>ampd follows the hub<br/>2 x MAX98397: woofer, tweeter"]:::hw
-
-    tune -. "filters, compiled in" .-> L
-    tune -. "filters, compiled in" .-> R
-    music == "stereo stream" ==> L
-    music == "stereo stream" ==> R
-    ctl -- "edits, knobs" --> L
-    L -- "fan-out" --> R
-```
-
-Thick arrows carry audio, thin arrows carry settings, and dotted arrows carry what is read
-once: the filters at build time, the state files at boot. Orange is control, blue is audio,
-green is hardware, grey is files on disk.
+In both pictures a thick dark outline is a device you can touch, a dark card a physical
+component, a teal card software of this repository and a white card third-party software. Blue
+arrows carry audio, orange ones carry settings. The second picture also separates what runs in
+user space from the kernel's drivers and from the hardware itself. The pictures are generated
+from [`docs/diagrams/diagrams.py`](docs/diagrams/diagrams.py).
 
 - **Music arrives over the network.** A Snapcast server on a computer streams to both
   speakers in sync; AirPlay through shairport-sync is the alternative.
@@ -55,35 +37,7 @@ green is hardware, grey is files on disk.
 
 ### Inside a speaker
 
-<!-- diagram: speaker -->
-```mermaid
-flowchart TB
-    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
-    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
-    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
-    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
-
-    src["snapclient, or shairport-sync<br/>receives the stream"]:::aud
-    subgraph PW["PipeWire"]
-        direction TB
-        sink["the speakerd sink"]:::aud
-        sd["speakerd<br/>the plugin graph: the headless LV2 builds<br/>of crossover, firConv and loudness"]:::aud
-        alsa["the amplifier node (ALSA)"]:::aud
-        sink ==> sd
-        sd ==> alsa
-    end
-    kern["Linux kernel<br/>device tree, TDM, the max98396 driver"]:::hw
-    amps["2 x MAX98397<br/>woofer, tweeter"]:::hw
-    ampd["ampd<br/>network agent; the hub on the left speaker"]:::ctl
-    files[("state files<br/>graph.json, device.json")]:::sto
-
-    src ==> sink
-    alsa ==> kern
-    kern ==> amps
-    ampd -- "local socket" --> sd
-    ampd --> files
-    files -. "read at boot" .-> sd
-```
+![Inside a speaker: user space with snapclient, PipeWire, speakerd and ampd; kernel space with the device tree and the ALSA drivers; hardware with the module, the amplifiers, the woofer and the tweeter](docs/images/speaker.png)
 
 ### The software blocks
 
@@ -166,7 +120,7 @@ hooks and CI) is in [`CLAUDE.md`](CLAUDE.md) and
 | [`hardware`](hardware/README.md) | KiCad projects: the carrier board and the amplifier board |
 | [`firmware`](firmware/README.md) | Device tree, kernel config, amplifier drivers, PipeWire configuration, the installers and `ampd` |
 | [`dsp`](dsp/README.md) | Measurement and tuning tools, the JUCE plugins, `speakerd`, the controller and `plugin-check` |
-| [`docs`](docs) | The [remote plugin host](docs/remote-plugin-host.md) design, its [protocol](docs/protocol.md), the [block FIR](docs/p1-block-fir.md) and the [development setup](docs/autonomous-development.md) |
+| [`docs`](docs) | The [remote plugin host](docs/remote-plugin-host.md) design, its [protocol](docs/protocol.md), the [block FIR](docs/p1-block-fir.md), the [development setup](docs/autonomous-development.md) and the [diagrams](docs/diagrams) above |
 | [`tests/vpair`](tests/vpair/README.md) | Two virtual speakers on one machine, for developing and testing without boards |
 | [`tools`](tools) | The build, test, container and board scripts; they work without Claude |
 
