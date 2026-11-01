@@ -1057,9 +1057,13 @@ do_install() {
             || loginctl enable-linger "$AUDIO_USER" 2> /dev/null \
             || warn "linger is off: speakerd starts only when $AUDIO_USER logs in. sudo loginctl enable-linger $AUDIO_USER"
     fi
+    local limits_now
+    limits_now="$(json_get "$(helper device "$STATE/device.json" --show 2> /dev/null)" \
+        '"output at %s dB, tweeter %s" % (d["limits"]["gain_db"], d["limits"]["tweeter"]) if d.get("limits") else "none (speakerd plays its fail-safe)"')"
+    [ -n "$limits_now" ] || limits_now="not read (device.json not written yet?)"
     cat <<EOF
 
-${c_green}speakerd $BUNDLE_ID installed.${c_off} The limits: $(python3 -c 'import json,sys; l=json.load(open(sys.argv[1])).get("limits") or {}; print(f"output at {l.get(\"gain_db\")} dB, tweeter {l.get(\"tweeter\")}")' "$STATE/device.json" 2> /dev/null || echo "device.json not written (dry run)").
+${c_green}speakerd $BUNDLE_ID installed.${c_off} The limits: $limits_now.
   - Check it, without a sound, with a quiet stream playing: $(installed_setup speakerd-setup.sh) smoke
   - Its log:                      journalctl --user-unit speakerd -b
   - Back to the previous version: $(installed_setup speakerd-setup.sh) rollback

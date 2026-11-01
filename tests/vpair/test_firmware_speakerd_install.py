@@ -497,6 +497,7 @@ class Install(Setup):
         result = self.install(home, "--role", "left", "--factory", self.factory,
                               "--allow-tweeter-without-crossover")
         self.assertIn("Every library speakerd and its plugins need is here", result.stdout)
+        self.assertIn("installed. The limits: output at 0.0 dB, tweeter on.", result.stdout)
         vid = version_file(self.bundle / "VERSION")["id"]
         files = tree(home)
         for want in (f".local/lib/speakerd/{vid}/bin/speakerd", f".local/lib/speakerd/{vid}/bin/speakerd-run",
