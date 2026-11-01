@@ -296,6 +296,10 @@ host forwards them all. A control build knows nothing about the network.
   no state. A structural edit is proposed as the accepted document with the edit applied, so
   what the controller cannot show travels on untouched: a plugin without a control build is a
   placeholder node, never dropped. A rejected proposal is undone on the canvas.
+- **Each speaker's load.** While the speakers panel shows, the controller subscribes to every
+  speaker's `speakerd/timing` and `board/cpu` at 2 Hz and shows the audio cycle's mean and max,
+  the late cycles and the board's CPU per speaker, and each node's share of the cycle on the
+  canvas; a speaker without `board/cpu` shows n/a.
 - **A test mode** (`controller --hub HOST --script FILE`) runs commands and prints JSON lines, so
   rung 2 can drive the controller without a display; a fake hub in its `tests/` checks the bridge
   without `ampd`.
@@ -751,6 +755,11 @@ check covers it, so a GUI can never wait for a stream the speaker does not produ
 - the amplifier telemetry the driver publishes through its ALSA controls: supply voltage,
   temperature, fault flags;
 - the time each node takes and the xrun count: built, as `speakerd/timing` (below).
+
+**Built into `ampd`, on every speaker.** The whole board's CPU use (every process, not only
+the audio graph), `board/cpu`: `ampd` reads `/proc/stat` only while a window subscribes, at
+most 10 times a second, and sends the busy fraction of the whole board and of each core
+([protocol.md](protocol.md), "Monitoring"). It is never `speakerd`'s.
 
 **Same resolution as the complete build.** The native `ampScope` draws each pixel column as
 the min/max envelope of the samples in it. The speaker computes that same envelope from the
@@ -1425,7 +1434,7 @@ so a slow disk holds up no connection. Its classes:
 | `Role` | what both roles share: following `speakerd` when it says hello on another revision than ampd's (it fell back to a layer), re-sending values when it restarted on ampd's |
 | `Hub(Role)` | the left speaker: the controllers and agents as `Peer`s, the `seq` counter, echoes, gestures (5 s timeout), proposals one at a time, the catalogue of plugins some speaker has loaded (`seen`), `state` to every controller |
 | `Agent(Role)` | the right speaker: connects to the hub every second, forwards its `param` and `apply` to `speakerd`, reports `speakerd`'s layer and revision, ignores OSC |
-| `Monitor`, `MonitorClient`, `Subscription` | the monitor link's server: the union of the clients' subscriptions, at the highest rate any asked, is what `speakerd` is asked for. It keeps the newest line of each stream (a value of a subscribed stream, at most 64 KiB, its numbers finite, nothing else) as `speakerd` sent it, or encoded once more, for all the clients, when it does not start with `{` or holds `NaN` or `Infinity`. It flushes once per pass of the event loop, so of the lines read at once only the newest of each stream goes out, never encoded again for each client, to each subscriber whose token bucket (one per client and stream, filling at its rate, starting with one token, which the newest value takes, and holding at most two) has one. A new subscription gets the newest value at once; a client further than 256 KiB behind skips values; no task or timer per client |
+| `Monitor`, `MonitorClient`, `Subscription` | the monitor link's server: the union of the clients' subscriptions, at the highest rate any asked, is what `speakerd` is asked for, except `board/cpu`, which `ampd` makes itself from `/proc/stat` while anyone subscribes. It keeps the newest line of each stream (a value of a subscribed stream, at most 64 KiB, its numbers finite, nothing else) as `speakerd` sent it, or encoded once more, for all the clients, when it does not start with `{` or holds `NaN` or `Infinity`. It flushes once per pass of the event loop, so of the lines read at once only the newest of each stream goes out, never encoded again for each client, to each subscriber whose token bucket (one per client and stream, filling at its rate, starting with one token, which the newest value takes, and holding at most two) has one. A new subscription gets the newest value at once; a client further than 256 KiB behind skips values; no task or timer per client |
 | `Knobs` | the UDP socket: OSC datagrams, checked for the token of an authenticated controller at that address |
 | `tweeter_rule` | the one Python definition of the tweeter rule, shared with the installer's `setup-helper.py` |
 
@@ -1459,9 +1468,9 @@ flowchart TB
 
     subgraph UI["«modules» UI layer"]
         mw["«module» MainHostWindow<br/>menus, Connect to a Hub"]:::ctl
-        gep["«module» GraphEditorPanel<br/>canvas, pins, connectors, status bar"]:::ctl
+        gep["«module» GraphEditorPanel<br/>canvas, pins, connectors, each node's load, status bar"]:::ctl
         pwin["«module» PluginWindow<br/>a control build's editor,<br/>the L / R monitor selector"]:::ctl
-        sp["«module» SpeakersPanel<br/>role, online, layer, level bars"]:::ctl
+        sp["«module» SpeakersPanel<br/>role, online, layer, level bars, load (audio cycle, late cycles, board CPU)"]:::ctl
     end
     subgraph MODEL["«modules» model layer"]
         pg["«module» PluginGraph<br/>AudioProcessorGraph as the canvas's model,<br/>node uids are the document's"]:::ctl
