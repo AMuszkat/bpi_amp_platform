@@ -156,7 +156,7 @@ anything else (the handshake is in "Authentication" below; these show the other 
 
 ## Monitoring (step 3: values)
 
-A **stream** is `output/level`, `speakerd/timing` or `node/<uid>/<mon_id>`:
+A **stream** is `output/level`, `speakerd/timing`, `board/cpu` or `node/<uid>/<mon_id>`:
 
 - `output/level`: what the amplifier gets, after the limits: `[woofer_peak, woofer_rms,
   tweeter_peak, tweeter_rms]` in dBFS, over the last period, built into `speakerd` for any graph.
@@ -170,6 +170,10 @@ A **stream** is `output/level`, `speakerd/timing` or `node/<uid>/<mon_id>`:
   the previous one (an xrun, or another driver); the `*_total` counters run since `speakerd`
   started; `dropped_total` counts cycles not recorded. `status` carries the same object over
   the last minute, with `"seconds"`.
+- `board/cpu`: the whole board's CPU use (every process: `speakerd`, PipeWire, `ampd`, the
+  rest), made by `ampd` itself from `/proc/stat` on every speaker, hub and agent alike, never
+  by `speakerd`. `v` is an object: `{"busy":0.23,"cores":[0.31,0.12,0.20,0.29],"seconds":0.50}`
+  (below).
 
 On the monitor link, straight to the speaker whose values are wanted:
 
@@ -180,10 +184,12 @@ On the monitor link, straight to the speaker whose values are wanted:
 ```
 
 - `ampd` passes subscriptions on to `speakerd` (local, the same objects), as the union of every
-  controller's, at the highest rate any asks for (at most 60 Hz). `speakerd`'s monitor thread
+  controller's, at the highest rate any asks for (at most 60 Hz); `board/cpu` it makes itself
+  and never passes on (`speakerd` would refuse it). `speakerd`'s monitor thread
   (normal priority, never the audio thread) samples the streams subscribed to and sends `value`
   lines; nothing is produced for a stream nobody subscribed to.
-- `t` is `speakerd`'s monotonic clock in seconds. `ampd` keeps the newest value per stream, and
+- `t` is `speakerd`'s monotonic clock in seconds (`board/cpu`'s is `ampd`'s, the same
+  `CLOCK_MONOTONIC` of the same machine). `ampd` keeps the newest value per stream, and
   sends each value as it arrives, at most at that controller's rate on average: in any T seconds
   `ampd` sends a controller at most 2 + T × rate values of a stream (1 + T × rate from its
   subscription), so after a pause one value may come early. Newest wins, nothing queues.
@@ -203,6 +209,36 @@ On the monitor link, straight to the speaker whose values are wanted:
   at the old rate before it and the new one after).
 - A subscription ends when the controller unsubscribes or its connection closes.
 - Frames, records and credits are step 4.
+
+**`board/cpu`, `ampd`'s own stream.** A subscription arrives on the monitor link as for any
+other stream (`{"op":"subscribe","stream":"board/cpu","rate_hz":R}`, `unsubscribe`), and its
+values go to the subscribers under the same rules as `speakerd`'s (newest wins, the token
+bucket and its 2 + T × rate bound, the newest value at once for a new subscription, the finite
+number and 64 KiB checks):
+
+```json
+{"op":"value","stream":"board/cpu","t":1234.567,"v":{"busy":0.23,"cores":[0.31,0.12,0.20,0.29],"seconds":0.50}}
+```
+
+- `ampd` reads `/proc/stat` only while at least one client of its monitor link subscribes to
+  `board/cpu`, at the highest rate any subscriber asks for, at most 10 Hz (`/proc/stat` counts
+  in 10 ms ticks, so faster is noise; a subscriber of 30 Hz gets 10 values a second). Each
+  reading is one small read of procfs on `ampd`'s loop, on its timer. When the last subscriber
+  goes, the sampling stops.
+- `busy` is the whole machine's busy fraction, 0 to 1, over the `seconds` since the previous
+  reading: 1 - (idle + iowait delta) / (total delta) from the `cpu` line, where total is the
+  sum of user, nice, system, idle, iowait, irq, softirq and steal (guest and guest_nice are
+  already inside user and nice, and are not added). `cores` is the same for each `cpuN` line, in
+  N order (the online CPUs in both readings, the ones `/proc/stat` lists; a core with no tick
+  in the period reads 0). Each is rounded to 4 decimals and kept
+  within 0 to 1 (iowait can step back). `t` is when the reading was taken.
+- The first value comes one period after sampling starts (it needs two readings); a period in
+  which no tick passed (a zero total delta) gives no value. A subscriber slower than the union
+  gets the newest reading's value, over the union's period (`seconds` says how long).
+- If `/proc/stat` cannot be read, every subscriber of `board/cpu` gets
+  `{"op":"error","about":"subscribe","stream":"board/cpu","reason":"cannot read /proc/stat: ..."}`
+  and loses the subscription, as for a stream `speakerd` refuses.
+- `speakerd` going away does not touch it: its newest value stays.
 
 **How a plugin publishes a monitor.** A monitor is a parameter whose ID starts with `mon_`,
 in every build of the plugin (complete, control, headless), declared after the plugin's other
@@ -291,12 +327,13 @@ These settle what version 1 left open; every implementation follows them.
     revision is building goes to the playing graph and is carried over to the new one.
     `applied` is sent once the new graph has run one audio cycle (or 200 ms after the swap
     when no cycle runs).
-19. **Monitor streams.** `v` is an array for `output/level` and a plain number for
-    `node/<uid>/<mon_id>`. Each stream has its own rate (`rate_hz`, default 30; outside 0.1 to
+19. **Monitor streams.** `v` is an array for `output/level`, a plain number for
+    `node/<uid>/<mon_id>` and an object for `speakerd/timing` and `board/cpu`. Each stream has its own rate (`rate_hz`, default 30; outside 0.1 to
     60 it is refused with an error); a period with no audio cycle sends nothing, so at a quantum of 1024 at
     48 kHz a stream gives about 47 values a second at most. RMS is plain RMS (a full-scale sine
     reads -3.01 dBFS); -120 is the floor. A `subscribe` to a name that is no stream is answered
-    `{"op":"error","about":"subscribe","stream":..,"reason":..}`; a well-formed `node/...`
+    `{"op":"error","about":"subscribe","stream":..,"reason":..}` (from `ampd`: `"a stream is
+    output/level, speakerd/timing, board/cpu or node/<uid>/mon_<id> (uid 16 or more)"`); a well-formed `node/...`
     stream the graph lacks is kept and starts when a revision has it.
 20. **`status`** is answered with the `hello`'s fields and `"op":"status"`.
 21. **Files.** `speakerd` writes no state file; it creates and removes its socket.
