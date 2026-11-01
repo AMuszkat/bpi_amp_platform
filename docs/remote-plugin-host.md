@@ -404,8 +404,8 @@ speaker in place of AudioPluginHost:
 - **Installed on a board by `firmware/`.** `firmware/speakerd-setup.sh` installs a bundle (the
   aarch64 `speakerd`, the plugins, the installer) into a versioned folder of the audio user's
   home with a `current` and a `previous` link for rollback, runs `speakerd` as a systemd user
-  unit with an empty `HOME` (so no old `~/.lv2` copy can shadow the deployed plugins), always
-  writes `device.json` capped, refuses a `speakerd` older than 0.2.0 or a running
+  unit with an empty `HOME` (so no old `~/.lv2` copy can shadow the deployed plugins), keeps
+  `device.json`'s limits (none on a first install), refuses a `speakerd` older than 0.2.0 or a running
   AudioPluginHost, and turns the board's session into the factory layer with the import above.
   The unit's wrapper (`firmware/speakerd/speakerd-run`) keeps the crash history and picks the
   layer (section 8). A PipeWire drop-in defines the persistent `speakerd` sink, with
@@ -1595,8 +1595,8 @@ Each rule is enforced at the lowest layer that can hold it, so that nothing abov
 - **The output cap and the tweeter mute** are `device.json`'s limits, applied by `speakerd`'s
   engine on the audio thread as constants fixed at start, after the graph and the fades, with
   NaN and infinity turned to 0 and every sample clamped to the ceiling. No message on any link
-  changes them; only the installer's `limits --person-present`, run by a person at the board,
-  rewrites the file and restarts `speakerd`.
+  changes them; only the installer's `limits` action, on the board, rewrites the file and
+  restarts `speakerd`. There is no cap since 2026-11-01: an install writes no limit.
 - **The tweeter rule** (only a crossover's high band reaches the tweeter while it is on) is
   checked in three places that must agree: `speakerd` when it loads a layer or an `apply`
   (C++, `GraphDocument`), the hub before it applies a proposal and the installer before it

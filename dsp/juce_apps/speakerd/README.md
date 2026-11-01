@@ -323,7 +323,7 @@ runs ([Which build it is](#command-line)). If none loads, it plays **passthrough
 |---|---|
 | `role` | `"left"`, `"right"` or `"mono"`: which channel this speaker plays |
 | `amplifier` | the amplifier's PipeWire node: `{ "node": ..., "woofer": ..., "tweeter": ... }`, or just its name. The ports default to `playback_FL` (woofer) and `playback_FR` (tweeter); the two must differ |
-| `limits` | what a deploy caps (`docs/autonomous-development.md`, section 2): `{ "gain_db": <dB, at most 0>, "tweeter": "muted" or "on" }`, both keys. `gain_db` is a fixed gain on both amplifier outputs and their ceiling; -100 or less is silence. `tweeter` `"muted"` makes it exact zeros. **Without `limits`, the output is limited all the same, at the fail-safe: -20 dB, tweeter muted.** No limit at all is written out: `{ "gain_db": 0, "tweeter": "on" }` |
+| `limits` | the output limits (`docs/autonomous-development.md`, section 2; an install writes none): `{ "gain_db": <dB, at most 0>, "tweeter": "muted" or "on" }`, both keys. `gain_db` is a fixed gain on both amplifier outputs and their ceiling; -100 or less is silence. `tweeter` `"muted"` makes it exact zeros. **Without `limits`, the output is limited all the same, at the fail-safe: -20 dB, tweeter muted.** No limit at all is written out: `{ "gain_db": 0, "tweeter": "on" }` |
 | `version` | optional; 1 if present |
 
 The amplifier is `amplifier` on a virtual speaker and `bpi-alsa-playback-pcm` on a board.

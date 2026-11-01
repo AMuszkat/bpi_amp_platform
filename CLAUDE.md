@@ -34,8 +34,9 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
   (`tools/test.sh all`), or, for a fix on top of a commit green in full, the virtual pair tests
   that cover every file it changed (`tools/test.sh affected`, by `tests/impact.json`). The
   plugins, speakerd, ampd, the tweeter rule, the harness and the gate always need both; an
-  installer fix re-runs exactly the installer tests a full run would. Every deploy keeps the
-  volume capped.
+  installer fix re-runs exactly the installer tests a full run would. There is no output cap
+  (2026-11-01, the person's decision): an install keeps `device.json`'s limits and writes none
+  on a first install; the tweeter rule still protects the tweeter.
 - **Real-time code never blocks:** no allocation, lock or syscall on the audio thread, in
   plugins and in `speakerd` alike.
 
@@ -81,8 +82,7 @@ the pull request. That run is also what the deploy gate reads.
   green, with that tree clean: `tests/.status/<commit>.json` saying `unit: pass` and
   `vpair: pass`, both run on a clean tree, or a passing affected run on top of a commit green
   in full that covers every file changed since. `tools/status.py gate` is the one definition
-  (the hook, `tools/board.sh` and the installers all ask it) and says why. Agents may never use `--person-present` (lifting a speaker's
-  output cap) or `BPI_DEPLOY_OVERRIDE`: both are a person's, in their own shell
+  (the hook, `tools/board.sh` and the installers all ask it) and says why. Agents may never use `BPI_DEPLOY_OVERRIDE`: it is a person's, in their own shell
   (`BPI_DEPLOY_OVERRIDE=1 tools/board.sh ...` bypasses the status, never the lock, and is
   logged in `tests/.status/overrides.log`). Create `.claude/lab.lock` whenever the boards are
   on a bench.
@@ -90,7 +90,7 @@ the pull request. That run is also what the deploy gate reads.
   `vpair` = the virtual pair, `all`, `affected` = only the virtual pair tests that cover a fix
   since the last commit green in full; writes the status file), `/vpair` (operate the virtual
   pair), `/pw-inspect` (a PipeWire graph, summarised), `/board` (a real board: status,
-  journal, deploy capped, smoke, rollback; gated), `/juce` (JUCE knowledge). Their
+  journal, deploy, smoke, rollback; gated), `/juce` (JUCE knowledge). Their
   scripts are in `tools/`, work without Claude, and run in the development container
   (below).
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,

@@ -1,6 +1,6 @@
 """speakerd_installed (docs/autonomous-development.md, section 5): a virtual speaker set up the
 way firmware/speakerd-setup.sh sets up a board plays through the persistent speakerd sink,
-clocked by the amplifier, capped, from the bundle that was deployed.
+clocked by the amplifier, with no gain limit, from the bundle that was deployed.
 
 Two versions are installed into one home (firmware/CLAUDE.md, "speakerd on a board"), the
 second current, with a factory graph of loudness's headless build (+12 dB shelf at 120 Hz) on
@@ -20,16 +20,18 @@ Pass when:
 - with a stream playing into the sink, pw-profiler shows the amplifier as the only driver on
   each speaker, with the speakerd sink, speakerd-dsp and the stream among its followers: the
   null sink never clocks the amplifier, whether the amplifier has priority 1000 or none;
-- speakerd says `device: limits: output at -20 dB, tweeter muted`, every sample of the tweeter
-  capture is 0, and the woofer's gain for a 100 Hz tone is the complete build's offline render
-  of the same document (no limits) minus 20 dB, within 0.05 dB;
+- speakerd says `device: limits: output at 0 dB, tweeter muted` (the factory graph feeds the
+  tweeter straight, which speakerd refuses with the tweeter on, so the test mutes it in
+  device.json after the installs), every sample of the tweeter capture is 0, and the woofer's
+  gain for a 100 Hz tone is the complete build's offline render of the same document, within
+  0.05 dB;
 - speakerd loads loudness_headless from the current version's lv2/ folder, although the copy
   in the home's own ~/.lv2 has the same URI and version; the same command with HOME set to that
   home stops with status 2 (lilv keeps the copy, read first and not older); after a rollback,
   the next start loads it from the previous version's folder; speakerd's HOME is still empty
   after it ran;
-- firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it is
-  capped, the live speakerd sink has the drop-in's properties and is the default sink, it is
+- firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it plays
+  device.json's limits, the live speakerd sink has the drop-in's properties and is the default sink, it is
   linked from the sink to the amplifier and nothing else feeds the amplifier, no AudioPluginHost
   runs, the amplifier drives, no restart or xrun in 3 s, and speakerd's timing (its status,
   read through the local link) shows the graph's longest cycle within half its cycle and no
@@ -68,10 +70,9 @@ DOCUMENT = graph_document(lv2_uri("loudness_headless"),
                           {"mode": "Force 1", "s0_e0_gain": 12.0, "s0_e0_freq": 120.0})
 TONE = tone(100.0, -20.0, 1.0)
 STREAM = tone(100.0, -20.0, 30.0)
-CAP_DB = -20.0
 TOLERANCE_DB = 0.05
 RECORD_SECONDS, SKIP, MEASURED = 0.8, int(0.2 * RATE), int(0.5 * RATE)
-LIMITS_LINE = "speakerd: device: limits: output at -20 dB, tweeter muted"
+LIMITS_LINE = re.compile(r"^speakerd: device: limits: output at -?0(\.0+)? dB, tweeter muted$", re.M)
 URI = lv2_uri("loudness_headless")
 
 
@@ -107,6 +108,11 @@ class Installed(unittest.TestCase):
                  "--allow-tweeter-without-crossover", env=no_pipewire)
         firmware("speakerd-setup.sh", "install", "--bundle", bundles[1], "--home", cls.user_home, "--no-systemd",
                  "--allow-tweeter-without-crossover", env=no_pipewire)
+        # The factory feeds the tweeter straight: with the tweeter on (a first install's limits)
+        # speakerd refuses that layer, so this speaker has no gain limit and the tweeter muted.
+        device_json = cls.user_home / ".local/state/speakerd/device.json"
+        device_json.write_text(json.dumps(dict(json.loads(device_json.read_text()),
+                                               limits={"gain_db": 0, "tweeter": "muted"}), indent=2))
         cls.lib = cls.user_home / ".local/lib/speakerd"
 
         # A copy of the bundle in the home's own ~/.lv2, of the same version (lilv keeps it over a
@@ -202,7 +208,7 @@ class Installed(unittest.TestCase):
             self.assertEqual(found, {"amplifier"}, f"{name}: {output}")
             self.assertLessEqual({"speakerd", "speakerd-dsp", stream.name}, followers, f"{name}: {output}")
 
-    def test_plays_capped(self):
+    def test_plays_with_no_limit(self):
         speaker = self.pair["left"]
         with Player(speaker, STREAM, target="speakerd"):
             capture = speaker.record(RECORD_SECONDS)
@@ -213,15 +219,13 @@ class Installed(unittest.TestCase):
         log = self.runs["left"].log()
         limits = [line for line in log.splitlines() if line.startswith("speakerd: device: limits:")
                   or line.startswith("speakerd: device: no limits")]
-        summary = (f"woofer {woofer:+.3f} dB, render {self.reference:+.3f} dB (so {self.reference + CAP_DB:+.3f} "
-                   f"expected), tweeter {np.count_nonzero(tweeter)} samples not 0; speakerd says: "
-                   f"{limits[0] if limits else 'nothing about limits'}")
+        summary = (f"woofer {woofer:+.3f} dB, render {self.reference:+.3f} dB, tweeter "
+                   f"{np.count_nonzero(tweeter)} samples not 0; "
+                   f"speakerd says: {limits[0] if limits else 'nothing about limits'}")
         print(f"\n  {summary}")
-        hint = ("\n  (this needs speakerd's device.json limits, which came after 2cb3278: a speakerd "
-                "without them ignores the cap)")
-        self.assertIn(LIMITS_LINE, log.splitlines(), summary + hint)
-        self.assertEqual(np.count_nonzero(tweeter), 0, f"the tweeter is not muted: {summary}{hint}")
-        self.assertAlmostEqual(woofer, self.reference + CAP_DB, delta=TOLERANCE_DB, msg=summary + hint)
+        self.assertRegex(log, LIMITS_LINE, summary)
+        self.assertAlmostEqual(woofer, self.reference, delta=TOLERANCE_DB, msg=summary)
+        self.assertEqual(np.count_nonzero(tweeter), 0, f"the tweeter is not muted: {summary}")
 
     def test_the_deployed_bundle_runs_and_rollback_switches_it(self):
         current = f"speakerd: lv2 bundle {self.lib / self.current / 'lv2/loudness_headless.lv2'}: {URI}"
@@ -259,7 +263,7 @@ class Installed(unittest.TestCase):
             result = firmware("speakerd-setup.sh", "smoke", "--home", self.user_home, "--no-systemd",
                               "--log", self.log["left"], "--window", "3", env=env, check=False)
         print("\n" + result.stdout)
-        for check in ("pass it plays: layer factory", "pass capped: output at -20 dB, tweeter muted",
+        for check in ("pass it plays: layer factory", "pass device.json's limits: output at 0",
                       "pass the speakerd sink is the drop-in's (priority.session 1500, priority.driver 0)",
                       "pass the default sink is speakerd",
                       "pass linked: speakerd sink -> speakerd-dsp -> amplifier",

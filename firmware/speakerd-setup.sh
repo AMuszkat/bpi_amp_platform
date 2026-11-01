@@ -18,8 +18,9 @@
 # A version also holds ampd (bin/ampd), which ampd-setup.sh runs as its own service; status,
 # smoke, rollback and uninstall include it when it is installed.
 #
-# Every install caps the output: device.json gets "limits": output at -20 dB, tweeter muted.
-# Only the limits action lifts the cap, with a person at the speaker after a smoke test.
+# An install keeps device.json's limits; a first install writes none (output at 0 dB, tweeter
+# on). The limits action sets them. The tweeter is protected by the tweeter rule: while it is on,
+# install and limits refuse any layer that feeds it other than through a crossover's high band.
 # install refuses everything it can refuse before it changes anything.
 #
 # Usage:
@@ -38,11 +39,9 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]
 . "$(dirname "$SELF")/install-lib.sh"
 HELPER="$FIRMWARE_DIR/speakerd/setup-helper.py"
 
-CAP_GAIN_DB=-20.0
-CAP_TWEETER=muted
 # The oldest speakerd that may play on a board: 0.2.0 is the first that enforces device.json's
 # limits (and fails closed without them) and says its version (speakerd --version). An older one
-# would ignore the cap, so install and rollback refuse it (dsp/juce_apps/speakerd/README.md).
+# would ignore them, so install and rollback refuse it (dsp/juce_apps/speakerd/README.md).
 SPEAKERD_MIN_VERSION=0.2.0
 # speakerd's line for the limits it plays, exactly; with the fail-safe it adds a suffix, such as
 # " (no limits in device.json: the fail-safe)", which is never device.json's limits.
@@ -84,8 +83,6 @@ ARCH=aarch64
 PLUGINS=()
 GAIN_DB=""
 TWEETER_LIMIT=""
-CAP=0
-PERSON_PRESENT=0
 WINDOW=10
 # smoke fails when the graph's longest cycle (speakerd's timing, per node and for the graph)
 # took more than this fraction of the cycle's length: half the budget, so the rest of the
@@ -109,16 +106,16 @@ Actions:
   uninstall   restore snapclient's routing from before speakerd and re-enable the AudioPluginHost
               units install disabled, then remove the service, the sink and the versions;
               device.json and the layers stay unless --purge
-  smoke       check without making a sound that speakerd plays capped, through the drop-in's
+  smoke       check without making a sound that speakerd plays device.json's limits, through the drop-in's
               speakerd sink, linked to the amplifier, driven by it, with no restart or xrun for a
               while, and what its audio thread spends (per node, the graph: at most half the
               cycle; no late cycle while watched). Run it with a quiet stream playing: who drives
               is measured only when the graph runs
   sink        install the persistent speakerd sink and check that the running PipeWire has it
   check       what install would refuse, without changing anything
-  limits      change device.json's limits (the cap), then restart speakerd. No limit at all is
-              --gain-db 0 --tweeter-limit on (written explicitly: without limits speakerd
-              plays capped)
+  limits      change device.json's limits, then restart speakerd. No limit at all is
+              --gain-db 0 --tweeter-limit on, what a first install writes (without limits
+              speakerd plays with its fail-safe: -20 dB, tweeter muted)
   stop-plugin-host
               stop a running AudioPluginHost and disable the systemd units that start it
               (setup.sh does this before it restarts PipeWire); uninstall re-enables them
@@ -154,12 +151,8 @@ Options:
                               once every other check has passed.
   --keep <n>                  versions to keep, current and previous included (default $KEEP_VERSIONS).
   --purge                     uninstall: also remove ~/.local/state/speakerd.
-  --cap                       limits: back to the cap (output at $CAP_GAIN_DB dB, tweeter $CAP_TWEETER).
   --gain-db <dB> --tweeter-limit <muted|on>
                               limits: the output gain limit (0 or below) and the tweeter.
-  --person-present            limits: required for anything above the cap. ONLY after a smoke test has
-                              passed, with a person at the speaker: these lift the protection of the
-                              drivers. No agent and no script passes this.
   --window <seconds>          smoke: how long to watch for restarts and xruns (default $WINDOW).
   --out <dir>                 bundle: where to assemble it.
   --arch <aarch64|native>     bundle and target-remote: which build tree (default aarch64: build/aarch64/...).
@@ -209,10 +202,8 @@ while [ $# -gt 0 ]; do
         --stop-plugin-host) STOP_PLUGIN_HOST=1; remote "$1"; shift ;;
         --keep)            KEEP_VERSIONS="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --purge)           PURGE=1; remote "$1"; shift ;;
-        --cap)             CAP=1; remote "$1"; shift ;;
         --gain-db)         GAIN_DB="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --tweeter-limit)   TWEETER_LIMIT="${2:?}"; remote "$1" "$2"; shift 2 ;;
-        --person-present)  PERSON_PRESENT=1; remote "$1"; shift ;;
         --window)          WINDOW="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --out)             OUT="${2:?}"; shift 2 ;;
         --arch)            ARCH="${2:?}"; shift 2 ;;
@@ -403,7 +394,7 @@ require_speakerd_version() {
         die "$2 cannot be executed ($1: permission denied): is its file system mounted noexec, as /tmp often is? Put the bundle in the home and run it from there."
     fi
     if [ -z "$FOUND_VERSION" ] || ! version_at_least "$FOUND_VERSION" "$SPEAKERD_MIN_VERSION"; then
-        die "$2 is ${FOUND_VERSION:-too old to say its version (no --version)}: a board needs speakerd $SPEAKERD_MIN_VERSION or newer, the first that enforces device.json's limits. An older one would ignore the cap."
+        die "$2 is ${FOUND_VERSION:-too old to say its version (no --version)}: a board needs speakerd $SPEAKERD_MIN_VERSION or newer, the first that enforces device.json's limits. An older one would ignore them."
     fi
 }
 
@@ -715,7 +706,7 @@ choose_amplifier() {
     info "The amplifier: '$node'${alsa:+ (ALSA: $alsa)}${rate:+, $rate Hz}${ports:+, ports $ports}"
     loud "woofer = $node:$woofer, tweeter = $node:$tweeter" \
          "Which port drives which speaker is the board's wiring, which this script cannot know." \
-         "Confirm it at the speaker before the cap is lifted; until then the tweeter stays muted."
+         "Confirm it at the speaker, at a low level, before you play music through it."
     if [ "$alsa" = no ]; then
         info "('$node' is not an ALSA sink: a virtual speaker's amplifier?)"
     elif [ "$alsa" = yes ] && { [ -z "$priority" ] || [ "${priority:-0}" -le 0 ] 2> /dev/null; }; then
@@ -813,11 +804,16 @@ restart_pipewire() {
 prepare_device() {
     local out changed="" role="" amplifier="" woofer="" tweeter="" limits="" note=""
     rm -f "$WORK/device.json"
-    if [ -f "$STATE/device.json" ] && [ "$DEVICE_BROKEN" -eq 0 ]; then cp "$STATE/device.json" "$WORK/device.json"; fi
-    out="$(helper device "$WORK/device.json" ${ROLE:+--role "$ROLE"} "${AMP_ARGS[@]}" --gain-db "$CAP_GAIN_DB" --tweeter-limit "$CAP_TWEETER")" \
+    local open=(--gain-db 0 --tweeter-limit on)
+    if [ -f "$STATE/device.json" ] && [ "$DEVICE_BROKEN" -eq 0 ]; then
+        cp "$STATE/device.json" "$WORK/device.json"
+        python3 -c 'import json,sys; sys.exit("limits" not in json.load(open(sys.argv[1])))' "$WORK/device.json" && open=()
+    fi
+    out="$(helper device "$WORK/device.json" ${ROLE:+--role "$ROLE"} "${AMP_ARGS[@]}" "${open[@]}")" \
         || die "cannot write device.json (see above)"
     eval "$out"
     : "$changed$note"
+    DEVICE_TWEETER="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("limits") or {}).get("tweeter", ""))' "$WORK/device.json")"
     info "device.json: role $role, amplifier '$amplifier' (woofer $woofer, tweeter $tweeter), limits $limits"
 }
 
@@ -884,10 +880,13 @@ install_version() {
 }
 
 # The tweeter rule over every layer speakerd may load: graph.json and graph.lkg.json (ampd's)
-# load before factory.json. $1 = refuse (any layer that breaks it refuses) | warn.
+# load before factory.json. $1 = refuse (any layer that breaks it refuses) | warn; then the
+# layers to check (default all three).
 check_layers() {
     local mode="$1" f out bad=()
-    for f in graph.json graph.lkg.json factory.json; do
+    shift
+    [ $# -gt 0 ] || set -- graph.json graph.lkg.json factory.json
+    for f in "$@"; do
         [ -f "$STATE/$f" ] || continue
         out="$(helper graph "$STATE/$f" 2>&1)" || bad+=("$f: ${out#setup-helper: }")
     done
@@ -898,7 +897,7 @@ check_layers() {
         exit 1
     fi
     loud "A layer speakerd may load feeds the tweeter other than through a crossover's high band (the" \
-         "tweeter is muted now; turning it on will be refused):" "${bad[@]/#/    }"
+         "tweeter is muted in device.json; turning it on will be refused):" "${bad[@]/#/    }"
 }
 
 # Writes what prepare_device and prepare_factory made. Sets DEVICE_CHANGED, FACTORY_CHANGED.
@@ -1013,6 +1012,7 @@ do_install() {
     note_rates
     prepare_device
     prepare_factory
+    if [ "$DEVICE_TWEETER" = on ] && [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ]; then check_layers refuse graph.json graph.lkg.json; fi
     [ ! -e "$LIB/home/.lv2" ] || die "$LIB/home/.lv2 exists: it would shadow the bundles. Remove it."
 
     # Nothing has changed so far. From here on it changes things.
@@ -1036,7 +1036,7 @@ do_install() {
         fi
     fi
     prune_versions
-    dry || check_layers warn
+    [ "$DEVICE_TWEETER" = on ] || dry || check_layers warn
 
     if dry; then ok "Dry run: nothing changed"; return 0; fi
     [ "$unit_changed" -eq 0 ] || sc daemon-reload
@@ -1059,7 +1059,7 @@ do_install() {
     fi
     cat <<EOF
 
-${c_green}speakerd $BUNDLE_ID installed.${c_off} The output is capped: -20 dB, tweeter muted.
+${c_green}speakerd $BUNDLE_ID installed.${c_off} The limits: $(python3 -c 'import json,sys; l=json.load(open(sys.argv[1])).get("limits") or {}; print(f"output at {l.get(\"gain_db\")} dB, tweeter {l.get(\"tweeter\")}")' "$STATE/device.json" 2> /dev/null || echo "device.json not written (dry run)").
   - Check it, without a sound, with a quiet stream playing: $(installed_setup speakerd-setup.sh) smoke
   - Its log:                      journalctl --user-unit speakerd -b
   - Back to the previous version: $(installed_setup speakerd-setup.sh) rollback
@@ -1137,18 +1137,11 @@ do_rollback() {
     version="$(version_value "$LIB/$previous/VERSION" speakerd_version)"
     if [ -n "$version" ]; then
         version_at_least "$version" "$SPEAKERD_MIN_VERSION" \
-            || die "the previous version's speakerd ($previous) is $version: a board needs speakerd $SPEAKERD_MIN_VERSION or newer, the first that enforces device.json's limits. An older one would ignore the cap."
+            || die "the previous version's speakerd ($previous) is $version: a board needs speakerd $SPEAKERD_MIN_VERSION or newer, the first that enforces device.json's limits. An older one would ignore them."
     else
         require_speakerd_version "$LIB/$previous/bin/speakerd" "the previous version's speakerd ($previous)"
     fi
-    if dry; then info "(dry-run) would make $previous current and $current previous, and cap device.json"; return 0; fi
-    # Other plugin builds (another crossover) play from here: under the cap, as after an
-    # install, until a person lifts it again. The cap first, then the switch.
-    if [ -f "$STATE/device.json" ]; then
-        helper device "$STATE/device.json" --gain-db "$CAP_GAIN_DB" --tweeter-limit "$CAP_TWEETER" > /dev/null \
-            || die "cannot cap device.json: not rolling back"
-        ok "device.json capped: output at $CAP_GAIN_DB dB, tweeter $CAP_TWEETER"
-    fi
+    if dry; then info "(dry-run) would make $previous current and $current previous"; return 0; fi
     point "$LIB/current" "$previous"
     point "$LIB/previous" "$current"
     ok "current -> $previous (previous -> $current; rollback again to go back)"
@@ -1270,15 +1263,8 @@ do_limits() {
     local gain tweeter out changed="" limits="" role="" amplifier="" woofer="" note=""
     [ -f "$STATE/device.json" ] || die "no $STATE/device.json: install first"
     check_device_json
-    if [ "$CAP" -eq 1 ]; then gain="$CAP_GAIN_DB"; tweeter="$CAP_TWEETER"
-    else
-        [ -n "$GAIN_DB" ] && [ -n "$TWEETER_LIMIT" ] || die "limits: --cap, or --gain-db <dB> --tweeter-limit <muted|on>"
-        gain="$GAIN_DB"; tweeter="$TWEETER_LIMIT"
-        if [ "$tweeter" != muted ] || awk -v g="$gain" -v c="$CAP_GAIN_DB" 'BEGIN { exit !(g > c) }'; then
-            [ "$PERSON_PRESENT" -eq 1 ] || die "output at $gain dB, tweeter $tweeter is above the cap ($CAP_GAIN_DB dB, tweeter $CAP_TWEETER): only with --person-present, after a smoke test, with a person at the speaker"
-            loud "Lifting the cap: output at $gain dB, tweeter $tweeter. A person is at the speaker (--person-present)."
-        fi
-    fi
+    [ -n "$GAIN_DB" ] && [ -n "$TWEETER_LIMIT" ] || die "limits: --gain-db <dB> --tweeter-limit <muted|on>"
+    gain="$GAIN_DB"; tweeter="$TWEETER_LIMIT"
     # The tweeter goes on only if no layer speakerd may load feeds it other than through a
     # crossover's high band: what it plays now may be ampd's graph.json, not the factory.
     if [ "$tweeter" = on ] && [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ]; then check_layers refuse; fi
@@ -1389,10 +1375,8 @@ do_smoke() {
             failed "device.json has no limits (speakerd then plays with its fail-safe ones; say them explicitly): ${line#speakerd: }"
         elif ! awk -v a="$gain" -v b="$want_gain" 'BEGIN { exit !(a - b < 0.001 && b - a < 0.001) }' || [ "$tweeter_on" != "$want_tweeter" ]; then
             failed "speakerd says '${line#speakerd: }'; device.json says output at $want_gain dB, tweeter $want_tweeter"
-        elif [ "$tweeter_on" = muted ] && awk -v g="$gain" -v c="$CAP_GAIN_DB" 'BEGIN { exit !(g <= c) }'; then
-            pass "capped: output at $gain dB, tweeter muted"
         else
-            noted "the cap is lifted: output at $gain dB, tweeter $tweeter_on (only a person does that, after a smoke test)"
+            pass "device.json's limits: output at $gain dB, tweeter $tweeter_on"
         fi
     else
         failed "speakerd did not say which limits it enforces ('device: limits: ...'): a speakerd without the limits must not play on a board"

@@ -1,5 +1,5 @@
 """firmware_speakerd_install (docs/autonomous-development.md, section 5): the installers lay
-speakerd out as firmware/CLAUDE.md documents it, always capped, refuse what is unsafe before
+speakerd out as firmware/CLAUDE.md documents it, refuse what is unsafe before
 they change anything, and their remote mode and the board script quote what they send.
 
 firmware/speakerd-setup.sh runs here as it runs on a board, with two test hooks: --home (a
@@ -27,21 +27,20 @@ Pass when:
   bin/speakerd-run, lv2/loudness_headless.lv2, VERSION (with the speakerd version) and setup/
   (the installer); current -> <id>; an empty home/ (speakerd's HOME);
   .local/state/speakerd/device.json exactly {version 1, role left, amplifier {node, woofer
-  playback_FL, tweeter playback_FR}, limits {gain_db -20.0, tweeter muted}}; factory.json, the
+  playback_FL, tweeter playback_FR}, limits {gain_db 0.0, tweeter on}}; factory.json, the
   document given; the unit and the PipeWire drop-in, byte for byte the tracked firmware/ files;
   and graph.json and graph.lkg.json, there before, unchanged byte for byte; and it says every
   library speakerd and its plugins need is there; VERSION records speakerd's whole --version
   line (speakerd_build), the installed scripts are executable, and the installed
   speakerd-setup.sh, called directly, says the status; its closing hints name the installed copy
   (.local/lib/speakerd/current/setup/speakerd-setup.sh smoke and rollback), never the bundle's;
-- installing the same bundle again adds no version and changes nothing, but a device.json whose
-  limits a person lifted (0 dB, tweeter on) is capped again, keeping its role and amplifier;
+- installing the same bundle again adds no version and changes nothing, and keeps device.json's
+  limits (-6 dB, tweeter on), role and amplifier;
   --role right changes the role alone; one of --amplifier, --woofer-port, --tweeter-port
   changes that alone and keeps device.json's others; a device.json with a key speakerd does not
   know, or a key twice, is refused (speakerd would reject it and play its fail-safe defaults);
 - a second, different bundle becomes current, the first previous; rollback swaps them, and
-  rollback again swaps them back, and a device.json whose limits a person lifted is capped
-  again by the rollback; with --keep 2 a third version removes the oldest, never current or
+  rollback again swaps them back, keeping device.json's limits; with --keep 2 a third version removes the oldest, never current or
   previous;
 - while the plugin host runs, install refuses, says so, and installs nothing; with
   --stop-plugin-host it still refuses, stopping nothing, while a desktop autostart or a profile
@@ -52,7 +51,8 @@ Pass when:
   band (channel 0); it is accepted with --allow-tweeter-without-crossover (with --home), and a
   later install that keeps it refuses it; `limits` turning the tweeter on refuses, leaving
   device.json as it was, while factory.json or ampd's graph.json breaks that rule (naming the
-  layer), and turns it on once none does; status marks such a layer with ***; the allow flag
+  layer), and turns it on once none does; with the tweeter on, an install refuses while ampd's
+  graph.json breaks it; status marks such a layer with ***; the allow flag
   without --home, and in the remote mode, is refused before anything is changed or contacted;
 - a plugin bundle with one of the bundle's URIs in a system LV2 folder is named loudly, once per
   system bundle, with its version against the bundle's: with one of the same version or a newer
@@ -65,7 +65,7 @@ Pass when:
   speaker (whose amplifier is a null sink) install refuses without --amplifier, and with
   --amplifier amplifier reads its ports playback_FL and playback_FR;
 - smoke passes the exact line `speakerd: device: limits: output at -20 dB, tweeter muted` when
-  device.json has those limits, and reports, each as a failure: a `device.json: FAILED` line,
+  device.json has those limits (any limits: there is no cap), and reports, each as a failure: a `device.json: FAILED` line,
   the limits line with either fail-safe suffix (or any other), speakerd's `NO INPUT SINK
   CONFIGURED` line, and no limits line at all;
 - smoke finds snapclient's stream by its application.name in pw-dump (snapclient 0.34.0's has no
@@ -167,6 +167,8 @@ from harness import (FIRMWARE, ROOT, TEST_ENV, TEST_PLUGIN_HOST, Pair, built, fi
 
 DOCUMENT = graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1", "s0_e0_gain": 12.0})
 CAPPED = {"gain_db": -20.0, "tweeter": "muted"}
+# What a first install writes: no limit at all.
+OPEN = {"gain_db": 0.0, "tweeter": "on"}
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
 LIMITS = "speakerd: device: limits: output at -20 dB, tweeter muted"
 AMPD_LISTENING = "ampd: listening on 0.0.0.0: control 7450, knobs 7451, monitor 7452"
@@ -522,7 +524,7 @@ class Install(Setup):
         self.assertEqual(json.loads((state / "device.json").read_text()),
                          {"version": 1, "role": "left",
                           "amplifier": {"node": "amplifier", "woofer": "playback_FL", "tweeter": "playback_FR"},
-                          "limits": CAPPED})
+                          "limits": OPEN})
         self.assertEqual(json.loads((state / "factory.json").read_text()), DOCUMENT)
         self.assertEqual((home / ".config/systemd/user/speakerd.service").read_bytes(),
                          (FIRMWARE / "speakerd/speakerd.service").read_bytes())
@@ -535,12 +537,12 @@ class Install(Setup):
             self.assertIn(f"{home}/.local/lib/speakerd/current/setup/speakerd-setup.sh {action}", result.stdout)
         self.assertNotIn(f"{FIRMWARE}/speakerd-setup.sh smoke", result.stdout)
 
-    def test_a_reinstall_keeps_the_device_and_caps_it_again(self):
+    def test_a_reinstall_keeps_the_device_and_its_limits(self):
         home = self.fresh_home("reinstall")
         self.install(home, "--role", "left")
         device_json = home / ".local/state/speakerd/device.json"
         device = json.loads(device_json.read_text())
-        device["limits"] = {"gain_db": 0.0, "tweeter": "on"}
+        device["limits"] = {"gain_db": -6.0, "tweeter": "on"}
         device["amplifier"]["tweeter"] = "playback_FL"
         device["amplifier"]["woofer"] = "playback_FR"
         device_json.write_text(json.dumps(device))
@@ -550,7 +552,7 @@ class Install(Setup):
                  env=self.env)
         self.assertEqual(tree(home / ".local/lib/speakerd"), before)
         again = json.loads(device_json.read_text())
-        self.assertEqual(again["limits"], CAPPED)
+        self.assertEqual(again["limits"], {"gain_db": -6.0, "tweeter": "on"})
         self.assertEqual((again["role"], again["amplifier"]),
                          ("left", {"node": "amplifier", "woofer": "playback_FR", "tweeter": "playback_FL"}))
 
@@ -589,12 +591,12 @@ class Install(Setup):
         self.install(home, "--role", "left")
         self.install(home, bundle=self.bundle2)
         self.assertEqual((link("current"), link("previous")), (two, one))
-        # Limits a person lifted: the version rolled back to plays capped, as after an install.
+        # device.json's limits stay as they are: rollback changes the version, nothing else.
         device_json = home / ".local/state/speakerd/device.json"
         device_json.write_text(json.dumps(dict(json.loads(device_json.read_text()), limits={"gain_db": -6.0, "tweeter": "on"})))
         firmware("speakerd-setup.sh", "rollback", "--home", home, "--no-systemd", env=self.env)
         self.assertEqual((link("current"), link("previous")), (one, two))
-        self.assertEqual(json.loads(device_json.read_text())["limits"], CAPPED)
+        self.assertEqual(json.loads(device_json.read_text())["limits"], {"gain_db": -6.0, "tweeter": "on"})
         firmware("speakerd-setup.sh", "rollback", "--home", home, "--no-systemd", env=self.env)
         self.assertEqual((link("current"), link("previous")), (two, one))
         status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
@@ -696,11 +698,13 @@ class Install(Setup):
         state = home / ".local/state/speakerd"
         self.install(home, "--role", "left", "--factory", self.factory, "--allow-tweeter-without-crossover")
         device_json = state / "device.json"
+        firmware("speakerd-setup.sh", "limits", "--gain-db", "-20", "--tweeter-limit", "muted", "--home", home,
+                 "--no-systemd", env=self.env)
         before = device_json.read_text()
 
         def tweeter_on(*extra):
             return firmware("speakerd-setup.sh", "limits", "--gain-db", "-20", "--tweeter-limit", "on",
-                            "--person-present", "--home", home, "--no-systemd", *extra, env=self.env, check=False)
+                            "--home", home, "--no-systemd", *extra, env=self.env, check=False)
 
         refused = tweeter_on()
         self.assertNotEqual(refused.returncode, 0, refused.stdout)
@@ -725,11 +729,20 @@ class Install(Setup):
         lifted = tweeter_on()
         self.assertEqual(lifted.returncode, 0, lifted.stdout)
         self.assertEqual(json.loads(device_json.read_text())["limits"], {"gain_db": -20.0, "tweeter": "on"})
-        firmware("speakerd-setup.sh", "limits", "--cap", "--home", home, "--no-systemd", env=self.env)
+
+        # With the tweeter on, an install refuses while ampd's graph.json breaks the rule.
+        (state / "graph.json").write_text(json.dumps(DOCUMENT))
+        refused = self.install(home, "--factory", self.tmp / "woofer-only.json", check=False)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn("graph.json: ", refused.stdout)
+        (state / "graph.json").unlink()
+        firmware("speakerd-setup.sh", "limits", "--gain-db", "-20", "--tweeter-limit", "muted", "--home", home,
+                 "--no-systemd", env=self.env)
         self.assertEqual(json.loads(device_json.read_text())["limits"], CAPPED)
 
         # The allow flag is for these tests (--home), never for a board.
-        refused = firmware("speakerd-setup.sh", "limits", "--cap", "--allow-tweeter-without-crossover", "--no-systemd",
+        refused = firmware("speakerd-setup.sh", "limits", "--gain-db", "0", "--tweeter-limit", "on",
+                           "--allow-tweeter-without-crossover", "--no-systemd",
                            env=dict(self.env, HOME=str(self.fresh_home("no-home-given"))), check=False)
         self.assertNotEqual(refused.returncode, 0, refused.stdout)
         self.assertIn("--allow-tweeter-without-crossover is for the virtual pair tests (--home) only", refused.stdout)
@@ -858,9 +871,11 @@ class Install(Setup):
             self.assertIn("ports playback_FL playback_FR", found.stdout)
             self.assertIn("woofer = amplifier:playback_FL, tweeter = amplifier:playback_FR", found.stdout)
 
-    def test_smoke_reports_what_is_not_capped(self):
+    def test_smoke_reports_limits_it_does_not_play(self):
         home = self.fresh_home("smoke")
         self.install(home, "--role", "left")
+        device_json = home / ".local/state/speakerd/device.json"
+        device_json.write_text(json.dumps(dict(json.loads(device_json.read_text()), limits=CAPPED)))
         start = "speakerd-run: starting speakerd x from layer current (test)"
         not_capped = "FAIL speakerd does not play device.json's limits"
         cases = {
@@ -882,7 +897,7 @@ class Install(Setup):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertRegex(result.stdout, r"smoke: \d+ failed, \d+ warning\(s\)")
             if name != "own sink":
-                self.assertNotIn("pass capped", result.stdout, name)
+                self.assertNotIn("pass device.json's limits", result.stdout, name)
             for fail in fails:
                 self.assertIn(fail, result.stdout, name)
         # The exact line, with device.json's own limits, passes that check (no PipeWire here, so
@@ -891,7 +906,7 @@ class Install(Setup):
         log.write_text("\n".join([start, LIMITS]) + "\n")
         result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
                           "--window", "0", env=self.env, check=False)
-        self.assertIn("pass capped: output at -20 dB, tweeter muted", result.stdout)
+        self.assertIn("pass device.json's limits: output at -20 dB, tweeter muted", result.stdout)
         self.assertIn("FAIL the speakerd sink is not the drop-in's", result.stdout)
         # A broken device.json: every check still reports, and the summary prints.
         (home / ".local/state/speakerd/device.json").write_text("{ broken")
@@ -1479,7 +1494,7 @@ class Systemd(Setup):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("speakerd ended", (d / "before").read_text())
 
-        # As a person's limits would leave it: rollback caps it again, as an install does.
+        # rollback keeps device.json's limits, as an install does.
         device = json.loads(device_json.read_text())
         device_json.write_text(json.dumps(dict(device, limits={"gain_db": -6.0, "tweeter": "on"})))
         (d / "before").unlink()
@@ -1487,7 +1502,7 @@ class Systemd(Setup):
         result = firmware("speakerd-setup.sh", "rollback", "--home", home, env=env, check=False)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("speakerd ended", (d / "before").read_text())
-        self.assertEqual(json.loads(device_json.read_text())["limits"], CAPPED)
+        self.assertEqual(json.loads(device_json.read_text())["limits"], {"gain_db": -6.0, "tweeter": "on"})
 
         # A crash after the new start still fails both.
         (d / "journal").write_text(f"{start}\n{LIMITS}\nspeakerd-run: speakerd ended: crash (status 134, signal ABRT); the next start uses current\n")

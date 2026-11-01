@@ -13,8 +13,8 @@ one path to a board is the `/board` skill (`tools/board.sh`); read its `SKILL.md
    and `.claude/lab.lock` must not exist. The `pre-bash` hook enforces both; do not work around it, and never use
    `BPI_DEPLOY_OVERRIDE`: that is for a person.
 2. `tools/board.sh status` and `tools/board.sh journal -n 100` first, to know what runs.
-3. Deploy with `tools/board.sh deploy`, which installs capped (-20 dB, tweeter muted). Never
-   lift or raise the cap; that is a person's, at the speaker.
+3. Deploy with `tools/board.sh deploy`, which keeps `device.json`'s limits. Change limits only
+   when the person asks.
 4. `tools/board.sh smoke`, then `tools/board.sh journal`. Report each smoke check with its
    result, the layer that plays, restarts and xrun lines.
 5. On any failure, `tools/board.sh rollback` first, report second.

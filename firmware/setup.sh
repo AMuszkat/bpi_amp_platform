@@ -9,7 +9,7 @@
 #              (pipewire.conf.d/60-speakerd-sink.conf); with --base-conf also the
 #              repository's pipewire.conf (48000 Hz), and with --rate another sample rate
 #   snapcast   snapclient, routed into the speakerd sink (snapcast-setup.sh --route speakerd)
-#   speakerd   the headless plugin host (speakerd-setup.sh install), its output capped
+#   speakerd   the headless plugin host (speakerd-setup.sh install)
 #   ampd       the speaker's network agent, and the hub on the left speaker (ampd-setup.sh install):
 #              ampd.json and its unit; its program comes with speakerd's version
 #
@@ -458,7 +458,7 @@ for c in "${CHOSEN[@]}"; do
             fi
             ;;
         speakerd)
-            info "speakerd: the headless plugin host, capped"
+            info "speakerd: the headless plugin host"
             speakerd_setup install "${SPEAKERD_ARGS[@]}"
             ;;
         ampd)

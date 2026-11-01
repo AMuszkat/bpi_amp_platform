@@ -78,9 +78,9 @@ path must fit in 108 bytes.
 | `test_speakerd_quantum_change.py` | the quantum changes while a stream plays, and the gain comes back each time |
 | `test_speakerd_device_limits.py` | device.json's limits, live and rendered, as a ceiling, and failing closed |
 | `test_speakerd_import.py` | an AudioPluginHost session imported renders like the same settings as parameters; unsafe sessions are refused |
-| `test_firmware_speakerd_install.py` | `firmware/speakerd-setup.sh`, `setup.sh` and `snapcast-setup.sh --mode target`: the layout, always capped, versions and rollback, the refusals before any change, the systemd path, a reinstall that changes nothing, smoke, the snapcast client checked before it is changed, the remote mode and the board script |
+| `test_firmware_speakerd_install.py` | `firmware/speakerd-setup.sh`, `setup.sh` and `snapcast-setup.sh --mode target`: the layout, the limits kept, versions and rollback, the refusals before any change, the systemd path, a reinstall that changes nothing, smoke, the snapcast client checked before it is changed, the remote mode and the board script |
 | `test_speakerd_crash_restart.py` | the installed unit's wrapper starts speakerd on the right layer after crashes |
-| `test_speakerd_installed.py` | a speaker set up like a board: the persistent sink, the amplifier drives, capped, the deployed bundle runs, smoke; and a PipeWire that does not load the drop-in, where nothing is routed into speakerd |
+| `test_speakerd_installed.py` | a speaker set up like a board: the persistent sink, the amplifier drives, no limit, the deployed bundle runs, smoke; and a PipeWire that does not load the drop-in, where nothing is routed into speakerd |
 | `stub_speakerd.c` | a stand-in speakerd that dies as it is told, for the installer and wrapper tests |
 | `stand_in_speakerd.py` | a stand-in speakerd that speaks only the local link of `docs/protocol.md` and answers as a test tells it, failing included: for ampd's tests that need no audio |
 | `test_ampd_protocol.py` | ampd, hub and agent, does what `docs/protocol.md` says, against stand-in speakerds |

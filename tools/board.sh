@@ -8,13 +8,13 @@
 #     tools/board.sh journal [-n N] [--follow] [--unit speakerd|ampd]
 #                                                journalctl --user-unit speakerd -b (or ampd) on the
 #                                                board (reads only)
-#     tools/board.sh deploy [options]            builds the aarch64 artifacts, installs them capped
+#     tools/board.sh deploy [options]            builds the aarch64 artifacts, installs them
 #                                                (firmware/setup.sh --mode target-remote; default
 #                                                --only speakerd). Options: --role, --plugin,
 #                                                --factory, --import-filtergraph, --only, --skip, and
 #                                                ampd's --name, --hub, --agent, --hub-address,
 #                                                --listen; anything else is a person's, run directly
-#     tools/board.sh smoke [--window S]          checks, without a sound, that speakerd plays capped,
+#     tools/board.sh smoke [--window S]          checks, without a sound, that speakerd plays device.json's limits,
 #                                                and ampd when it is installed
 #     tools/board.sh rollback                    makes the previous speakerd current again
 #     tools/board.sh --dry-run <command> ...     says what it would run; builds and reaches nothing
@@ -29,8 +29,8 @@
 # full (tests/impact.json). The pre-bash hook asks the same command; this is defence in depth. A
 # person may bypass the test status, never the lock, with BPI_DEPLOY_OVERRIDE=1; that is logged
 # in tests/.status/overrides.log.
-# Nothing here lifts the output cap: every deploy installs capped, and only a person at the
-# speaker lifts it (firmware/speakerd-setup.sh limits, in their own shell).
+# An install keeps device.json's limits (none on a first install); firmware/speakerd-setup.sh
+# limits sets them.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../firmware/install-lib.sh
