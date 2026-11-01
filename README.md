@@ -2,156 +2,175 @@
 
 ![BPI AMP Platform boards](all.jpeg)
 
-The BPI AMP Platform is a Linux-based audio streaming platform built for **custom loudspeaker
-tuning**. A BananaPi BPI-CM4 module receives audio over the network (AirPlay through
-shairport-sync, or synchronized multi-room streams through Snapcast), processes it in PipeWire
-and drives two MAX98397 class-D smart amplifiers.
+A Linux audio streaming platform for **custom loudspeaker tuning**. Each speaker is a
+BananaPi BPI-CM4 module on the two boards of this repository. It receives music over the
+network, runs the speaker's crossover, correction and loudness filters as JUCE plugins inside
+PipeWire, and drives a woofer and a tweeter with two MAX98397 class-D amplifiers. Two such
+speakers make a stereo pair, tuned from one controller application on a computer.
 
-The loudspeaker DSP lives in [`dsp`](dsp): it measures a speaker, designs crossover and
-correction filters for it, and runs them on the board as JUCE audio plugins in the PipeWire
-graph. [`docs`](docs) holds the design of the next step, a remote plugin host that tunes a
-stereo pair of boards from one controller, and [`tests/vpair`](tests/vpair) a virtual pair of
-speakers to develop it against without hardware.
+## How it works
+
+You play music as you always do. The speakers do the rest.
+
+<!-- diagram: overview -->
+```mermaid
+flowchart LR
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+
+    tune["Measurement and tuning GUIs<br/>measure the drivers,<br/>design the filters"]:::ctl
+    music["Your music<br/>Snapcast server or AirPlay,<br/>on a computer or a phone"]:::aud
+    ctl["Controller app<br/>add plugins, wire them,<br/>turn the knobs"]:::ctl
+
+    L["Left speaker, the hub<br/>speakerd runs the plugins,<br/>ampd keeps the pair in step<br/>2 x MAX98397: woofer, tweeter"]:::hw
+    R["Right speaker<br/>speakerd runs the plugins,<br/>ampd follows the hub<br/>2 x MAX98397: woofer, tweeter"]:::hw
+
+    tune -. "filters, compiled in" .-> L
+    tune -. "filters, compiled in" .-> R
+    music == "stereo stream" ==> L
+    music == "stereo stream" ==> R
+    ctl -- "edits, knobs" --> L
+    L -- "fan-out" --> R
+```
+
+Thick arrows carry audio, thin arrows carry settings, and dotted arrows carry what is read
+once: the filters at build time, the state files at boot. Orange is control, blue is audio,
+green is hardware, grey is files on disk.
+
+- **Music arrives over the network.** A Snapcast server on a computer streams to both
+  speakers in sync; AirPlay through shairport-sync is the alternative.
+- **Each speaker processes its own channel.** `speakerd`, the headless plugin host, runs the
+  plugin graph: a correction FIR, the crossover that splits the signal between the woofer and
+  the tweeter, and the loudness contour. It plays with no network, no controller and no hub,
+  from the settings on its own disk.
+- **The pair is tuned from the controller app.** It looks and works like JUCE's
+  AudioPluginHost: add plugins, wire them, open their editors and turn the knobs, and both
+  speakers follow within milliseconds. It holds no audio: the graph lives on the speakers.
+  `ampd` on the left speaker is the hub that keeps both in step; `ampd` on the right applies
+  what the hub sends. Meters and level bars come straight from each speaker.
+- **The filters come from measurements.** The Python GUIs measure the drivers with the
+  near-field method and design the crossover and correction filters, which the plugins
+  compile in.
+
+### Inside a speaker
+
+<!-- diagram: speaker -->
+```mermaid
+flowchart TB
+    classDef ctl fill:#fbe3cf,stroke:#b4642a,color:#1d1d1d
+    classDef aud fill:#d6e6f5,stroke:#2f6aa3,color:#1d1d1d
+    classDef hw fill:#dcefd9,stroke:#3d8a3a,color:#1d1d1d
+    classDef sto fill:#ececec,stroke:#7a7a7a,color:#1d1d1d
+
+    src["snapclient, or shairport-sync<br/>receives the stream"]:::aud
+    subgraph PW["PipeWire"]
+        direction TB
+        sink["the speakerd sink"]:::aud
+        sd["speakerd<br/>the plugin graph: the headless LV2 builds<br/>of crossover, firConv and loudness"]:::aud
+        alsa["the amplifier node (ALSA)"]:::aud
+        sink ==> sd
+        sd ==> alsa
+    end
+    kern["Linux kernel<br/>device tree, TDM, the max98396 driver"]:::hw
+    amps["2 x MAX98397<br/>woofer, tweeter"]:::hw
+    ampd["ampd<br/>network agent; the hub on the left speaker"]:::ctl
+    files[("state files<br/>graph.json, device.json")]:::sto
+
+    src ==> sink
+    alsa ==> kern
+    kern ==> amps
+    ampd -- "local socket" --> sd
+    ampd --> files
+    files -. "read at boot" .-> sd
+```
+
+### The software blocks
+
+| Block | What it does | Runs on | Where |
+|---|---|---|---|
+| Measurement and tuning GUIs | Measure a speaker's drivers, design its filters, export them as C++ headers | the development computer (Python) | [`dsp/python_dsp_tools`](dsp/python_dsp_tools) |
+| The plugins | `crossover`, `firConv` (correction), `loudness`, `ampScope`. Each builds from one source as **complete**, **control** (the editor alone) and **headless** (the DSP alone) | speakers (headless), controller (control) | [`dsp/juce_plugins`](dsp/juce_plugins) |
+| `speakerd` | The headless plugin host: the plugin graph inside PipeWire, loaded from the state files on disk | each speaker | [`dsp/juce_apps/speakerd`](dsp/juce_apps/speakerd) |
+| `ampd` | The speaker's network agent: keeps and applies the settings. On the left speaker also the hub | each speaker | [`firmware/ampd`](firmware/ampd) |
+| Controller | The plugin host GUI that edits the speakers' graph through the hub | the listener's computer | [`dsp/juce_apps/controller`](dsp/juce_apps/controller) |
+| PipeWire and Snapcast | The speaker's audio server, and the network stream into it | each speaker | [`firmware/pipewire`](firmware/pipewire), [`firmware/snapcast-setup.sh`](firmware/snapcast-setup.sh) |
+| Kernel side | Device tree, kernel config, the MAX98397 and sound-card drivers | each speaker | [`firmware`](firmware) |
+| Installers | `setup.sh` installs the audio side of a speaker, component by component | the development computer, or the speaker | [`firmware/setup.sh`](firmware/setup.sh) |
+
+The controller, `ampd` and `speakerd` speak [`docs/protocol.md`](docs/protocol.md). The design
+is [`docs/remote-plugin-host.md`](docs/remote-plugin-host.md).
+
+<table>
+  <tr valign="top">
+    <td width="50%"><img src="dsp/docs/images/tuning-gui.png" alt="Tuning GUI"></td>
+    <td width="50%"><img src="docs/images/loudness-control-editor.png" alt="The loudness plugin's editor in the controller"></td>
+  </tr>
+  <tr valign="top">
+    <td><b>Tuning GUI:</b> driver responses, crossover sum and corrected output, every filter parameter live.</td>
+    <td><b>The loudness plugin in the controller:</b> the real editor, running with no DSP, as a remote control of both speakers.</td>
+  </tr>
+</table>
+
+## Where it stands
+
+Steps 1 to 3 of the roadmap are built and tested: the three-target plugin build, `speakerd`,
+and the controller with the hub, checked on every test run by a virtual pair of speakers. The
+first deploy to a real board was on 2026-11-01: `speakerd` plays the factory graph at boot,
+`snapclient` streams into it, `ampd` runs as the hub and the controller edits the graph live.
+Step 4 (scope frames, the plugin catalogue, several controllers) is next. `tools/roadmap.py`
+prints the current state.
+
+## Hardware
+
+Two boards, connected by a board-to-board connector: a **base board** carrying the BPI-CM4
+module, with USB-C and a debug UART, and a **speaker amp board** with the two MAX98397
+amplifiers on one TDM bus, a boost converter for their supply and a 5 V buck for the rest.
+The KiCad projects and the details are in [`hardware/`](hardware/README.md).
+
+![Hardware block diagram](hardware/block-diagram.svg)
+
+## Firmware
+
+The board runs Armbian with this repository's device tree, kernel config and amplifier
+drivers, and PipeWire as its audio server. `firmware/setup.sh` installs the audio side of a
+speaker, from the development machine or on the board. The bring-up steps and the installers
+are in [`firmware/`](firmware/README.md).
+
+## Developing
+
+Everything but the boards themselves runs on a Linux x86_64 machine with no board attached,
+and needs only Podman and git: the builds and both test rungs run in a development container
+with the PipeWire version the boards run.
+
+```sh
+git clone --recurse-submodules https://github.com/AMuszkat/bpi_amp_platform
+cd bpi_amp_platform
+tools/test.sh all          # rung 1 (plugin-check) and rung 2 (the virtual pair)
+tools/build.sh loudness    # one plugin or application, into build/
+tools/container.sh         # a shell in the container
+```
+
+The first run builds the container image and JUCE, which takes a few minutes. For a board,
+`tools/build.sh speakerd aarch64` cross-compiles into `build/aarch64/`, and
+`firmware/setup.sh --mode target-remote` installs; nothing reaches a board unless the commit
+has passed the tests. The Python measurement and tuning tools have their own quick start in
+[`dsp/README.md`](dsp/README.md). The development process (the test rungs, the agents, the
+hooks and CI) is in [`CLAUDE.md`](CLAUDE.md) and
+[`docs/autonomous-development.md`](docs/autonomous-development.md).
 
 ## Repository layout
 
 | Directory | Contents |
 |---|---|
-| [`hardware/base_board`](hardware/base_board) | KiCad project: carrier board for the BPI-CM4 module |
-| [`hardware/speaker_amp`](hardware/speaker_amp) | KiCad project: amplifier and power board |
-| [`firmware`](firmware) | Device tree, kernel config, amplifier and sound-card drivers, PipeWire config and board setup scripts |
-| [`dsp`](dsp) | Measurement and tuning tools, the JUCE plugins, and the applications of the remote plugin host (formerly the `bpi_amp_dsp_tuning` repository) |
-| [`docs`](docs) | Design proposals: the [remote plugin host](docs/remote-plugin-host.md) for controlling a stereo pair, and its [autonomous development setup](docs/autonomous-development.md) |
-| [`tests/vpair`](tests/vpair) | Two virtual speakers on one machine, for developing and testing the remote plugin host without boards |
+| [`hardware`](hardware/README.md) | KiCad projects: the carrier board and the amplifier board |
+| [`firmware`](firmware/README.md) | Device tree, kernel config, amplifier drivers, PipeWire configuration, the installers and `ampd` |
+| [`dsp`](dsp/README.md) | Measurement and tuning tools, the JUCE plugins, `speakerd`, the controller and `plugin-check` |
+| [`docs`](docs) | The [remote plugin host](docs/remote-plugin-host.md) design, its [protocol](docs/protocol.md), the [block FIR](docs/p1-block-fir.md) and the [development setup](docs/autonomous-development.md) |
+| [`tests/vpair`](tests/vpair/README.md) | Two virtual speakers on one machine, for developing and testing without boards |
+| [`tools`](tools) | The build, test, container and board scripts; they work without Claude |
 
-## Developing
+## License
 
-Clone with the JUCE submodule, then follow the quick start in [`CLAUDE.md`](CLAUDE.md): it
-lists the packages, builds JUCE once, runs `plugin-check` on a plugin's three builds and runs
-the virtual pair's tests, all on a Linux machine with no board attached. The board builds are
-`dsp/juce_plugins/tools/build-podman.sh` for the plugins and `firmware/Makefile` for the
-kernel side; both read their board address from a gitignored local file.
-
-```sh
-git clone --recurse-submodules https://github.com/AMuszkat/bpi_amp_platform
-```
-
-## Hardware
-
-The platform has two boards connected by a 46-pin (2×23) board-to-board connector: a
-**base board** that carries the compute module, and a **speaker amp board** with the
-amplifiers and the power supply.
-
-![Hardware block diagram](hardware/block-diagram.svg)
-
-### Base board
-
-- Carries the **BananaPi BPI-CM4** (Amlogic A311D) on two 100-pin DF40 board-to-board
-  connectors.
-- **USB-C** port on the module's USB OTG interface, ESD protected. It can serve as a login
-  console over USB (see `usb-serial-console-setup.sh`). Jumper J3 links the USB VBUS to the
-  5 V rail.
-- 3-pin **debug UART** header (J_LIN_DEB1).
-- No SD-card slot: the module is installed to its eMMC beforehand (see
-  [First boot](#1-first-boot-one-time)).
-
-### Speaker amp board
-
-- **Amplifiers:** two MAX98397 smart class-D amplifiers (U1, U2), one per speaker output
-  (JOUT1, JOUT2). They share one TDM bus from the module's TDM_A interface: BCLK, FS and D0
-  carry the audio to both amps, and D1 returns their voltage and current sense data. Each amp
-  is configured over I²C, with reset, IRQ and LV_EN on module GPIOs, and the two are linked
-  through their ICC pins.
-- **PVDD** (the amplifiers' power stage supply) comes either from an external supply on
-  JPVDD1 or from the on-board boost converter, selected with the jumpers on JBST_PVDD1.
-- **Boost converter:** an LTC3786 synchronous boost controller (BSZ024N04LS6 MOSFETs,
-  4.7 µH inductor) raises the battery or DC input on JBATT1 to PVDD. The module enables it
-  and reads its power-good signal. The board has unpopulated footprints for trimming the
-  output voltage from the module by PWM.
-- **5 V buck:** an MP9943 converts PVDD to 5 V for the amplifiers' VBAT supply and, through
-  the board-to-board connector, for the base board and the module.
-- The amplifiers' **1.8 V** logic supply comes from the module.
-
-### 3D models
-
-Most vendor 3D models used by the boards are not in the repo. The PCBs reference them as
-`${BPI_AMP_3DMODELS}/<file>`. To see them in the 3D viewer, download the models and point
-`BPI_AMP_3DMODELS` at that folder in KiCad (*Preferences → Configure Paths*). Models that ship
-with the repo (in `hardware/speaker_amp/speaker_amp_library.pretty`) load without it.
-
-## Firmware
-
-> **Status: bring-up and debugging.** The firmware currently sits on top of a stock Armbian
-> (Debian) install: a device tree, a kernel config, locally built amplifier drivers and setup
-> scripts. Proper BSP support through Yocto or the Armbian build framework is planned.
-
-### 1. First boot (one time)
-
-The base board has no SD-card slot, so the BPI-CM4 gets its operating system once on Banana
-Pi's CM4IO baseboard:
-
-1. Write the Armbian (Debian) image for the BananaPi CM4IO to an SD card.
-2. Mount the BPI-CM4 on the **BPI-CM4IO** baseboard, insert the card and boot.
-3. Transfer the system to the module's eMMC with `armbian-install`, then power off.
-4. Move the module to the BPI AMP base board. From now on it boots from eMMC.
-
-### 2. Host setup
-
-The board address and login are per-developer settings and stay out of git, in
-`firmware/local.mk` (gitignored). The device tree is built in a kernel source tree matching
-the board's kernel series:
-
-```sh
-cd firmware
-cp local.mk.example local.mk            # set BOARD_HOST and BOARD_USER
-git clone --depth 1 --branch v6.12.22 \
-    https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linuxMainLine
-cp defconfig linuxMainLine/arch/arm64/configs/defconfig
-make -C linuxMainLine ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-```
-
-You need an arm64 cross toolchain and the usual kernel build tools (on Debian/Ubuntu:
-`gcc-aarch64-linux-gnu flex bison bc`), plus ssh access to the board as root for installing.
-
-### 3. Device tree: `firmware/Makefile`
-
-`dtbs` and `install_dtbs` are currently the only working targets of the main Makefile:
-
-```sh
-make dtbs           # build meson-g12b-bananapi-cm4-cm4io.dtb from the .dts/.dtsi in firmware/
-make install_dtbs   # copy it to the board's /boot over ssh
-```
-
-Set `TARGET_KERNEL1` in the Makefile to the board's kernel version (`uname -r` on the board),
-because `install_dtbs` writes to `/boot/dtb-<version>/amlogic/`. Reboot the board to load the
-new device tree. The other targets (`image`, `modules`, `install`, `all`, ...) do not work yet.
-
-### 4. Amplifier drivers: `firmware/localBuild`
-
-The drivers are built natively on the board against its running kernel. Install the kernel
-headers on the board first (Armbian: `sudo apt install linux-headers-current-meson64`), set
-`TARGET_KERNEL` in `localBuild/Makefile` to the board's `uname -r`, then run from the host:
-
-```sh
-cd firmware/localBuild
-make max98396    # MAX98396/MAX98397 codec driver
-make axg_card    # Amlogic AXG sound-card machine driver
-make all         # dummy codec, for TDM bring-up without amplifiers
-```
-
-Each target copies the sources to the board, builds them there, copies the `.ko` back and
-installs it into the board's module tree.
-
-### 5. Board setup and tools
-
-| File | Purpose |
-|---|---|
-| [`snapcast-setup.sh`](firmware/snapcast-setup.sh) | Synchronized network audio: Snapcast over PipeWire, server on the host and client on the board |
-| [`pipewire/pipewire.conf`](firmware/pipewire/pipewire.conf) | PipeWire configuration for the board, including the AirPlay loopback |
-| [`usb-serial-console-setup.sh`](firmware/usb-serial-console-setup.sh) | Login console over the USB-C port |
-| [`wifi-driver-setup.sh`](firmware/wifi-driver-setup.sh) | Pins the RTL8822CS WiFi to one driver and disables power saving |
-| [`max98397-diag.py`](firmware/max98397-diag.py) | Reads and clears the amplifiers' fault registers over I²C (runs on the board) |
-
-The scripts take `--target-host [user@]host`, or read `BOARD_HOST` and `BOARD_USER` from the
-environment. Detailed developer notes, including the amplifier telemetry work, are in
-[`firmware/CLAUDE.md`](firmware/CLAUDE.md).
+The software under [`dsp/`](dsp) is free software under the GNU Affero General Public License
+v3.0; see [`dsp/LICENSE`](dsp/LICENSE).
