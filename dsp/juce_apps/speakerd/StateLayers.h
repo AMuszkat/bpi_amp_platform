@@ -20,8 +20,8 @@ namespace speakerd
 
     /** Tries graph.json, graph.lkg.json and factory.json in the state directory, in that order,
         starting at `firstLayer` (one of layerNames()), and returns the first that loads
-        completely: it parses, and every plugin in it is found,
-        instantiated and takes its state and parameter values. Says on stderr why each layer before it failed. If none loads,
+        completely: it parses, and every plugin in it is found, instantiated and takes its state
+        and parameter values. Says on stderr why each layer before it failed. If none loads,
         returns passthrough, loudly. Message thread. */
     LoadedLayer loadFirstWorkingLayer (const juce::File& stateDir, GraphBuilder&, Role,
                                        double sampleRate, int maxBlock,
