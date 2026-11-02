@@ -43,8 +43,19 @@ def text(x, y, s, size=16, fill=PAPER, mono=False, weight=400, italic=False, anc
 
 
 def caption(x, y, kicker, line):
-    return (text(x, y, kicker, 12, BLUE_DIM, mono=True, weight=600, anchor="middle", spacing="0.16em")
-            + text(x, y + 28, line, 19, INK, anchor="middle"))
+    return (text(x, y, kicker, 14, BLUE_DIM, mono=True, weight=600, anchor="middle", spacing="0.16em")
+            + text(x, y + 32, line, 23, INK, anchor="middle"))
+
+
+def transport(cx, cy, kind, line, color, fill):
+    """A transport line's label: a pill saying what it carries and over which protocol."""
+    w = 44 + 11.2 * len(kind) + 12 + 9.6 * len(line)
+    o = (f'<rect x="{cx - w / 2:.0f}" y="{cy - 20}" width="{w:.0f}" height="40" rx="20" fill="{fill}" '
+         f'stroke="{color}" stroke-width="1.5"/>\n')
+    o += (f'<text x="{cx}" y="{cy + 6}" text-anchor="middle" style="font-family: {FONT_MONO}; font-size: 16px">'
+          f'<tspan fill="{color}" font-weight="600" letter-spacing="0.1em">{kind}</tspan>'
+          f'<tspan fill="{INK}" dx="12">{line}</tspan></text>\n')
+    return o
 
 
 def phone(x, y):
@@ -245,31 +256,34 @@ def scene():
     # the music: out of the phone, across the picture, into the speakers (drawn first: it passes behind them)
     o += wave(270, 970, 470, 34, 5.0, width=7, color=BLUE, opacity=0.18)
     o += wave(270, 970, 470, 26, 5.0, width=4.5, color=BLUE)
-    o += text(620, 545, "the music, to both speakers in sync", 15, MUTED, italic=True)
+    o += transport(800, 470, "AUDIO", "Snapcast · TCP", BLUE_DIM, "#E6EEFB")
+    o += text(800, 548, "the music, to both speakers in sync", 19, MUTED, italic=True, anchor="middle")
 
     # sources
     o += phone(130, 170)
     o += laptop(96, 480)
 
     # network
-    o += wifi(760, 370)
-    o += text(760, 412, "WI-FI", 11.5, MUTED, mono=True, weight=600, anchor="middle", spacing="0.16em")
+    o += wifi(790, 372)
+    o += text(790, 414, "WI-FI", 14, MUTED, mono=True, weight=600, anchor="middle", spacing="0.16em")
     # settings: the controller to the plugin graph
-    o += (f'<path d="M496 486 C 560 200, 850 200, 980 222" fill="none" stroke="{ORANGE}" stroke-width="2.5" '
-          f'stroke-dasharray="10 8" stroke-linecap="round"/>\n')
+    o += (f'<path d="M496 486 C 560 200, 850 200, 980 222" fill="none" stroke="{ORANGE}" stroke-width="3" '
+          f'stroke-dasharray="2 9" stroke-linecap="round"/>\n')
     o += arrow_head(986, 223, 9, ORANGE, 16)
-    o += text(590, 196, "settings and knobs, within milliseconds", 15, ORANGE, italic=True)
+    o += text(735, 186, "settings and knobs, on both speakers within milliseconds", 19, MUTED, italic=True,
+              anchor="middle")
+    o += transport(735, 225, "CONTROL", "settings + meters TCP · knobs UDP", ORANGE, "#FBEDE6")
 
     # the two speakers, each a board with its DSP plugins and a loudspeaker
     o += speaker_unit(968, 214, 1)
     o += speaker_unit(1268, 214, 2)
-    o += text(1254, 656, "the boards of this repository: BPI-CM4 · two MAX98397 amplifiers", 12, MUTED,
+    o += text(1254, 656, "the boards of this repository: BPI-CM4 · two MAX98397 amplifiers", 14, MUTED,
               mono=True, anchor="middle")
 
     # captions
-    o += caption(300, 838, "YOUR MUSIC", "Play from a phone or a computer, as always")
-    o += caption(760, 838, "OVER THE NETWORK", "Snapcast or AirPlay carry it to both speakers")
-    o += caption(1254, 838, "IN EACH SPEAKER", "A Linux board runs your JUCE DSP plugins")
+    o += caption(280, 830, "YOUR MUSIC", "Play from a phone or a computer")
+    o += caption(770, 830, "OVER THE NETWORK", "Snapcast or AirPlay, to both speakers")
+    o += caption(1265, 830, "IN EACH SPEAKER", "A Linux board runs JUCE DSP plugins")
     return o
 
 
