@@ -827,7 +827,8 @@ version that applies them.
 ## 7. Build system
 
 `speaker_add_plugin()` takes the sources by role and produces one CMake target per build.
-This is implemented; `loudness` uses it:
+This is implemented; `loudness`, `crossover` (since 0.0.4) and `firConv` (since 0.0.5) use it.
+For `loudness`:
 
 ```cmake
 speaker_add_plugin(loudness
@@ -1198,7 +1199,7 @@ flowchart TB
             sdm["«modules» Engine, Control, Monitor,<br/>GraphBuilder, StateLayers, PipeWireNode"]:::aud
             jucesd("«library» JUCE 8<br/>audio_processors_headless with its LV2 hosting,<br/>audio_formats, events"):::lib
             libpw("«library» libpipewire-0.3<br/>the pw_filter node, the registry,<br/>the real-time data thread"):::lib
-            lv2("«bundle» LV2 plugins, loaded at run time<br/>loudness_headless, crossover, firConv"):::aud
+            lv2("«bundle» LV2 plugins, loaded at run time<br/>loudness_headless, crossover_headless,<br/>firConv_headless"):::aud
             sdm --> jucesd --> lv2
             sdm --> libpw
         end

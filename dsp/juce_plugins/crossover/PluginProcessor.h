@@ -23,6 +23,11 @@ public:
     ~PluginProcessor() override;
 
     //==============================================================================
+    // The audio processing (prepareToPlay, reset, processBlock, processBlockBypassed and the
+    // private helpers below) is defined in the DSP source (CMakeLists.txt, DSP), compiled into
+    // the complete and headless builds; the control build defines them as empty stubs in
+    // PluginProcessor.cpp and the audio passes through untouched. Every build shares this
+    // class, so the parameter layout and the state are the same in all three.
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void reset () override;
     void releaseResources() override;

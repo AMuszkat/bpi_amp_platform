@@ -44,7 +44,7 @@ from [`docs/diagrams/`](docs/diagrams).
 | Block | What it does | Runs on | Where |
 |---|---|---|---|
 | Measurement and tuning GUIs | Measure a speaker's drivers, design its filters, export them as C++ headers | the development computer (Python) | [`dsp/python_dsp_tools`](dsp/python_dsp_tools) |
-| The plugins | `crossover`, `firConv` (correction), `loudness`, `ampScope`. Each builds from one source as **complete**, **control** (the editor alone) and **headless** (the DSP alone) | speakers (headless), controller (control) | [`dsp/juce_plugins`](dsp/juce_plugins) |
+| The plugins | `crossover`, `firConv` (correction), `loudness`, `ampScope`. The first three each build from one source as **complete**, **control** (the editor alone) and **headless** (the DSP alone); `ampScope` builds complete only | speakers (headless), controller (control) | [`dsp/juce_plugins`](dsp/juce_plugins) |
 | `speakerd` | The headless plugin host: the plugin graph inside PipeWire, loaded from the state files on disk | each speaker | [`dsp/juce_apps/speakerd`](dsp/juce_apps/speakerd) |
 | `ampd` | The speaker's network agent: keeps and applies the settings. On the left speaker also the hub | each speaker | [`firmware/ampd`](firmware/ampd) |
 | Controller | The plugin host GUI that edits the speakers' graph through the hub | the listener's computer | [`dsp/juce_apps/controller`](dsp/juce_apps/controller) |

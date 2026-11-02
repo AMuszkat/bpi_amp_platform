@@ -3,16 +3,21 @@
 
     This file contains the basic framework code for a JUCE plugin processor.
 
+    The parameters, the state and the plot helpers: compiled into every build (complete,
+    control, headless). The audio processing is in CrossoverDsp.cpp, which the control build
+    leaves out (DSP in CMakeLists.txt); the editor in PluginEditor.cpp and PlotComponent.cpp,
+    which the headless build leaves out (EDITOR).
+
   ==============================================================================
 */
 
 #include "PluginProcessor.h"
-#include "PluginEditor.h"
-#include "crossover_coefs.hpp" // provides lp[] and hp[] FIR coefficient arrays
-#include <algorithm>
+
+#if ! SPEAKER_HEADLESS
+ #include "PluginEditor.h"
+#endif
+
 #include <cmath>
-#include <cstring>
-#include <iterator>
 
 //==============================================================================
 PluginProcessor::PluginProcessor()
@@ -115,61 +120,16 @@ void PluginProcessor::changeProgramName (int, const juce::String&)
 }
 
 //==============================================================================
-void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
-{
-    // A host may prepare before it has an audio device (JUCE's LV2 wrapper instantiates with a
-    // block size of 0); a later block of any size is still handled, in chunks.
-    const int preparedBlock = samplesPerBlock > 0 ? samplesPerBlock : 512;
-
-    juce::dsp::ProcessSpec spec;
-    spec.sampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
-    spec.maximumBlockSize = (juce::uint32) preparedBlock;
-    // Process internally as mono; we'll route to two outputs later
-    spec.numChannels = 1;
-
-    // Allocate temporary mono buffers for LP/HP outputs: here, never in processBlock.
-    lpBuffer.setSize(1, preparedBlock);
-    hpBuffer.setSize(1, preparedBlock);
-    dryBuffer.setSize(1, preparedBlock);
-
-    // The low band: its gain, then its FIR.
-    lpGain.prepare(spec);
-    lpGain.setRampDurationSeconds(gainRampSeconds);
-    lpGain.setGainDecibels(0.0f);
-    lpFir.prepare(lp, (int)(sizeof(lp)/sizeof(lp[0])), preparedBlock);
-
-    // The high band, the same way.
-    hpGain.prepare(spec);
-    hpGain.setRampDurationSeconds(gainRampSeconds);
-    hpGain.setGainDecibels(0.0f);
-    hpFir.prepare(hp, (int)(sizeof(hp)/sizeof(hp[0])), preparedBlock);
-
-    // The bypass: the low band's gained input delayed as its FIR delays it. Both FIRs are
-    // linear phase (symmetric taps, which the tuning GUI exports) and of one length, so each
-    // delays by (N - 1) / 2 samples.
-    constexpr int numLp = (int) (sizeof (lp) / sizeof (lp[0]));
-    static_assert (numLp == (int) (sizeof (hp) / sizeof (hp[0])), "the two bands' FIRs must have one delay");
-    jassert (std::equal (lp, lp + numLp, std::reverse_iterator<const float*> (lp + numLp)));
-    jassert (std::equal (hp, hp + numLp, std::reverse_iterator<const float*> (hp + numLp)));
-    dryDelay.prepare ((numLp - 1) / 2);
-    bypassFade.prepare (spec.sampleRate, bypassFadeSeconds);
-
-    // The gain parameter is applied again at the next block, whatever it is now: at once on the
-    // first block, and over gainRampSeconds after that.
-    appliedGainDb = std::numeric_limits<float>::quiet_NaN();
-
-    reset();
-}
-
-void PluginProcessor::reset()
-{
-    lpGain.reset();
-    lpFir.reset();
-    hpGain.reset();
-    hpFir.reset();
-    dryDelay.reset();
-    bypassFade.reset();
-}
+#if SPEAKER_CONTROL
+// The control build is a remote control: its editor drives the parameters, and the speaker
+// running the headless build does the processing. It never processes audio itself, so the DSP
+// (CrossoverDsp.cpp, the coefficient header with it) is not compiled in, and the audio passes
+// through untouched, bypassed or not.
+void PluginProcessor::prepareToPlay (double, int) {}
+void PluginProcessor::reset() {}
+void PluginProcessor::processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
+void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
+#endif
 
 void PluginProcessor::releaseResources()
 {
@@ -200,106 +160,29 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 }
 #endif
 
-void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
-{
-    process (buffer, false);
-}
-
-void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
-{
-    process (buffer, true);
-}
-
-void PluginProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
-{
-    juce::ScopedNoDenormals noDenormals;
-
-    // Audio thread: nothing here allocates, locks or makes a syscall.
-    const float gainDb = gainParam->load (std::memory_order_relaxed);
-
-    if (! juce::exactlyEqual (gainDb, appliedGainDb))
-    {
-        const bool first = std::isnan (appliedGainDb);
-        lpGain.setGainDecibels (gainDb);
-        hpGain.setGainDecibels (gainDb);
-
-        if (first)
-        {
-            lpGain.reset();        // the first block after prepareToPlay starts at the gain, no ramp
-            hpGain.reset();
-        }
-
-        appliedGainDb = gainDb;
-    }
-
-    bypassFade.setBypassed (bypassed);
-
-    const int numSamples = buffer.getNumSamples();
-
-    if (buffer.getNumChannels() == 0 || lpBuffer.getNumSamples() == 0)
-    {
-        buffer.clear();
-        return;
-    }
-
-    // A block larger than the one prepared is processed in prepared-size chunks.
-    const int chunk = lpBuffer.getNumSamples();
-
-    for (int start = 0; start < numSamples; start += chunk)
-        processChunk (buffer, start, juce::jmin (chunk, numSamples - start));
-
-    // Clear any remaining output channels beyond the first two
-    for (int ch = 2; ch < getTotalNumOutputChannels(); ++ch)
-        buffer.clear (ch, 0, numSamples);
-}
-
-void PluginProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start, int numSamples) noexcept
-{
-    const auto n = (size_t) numSamples;
-
-    // Copy mono input (channel 0) to both temp buffers' single channel
-    const float* inData = buffer.getReadPointer (0, start);
-    lpBuffer.copyFrom (0, 0, inData, numSamples);
-    hpBuffer.copyFrom (0, 0, inData, numSamples);
-
-    // Process LP and HP over the first numSamples of their buffers: the gain, then the FIR.
-    auto lpBlock = juce::dsp::AudioBlock<float> (lpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
-    lpGain.process (juce::dsp::ProcessContextReplacing<float> (lpBlock));
-
-    // The bypassed low band: the gained input, delayed as the FIR delays it.
-    dryBuffer.copyFrom (0, 0, lpBuffer, 0, 0, numSamples);
-    dryDelay.process (dryBuffer.getWritePointer (0), numSamples);
-
-    lpFir.process (lpBuffer.getReadPointer (0), lpBuffer.getWritePointer (0), numSamples);
-    auto hpBlock = juce::dsp::AudioBlock<float> (hpBuffer).getSubsetChannelBlock (0, 1).getSubBlock (0, n);
-    hpGain.process (juce::dsp::ProcessContextReplacing<float> (hpBlock));
-    hpFir.process (hpBuffer.getReadPointer (0), hpBuffer.getWritePointer (0), numSamples);
-
-    // Processed, bypassed, or the fade between them; bypassed, the high band is silence.
-    float* wet[] { lpBuffer.getWritePointer (0), hpBuffer.getWritePointer (0) };
-    const float* dry[] { dryBuffer.getReadPointer (0), nullptr };
-    bypassFade.mix (wet, dry, 2, numSamples);
-
-    // Route: output channel 0 = LP, output channel 1 = HP.
-    const int outChs = getTotalNumOutputChannels();
-
-    if (outChs >= 1)
-        std::memcpy (buffer.getWritePointer (0, start), lpBuffer.getReadPointer (0), sizeof (float) * n);
-
-    if (outChs >= 2 && buffer.getNumChannels() >= 2)
-        std::memcpy (buffer.getWritePointer (1, start), hpBuffer.getReadPointer (0), sizeof (float) * n);
-}
-
 //==============================================================================
+#if SPEAKER_HEADLESS
+// The headless build runs on the speaker, where nobody opens a window.
 bool PluginProcessor::hasEditor() const
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    return false;
+}
+
+juce::AudioProcessorEditor* PluginProcessor::createEditor()
+{
+    return nullptr;
+}
+#else
+bool PluginProcessor::hasEditor() const
+{
+    return true;
 }
 
 juce::AudioProcessorEditor* PluginProcessor::createEditor()
 {
     return new PluginEditor (*this, apvts);
 }
+#endif
 
 //==============================================================================
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -325,6 +208,9 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
     return new PluginProcessor();
 }
 
+//==============================================================================
+// The plot helpers the editor's PlotComponent calls: in every build that has an editor, the
+// control build included, which has no DSP to read the response from.
 void PluginProcessor::createFrequencyPlot(juce::Path& p, const std::vector<double>& freqs,  const std::vector<double>& mags, const juce::Rectangle<int>& bounds)
 {
     for (size_t i = 0; i < freqs.size(); ++i)
@@ -373,5 +259,5 @@ void PluginProcessor::createLogFrequencyVector(std::vector<double>& frequencyVec
 }
 double PluginProcessor::mapLog10(double x, double inMin, double inMax, double outMin, double outMax)
 {
-    return jmap(std::log10(x), std::log10(inMin), std::log10(inMax), outMin, outMax);
+    return juce::jmap(std::log10(x), std::log10(inMin), std::log10(inMax), outMin, outMax);
 }

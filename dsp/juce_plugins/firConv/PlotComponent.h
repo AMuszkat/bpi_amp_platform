@@ -1,7 +1,6 @@
 #pragma once
 
 #include "PluginProcessor.h"
-#include <JuceHeader.h>
 
 //==============================================================================
 /**
@@ -35,7 +34,7 @@ private:
     float plottedGain = std::numeric_limits<float>::quiet_NaN();
     float plottedFreq = std::numeric_limits<float>::quiet_NaN();
 
-    Path frequencyResponse;
+    juce::Path frequencyResponse;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PlotComponent)
 };

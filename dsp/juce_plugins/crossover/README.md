@@ -22,6 +22,21 @@ To change the crossover, re-export from the tuning GUI and rebuild:
 The per-band delays the tuning GUI uses for time alignment are simulation-only. They are
 not part of this header, so apply them in the host or in the signal chain.
 
+## Builds
+
+Since 0.0.4 the crossover builds, like `loudness`, as three targets from one source
+([../README.md](../README.md#control-and-headless-builds)): `crossover`, the complete plugin, as
+before; `crossover_control`, the parameters and the editor with no DSP, which the controller app
+compiles in, so it shows the crossover's own editor with its real pins (one input, two outputs)
+instead of a placeholder; and `crossover_headless`, the parameters and the DSP with no editor,
+for `speakerd` on a speaker (`tools/build.sh crossover aarch64 headless` from the repository
+root cross-builds it, into `build/aarch64/crossover/`). The DSP (the two bands and the bypass)
+is in `CrossoverDsp.cpp`, which the control build leaves out together with the coefficient
+header: its `processBlock` and `processBlockBypassed` leave the audio untouched. The parameter
+layout and the state are the same in all three, and the processed output is 0.0.3's bit for
+bit, so the bypass test's reference stays. `../../juce_apps/plugin-check/run.sh crossover`
+checks all of that with the gain at -12 dB (`plugin-check.probes`).
+
 Each band's FIR is the shared block FIR, `../shared/blockfir/BlockFir.h` (`SHARED blockfir`
 in `CMakeLists.txt`, [../README.md](../README.md#shared-source-folders)), after the band's gain.
 Since 0.0.2 it replaces `juce::dsp::FIR::Filter`, a patch whose tolerance is, as measured: on
@@ -70,7 +85,9 @@ when bypassed (processed: −49.0 dBFS of pink noise at −12 dB). At a constant
 outputs are the same as 0.0.2's bit for bit, both of them: `../tests/bypass` builds 0.0.2 from
 its sources in git and compares the two renders sample for sample.
 
-The editor plots the combined response of the compiled-in filters.
+The editor's plot does not read the filters: it draws `getMagnitudes()`, which nothing fills,
+so it shows a flat line at the bottom of the plot, in the control build (which has no filters)
+as in the complete one.
 
 Latency: a linear-phase FIR delays by (N − 1)/2 samples, e.g. 129 samples (2.7 ms at
 48 kHz) for the shipped 259-tap design.

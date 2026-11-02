@@ -89,6 +89,21 @@ are within 0.00002 dB.
 ../tools/build-podman.sh firConv              # then -install to deploy
 ```
 
+## Builds
+
+Since 0.0.5 firConv builds, like `loudness`, as three targets from one source
+([../README.md](../README.md#control-and-headless-builds)): `firConv`, the complete plugin, as
+before; `firConv_control`, the parameters and the editor with no DSP, which the controller app
+compiles in, so it shows firConv's own editor with its real pins instead of a placeholder; and
+`firConv_headless`, the parameters and the DSP with no editor, for `speakerd` on a speaker
+(`tools/build.sh firConv aarch64 headless` from the repository root cross-builds it, into
+`build/aarch64/firConv/`). The DSP (the gain, the three filters and the bypass) is in
+`FirConvDsp.cpp`, which the control build leaves out together with `filters.hpp`: its
+`processBlock` and `processBlockBypassed` leave the audio untouched. The parameter layout and
+the state are the same in all three, and the processed output is 0.0.4's bit for bit, so the
+bypass test's reference stays. `../../juce_apps/plugin-check/run.sh firConv` checks all of
+that with the gain at -12 dB (`plugin-check.probes`).
+
 | Parameter | Range | Default | |
 |---|---|---|---|
 | Gain | −60 … 0 dB | 0 dB | input gain, headroom for the correction's boost; a change ramps over 10 ms (since 0.0.4) |
@@ -136,4 +151,5 @@ and at a constant gain its processed output is the same as 0.0.3's bit for bit: 
 builds 0.0.3 from its sources in git and compares the two renders sample for sample.
 
 The editor's plot does not read the filters: it draws `getMagnitudes()`, which nothing fills,
-so it shows a flat line at the bottom of the plot.
+so it shows a flat line at the bottom of the plot, in the control build (which has no filters)
+as in the complete one.

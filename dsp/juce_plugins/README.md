@@ -182,7 +182,9 @@ The sources see `SPEAKER_COMPLETE`, `SPEAKER_CONTROL` and `SPEAKER_HEADLESS` (0 
 control build must still define `prepareToPlay`, `reset` and `processBlock`, as empty stubs;
 the headless build's `hasEditor()` returns false. `tools/build-podman.sh` keeps building the
 complete target only. [`../juce_apps/plugin-check`](../juce_apps/plugin-check/README.md)
-checks that the three builds fit together. So far `loudness` is split this way.
+checks that the three builds fit together. `loudness`, `crossover` (since 0.0.4) and `firConv`
+(since 0.0.5) are split this way, each with its DSP in a `<Plugin>Dsp.cpp` and its editor
+under `EDITOR`; `ampScope` builds its complete target only.
 
 **Monitors.** What a plugin's editor shows live (a level, the active setting) reaches the
 controller as read-only parameters whose IDs start with `mon_`
@@ -393,7 +395,10 @@ x86_64 and aarch64 builds now differ by -92 dB re peak (0.0.2: -55.6 dB), 93 % o
 bypass (firConv 0.0.4, crossover 0.0.3, their READMEs' "Bypass") is a patch as well: the same
 parameters, defaults and state, a new bypassed output, and the processed output bit for bit as
 before at a constant gain (a gain change now ramps over 10 ms), which the bypass test checks
-against the previous versions built from git.
+against the previous versions built from git. crossover 0.0.4 and firConv 0.0.5 add their
+control and headless targets (the DSP moved into `CrossoverDsp.cpp` and `FirConvDsp.cpp`), a
+patch too: the same parameters, defaults and state, and the processed output bit for bit as
+before, so the bypass test's reference stays.
 
 lilv, which picks the bundle a host runs when two have one URI, sees only a version's last two
 numbers: JUCE writes `x.y.z` as `lv2:minorVersion y`, `lv2:microVersion z`, and lilv runs the

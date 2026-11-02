@@ -2,7 +2,6 @@
 
 #include "PluginProcessor.h"
 #include "PlotComponent.h"
-#include <JuceHeader.h>
 
 //==============================================================================
 /**

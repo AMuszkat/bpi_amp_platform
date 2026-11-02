@@ -60,7 +60,7 @@ void PlotComponent::paint (juce::Graphics& g)
     g.drawFittedText ("Gain+Freq", 0, 0, getWidth(), 30, juce::Justification::centred, 1);
 
     g.setColour(juce::Colours::white);
-    g.strokePath (frequencyResponse, PathStrokeType (2.5f));
+    g.strokePath (frequencyResponse, juce::PathStrokeType (2.5f));
 }
 
 void PlotComponent::resized()
