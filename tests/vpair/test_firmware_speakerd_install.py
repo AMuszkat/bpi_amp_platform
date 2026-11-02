@@ -146,11 +146,9 @@ Pass when:
   --route speakerd run finds the helper and checks the running PipeWire's sink with it (passing
   with the drop-in's sink, refusing without one), the folder removed afterwards either way, and
   its --dry-run prints those steps and contacts nothing; and, for a
-  host that is not a test's (.invalid), the remote mode applies the deploy gate before it calls
-  ssh: refused outside a git checkout, without a readable test status for HEAD, with a red one or
-  one from a dirty tree, on a dirty tree, and while a lab lock exists, as tools/status.py gate
-  judges the status; refused too with no tools/status.py and with one that answers neither 0
-  (green) nor 1 (not green); with all of it green it reaches the (stand-in) board;
+  host that is not a test's (.invalid), the remote mode refuses before it calls ssh while a lab
+  lock exists, and with none reaches the (stand-in) board from any checkout, tested or not (there
+  is no test-status gate);
 - the board script (with --dry-run) refuses `journal -n` that is not a number and a deploy
   option that is not an agent's (--base-conf, --stop-plugin-host, --server, --server-ip, --no-restart),
   quotes journal's argument, reads the journal with `journalctl --user-unit` (never `--user -u`,
@@ -1903,67 +1901,34 @@ class Remote(Setup):
         self.assertEqual(crt.read_text(), PERSONS_ROUTING)
         self.assertEqual(list(tmp.iterdir()), [], "the copy was left on the board")
 
-    def test_the_remote_mode_has_the_deploy_gate(self):
-        """The installers' remote mode refuses, as tools/board.sh does, before it calls ssh: while a
-        lab lock exists, outside a git checkout, on a dirty tree, and without a green test status
-        for HEAD from a clean tree, as tools/status.py gate judges it; and it fails closed when
-        there is no status.py or it answers neither green nor not. A copy of firmware/ and of
-        tools/status.py in a scratch repository stands for the checkout; the host is a .test name
-        (reserved: nothing resolves it), reached only through the stand-in ssh. The affected run
-        is tools/tests' to test."""
+    def test_the_remote_mode_has_the_lab_lock(self):
+        """The installers' remote mode refuses, as tools/board.sh does, before it calls ssh, while a
+        lab lock exists. There is no test-status gate (2026-11-02, the person's decision): with no
+        lock it reaches the board from any checkout, tested or not, clean or not. A copy of
+        firmware/ in a scratch folder stands for the checkout; the host is a .test name (reserved:
+        nothing resolves it), reached only through the stand-in ssh."""
         board, env = self.board("gate")
         repo = self.tmp / "gate-repo"
         shutil.rmtree(repo, ignore_errors=True)
         shutil.copytree(FIRMWARE, repo / "firmware", ignore=shutil.ignore_patterns("local.mk", "localBuild"))
-        (repo / "tools").mkdir()
-        shutil.copy2(ROOT / "tools/status.py", repo / "tools/status.py")
         host = "user@bpi-amp.test"
 
         def status():
             return firmware_at(repo, "speakerd-setup.sh", "status", "--mode", "target-remote", "--target-host", host,
                                env=env)
 
-        def refused(said):
-            result = status()
-            self.assertNotEqual(result.returncode, 0, result.stdout)
-            self.assertIn(said, result.stdout)
-            self.assertEqual((board / "hosts").read_text(), "", "ssh was called")
-
-        refused("is not a git checkout")
-        git = ["git", "-C", str(repo), "-c", "user.name=user", "-c", "user.email=user@bpi-amp.local"]
-        (repo / ".gitignore").write_text("tests/.status/\n")
-        subprocess.run(git + ["init", "-q"], check=True)
-        subprocess.run(git + ["add", "-A"], check=True)
-        subprocess.run(git + ["commit", "-q", "-m", "scratch"], check=True)
-        refused("no readable test status")
-        head = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-        record = repo / "tests/.status" / f"{head}.json"
-        record.parent.mkdir(parents=True)
-        record.write_text(json.dumps({"unit": "pass", "unit_tree": "clean", "vpair": "fail", "vpair_tree": "clean"}))
-        refused("vpair: fail")
-        record.write_text(json.dumps({"unit": "pass", "unit_tree": "clean", "vpair": "pass", "vpair_tree": "dirty"}))
-        refused("tree dirty")
-        record.write_text(json.dumps({"unit": "pass", "unit_tree": "clean", "vpair": "pass", "vpair_tree": "clean"}))
-        (repo / "firmware/edited").write_text("not committed\n")
-        refused("uncommitted changes")
-        (repo / "firmware/edited").unlink()
         (repo / ".claude").mkdir()
         (repo / ".claude/lab.lock").write_text("")
-        refused("the lab is locked")
+        result = status()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("the lab is locked", result.stdout)
+        self.assertEqual((board / "hosts").read_text(), "", "ssh was called")
         (repo / ".claude/lab.lock").unlink()
-        (repo / ".claude").rmdir()
 
-        # Fail closed: no judge, or one that answers neither 0 (green) nor 1 (not green).
-        judge = repo / "tools/status.py"
-        judge.unlink()
-        refused("/tools/status.py to judge the test status")
-        judge.write_text("import sys\nprint('the judge broke')\nsys.exit(3)\n")
-        refused("could not judge the test status (exit status 3): the judge broke")
-        subprocess.run(git + ["checkout", "-q", "--", "tools/status.py"], check=True)
-
+        # Not a git checkout, nothing tested, a file nobody committed: it reaches the board.
+        (repo / "firmware/edited").write_text("not committed\n")
         result = status()
         self.assertIn(host, (board / "hosts").read_text(), result.stdout)
-        self.assertIn("the deploy gate: green", result.stdout)
 
     def test_the_hints_name_the_installed_copy(self):
         """setup.sh --mode target-remote --only speakerd, as the person ran it: the closing hints

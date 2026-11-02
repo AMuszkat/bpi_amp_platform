@@ -170,9 +170,8 @@ to the board and run their local mode there; they build nothing. Nothing is rout
 the `/board` skill (`.claude/skills/board`), builds the aarch64 artifacts and deploys, runs a
 smoke test that makes no sound (it plays, capped, through the drop-in's sink, linked, clocked
 by the amplifier, no restart or xrun for a while), reads the journal and rolls back, and
-refuses while the lab is locked or unless the commit is green on a clean tree (both rungs, or
-an affected run on top of a commit green in full: section 4); the installers' remote modes
-apply the same gate themselves. Their local mode is
+refuses while the lab is locked; the installers' remote modes check the lock themselves. There
+is no test-status gate (2026-11-02, the person's decision: section 4). Their local mode is
 tested on the virtual pair, their remote mode through a stand-in `ssh` that runs the board's
 side on the same machine. The first deploy is a person's (section 8, and the staged procedure
 in `firmware/CLAUDE.md`); it ran them on one board on 2026-11-01: `speakerd` capped,
@@ -190,7 +189,7 @@ forgotten and hooks cannot.
 | Rule | Why | Enforced by |
 |---|---|---|
 | No hostname, IP, user name or home path in any tracked file | the repository is public | `PreToolUse` on Edit/Write and a pre-commit check |
-| Nothing is deployed to rung 3 unless rung 2 is green for the same commit: in full, or, for a fix on top of a commit green in full, the scenarios that cover every file it changed | an agent cannot hear a broken crossover | `PreToolUse` gate on the deploy skill, and the deploy skill itself |
+| No test-status gate on a deploy (2026-11-02, the person's decision): run the tests before deploying, but nothing refuses a deploy of a commit that is not green | the person deploys what they choose | nothing |
 | No output cap (2026-11-01, the person's decision); while the tweeter is on, only a crossover's high band reaches it | a wrong graph must not reach a tweeter | the installer (it keeps `device.json`'s limits, writes none on a first install, and refuses a layer that breaks the tweeter rule), `ampd` (it refuses such a revision), and smoke (`speakerd` plays exactly `device.json`'s limits) |
 | A lab lock file stops every hardware action | a human may be measuring, or the boards may be on a bench | `PreToolUse` on any ssh to a board |
 | No `git push` to `main`, no force push, no history rewrite | agents work on branches and open pull requests | `PreToolUse` on Bash |
@@ -262,7 +261,7 @@ agent never improvises a `pw-cli` or `ssh` line.
 | `/vpair up\|down\|scenario <name>` | brings the virtual pair up with a given build and runs one scenario from `tests/scenarios/` | all dev agents, one scenario at a time |
 | `/measure <capture> <expected>` | compares a recorded sweep with the expected response: magnitude error per band, crossover point, knob-to-change latency, monitor frame age | dev agents, orchestrator |
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
-| `/board status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3 (the board of `firmware/local.mk`); refuses when the lab lock exists or rung 2 is not green | board-ops |
+| `/board status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3 (the board of `firmware/local.mk`); refuses when the lab lock exists | board-ops |
 | `/juce` | the JUCE knowledge base in `dsp/docs/juce-knowledge/` | dev agents |
 | `/render [preview\|final]` | the boards rendered in Blender from the KiCad projects (`tools/render.sh`), and the README's slider from the render to the photo | render-dev |
 | `/release` | builds every target, writes the catalogue (each plugin's version and source identity, and what step 4's catalogue compares), tags | orchestrator |
@@ -274,7 +273,7 @@ scripts from `.claude/hooks/`.
 ```mermaid
 flowchart LR
     ss["SessionStart<br/>pull the builder image, verify local.env exists<br/>and is gitignored, print the lab lock state"]
-    pre["PreToolUse<br/>Bash: block push to main and force push<br/>gate ssh, scp, rsync and /board: no lab lock,<br/>HEAD green on a clean tree: both rungs,<br/>or an affected run on a base green in full<br/>Edit/Write: block private strings in tracked files"]
+    pre["PreToolUse<br/>Bash: block push to main and force push<br/>refuse ssh, scp, rsync and /board while the lab lock exists<br/>Edit/Write: block private strings in tracked files"]
     post["PostToolUse<br/>Edit of *.cpp/*.h: clang-format<br/>Edit of docs/*.md: render the Mermaid blocks to check syntax"]
     ss --> pre --> post
 ```
@@ -282,44 +281,28 @@ flowchart LR
 **What exists today.** The hooks are in place: `.claude/hooks/pre-edit.py` and the commit
 check in `pre-bash.py` refuse private data (the rule is `private-data-check.py`, with the
 documentation address ranges and the placeholders as exceptions); `pre-bash.py` refuses
-pushes to `main` and force pushes, and gates every command that could reach a board (`ssh`,
-`scp`, `rsync`, the `-install` and `--target-host` paths of the build scripts) on the lab
-lock and on a green test status for the exact commit with a clean tree; `post-edit.py`
+pushes to `main` and force pushes, and refuses every command that could reach a board (`ssh`,
+`scp`, `rsync`, the `-install` and `--target-host` paths of the build scripts) while the lab
+lock exists; `post-edit.py`
 checks the Mermaid diagrams of an edited document when `tools/mermaid-check` is installed.
 No hook runs tests: a Stop hook that ran the virtual pair at the end of every turn was
 removed, because the suite takes 10 to 14 minutes and the full run before the push covers
 it. The skills `/build`, `/test`, `/vpair` and `/pw-inspect` exist
-with their scripts in `tools/`; `/test` writes the status file the gate reads. `/board` exists
+with their scripts in `tools/`; `/test` writes the status file. `/board` exists
 too (`tools/board.sh`); `/measure` and `/release` do not exist yet: `/measure` follows `ampd`,
 `/release` step 4's catalogue.
 
-The deploy gate is the one that matters most. It reads `tests/.status/<commit>.json`, which
-`/test` writes, and refuses the deploy if the file is missing, red, for another commit or from
-a run on a dirty tree, or if the tree is dirty now; while `.claude/lab.lock` exists it
-refuses everything. A commit is green in one of two ways. **In full:** both rungs passed on a
-clean tree (`/test all`). **Affected:** for a fix on top of a commit green in full (the base),
-typically one found at the bench, `/test affected` runs only the rung 2 modules that cover the
-files changed since the base, by the base's `tests/impact.json`: the installers and the board
-script re-run the installer scenarios, a test module itself and the modules that import it,
-documentation nothing. Any other file (the plugins, `speakerd`, the controller, `ampd.py`, the
-tweeter rule, the harness, the build and test tools, the gate, the map itself, CI) needs both
-rungs. The installer files the shortcut covers do decide what plays (snapclient's routing, the
-sink drop-in, the wrapper's fallback layers, the unit's empty HOME, the tweeter-rule check of a
-factory graph), but no test outside the installer scenarios exercises them, so an affected run
-gives them exactly the tests a full run would. CI still runs both rungs in full on every pull
-request. The gate does not take the record's word for what changed or what had to run: it
-recomputes both from git (with submodules and untracked files shown whatever the local
-configuration says) and the base's map. It refuses when a full run failed on a clean tree on
-the commit or since the base (something the map does not see), and the base must be green in
-full itself, so fixes add up against it until the next full run. It does believe the record's
-pass, as it believes a full run's. The definition is
-in one place, `tools/status.py gate`, which the hook, `tools/board.sh` and the installers'
-remote modes all ask, and which rung 1 tests (`tools/tests/test_status_gate.py`). Only a person can override the test status,
-never the lock: they run the one command in their own shell with the variable set, as in
-`BPI_DEPLOY_OVERRIDE=1 tools/board.sh deploy`, and the override is logged in
-`tests/.status/overrides.log`. An agent cannot: the hook refuses any command of its that sets
-the variable. `tools/board.sh` and the installers' remote modes apply the same gate
-themselves, for a person's shell where no hook runs.
+**There is no test-status gate** (2026-11-02, the person's decision). Until then a deploy was
+refused unless `tests/.status/<commit>.json` said the exact commit was green on a clean tree;
+now only `.claude/lab.lock` stops a deploy, in the hook, in `tools/board.sh` and in the
+installers' remote modes. `/test` still records its results, and `tools/status.py gate` still
+says whether a commit is green, without enforcing it. A commit is green in one of two ways.
+**In full:** both rungs passed on a clean tree (`/test all`). **Affected:** for a fix on top of
+a commit green in full (the base), typically one found at the bench, `/test affected` runs
+only the rung 2 modules that cover the files changed since the base, by the base's
+`tests/impact.json`: the installers and the board script re-run the installer scenarios, a
+test module itself and the modules that import it, documentation nothing. Any other file needs
+both rungs. CI still runs both rungs in full on every pull request.
 
 ## 5. The tests
 
@@ -333,9 +316,9 @@ flowchart LR
 ```
 
 Rung 1 (`tools/test.sh unit`) runs `plugin-check` on every plugin that declares its targets,
-the controller's bridge against its fake hub, the deploy gate's test
+the controller's bridge against its fake hub, the test of `tools/status.py`
 (`tools/tests/test_status_gate.py`: what is green in full and by an affected run, on scratch
-repositories, and the decisions of `tests/impact.json`), and three checks of the plugins'
+repositories, the decisions of `tests/impact.json`, and the hook's lab lock), and three checks of the plugins'
 code and build:
 
 - **The block FIR test** (`dsp/juce_plugins/tests/blockfir`): the block FIR that firConv

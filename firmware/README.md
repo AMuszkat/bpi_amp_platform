@@ -37,8 +37,8 @@ server when the network changes. On the board a `.local` name needs `libnss-mdns
 client setup installs when the name does not resolve without it; a name that still does not is
 refused (pass `--server <ip>`). `setup.sh --server` passes it on.
 
-The remote modes refuse to touch a board unless the commit they run from has passed the tests
-(`tools/status.py gate` says why); the root [`CLAUDE.md`](../CLAUDE.md) has the rule. A first
+The remote modes refuse to touch a board only while a lab lock (`.claude/lab.lock`) exists;
+they do not ask whether the commit passed the tests. A first
 deploy, step by step, and what the board measured are in [`CLAUDE.md`](CLAUDE.md).
 
 ## The kernel side

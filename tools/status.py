@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Records test results for the current commit in tests/.status/<commit>.json, and holds the
-deploy gate's one definition: whether a checkout may reach a board. The pre-bash hook
-(.claude/hooks/pre-bash.py) and firmware/install-lib.sh's deploy_gate (tools/board.sh, the
-installers' remote modes) both ask `gate`.
+"""Records test results for the current commit in tests/.status/<commit>.json, and says whether
+a checkout is green. Nothing enforces it any more: there is no test-status gate on a deploy
+(2026-11-02, the person's decision); `gate` only reports, and `plan` is what `tools/test.sh
+affected` runs.
 
     tools/status.py set <key> <pass|fail|skipped> [note]
     tools/status.py affected <pass|fail> <base> "<module ...>" [note]
     tools/status.py show
     tools/status.py plan               what `tools/test.sh affected` runs, on top of which commit
-    tools/status.py gate [--tree DIR]  exit 0 if the checkout may reach a board, else 1; says why
+    tools/status.py gate [--tree DIR]  exit 0 if the checkout is green, else 1; says why
 
 A commit is green in one of two ways, with the tree clean now:
 - in full: `unit` and `vpair` both "pass", both run on a clean tree (tools/test.sh all);

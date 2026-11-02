@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the test rungs and records their results for the deploy gate. See .claude/skills/test.
+# Runs the test rungs and records their results (tools/status.py). See .claude/skills/test.
 #
 #     tools/test.sh unit | vpair | all | affected [--no-record]
 #
@@ -91,7 +91,7 @@ run_unit() {
         fi
         checked+=" controller"
     fi
-    # The deploy gate's definition of green, full and affected (tools/status.py gate).
+    # tools/status.py: what green is, full and affected, and the hook's lab lock.
     echo "=== /test unit: status-gate"
     if python3 tools/tests/test_status_gate.py; then echo "unit: status-gate passed"; else echo "unit: status-gate FAILED"; failed=1; fi
     checked+=" status-gate"

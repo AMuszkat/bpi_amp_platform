@@ -6,18 +6,10 @@ instructions alone cannot:
 - no private data in a commit (the staged additions are scanned);
 - nothing reaches a board (ssh, scp, rsync, the deploy targets of the build scripts, any make
   on the firmware, the installers' remote mode, the /board skill's tools/board.sh) while a lab lock
-  (.claude/lab.lock, in the checkout the command runs in or in the main checkout) exists, or
-  without a green test status for the exact commit being deployed, with a clean tree now. Green
-  is tools/status.py's gate, the one definition firmware/install-lib.sh asks too: both rungs
-  passed on a clean tree (/test all), or an affected run (/test affected) covers every file
-  changed since a commit green in full (tests/impact.json). The checkout is the one the command
-  runs in (the session's working directory), so a worktree is judged on its own commit; the gate
-  is this checkout's tools/status.py. Looking at a board (tools/board.sh status or journal) only
-  needs the lab to be unlocked;
-- no command uses the deploy override (BPI_DEPLOY_OVERRIDE): it is a person's, in their own
-  shell, which this hook never sees.
+  (.claude/lab.lock, in the checkout the command runs in or in the main checkout) exists. There is
+  no test-status gate (2026-11-02, the person's decision): a deploy does not need a green commit.
 
-It is a tripwire on the command text, not a sandbox: tools/board.sh checks the same gate
+It is a tripwire on the command text, not a sandbox: tools/board.sh checks the same lock
 itself. Whatever goes wrong inside the hook on a guarded path blocks the command.
 """
 
@@ -42,22 +34,9 @@ DEPLOY = re.compile(r"""(^|[\s;&|(`'"])(?:[\w./-]*/)?["']?(ssh|scp|rsync|sftp)["
                     r"|build-podman\.sh\b.*\s-install\b|\bmake\b.*\binstall"
                     r"""|--target-host\b|--mode[\s=]+["']?(target-remote|both)\b"""
                     r"|\btools/board\.sh\b")
-# Reading a board changes nothing on it: the lab lock applies, the test status does not.
-BOARD_READ = re.compile(r"\btools/board\.sh\s+(status|journal)\b")
-# The deploy override is a person's too (tools/board.sh reads it from their shell).
-OVERRIDE = re.compile(r"\bBPI_DEPLOY_OVERRIDE\b")
 # make on the firmware: its targets copy kernels, modules and device trees to a board and
 # change its /boot, so every make there is deploy-class, whatever the target.
 MAKE = re.compile(r"(^|[\s;&|(])make\b")
-
-
-def status_gate():
-    """tools/status.py's gate(tree) -> (green, why), loaded from this checkout."""
-    sys.dont_write_bytecode = True
-    spec = importlib.util.spec_from_file_location("bpi_status", os.path.join(ROOT, "tools", "status.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.gate
 
 
 def refuse(msg):
@@ -101,11 +80,6 @@ def check_deploy(tree, command):
         if os.path.exists(lock):
             return refuse(f"the lab is locked ({lock} exists): nothing may reach a board. "
                           "A person removes the lock when the boards are free.")
-    if BOARD_READ.search(command) and not DEPLOY.search(BOARD_READ.sub("", command)):
-        return 0
-    green, why = status_gate()(tree)
-    if not green:
-        return refuse(f"nothing reaches a board from {tree}: {why}.")
     return 0
 
 
@@ -123,7 +97,7 @@ def main():
         cwd = data.get("cwd")
         tree = checkout_of(cwd)
     except Exception as e:  # cannot even read the command: block anything that looks guarded
-        if any(p.search(raw) for p in (DEPLOY, OVERRIDE, COMMIT, MAKE)):
+        if any(p.search(raw) for p in (DEPLOY, COMMIT, MAKE)):
             return refuse(f"the pre-bash hook could not read the command ({type(e).__name__}); "
                           "blocking it.")
         return 0
@@ -132,9 +106,6 @@ def main():
         return refuse("pushing to main or master is not allowed: push a branch and open a pull request.")
     if FORCE.search(command):
         return refuse("force pushes are not allowed: no history rewrite on shared branches.")
-    if OVERRIDE.search(command):
-        return refuse("BPI_DEPLOY_OVERRIDE bypasses the test status: a person uses it, in their own "
-                      "shell. Not an agent.")
     try:
         if COMMIT.search(command):
             rc = check_commit(tree, command)

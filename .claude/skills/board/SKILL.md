@@ -1,6 +1,6 @@
 ---
 name: board
-description: The one way to reach a real speaker board (rung 3). `/board status|journal` reads what is installed and what runs; `/board deploy` builds the aarch64 artifacts and installs them; `/board smoke` checks without a sound that speakerd plays device.json's limits; `/board rollback` makes the previous speakerd current. Gated by the lab lock and by a green test status for the exact commit. Use only for board work, normally through the board-ops agent.
+description: The one way to reach a real speaker board (rung 3). `/board status|journal` reads what is installed and what runs; `/board deploy` builds the aarch64 artifacts and installs them; `/board smoke` checks without a sound that speakerd plays device.json's limits; `/board rollback` makes the previous speakerd current. Refused while the lab lock exists. Use only for board work, normally through the board-ops agent.
 ---
 
 # /board
@@ -21,13 +21,10 @@ The board is `$BOARD_USER@$BOARD_HOST`, from the environment or the gitignored
 installer puts where, its options and its safety rules are in `firmware/CLAUDE.md`
 (`speakerd-setup.sh`, `setup.sh`, `tools/board.sh`).
 
-**The gate.** Every command is refused while `.claude/lab.lock` exists: a person has the
-boards. `deploy`, `smoke` and `rollback` also need HEAD green, with the tree clean now:
-`tests/.status/<HEAD>.json` saying `unit: pass` and `vpair: pass`, run on a clean tree (`/test
-all`), or a passing affected run that covers every file changed since a commit green in full
-(`/test affected`, for a fix on top of one). `tools/status.py gate` is the one definition and
-says why. The `pre-bash` hook enforces the same, on the checkout the command runs in, and
-refuses `BPI_DEPLOY_OVERRIDE` from an agent: it is a person's, in their own shell.
+**The lab lock.** Every command is refused while `.claude/lab.lock` exists: a person has the
+boards. The `pre-bash` hook enforces the same. There is no test-status gate (2026-11-02, the
+person's decision): nothing checks that the commit passed the tests, so run `/test` first
+whenever the code changed.
 
 **The limits.** There is no output cap. A deploy keeps `device.json`'s limits, and a first
 install writes none (`"limits": { "gain_db": 0, "tweeter": "on" }`). With the tweeter on, the

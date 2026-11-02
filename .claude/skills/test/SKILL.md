@@ -1,6 +1,6 @@
 ---
 name: test
-description: Run the remote plugin host's tests and record the result for the deploy gate. `/test unit` runs plugin-check on every plugin that builds control and headless targets, the build identity checks, the block FIR test (x86_64 and aarch64 under qemu), the plugin-versions test, the controller's test and the deploy gate's test (rung 1); `/test vpair` runs the virtual pair tests (rung 2); `/test all` runs both; `/test affected` runs only the virtual pair tests that cover the files changed since the last commit green in full, and refuses when a changed file needs both rungs. Use before any deploy, after changing a plugin, speakerd, ampd or tests/vpair, and whenever asked whether the build is green.
+description: Run the remote plugin host's tests and record the result (tools/status.py). `/test unit` runs plugin-check on every plugin that builds control and headless targets, the build identity checks, the block FIR test (x86_64 and aarch64 under qemu), the plugin-versions test, the controller's test and the test of tools/status.py and the lab lock (rung 1); `/test vpair` runs the virtual pair tests (rung 2); `/test all` runs both; `/test affected` runs only the virtual pair tests that cover the files changed since the last commit green in full, and refuses when a changed file needs both rungs. Use before any deploy, after changing a plugin, speakerd, ampd or tests/vpair, and whenever asked whether the build is green.
 ---
 
 # /test
@@ -11,10 +11,10 @@ tools/test.sh unit | vpair | all | affected
 
 Runs from the repository root, in the development container when Podman is installed
 (`tools/container.sh`), natively with `BPI_CONTAINER=0`. Every run records its result for the current commit with
-`tools/status.py`, in `tests/.status/<commit>.json`. The deploy gate (`tools/status.py gate`,
-which `.claude/hooks/pre-bash.py` and `firmware/install-lib.sh` both ask) refuses to let
-anything reach a board unless the exact commit is green, with a clean tree: `unit` and `vpair`
-both `pass`, or a passing `affected` run that covers what changed since a commit green in full.
+`tools/status.py`, in `tests/.status/<commit>.json`. `tools/status.py gate` says whether a
+commit is green: `unit` and `vpair` both `pass` on a clean tree, or a passing `affected` run
+that covers what changed since a commit green in full. Nothing enforces it before a deploy
+(2026-11-02, the person's decision).
 
 | Rung | What runs | Natively, needs |
 |---|---|---|
@@ -22,8 +22,8 @@ both `pass`, or a passing `affected` run that covers what changed since a commit
 | `vpair` | `python3 -m unittest discover -s tests/vpair` | `pipewire`, `wireplumber`, `dbus`, `python3-numpy` |
 | `affected` | the `tests/vpair` modules `tools/status.py plan` names; nothing of `unit` | as `vpair` |
 
-The container has all of them. `unit` also runs `tools/tests/test_status_gate.py`, the deploy
-gate's own test.
+The container has all of them. `unit` also runs `tools/tests/test_status_gate.py`, the test of
+`tools/status.py` and of the hook's lab lock.
 
 **`affected`** is for a fix on top of a commit green in full, typically one found at the
 bench: an installer, the board script, a test module, the documentation. `tools/status.py plan`

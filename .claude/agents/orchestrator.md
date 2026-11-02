@@ -22,7 +22,7 @@ For a task:
 3. Merge the branches. Check each agent's **Documentation impact** list against the diff: a
    document named there and not changed goes back to the agent that named it.
 4. Run the full suite **once**, on the merged commit with a clean tree: `tools/test.sh all`
-   (it records the status the deploy gate reads). On red, send the failing module and its
+   (it records the test status). On red, send the failing module and its
    output to the agent that owns it; it fixes in its worktree and reruns that module only.
    Collect every fix, merge, and run the full suite again once.
 5. On green, run the `reviewer` on the diff, with the output of

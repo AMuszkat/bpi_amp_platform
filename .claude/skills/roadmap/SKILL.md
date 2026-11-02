@@ -23,7 +23,7 @@ Then route the work:
 | "is it green?", before a pull request | `tools/test.sh all`, once, run by the orchestrator or the main session |
 | before merging | `reviewer` |
 | documentation alone | the main session, or the area agent whose code the document describes |
-| anything on a real board | `board-ops`, and only when the commit is recorded green (both rungs, or an affected run) |
+| anything on a real board | `board-ops` |
 
 The agent definitions are in `.claude/agents/`; each one's description says what it is for,
 and its rules say what it never does. When a task's area is unclear, ask which files it

@@ -30,11 +30,10 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
 - **The design documents in `docs/` are the plan.** When the implementation diverges from
   them, change the document in the same commit, and keep their Mermaid diagrams rendering
   (every ```mermaid block must parse; a label that starts with `1. ` is read as a list).
-- **Nothing is deployed to a board unless its commit is green:** both rungs
-  (`tools/test.sh all`), or, for a fix on top of a commit green in full, the virtual pair tests
-  that cover every file it changed (`tools/test.sh affected`, by `tests/impact.json`). The
-  plugins, speakerd, ampd, the tweeter rule, the harness and the gate always need both; an
-  installer fix re-runs exactly the installer tests a full run would. There is no output cap
+- **No test gate on a deploy** (2026-11-02, the person's decision): nothing checks that a
+  commit passed the tests before it reaches a board; only the lab lock stops a deploy. Run the
+  tests before deploying all the same (`tools/test.sh all`, or `tools/test.sh affected` for a
+  fix on top of a commit green in full). There is no output cap
   (2026-11-01, the person's decision): an install keeps `device.json`'s limits and writes none
   on a first install; the tweeter rule still protects the tweeter.
 - **Real-time code never blocks:** no allocation, lock or syscall on the audio thread, in
@@ -56,7 +55,7 @@ task would change:
 | documentation alone | the main session, or the area agent whose code it describes |
 | more than one of the above, work that can run in parallel, or a protocol they share | `orchestrator`, which runs the area agents in parallel worktrees, merges, and runs the full suite once |
 | before a pull request is merged | `reviewer` |
-| a real board | `board-ops`, only when the commit is recorded green (both rungs, or an affected run) |
+| a real board | `board-ops` |
 
 A single-area task goes straight to its agent; the orchestrator is for work that has to be
 split and merged, not a required entry point. Agents do not cross areas: an agent that
@@ -69,7 +68,7 @@ builds what it changed and runs only the scenario that covers it, by name
 (`python3 -m unittest -v tests.vpair.<module>`, or `plugin-check/run.sh <plugin>`); no hook
 runs tests at the end of a turn. The full suite (`tools/test.sh all`) runs once on the
 finished branch, before it is pushed, and again only if code changed since; CI repeats it on
-the pull request. That run is also what the deploy gate reads.
+the pull request.
 
 ## Hooks, skills and agents
 
@@ -77,21 +76,16 @@ the pull request. That run is also what the deploy gate reads.
 
 - **Hooks** (`.claude/settings.json`, scripts in `.claude/hooks/`) enforce the rules above:
   no private data in an edit or a commit, no push to `main`, no force push, and the
-  **deploy gate**: nothing reaches a board (`ssh`, `scp`, `rsync`, `-install`,
+  **lab lock**: nothing reaches a board (`ssh`, `scp`, `rsync`, `-install`,
   `--target-host`, the installers' `--mode target-remote`, `tools/board.sh`) while a
-  `.claude/lab.lock` exists, or unless the exact commit of the checkout the command runs in is
-  green, with that tree clean: `tests/.status/<commit>.json` saying `unit: pass` and
-  `vpair: pass`, both run on a clean tree, or a passing affected run on top of a commit green
-  in full that covers every file changed since. `tools/status.py gate` is the one definition
-  (the hook, `tools/board.sh` and the installers all ask it) and says why. Agents may never use `BPI_DEPLOY_OVERRIDE`: it is a person's, in their own shell
-  (`BPI_DEPLOY_OVERRIDE=1 tools/board.sh ...` bypasses the status, never the lock, and is
-  logged in `tests/.status/overrides.log`). Create `.claude/lab.lock` whenever the boards are
-  on a bench.
+  `.claude/lab.lock` exists (`tools/board.sh` and the installers check it too). Create
+  `.claude/lab.lock` whenever the boards are on a bench. There is no test-status gate
+  (2026-11-02): `tools/status.py gate` only reports whether a commit is green.
 - **Skills**: `/build` (a plugin or app, x86_64 or aarch64), `/test` (`unit` = plugin-check,
   `vpair` = the virtual pair, `all`, `affected` = only the virtual pair tests that cover a fix
   since the last commit green in full; writes the status file), `/vpair` (operate the virtual
   pair), `/pw-inspect` (a PipeWire graph, summarised), `/board` (a real board: status,
-  journal, deploy, smoke, rollback; gated), `/juce` (JUCE knowledge), `/render` (the boards
+  journal, deploy, smoke, rollback; refused while the lab is locked), `/juce` (JUCE knowledge), `/render` (the boards
   in Blender, and the README's slider). Their scripts are in `tools/`, work without Claude,
   and run in the development container (below), except `tools/render.sh` and
   `tools/blender.sh`, which run Blender natively from `build/tools/`.

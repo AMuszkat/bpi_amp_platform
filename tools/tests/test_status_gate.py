@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The deploy gate's definition of green (tools/status.py gate and plan), on scratch git
+"""What green is (tools/status.py gate and plan; reported, not enforced since 2026-11-02), on scratch git
 repositories with a copy of tools/status.py and a small tests/impact.json, and the decisions of
 the real tests/impact.json. Part of rung 1 (tools/test.sh unit).
 
@@ -252,20 +252,25 @@ class Gate(unittest.TestCase):
         self.repo.affected(head, self.base, [])
         self.refused("it did not run test_b, test_c")
 
-    def test_the_hook_asks_the_gate(self):
+    def test_the_hook_asks_only_the_lab_lock(self):
+        """There is no test-status gate (2026-11-02, the person's decision): the hook lets a board
+        command through from a commit with no test status, and refuses it only while a lab lock
+        exists."""
         hook = ROOT / ".claude" / "hooks" / "pre-bash.py"
 
         def hook_on(cwd):
             data = json.dumps({"tool_input": {"command": "tools/" + "board.sh smoke"}, "cwd": str(cwd)})
             return subprocess.run([sys.executable, str(hook)], input=data, capture_output=True, text=True)
 
-        self.assertEqual(hook_on(self.repo.path).returncode, 0)
-        head = self.repo.commit("docs", {"docs/a": "words\n"})
+        self.repo.commit("docs", {"docs/a": "words\n"})
+        result = hook_on(self.repo.path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lock = self.repo.path / ".claude" / "lab.lock"
+        lock.parent.mkdir(exist_ok=True)
+        lock.write_text("")
         result = hook_on(self.repo.path)
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("no readable test status", result.stderr)
-        self.repo.affected(head, self.base, [])
-        self.assertEqual(hook_on(self.repo.path).returncode, 0)
+        self.assertIn("the lab is locked", result.stderr)
 
     def test_plan(self):
         self.repo.commit("fix", {"firmware/speakerd-setup.sh": "echo 2\n"})
