@@ -253,26 +253,27 @@ def scene():
     o += text(80, 132, "Stream from anything. Tune the pair from one app. Each speaker runs its own DSP.",
               20, MUTED, italic=True)
 
-    # the music: out of the phone, across the picture, into the speakers (drawn first: it passes behind them)
-    o += wave(270, 970, 470, 34, 5.0, width=7, color=BLUE, opacity=0.18)
-    o += wave(270, 970, 470, 26, 5.0, width=4.5, color=BLUE)
-    o += transport(800, 470, "AUDIO", "Snapcast · TCP", BLUE_DIM, "#E6EEFB")
-    o += text(800, 548, "the music, to both speakers in sync", 19, MUTED, italic=True, anchor="middle")
+    # the music: out of the phone at the top, straight into the speakers' DSP plugins (drawn first:
+    # it passes behind the phone's edge)
+    o += wave(282, 966, 330, 34, 5.0, width=7, color=BLUE, opacity=0.18)
+    o += wave(282, 966, 330, 26, 5.0, width=4.5, color=BLUE)
+    o += transport(640, 330, "AUDIO", "Snapcast · TCP", BLUE_DIM, "#E6EEFB")
+    o += text(640, 274, "the music, to both speakers in sync", 19, MUTED, italic=True, anchor="middle")
 
-    # sources
-    o += phone(130, 170)
-    o += laptop(96, 480)
+    # sources: the phone above, the controller below, each whole
+    o += phone(130, 160)
+    o += laptop(96, 500)
 
-    # network
-    o += wifi(790, 372)
-    o += text(790, 414, "WI-FI", 14, MUTED, mono=True, weight=600, anchor="middle", spacing="0.16em")
-    # settings: the controller to the plugin graph
-    o += (f'<path d="M496 486 C 560 200, 850 200, 980 222" fill="none" stroke="{ORANGE}" stroke-width="3" '
+    # network, between the two lines
+    o += wifi(720, 470)
+    o += text(720, 512, "WI-FI", 14, MUTED, mono=True, weight=600, anchor="middle", spacing="0.16em")
+    # settings: out of the controller at the bottom, into the speakers' boards
+    o += (f'<path d="M500 640 C 600 668, 800 610, 958 578" fill="none" stroke="{ORANGE}" stroke-width="3" '
           f'stroke-dasharray="2 9" stroke-linecap="round"/>\n')
-    o += arrow_head(986, 223, 9, ORANGE, 16)
-    o += text(735, 186, "settings and knobs, on both speakers within milliseconds", 19, MUTED, italic=True,
+    o += arrow_head(966, 576, -12, ORANGE, 16)
+    o += transport(735, 700, "CONTROL", "settings + meters TCP · knobs UDP", ORANGE, "#FBEDE6")
+    o += text(735, 752, "settings and knobs, on both speakers within milliseconds", 19, MUTED, italic=True,
               anchor="middle")
-    o += transport(735, 225, "CONTROL", "settings + meters TCP · knobs UDP", ORANGE, "#FBEDE6")
 
     # the two speakers, each a board with its DSP plugins and a loudspeaker
     o += speaker_unit(968, 214, 1)
