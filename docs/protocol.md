@@ -409,8 +409,8 @@ neither a fake hub nor a forged datagram is believed.
   OSC datagrams (within that session's range of values) and, by placing itself in the path
   (ARP or mDNS spoofing), relay a handshake and then alter messages afterwards: the links are
   authenticated, not encrypted or signed per message. On a home network that is out of scope
-  for now; TLS or a per-message MAC is the step after. Nothing over the network can lift the
-  output cap or unmute the tweeter: those are enforced by `device.json` on the speaker.
+  for now; TLS or a per-message MAC is the step after. Nothing over the network changes
+  `device.json`'s limits: the speaker enforces them.
 - **Limits.** A hub takes at most 32 control peers and 32 monitor clients with at most 32
   subscriptions each, and at most 16 connections per link still in their handshake (10 s
   each); a controller with more than 1 MiB unread is dropped. A document has at most 64
