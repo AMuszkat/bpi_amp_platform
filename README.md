@@ -82,7 +82,10 @@ module, with USB-C and a debug UART, and a **speaker amp board** with the two MA
 amplifiers on one TDM bus, a boost converter for their supply and a 5 V buck for the rest.
 The KiCad projects and the details are in [`hardware/`](hardware/README.md).
 
-![BPI AMP Platform boards](all.jpeg)
+![The two boards: a KiCad render of the base board and the speaker amp board, wiping across to a photo of the boards as built, with the BPI-CM4 module](docs/images/boards.svg)
+
+The picture moves from the KiCad render to the boards as built, and back. The render is
+[`docs/diagrams/boards.py`](docs/diagrams/boards.py)'s; the photo is [`all.jpeg`](all.jpeg).
 
 ![Hardware block diagram](hardware/block-diagram.svg)
 
