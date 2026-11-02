@@ -14,8 +14,8 @@
   ],
   "rules": [
     {
-      "why": "words and drawings: nothing here runs",
-      "paths": ["*.md", "docs/*", "hardware/*"],
+      "why": "words and drawings: nothing here runs on a speaker (the renderer and its tools included)",
+      "paths": ["*.md", "docs/*", "hardware/*", "all.jpeg", "tools/render.sh", "tools/blender.sh"],
       "tests": []
     },
     {

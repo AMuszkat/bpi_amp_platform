@@ -12,7 +12,7 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
 
 | Path | What | Guidance |
 |---|---|---|
-| `hardware/` | KiCad projects: the carrier board and the amplifier board | `hardware/README.md` |
+| `hardware/` | KiCad projects: the carrier board and the amplifier board; `render/`, the boards' Blender render | `hardware/README.md` |
 | `firmware/` | Device tree, kernel config, amplifier drivers, PipeWire config, board setup scripts, the installers of `speakerd` and of the whole audio side (`setup.sh`); later `ampd` | `firmware/CLAUDE.md` |
 | `dsp/` | Measurement and tuning tools, the JUCE plugins, `plugin-check`, `speakerd` (the headless plugin host); later the controller app (formerly the `bpi_amp_dsp_tuning` repository) | `dsp/CLAUDE.md` |
 | `docs/` | The remote plugin host design (`remote-plugin-host.md`) and how to develop it autonomously (`autonomous-development.md`) | |
@@ -52,6 +52,7 @@ task would change:
 | `dsp/juce_apps/speakerd/` | `host-dev` |
 | `dsp/juce_apps/controller/` | `controller-dev` |
 | `firmware/`, `tests/vpair/` | `board-dev` |
+| `hardware/render/`, `docs/diagrams/`, the pictures they make in `docs/images/` | `render-dev` |
 | documentation alone | the main session, or the area agent whose code it describes |
 | more than one of the above, work that can run in parallel, or a protocol they share | `orchestrator`, which runs the area agents in parallel worktrees, merges, and runs the full suite once |
 | before a pull request is merged | `reviewer` |
@@ -90,12 +91,13 @@ the pull request. That run is also what the deploy gate reads.
   `vpair` = the virtual pair, `all`, `affected` = only the virtual pair tests that cover a fix
   since the last commit green in full; writes the status file), `/vpair` (operate the virtual
   pair), `/pw-inspect` (a PipeWire graph, summarised), `/board` (a real board: status,
-  journal, deploy, smoke, rollback; gated), `/juce` (JUCE knowledge). Their
-  scripts are in `tools/`, work without Claude, and run in the development container
-  (below).
+  journal, deploy, smoke, rollback; gated), `/juce` (JUCE knowledge), `/render` (the boards
+  in Blender, and the README's slider). Their scripts are in `tools/`, work without Claude,
+  and run in the development container (below), except `tools/render.sh` and
+  `tools/blender.sh`, which run Blender natively from `build/tools/`.
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
-  `controller-dev`, `board-dev`, `reviewer`, `board-ops`, each limited to its area and tools
-  as the document's table says.
+  `controller-dev`, `board-dev`, `reviewer`, `board-ops`, `render-dev`, each limited to its
+  area and tools as the document's table says.
 - **CI** (`.github/workflows/ci.yml`) runs rungs 1 and 2 on pull requests and on `develop`.
 
 ## Developing the remote plugin host

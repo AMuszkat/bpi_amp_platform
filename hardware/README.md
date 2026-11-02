@@ -39,6 +39,26 @@ and a **speaker amp board** with the amplifiers and the power supply.
   the board-to-board connector, for the base board and the module.
 - The amplifiers' **1.8 V** logic supply comes from the module.
 
+## Renders
+
+![The two boards rendered in Blender](../docs/images/boards-render.jpg)
+
+`tools/render.sh` renders both boards in Blender from these projects: `kicad-cli` exports
+each board (copper, mask, silkscreen, components) to glTF, and
+[`render/scene.py`](render/scene.py) gives every layer a real material, builds a stand-in
+body for each part whose 3D model is not here, and renders with Cycles. It works on a copy
+in `build/boards/`, never on the projects themselves. `--quality preview` takes about a
+minute; the final render, about 8 minutes on 24 cores, writes
+`docs/images/boards-render.jpg` and the README's slider, `docs/images/boards.svg`. Blender
+4.5 LTS is fetched into `build/tools/` the first time (`tools/blender.sh`). The `/render`
+skill has the details.
+
+The parts drawn as stand-ins, sized from their datasheets: the MAX98397 amplifiers (WLP),
+the LTC3786 (QFN-16), the boost MOSFETs (PQFN 3.3 × 3.3), the boost inductor, the JST VH
+connectors, the PVDD jumper header, the DF40 board-to-board receptacles, the USB-C socket and
+the USB ESD diodes. With the vendor models (below), the parts found there are rendered from
+them.
+
 ## 3D models
 
 Most vendor 3D models used by the boards are not in the repo. The PCBs reference them as

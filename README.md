@@ -84,8 +84,9 @@ The KiCad projects and the details are in [`hardware/`](hardware/README.md).
 
 ![The two boards: a KiCad render of the base board and the speaker amp board, wiping across to a photo of the boards as built, with the BPI-CM4 module](docs/images/boards.svg)
 
-The picture moves from the KiCad render to the boards as built, and back. The render is
-[`docs/diagrams/boards.py`](docs/diagrams/boards.py)'s; the photo is [`all.jpeg`](all.jpeg).
+The picture moves from a Blender render of the KiCad projects to the boards as built, and
+back. The render is [`hardware/render/`](hardware/README.md#renders)'s; the photo is
+[`all.jpeg`](all.jpeg).
 
 ![Hardware block diagram](hardware/block-diagram.svg)
 

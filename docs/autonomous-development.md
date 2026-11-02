@@ -199,7 +199,8 @@ forgotten and hooks cannot.
 
 ## 3. The agents
 
-One orchestrator, four area developers, a reviewer and board-ops. Each has the tools it
+One orchestrator, four area developers, a reviewer and board-ops, and render-dev for the
+repository's pictures (it runs nothing on a speaker and is left out of the drawing). Each has the tools it
 needs and nothing else; the "tools" column is what its `.claude/agents/<name>.md` definition
 grants.
 
@@ -226,8 +227,9 @@ flowchart TB
 | `board-dev` | `firmware/`, `tests/vpair/` and the documents of its change | Read, Edit, Write, Bash for the virtual pair | ssh to real boards |
 | `reviewer` | all | Read, Grep, Glob | edits source, runs anything |
 | `board-ops` | `firmware/` | the board skill only | edits source, runs on a locked lab |
+| `render-dev` | `hardware/render/`, `docs/diagrams/` and the pictures they make | Read, Edit, Write, Bash for KiCad's CLI and Blender | edits the KiCad projects, touches anything that runs on a speaker |
 
-All seven definitions are in `.claude/agents/`, with these tool grants and rules;
+All eight definitions are in `.claude/agents/`, with these tool grants and rules;
 `board-ops` works only through the `/board` skill (`tools/board.sh`).
 
 Each area agent updates the documents its change affects (`docs/`, the READMEs, `dsp/docs/`,
@@ -262,6 +264,7 @@ agent never improvises a `pw-cli` or `ssh` line.
 | `/pw-inspect` | `pw-dump`, `pw-top` and `pw-link -l` on a virtual speaker or a board, summarised as the node graph | all |
 | `/board status\|deploy\|smoke\|journal\|rollback` | the only way to touch rung 3 (the board of `firmware/local.mk`); refuses when the lab lock exists or rung 2 is not green | board-ops |
 | `/juce` | the JUCE knowledge base in `dsp/docs/juce-knowledge/` | dev agents |
+| `/render [preview\|final]` | the boards rendered in Blender from the KiCad projects (`tools/render.sh`), and the README's slider from the render to the photo | render-dev |
 | `/release` | builds every target, writes the catalogue (each plugin's version and source identity, and what step 4's catalogue compares), tags | orchestrator |
 
 Hooks are the gates. They live in `.claude/settings.json` of each repository and run
