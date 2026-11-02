@@ -2,8 +2,7 @@
 
 How AI coding agents build, test and deploy the architecture of
 [remote-plugin-host.md](remote-plugin-host.md) with no person in the loop for the routine work,
-and what they may never touch. Three questions, in this order: **where** an agent can test
-without hardware, **what** it may do, and **who** does which step.
+and what they may never touch.
 
 ## 1. Three test levels
 

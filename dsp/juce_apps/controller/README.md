@@ -11,8 +11,8 @@ It processes no audio and holds no DSP:
 - **No audio device.** No device type is compiled in (`JUCE_ALSA=0`, `JUCE_JACK=0`, and
   `juce_audio_devices` is not linked), no `AudioDeviceManager` exists, and the graph is never
   prepared or run: `AudioProcessorGraph` is only the canvas's model of nodes and connections.
-- **Only control builds.** The plugin list is the control builds compiled in (below); nothing is
-  scanned or loaded from disk (`JUCE_PLUGINHOST_LV2=0`, `JUCE_PLUGINHOST_VST3=0`). A control
+- **Only control builds.** The plugin list is the control builds compiled in (below: loudness,
+  firConv and crossover); nothing is scanned or loaded from disk (`JUCE_PLUGINHOST_LV2=0`, `JUCE_PLUGINHOST_VST3=0`). A control
   build's `processBlock()` is empty and its DSP sources are not compiled.
 - **The hub's graph, never its own.** The canvas is built from the hub's `state`; every edit
   and every parameter change leaves through the bridge. Before the hub's state arrives, and
@@ -326,14 +326,15 @@ its name in `CMakeLists.txt`:
 ```cmake
 controller_add_control_plugins(controller
     loudness
+    firConv
     crossover)
 ```
 
 That is all: its control target is the description of the build. `ControlPlugins.cmake` adds
 the plugin's own `CMakeLists.txt` (nothing of it is built), reads its `<plugin>_control` target
 (the shared-code target `juce_add_plugin()` makes) for its sources (`SOURCES` and `EDITOR`,
-no `DSP`), its plugin definitions (`JucePlugin_Name`, `SPEAKER_CONTROL=1`, ...) and the JUCE
-modules it uses, and compiles those sources into the controller as an object library with the
+no `DSP`), its include path (the `SHARED` folders), its plugin definitions (`JucePlugin_Name`,
+`SPEAKER_CONTROL=1`, ...) and the JUCE modules it uses, and compiles those sources into the controller as an object library with the
 controller's own JUCE configuration. The plugin's `createPluginFilter()` is renamed
 `bpiControl_create_<plugin>()` for its sources, and the generated `ControlPluginList.h` lists
 each plugin with its factory and the LV2 URIs of its headless, complete and control builds

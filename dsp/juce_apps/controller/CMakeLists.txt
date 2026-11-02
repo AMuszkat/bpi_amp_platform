@@ -60,4 +60,6 @@ target_link_libraries(controller
 # The control builds compiled in, one name per plugin of dsp/juce_plugins. Adding a plugin is
 # adding its name here (README.md, "Adding a plugin").
 controller_add_control_plugins(controller
-    loudness)
+    loudness
+    firConv
+    crossover)

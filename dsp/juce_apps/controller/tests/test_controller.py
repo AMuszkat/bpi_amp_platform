@@ -27,7 +27,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
 CONTROLLER = os.environ.get("CONTROLLER", os.path.join(ROOT, "build", "controller", "controller_artefacts", "Release", "controller"))
 LEFT, RIGHT = "127.0.3.1", "127.0.3.2"
-CROSSOVER_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/crossover_headless"
+# A plugin this controller has no control build of (ampScope builds complete only): shown as a placeholder.
+AMPSCOPE_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/ampScope"
 
 
 def report(name, **numbers):
@@ -279,11 +280,11 @@ class ControllerTest(unittest.TestCase):
 
     def test_08_revision_from_another_controller(self):
         hub = self.start_hub()
-        hub.known_plugins.add(CROSSOVER_URI)
+        hub.known_plugins.add(AMPSCOPE_URI)
         doc = default_document()
         doc["nodes"].append({"uid": 30, "name": "loudness", "plugin": {"format": "LV2", "identifier": LOUDNESS_URI},
                              "params": {"s0_e0_gain": -7.5}})
-        doc["nodes"].append({"uid": 31, "name": "crossover", "plugin": {"format": "LV2", "identifier": CROSSOVER_URI},
+        doc["nodes"].append({"uid": 31, "name": "ampScope", "plugin": {"format": "LV2", "identifier": AMPSCOPE_URI},
                              "params": {"xover_hz": 2200.0}, "state": "AAEC", "future_key": {"kept": True}})
         doc["connections"] += [{"src": {"node": 16, "channel": 0}, "dst": {"node": 30, "channel": 0}},
                                {"src": {"node": 30, "channel": 0}, "dst": {"node": 31, "channel": 0}},

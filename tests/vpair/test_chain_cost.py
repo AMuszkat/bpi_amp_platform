@@ -4,7 +4,7 @@ audio thread, measured by speakerd itself, on the virtual pair.
 The chain is the board's: the Mine pin -> loudness_headless (16) -> firConv (17) -> crossover
 (18), its low band to the woofer and its high band to the tweeter (which keeps the tweeter rule,
 so speakerd runs as on a board: the tweeter on, no --allow-tweeter-without-crossover). firConv and
-crossover are their complete builds (they have no other). speakerd runs on the left virtual
+crossover are their complete builds (the bundles a board runs today). speakerd runs on the left virtual
 speaker at the pair's own 48 kHz and quantum 1024 (nothing here changes either), with stereo
 noise at a moderate level playing into its sink (-26 dBFS RMS a channel). A client of its local
 link subscribes to `speakerd/timing` (docs/protocol.md, "Monitoring": per plugin node, the graph

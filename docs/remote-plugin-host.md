@@ -1180,7 +1180,7 @@ flowchart TB
         ui["«modules» UI layer<br/>MainHostWindow, GraphEditorPanel,<br/>PluginWindow, SpeakersPanel"]:::ctl
         model["«modules» model layer<br/>PluginGraph, ControlPlugins"]:::ctl
         bridge["«modules» bridge layer<br/>Bridge, Auth, GraphDocument,<br/>JsonLineLink, ScriptRunner"]:::ctl
-        cb("«bundle» control builds, compiled in<br/>loudness_control: the processor<br/>and the editor, no DSP"):::ctl
+        cb("«bundle» control builds, compiled in<br/>loudness_control, crossover_control, firConv_control:<br/>the processor and the editor, no DSP"):::ctl
         jucec("«library» JUCE 8<br/>gui_extra, audio_processors,<br/>osc, cryptography"):::lib
         ui --> model --> bridge
         model --> cb
@@ -1235,7 +1235,7 @@ inside it are calls.
 | Piece | Kind | Written in, built on | Needs | Never |
 |---|---|---|---|---|
 | the controller app | one process on the desktop, `controller`, a JUCE application | C++, JUCE 8 (`juce_gui_extra`, `juce_audio_processors`, `juce_osc`, `juce_cryptography`); no `juce_audio_devices` | the hub's address and the pair's secret | process audio, scan or load a plugin from disk, hold a graph of its own |
-| control builds | not a process: `loudness_control`, a plugin's processor and editor sources, compiled into the controller's binary | the same JUCE modules as the controller | nothing of the speaker | contain DSP (`processBlock` is empty) |
+| control builds | not a process: `loudness_control`, `crossover_control` and `firConv_control`, a plugin's processor and editor sources, compiled into the controller's binary | the same JUCE modules as the controller | nothing of the speaker | contain DSP (`processBlock` is empty) |
 | `ampd` | one process on each speaker: `python3` running `ampd.py` and `tweeter_rule.py`, as a systemd user unit | Python 3.9, the standard library only (a board has no pip) | `speakerd`'s socket, `ampd.json`; the hub's address when it is an agent | touch audio; change `device.json` |
 | `speakerd` | one process on each speaker, a JUCE console application, as a systemd user unit started through `speakerd-run` | C++, JUCE 8 (`juce_audio_processors_headless` with its LV2 hosting, `juce_audio_formats`) and libpipewire-0.3 | PipeWire and the bundles named on its command line | touch the network; write a file |
 | headless builds | not a process: LV2 bundles (`loudness_headless.lv2`: `libloudness_headless.so` and its `.ttl`), loaded into `speakerd`'s process at run time by JUCE's LV2 hosting; complete builds the same way, without a window | a plugin's processor and DSP sources, JUCE's LV2 wrapper | the host's `patch:Set` for parameters | open an editor (`hasEditor()` is false) |
@@ -1264,7 +1264,7 @@ flowchart LR
     juce("«library» JUCE 8 and its LV2 wrapper<br/>audio_processors, gui_basics, gui_extra, audio_utils"):::lib
     complete("«bundle» complete: loudness.lv2<br/>SPEAKER_COMPLETE=1<br/>the desktop plugin host, tuning"):::aud
     headless("«bundle» headless: loudness_headless.lv2<br/>SPEAKER_HEADLESS=1<br/>loaded by speakerd on the speaker"):::aud
-    control("«bundle» control: loudness_control<br/>SPEAKER_CONTROL=1<br/>a library compiled into the controller"):::ctl
+    control("«bundle» control: loudness_control,<br/>crossover_control, firConv_control<br/>SPEAKER_CONTROL=1<br/>a library compiled into the controller"):::ctl
 
     proc --> complete
     dsp --> complete

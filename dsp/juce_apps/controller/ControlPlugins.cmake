@@ -60,6 +60,13 @@ function(controller_add_control_plugins app)
         get_target_property(sources ${plugin}_control SOURCES)
         get_target_property(interfaceDefs ${plugin}_control INTERFACE_COMPILE_DEFINITIONS)
         get_target_property(links ${plugin}_control LINK_LIBRARIES)
+        # The plugin's own include path: its SHARED folders (juce_plugins/shared/<name>, whose
+        # headers the processor includes), and the generated SpeakerBuildInfo.h, which only the
+        # wrappers read.
+        get_target_property(includes ${plugin}_control INCLUDE_DIRECTORIES)
+        if(NOT includes)
+            set(includes "")
+        endif()
 
         # The plugin's own sources only (JUCE adds none of its own to a shared-code target
         # today; this keeps it that way if it ever does).
@@ -100,6 +107,7 @@ function(controller_add_control_plugins app)
             createPluginFilter=bpiControl_create_${plugin})
         target_include_directories(${objects} PRIVATE
             "${sourceDir}"
+            ${includes}
             $<TARGET_PROPERTY:${app},INCLUDE_DIRECTORIES>)
         target_compile_options(${objects} PRIVATE $<TARGET_PROPERTY:${app},COMPILE_OPTIONS>)
         set_target_properties(${objects} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
