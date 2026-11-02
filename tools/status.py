@@ -16,7 +16,7 @@ A commit is green in one of two ways, with the tree clean now:
   an ancestor commit green in full, the test modules it ran cover every file changed since the
   base, by the base's tests/impact.json, and no full run failed on a clean tree on this commit
   or since the base. The gate recomputes what changed and what had to run from git: it does
-  not take the record's word for those. A file the map does not name needs both rungs in full.
+  not take the record's word for those. A file the map does not name needs both levels in full.
 Git is asked with submodules and untracked files shown whatever the local configuration says,
 and a git command that fails refuses.
 """
@@ -125,7 +125,7 @@ def load_impact(tree, base):
 
 def classify(impact, path):
     """(tests, None) for a path the map covers, tests a list of module names or "self"; (None,
-    why) for one that needs both rungs in full."""
+    why) for one that needs both levels in full."""
     for rule in impact["rules"]:
         if any(fnmatch.fnmatchcase(path, pattern) for pattern in rule["paths"]):
             return rule["tests"], None
@@ -150,7 +150,7 @@ def with_importers(tree, modules):
 
 def plan(tree, base, head=None):
     """What an affected run on top of base must run: {"base", "changed", "tests", "full"}, where
-    "full" lists (path, why) for the files that need both rungs in full."""
+    "full" lists (path, why) for the files that need both levels in full."""
     files = changed_files(tree, base, head)
     impact, why = load_impact(tree, base)
     if impact is None:
@@ -216,7 +216,7 @@ def check_affected(tree, head, status):
     if needed["full"]:
         path, why = needed["full"][0]
         more = len(needed["full"]) - 1
-        return False, (f"{path} changed since {base[:12]} and needs both rungs in full ({why})"
+        return False, (f"{path} changed since {base[:12]} and needs both levels in full ({why})"
                        + (f", and {more} more file(s)" if more else ""))
     missing = sorted(set(needed["tests"]) - set(ran))
     if missing:
@@ -249,7 +249,7 @@ def gate(tree):
         return False, (f"no readable test status {status_path(tree, head)} ({e}): run tools/test.sh all "
                        "first, or tools/test.sh affected after a fix on top of a commit green in full")
     if green_in_full(status):
-        return True, f"green: both rungs passed on a clean tree for {head[:12]}"
+        return True, f"green: both levels passed on a clean tree for {head[:12]}"
     affected_why = None
     if "affected" in status:
         try:
@@ -323,7 +323,7 @@ def main():
             print(f"{failure}: run tools/test.sh all", file=sys.stderr)
             return 1
         for path, why in needed["full"]:
-            print(f"needs both rungs in full: {path} ({why})", file=sys.stderr)
+            print(f"needs both levels in full: {path} ({why})", file=sys.stderr)
         if needed["full"]:
             return 1
         print(f"on top of {base[:12]}, green in full: {len(needed['changed'])} file(s) changed; "

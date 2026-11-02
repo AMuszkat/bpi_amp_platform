@@ -6,7 +6,7 @@
 #
 #     dsp/juce_plugins/tests/firconv-response/run.sh
 #
-# Standalone, not part of rung 1. Runs in the development container when Podman is installed
+# Standalone, not part of level 1. Runs in the development container when Podman is installed
 # (tools/container.sh; BPI_CONTAINER=0 runs it natively, with the packages of
 # dsp/juce_plugins/tools/Containerfile, python3-scipy included). Its output goes to
 # build/tests/firconv-response/ at the repository root, the builds where tools/build.sh puts them.

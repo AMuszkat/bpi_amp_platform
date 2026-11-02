@@ -1,6 +1,6 @@
 ---
 name: board
-description: The one way to reach a real speaker board (rung 3). `/board status|journal` reads what is installed and what runs; `/board deploy` builds the aarch64 artifacts and installs them; `/board smoke` checks without a sound that speakerd plays device.json's limits; `/board rollback` makes the previous speakerd current. Refused while the lab lock exists. Use only for board work, normally through the board-ops agent.
+description: The one way to reach a real speaker board (level 3). `/board status|journal` reads what is installed and what runs; `/board deploy` builds the aarch64 artifacts and installs them; `/board smoke` checks without a sound that speakerd plays device.json's limits; `/board rollback` makes the previous speakerd current. Refused while the lab lock exists. Use only for board work, normally through the board-ops agent.
 ---
 
 # /board
@@ -31,7 +31,7 @@ install writes none (`"limits": { "gain_db": 0, "tweeter": "on" }`). With the tw
 installer refuses any layer that feeds the tweeter other than through a crossover's high band.
 `firmware/speakerd-setup.sh limits --gain-db G --tweeter-limit muted|on` sets limits.
 
-**What stays human** (`docs/autonomous-development.md`, section 8): the first deploy of a new
+**What stays human** (`docs/autonomous-development.md`, section 6): the first deploy of a new
 `speakerd` to a board, and any change to a board's network, boot
 or Wi-Fi configuration. An agent deploys only builds a person has already run on that board.
 

@@ -154,7 +154,7 @@ in every build: both builds are within 0.011 dB of the design from 20 Hz to 20 k
 
 P1's tests check the FIRs bit for bit, and the plugins' outputs only where rounding allows:
 
-| Test (rung 1 and rung 2) | Result | Limit |
+| Test (level 1 and level 2) | Result | Limit |
 |---|---|---|
 | Against a reference FIR with its arithmetic spelled out, x86_64 and aarch64 under qemu, blocks of 1024 and of random sizes | identical, bit for bit | identical |
 | Against `juce::dsp::FIR::Filter`, x86_64 | identical | −120 dB |

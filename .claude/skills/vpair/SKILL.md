@@ -30,5 +30,5 @@ Rules:
   is used), one folder each, with `pipewire.log` and `wireplumber.log`. Read those when a
   speaker does not come up: `tools/container.sh cat /tmp/vpair/left/pipewire.log`.
 - A new scenario is a new `tests/vpair/test_<name>.py`; the scenario names and pass criteria
-  are in `docs/autonomous-development.md`, section 5. Never weaken a pass criterion to make
+  are in `docs/autonomous-development.md`, section 4. Never weaken a pass criterion to make
   a scenario pass.

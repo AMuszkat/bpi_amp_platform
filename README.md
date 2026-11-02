@@ -100,13 +100,13 @@ are in [`firmware/`](firmware/README.md).
 ## Developing
 
 Everything but the boards themselves runs on a Linux x86_64 machine with no board attached,
-and needs only Podman and git: the builds and both test rungs run in a development container
+and needs only Podman and git: the builds and both test levels run in a development container
 with the PipeWire version the boards run.
 
 ```sh
 git clone --recurse-submodules https://github.com/AMuszkat/bpi_amp_platform
 cd bpi_amp_platform
-tools/test.sh all          # rung 1 (plugin-check) and rung 2 (the virtual pair)
+tools/test.sh all          # level 1 (plugin-check) and level 2 (the virtual pair)
 tools/build.sh loudness    # one plugin or application, into build/
 tools/container.sh         # a shell in the container
 ```
@@ -115,7 +115,7 @@ The first run builds the container image and JUCE, which takes a few minutes. Fo
 `tools/build.sh speakerd aarch64` cross-compiles into `build/aarch64/`, and
 `firmware/setup.sh --mode target-remote` installs; nothing reaches a board unless the commit
 has passed the tests. The Python measurement and tuning tools have their own quick start in
-[`dsp/README.md`](dsp/README.md). The development process (the test rungs, the agents, the
+[`dsp/README.md`](dsp/README.md). The development process (the test levels, the agents, the
 hooks and CI) is in [`CLAUDE.md`](CLAUDE.md) and
 [`docs/autonomous-development.md`](docs/autonomous-development.md).
 

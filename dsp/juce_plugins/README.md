@@ -24,11 +24,11 @@ juce_plugins/
 ├── cmake/SourceId.cmake        the version and source identity every target embeds (below)
 ├── shared/<name>/              source folders several plugins compile (SHARED), e.g. blockfir/
 ├── tests/                      tests of shared code, outside every plugin's identity
-│   ├── blockfir/                 the block FIR, bit for bit on x86_64 and aarch64 (rung 1)
-│   ├── buildinfo/                a built bundle and its copy carry the identity of its sources (rung 1)
+│   ├── blockfir/                 the block FIR, bit for bit on x86_64 and aarch64 (level 1)
+│   ├── buildinfo/                a built bundle and its copy carry the identity of its sources (level 1)
 │   ├── bypass/                   firConv and crossover: bypassed, their gain kept; processed, as before (standalone)
 │   ├── firconv-response/         firConv's magnitude response: the design against both builds (standalone)
-│   └── plugin-versions/          plugin-versions.sh check and list on a scratch repository (rung 1)
+│   └── plugin-versions/          plugin-versions.sh check and list on a scratch repository (level 1)
 ├── tools/                      the build system, shared by every plugin
 │   ├── build-podman.sh           recommended: containerised cross-build, deploy, local debug
 │   ├── common.sh                 config loading + plugin discovery used by the scripts
@@ -233,7 +233,7 @@ logarithmic frequency axis: the design, `filters.hpp` as the tuning GUI graphs i
 float64, the high-pass as the `HPreHpSos` cascade the plugin runs), and the plugin built for
 x86_64 and for aarch64, each rendered by `speakerd --render` (the aarch64 build under
 `qemu-aarch64-static`). A second panel shows each build's deviation from the design, where the
-three curves no longer sit on top of each other. It is standalone, not part of rung 1: a run
+three curves no longer sit on top of each other. It is standalone, not part of level 1: a run
 took 3 min 2 s cold (nothing built yet in the checkout, 24 threads) and 13 s warm (nothing
 changed), and it moves into the development container like the other test scripts.
 
@@ -258,9 +258,9 @@ changed), and it moves into the development container like the other test script
 "Bypass"). It moves into the development container like the other test scripts, and writes to
 `build/tests/bypass/`.
 
-It is **standalone, like the response test: not part of rung 1** (`tools/test.sh unit`), so CI
+It is **standalone, like the response test: not part of level 1** (`tools/test.sh unit`), so CI
 does not run it; run it by hand after a change to firConv, the crossover or `shared/bypass`.
-Putting it into rung 1 is one more step in `run_unit` of `tools/test.sh`, beside `blockfir`:
+Putting it into level 1 is one more step in `run_unit` of `tools/test.sh`, beside `blockfir`:
 `dsp/juce_plugins/tests/bypass/run.sh`, which exits non-zero on a failure. It took 1 min 7 s the
 first time in a checkout (the previous versions' builds; speakerd, firConv and the crossover
 already built; 24 threads) and 25 s after that, most of it `tools/build.sh` and cmake finding
@@ -357,12 +357,12 @@ bundle each plugin runs from (`../juce_apps/speakerd/README.md`, "Which build it
 `tests/buildinfo/check.sh` checks that a bundle's `buildinfo.ttl` and binary agree with
 `plugin-versions.sh list`, that its manifest does not mention `buildinfo.ttl`, and with `--arch`
 that the binary is code for that machine; it checks any bundle it is given, a copy included.
-Rung 1 (`tools/test.sh unit`) runs it on the x86_64 bundles plugin-check builds, and on
+Level 1 (`tools/test.sh unit`) runs it on the x86_64 bundles plugin-check builds, and on
 `loudness_headless` cross-built for aarch64 with its copy in the build's `copied/lv2`
 (`tools/build.sh loudness aarch64 headless`: what the board installer deploys, and the cheapest
 target to cross-build). That copy proves the copy step's order (the copy is why
 `speaker_add_plugin()` writes `buildinfo.ttl` before it), because only that build tree writes
-`copied/lv2`. Rung 1 does not check the copies in `~/.lv2`: any other build in the same HOME
+`copied/lv2`. Level 1 does not check the copies in `~/.lv2`: any other build in the same HOME
 (`tools/build.sh` of another tree, `build-podman.sh`'s local debug loop, whose bundles say
 `unknown`) may have written them since, and JUCE copies a bundle again only when it links the
 binary. The controller, which compiles `loudness_control`'s sources in
@@ -419,7 +419,7 @@ usage, git or parse error (a `CMakeLists.txt` whose version or `SHARED` cannot b
 or at the base, or a tree of the base that git cannot read, fails the check rather than pass a
 plugin unread). The version and `SHARED` are read from the text of the plugin's
 `CMakeLists.txt`, so both must be written out literally; the configure step fails when that
-reading disagrees with CMake's. `tests/plugin-versions/run.sh` (rung 1, a few seconds) runs
+reading disagrees with CMake's. `tests/plugin-versions/run.sh` (level 1, a few seconds) runs
 both commands on a scratch repository with this layout: every verdict of `check` and its exit
 status, and every identity `list` prints against the `git` command above, `-dirty` exactly when
 the plugin's inputs changed. It touches no other repository, wherever `TMPDIR` is (inside a

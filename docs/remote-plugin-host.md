@@ -301,7 +301,7 @@ host forwards them all. A control build knows nothing about the network.
   the late cycles and the board's CPU per speaker, and each node's share of the cycle on the
   canvas; a speaker without `board/cpu` shows n/a.
 - **A test mode** (`controller --hub HOST --script FILE`) runs commands and prints JSON lines, so
-  rung 2 can drive the controller without a display; a fake hub in its `tests/` checks the bridge
+  level 2 can drive the controller without a display; a fake hub in its `tests/` checks the bridge
   without `ampd`.
 
 **speakerd: the headless plugin host.** `speakerd` is AudioPluginHost with the window
@@ -907,7 +907,7 @@ any other change to its sources (its README, its editor alone, a comment). A cha
 identity, as a build made at that moment embeds them; `plugin-versions.sh check [REF]` fails
 (exit status 1) when a plugin whose sources differ between `git merge-base HEAD REF` (REF
 defaults to `origin/develop`) and the working tree has not raised its version, and exits 2 on
-any git or parse error. Rung 1 tests both commands on a scratch repository
+any git or parse error. Level 1 tests both commands on a scratch repository
 (`dsp/juce_plugins/tests/plugin-versions`), and checks the identity in the bundles plugin-check
 builds and in `loudness_headless` cross-built for aarch64 with its copy in the build's own
 `copied/lv2`, which proves that JUCE's copy step runs after `buildinfo.ttl` is written
@@ -1309,7 +1309,7 @@ builds differ by -92 dB re peak, 93 % of it above 20 kHz, and every 1/6-octave b
 to 20 kHz of the difference is at least 84 dB below the output. Against the chain computed in
 float64, what remains is the float32 rounding of the coefficients in `filters.hpp` (-77 dBFS
 RMS, the same in every build); the arithmetic's share fell from -75 to -107 dBFS RMS. The block
-FIR's test, `dsp/juce_plugins/tests/blockfir` (rung 1, outside every plugin's identity), builds
+FIR's test, `dsp/juce_plugins/tests/blockfir` (level 1, outside every plugin's identity), builds
 it with the plugins' flags and checks it bit for bit against a reference whose arithmetic is
 written out, on x86_64 and on aarch64 under qemu. Both plugins went from 0.0.1 to 0.0.2, and
 firConv on to 0.0.3: patches, the processing changed and the interface did not. [p1-block-fir.md](p1-block-fir.md) explains, with

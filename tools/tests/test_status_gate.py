@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What green is (tools/status.py gate and plan; reported, not enforced since 2026-11-02), on scratch git
 repositories with a copy of tools/status.py and a small tests/impact.json, and the decisions of
-the real tests/impact.json. Part of rung 1 (tools/test.sh unit).
+the real tests/impact.json. Part of level 1 (tools/test.sh unit).
 
     python3 tools/tests/test_status_gate.py
 """
@@ -104,7 +104,7 @@ class Gate(unittest.TestCase):
         self.assertIn(said, out)
 
     def test_green_in_full(self):
-        self.green("both rungs passed")
+        self.green("both levels passed")
 
     def test_not_a_checkout(self):
         plain = self.tmp / "plain"
@@ -167,7 +167,7 @@ class Gate(unittest.TestCase):
         widened = dict(MAP, rules=[{"paths": ["dsp/*", "tests/impact.json"], "tests": []}] + MAP["rules"])
         head = self.repo.commit("widen", {"tests/impact.json": json.dumps(widened), "dsp/engine.cpp": "int y;\n"})
         self.repo.affected(head, self.base, [])
-        self.refused("needs both rungs in full")
+        self.refused("needs both levels in full")
 
     def test_a_base_without_a_map(self):
         os.remove(self.repo.path / "tests" / "impact.json")
@@ -217,7 +217,7 @@ class Gate(unittest.TestCase):
         self.repo.affected(head, self.base, ["test_installers"])
         self.refused(f"a full run failed on {first[:12]} (unit: fail)")
         self.repo.record(head, **GREEN)
-        self.green("both rungs passed")
+        self.green("both levels passed")
 
     def test_a_red_affected_run_since_the_base_does_not(self):
         first = self.repo.commit("fix", {"firmware/speakerd-setup.sh": "echo 2\n"})
@@ -282,7 +282,7 @@ class Gate(unittest.TestCase):
         self.repo.write("dsp/engine.cpp", "int z;\n")
         result = self.repo.run("plan")
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("needs both rungs in full: dsp/engine.cpp", result.stderr)
+        self.assertIn("needs both levels in full: dsp/engine.cpp", result.stderr)
 
     def test_recording_an_affected_run(self):
         head = self.repo.commit("docs", {"docs/a": "words\n"})

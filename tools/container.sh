@@ -1,6 +1,6 @@
 #!/bin/bash
 # The development container: the builder image of dsp/juce_plugins/tools/Containerfile with
-# this checkout mounted at its own path, so the builds and both test rungs run on a machine
+# this checkout mounted at its own path, so the builds and both test levels run on a machine
 # that has Podman and none of the packages of the root CLAUDE.md. See the root CLAUDE.md.
 #
 #     tools/container.sh                  # a shell in this checkout's container

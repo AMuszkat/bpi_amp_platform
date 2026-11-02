@@ -4,7 +4,7 @@
 # tools/plugin-versions.sh list, i.e. with what a build of this tree embeds: buildinfo.ttl
 # exactly, a manifest.ttl that does not mention it (no LV2 host may parse it, so a damaged one
 # can never stop the bundle loading), the bpi-build-info string in the binary and, with
-# --arch, that the binary is code for that machine. Part of rung 1 (tools/test.sh unit): on the
+# --arch, that the binary is code for that machine. Part of level 1 (tools/test.sh unit): on the
 # x86_64 bundles plugin-check builds, and on one aarch64 bundle of tools/build.sh and its copy
 # in the build's copied/lv2, which only that build tree writes: the copy proves that JUCE's copy
 # step runs after buildinfo.ttl is written. Not on the copies in ~/.lv2, which any other build

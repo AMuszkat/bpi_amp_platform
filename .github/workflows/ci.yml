@@ -1,4 +1,4 @@
-# Rungs 1 and 2 of docs/autonomous-development.md on every pull request and push to develop:
+# Levels 1 and 2 of docs/autonomous-development.md on every pull request and push to develop:
 # plugin-check on every plugin with control and headless targets, then the virtual pair.
 name: ci
 
@@ -23,7 +23,7 @@ jobs:
       - name: Every changed plugin raised its version
         run: dsp/juce_plugins/tools/plugin-versions.sh check "origin/${{ github.base_ref }}"
 
-  rungs-1-and-2:
+  levels-1-and-2:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     # Natively, with the packages below: the runners have Podman, and the scripts would
@@ -39,7 +39,7 @@ jobs:
 
       - name: Install packages
         run: |
-          # Rung 1's aarch64 half (the block FIR test under qemu, an aarch64 plugin build and
+          # Level 1's aarch64 half (the block FIR test under qemu, an aarch64 plugin build and
           # its copy) needs the cross compiler, qemu and the :arm64 libraries of
           # dsp/juce_plugins/tools/Containerfile. Ubuntu serves arm64 from ports.ubuntu.com,
           # so the runner's own sources are limited to amd64 and a ports source is added.
@@ -84,10 +84,10 @@ jobs:
           cmake --build build/juce
           cmake --install build/juce
 
-      - name: Rung 1, plugin-check
+      - name: Level 1, plugin-check
         run: tools/test.sh unit
 
-      - name: Rung 2, the virtual pair
+      - name: Level 2, the virtual pair
         run: tools/test.sh vpair
 
       - name: Keep the reports

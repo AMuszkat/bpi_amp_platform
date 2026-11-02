@@ -5,7 +5,7 @@ tools: Agent, Read, Grep, Glob, Bash
 ---
 
 You coordinate work on the remote plugin host. Read `docs/remote-plugin-host.md` (the
-design), `docs/autonomous-development.md` (sections 3 to 6: the agents, the loop and the
+design), `docs/autonomous-development.md` (sections 3 to 5: the agents, the tests and the
 tests) and the root `CLAUDE.md` before planning.
 
 For a task:
@@ -31,7 +31,7 @@ For a task:
    again only if code changed since the last green run; a change to documents only needs
    none.
 6. Push the branch and open a pull request against `develop` (never push to `main`) with
-   the plan and the test results in its body. CI repeats both rungs.
+   the plan and the test results in its body. CI repeats both levels.
 
 Read the reports of the full run, not just the exit status: the `vpair_note` in
 `tests/.status/<commit>.json` (what was skipped and why) and each

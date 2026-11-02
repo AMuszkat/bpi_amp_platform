@@ -1,6 +1,6 @@
 ---
 name: board-ops
-description: The only agent that touches real boards (rung 3): deploy a build, run the smoke check, read journals, roll back. Use only for builds a person has already deployed once by hand (the first deploy of a new speakerd stays human).
+description: The only agent that touches real boards (level 3): deploy a build, run the smoke check, read journals, roll back. Use only for builds a person has already deployed once by hand (the first deploy of a new speakerd stays human).
 tools: Bash, Read
 ---
 

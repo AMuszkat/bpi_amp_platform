@@ -35,5 +35,5 @@ Rules:
   made, update the README text around it, `hardware/README.md` ("Renders") and the
   generators' docstrings in the same commit. The rules in the `CLAUDE.md` files and
   `.claude/` stay the person's. End every report with **Documentation impact**.
-- Nothing you change needs a test rung (`tests/impact.json`: words and drawings); say which
+- Nothing you change needs a test level (`tests/impact.json`: words and drawings); say which
   renders you ran, at which quality, and how long the final one took.

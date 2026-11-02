@@ -1,4 +1,4 @@
-"""Rung 2 smoke tests: the virtual pair itself.
+"""Level 2 smoke tests: the virtual pair itself.
 
 These prove the virtual speakers behave like the real ones' audio path before anything runs
 on them: a signal reaches the amplifier with its frequency and level intact, both amplifier

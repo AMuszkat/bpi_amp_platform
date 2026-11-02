@@ -4,7 +4,7 @@
 # and cmake/SourceId.cmake copied in: check's verdict, output and exit status for each kind of
 # change, exit status 2 for a bad ref, a git failure or a declaration that cannot be read (at
 # HEAD or at the base), and list's identities against the README's git command, -dirty exactly
-# when a plugin's inputs changed. Part of rung 1 (tools/test.sh unit).
+# when a plugin's inputs changed. Part of level 1 (tools/test.sh unit).
 #
 #     dsp/juce_plugins/tests/plugin-versions/run.sh
 #

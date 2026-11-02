@@ -92,18 +92,18 @@ the pull request.
 - **Agents** (`.claude/agents/`): `orchestrator`, `plugin-dev`, `host-dev`,
   `controller-dev`, `board-dev`, `reviewer`, `board-ops`, `render-dev`, each limited to its
   area and tools as the document's table says.
-- **CI** (`.github/workflows/ci.yml`) runs rungs 1 and 2 on pull requests and on `develop`.
+- **CI** (`.github/workflows/ci.yml`) runs levels 1 and 2 on pull requests and on `develop`.
 
 ## Developing the remote plugin host
 
 Everything below runs on a Linux x86_64 machine with no boards attached, and needs only
-**Podman** and git: the builds and both test rungs run in the **development container**,
+**Podman** and git: the builds and both test levels run in the **development container**,
 the builder image of `dsp/juce_plugins/tools/Containerfile` (Debian bookworm, so PipeWire
 0.3.65 and WirePlumber 0.4.13, the versions the boards run).
 
 ```sh
 git clone --recurse-submodules <this repository>
-tools/test.sh all                # rung 1 (plugin-check) and rung 2 (the virtual pair)
+tools/test.sh all                # level 1 (plugin-check) and level 2 (the virtual pair)
 tools/build.sh loudness          # one plugin or application, into build/
 tools/container.sh               # a shell in the container
 ```
@@ -121,4 +121,4 @@ For the boards, `tools/build.sh <plugin|app> aarch64 [target]` cross-compiles in
 container into `build/aarch64/`; that is what `firmware/speakerd-setup.sh` and `/board deploy`
 install. `dsp/juce_plugins/tools/build-podman.sh` keeps its own flows (complete builds deployed
 to `~/.lv2`, the local AudioPluginHost debug loop), and `firmware/Makefile` builds the kernel
-side. See `docs/autonomous-development.md` for the three test rungs and what each one proves.
+side. See `docs/autonomous-development.md` for the three test levels and what each one proves.

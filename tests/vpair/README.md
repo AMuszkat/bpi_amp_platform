@@ -1,7 +1,7 @@
 # The virtual pair
 
 Two virtual speakers, `left` and `right`, on one machine, for testing the remote plugin host
-(`docs/remote-plugin-host.md`) without hardware. This is rung 2 of
+(`docs/remote-plugin-host.md`) without hardware. This is level 2 of
 `docs/autonomous-development.md`.
 
 Each virtual speaker has what a real one has around its audio path:

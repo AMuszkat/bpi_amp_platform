@@ -20,7 +20,7 @@ Rules:
   passthrough) and the role from `device.json`; it must play with no network and no `ampd`.
 - Plugin state crosses the LV2 URI boundary: wrap and unwrap it (see
   `dsp/juce_apps/plugin-check/README.md`).
-- A scenario in `docs/autonomous-development.md` section 5 is the definition of done for a
+- A scenario in `docs/autonomous-development.md` section 4 is the definition of done for a
   feature.
 - You do not change a plugin's parameter layout, the controller, or `firmware/ampd/`
   beyond the agreed socket protocol; protocol changes go through the orchestrator.

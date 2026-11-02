@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the block FIR test (README.md) for x86_64 and for aarch64, the way tools/build.sh
 # <plugin> aarch64 cross-compiles the plugins, and runs both, the aarch64 build under
-# qemu-aarch64-static. Part of rung 1 (tools/test.sh unit).
+# qemu-aarch64-static. Part of level 1 (tools/test.sh unit).
 #
 #     dsp/juce_plugins/tests/blockfir/run.sh [--time]
 #

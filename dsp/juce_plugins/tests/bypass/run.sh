@@ -6,7 +6,7 @@
 #
 #     dsp/juce_plugins/tests/bypass/run.sh
 #
-# Standalone, not part of rung 1. Runs in the development container when Podman is installed
+# Standalone, not part of level 1. Runs in the development container when Podman is installed
 # (tools/container.sh; BPI_CONTAINER=0 runs it natively). It builds speakerd, firConv and
 # crossover with tools/build.sh, and the versions before the bypass (firConv 0.0.3, crossover
 # 0.0.2) from their sources at commit PREVIOUS, below, into build/tests/bypass-previous/ (kept

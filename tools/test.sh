@@ -1,11 +1,11 @@
 #!/bin/bash
-# Runs the test rungs and records their results (tools/status.py). See .claude/skills/test.
+# Runs the test levels and records their results (tools/status.py). See .claude/skills/test.
 #
 #     tools/test.sh unit | vpair | all | affected [--no-record]
 #
 # affected runs only the virtual pair modules that cover the files changed since the last
 # commit green in full (tools/status.py plan, by tests/impact.json), and refuses when a changed
-# file needs both rungs in full. --no-record runs the tests without writing the status file.
+# file needs both levels in full. --no-record runs the tests without writing the status file.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -119,12 +119,12 @@ run_vpair() {
     [ "$result" = pass ]
 }
 
-# Runs no part of rung 1: every file rung 1 covers needs the full run, so the base's stands.
+# Runs no part of level 1: every file level 1 covers needs the full run, so the base's stands.
 run_affected() {
     echo "=== /test affected"
     local plan base tests note result=pass
     if ! plan="$(tools/status.py plan)"; then
-        echo "affected: needs both rungs in full: tools/test.sh all"; return 1
+        echo "affected: needs both levels in full: tools/test.sh all"; return 1
     fi
     base="$(sed -n 1p <<< "$plan")"
     tests="$(sed -n 2p <<< "$plan")"

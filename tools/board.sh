@@ -1,5 +1,5 @@
 #!/bin/bash
-# The script behind the /board skill: the one way an agent reaches a real speaker, rung 3 of
+# The script behind the /board skill: the one way an agent reaches a real speaker, level 3 of
 # docs/autonomous-development.md. See firmware/CLAUDE.md, "tools/board.sh".
 #
 #     tools/board.sh status                      what is installed and what runs (reads only: the
