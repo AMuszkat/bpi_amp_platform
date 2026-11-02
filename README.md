@@ -1,6 +1,6 @@
 # BPI AMP Platform
 
-![BPI AMP Platform boards](all.jpeg)
+![The BPI AMP Platform: a phone and the controller on a laptop, the Wi-Fi, and two speakers with the boards and the plugin graph inside](docs/images/hero.png)
 
 A Linux audio streaming platform for **custom loudspeaker tuning**. Each speaker is a
 BananaPi BPI-CM4 module on the two boards of this repository. It receives music over the
@@ -17,8 +17,8 @@ You play music as you always do. The speakers do the rest.
 In both pictures a ruled frame is a device you can touch, a solid dark card a physical
 component, a pale blue card software of this repository, a dashed card third-party software and
 a double-ruled card a kernel module. Blue arrows carry audio, dashed orange ones carry settings. The second picture also separates what runs in
-user space from the kernel's drivers and from the hardware itself. The pictures are generated
-from [`docs/diagrams/diagrams.py`](docs/diagrams/diagrams.py).
+user space from the kernel's drivers and from the hardware itself. The pictures, and the one at the top, are generated
+from [`docs/diagrams/`](docs/diagrams).
 
 - **Music arrives over the network.** A Snapcast server on a computer streams to both
   speakers in sync; AirPlay through shairport-sync is the alternative.
@@ -81,6 +81,8 @@ Two boards, connected by a board-to-board connector: a **base board** carrying t
 module, with USB-C and a debug UART, and a **speaker amp board** with the two MAX98397
 amplifiers on one TDM bus, a boost converter for their supply and a 5 V buck for the rest.
 The KiCad projects and the details are in [`hardware/`](hardware/README.md).
+
+![BPI AMP Platform boards](all.jpeg)
 
 ![Hardware block diagram](hardware/block-diagram.svg)
 

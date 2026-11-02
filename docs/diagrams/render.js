@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Renders docs/diagrams/<name>.html (written by diagrams.py) to docs/images/<name>.png at
+// Renders docs/diagrams/<name>.html (written by diagrams.py and hero.py) to docs/images/<name>.png at
 // twice the pixel size, with the Chromium that tools/mermaid-check installs:
 //
 //     python3 docs/diagrams/diagrams.py && node docs/diagrams/render.js [name ...]
@@ -12,7 +12,7 @@ const ROOT = path.resolve(__dirname, "..", "..");
 const { chromium } = require(path.join(ROOT, "tools", "mermaid-check", "node_modules", "playwright"));
 
 async function main() {
-  const names = process.argv.slice(2).length ? process.argv.slice(2) : ["overview", "speaker"];
+  const names = process.argv.slice(2).length ? process.argv.slice(2) : ["overview", "speaker", "hero"];
   const launch = {};
   if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE) launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
   const browser = await chromium.launch(launch);
