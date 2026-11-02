@@ -6,11 +6,11 @@
 //==============================================================================
 /**
 */
-class PluginEditor  : public juce::AudioProcessorEditor
+class FirConvEditor  : public juce::AudioProcessorEditor
 {
 public:
-    PluginEditor (PluginProcessor&, juce::AudioProcessorValueTreeState& vts);
-    ~PluginEditor() override;
+    FirConvEditor (FirConvProcessor&, juce::AudioProcessorValueTreeState& vts);
+    ~FirConvEditor() override;
     
     //==============================================================================
     
@@ -23,7 +23,7 @@ public:
 private:
     // This reference is provided as a quick way for your editor to
     // access the processor object that created it.
-    PluginProcessor& audioProcessor;
+    FirConvProcessor& audioProcessor;
     
     juce::AudioProcessorValueTreeState& valueTreeState;
     
@@ -33,7 +33,7 @@ private:
     std::unique_ptr<SliderAttachment> gainAttachment;
     std::unique_ptr<SliderAttachment> freqAttachment;
 
-    PlotComponent plot;
+    FirConvPlotComponent plot;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FirConvEditor)
 };

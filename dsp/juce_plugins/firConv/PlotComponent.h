@@ -5,12 +5,12 @@
 //==============================================================================
 /**
 */
-class PlotComponent  : public juce::AudioProcessorEditor,
+class FirConvPlotComponent  : public juce::AudioProcessorEditor,
                        private juce::Timer
 {
 public:
-    PlotComponent (PluginProcessor&, juce::AudioProcessorValueTreeState& vts);
-    ~PlotComponent() override;
+    FirConvPlotComponent (FirConvProcessor&, juce::AudioProcessorValueTreeState& vts);
+    ~FirConvPlotComponent() override;
     
     //==============================================================================
 
@@ -22,7 +22,7 @@ public:
     void updateFrequencyResponses();
 
 private:
-    PluginProcessor& pluginProcessor;
+    FirConvProcessor& pluginProcessor;
     juce::AudioProcessorValueTreeState& valueTreeState;
 
     // The plot follows the parameters by polling them on the message thread. (It used to be
@@ -36,5 +36,5 @@ private:
 
     juce::Path frequencyResponse;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PlotComponent)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FirConvPlotComponent)
 };

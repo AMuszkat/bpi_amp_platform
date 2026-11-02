@@ -6,11 +6,11 @@
 //==============================================================================
 /**
 */
-class PluginEditor  : public juce::AudioProcessorEditor
+class CrossoverEditor  : public juce::AudioProcessorEditor
 {
 public:
-    PluginEditor (PluginProcessor&, juce::AudioProcessorValueTreeState& vts);
-    ~PluginEditor() override;
+    CrossoverEditor (CrossoverProcessor&, juce::AudioProcessorValueTreeState& vts);
+    ~CrossoverEditor() override;
     
     //==============================================================================
     
@@ -23,7 +23,7 @@ public:
 private:
     // This reference is provided as a quick way for your editor to
     // access the processor object that created it.
-    PluginProcessor& audioProcessor;
+    CrossoverProcessor& audioProcessor;
     
     juce::AudioProcessorValueTreeState& valueTreeState;
     
@@ -33,7 +33,7 @@ private:
     std::unique_ptr<SliderAttachment> gainAttachment;
     std::unique_ptr<SliderAttachment> freqAttachment;
 
-    PlotComponent plot;
+    CrossoverPlotComponent plot;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CrossoverEditor)
 };

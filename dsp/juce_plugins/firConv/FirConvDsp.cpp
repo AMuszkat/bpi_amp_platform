@@ -14,7 +14,7 @@
 #include <iterator>
 
 //==============================================================================
-void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
+void FirConvProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
 {
     // Everything is allocated here. The gain and the biquads work sample by sample and the
     // FIRs in chunks of the prepared size, so a block of any size is processed without
@@ -54,7 +54,7 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     reset();
 }
 
-void PluginProcessor::loadSosCascade (const float* sos, int numFloats)
+void FirConvProcessor::loadSosCascade (const float* sos, int numFloats)
 {
     const int nSections = numFloats / 6;  // 6 coeffs per biquad: [b0,b1,b2,a0,a1,a2]
     preHp.clear();
@@ -69,7 +69,7 @@ void PluginProcessor::loadSosCascade (const float* sos, int numFloats)
     }
 }
 
-void PluginProcessor::reset()
+void FirConvProcessor::reset()
 {
     gain.reset();
     preLp.reset();
@@ -80,7 +80,7 @@ void PluginProcessor::reset()
     bypassFade.reset();
 }
 
-void PluginProcessor::processPreHp (float* samples, int numSamples) noexcept
+void FirConvProcessor::processPreHp (float* samples, int numSamples) noexcept
 {
     // Sample by sample through every section, so the signal between sections stays double
     // without a buffer. TDF-II, the equations of juce::dsp::IIR::Filter. No snapToZero() at the
@@ -105,17 +105,17 @@ void PluginProcessor::processPreHp (float* samples, int numSamples) noexcept
 }
 
 //==============================================================================
-void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void FirConvProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     process (buffer, false);
 }
 
-void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void FirConvProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     process (buffer, true);
 }
 
-void PluginProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
+void FirConvProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -147,7 +147,7 @@ void PluginProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) 
         processChunk (samples + start, juce::jmin (chunk, numSamples - start));
 }
 
-void PluginProcessor::processChunk (float* samples, int numSamples) noexcept
+void FirConvProcessor::processChunk (float* samples, int numSamples) noexcept
 {
     // gain -> pre-LP (FIR) -> pre-HP (IIR biquad cascade) -> inverse (FIR): the processed path.
     // The bypassed path: the same gain, then the FIRs' delay. Both run whatever the bypass is.

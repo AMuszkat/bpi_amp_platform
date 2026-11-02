@@ -20,7 +20,7 @@
 #include <cmath>
 
 //==============================================================================
-PluginProcessor::PluginProcessor()
+FirConvProcessor::FirConvProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
          : AudioProcessor (BusesProperties()
                                          #if ! JucePlugin_IsMidiEffect
@@ -39,14 +39,14 @@ PluginProcessor::PluginProcessor()
     magnitudes.resize (frequencies.size());
 }
 
-PluginProcessor::~PluginProcessor()
+FirConvProcessor::~FirConvProcessor()
 {
     
 }
 
 
 //==============================================================================
-juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::create_param_layout()
+juce::AudioProcessorValueTreeState::ParameterLayout FirConvProcessor::create_param_layout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
@@ -58,12 +58,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::create_para
     return layout;
 }
 //==============================================================================
-const juce::String PluginProcessor::getName() const
+const juce::String FirConvProcessor::getName() const
 {
     return JucePlugin_Name;
 }
 
-bool PluginProcessor::acceptsMidi() const
+bool FirConvProcessor::acceptsMidi() const
 {
    #if JucePlugin_WantsMidiInput
     return true;
@@ -72,7 +72,7 @@ bool PluginProcessor::acceptsMidi() const
    #endif
 }
 
-bool PluginProcessor::producesMidi() const
+bool FirConvProcessor::producesMidi() const
 {
    #if JucePlugin_ProducesMidiOutput
     return true;
@@ -81,7 +81,7 @@ bool PluginProcessor::producesMidi() const
    #endif
 }
 
-bool PluginProcessor::isMidiEffect() const
+bool FirConvProcessor::isMidiEffect() const
 {
    #if JucePlugin_IsMidiEffect
     return true;
@@ -90,32 +90,32 @@ bool PluginProcessor::isMidiEffect() const
    #endif
 }
 
-double PluginProcessor::getTailLengthSeconds() const
+double FirConvProcessor::getTailLengthSeconds() const
 {
     return 0.0;
 }
 
-int PluginProcessor::getNumPrograms()
+int FirConvProcessor::getNumPrograms()
 {
     return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
                 // so this should be at least 1, even if you're not really implementing programs.
 }
 
-int PluginProcessor::getCurrentProgram()
+int FirConvProcessor::getCurrentProgram()
 {
     return 0;
 }
 
-void PluginProcessor::setCurrentProgram (int)
+void FirConvProcessor::setCurrentProgram (int)
 {
 }
 
-const juce::String PluginProcessor::getProgramName (int)
+const juce::String FirConvProcessor::getProgramName (int)
 {
     return {};
 }
 
-void PluginProcessor::changeProgramName (int, const juce::String&)
+void FirConvProcessor::changeProgramName (int, const juce::String&)
 {
 }
 
@@ -125,20 +125,20 @@ void PluginProcessor::changeProgramName (int, const juce::String&)
 // running the headless build does the processing. It never processes audio itself, so the DSP
 // (FirConvDsp.cpp, the coefficient header with it) is not compiled in, and the audio passes
 // through untouched, bypassed or not.
-void PluginProcessor::prepareToPlay (double, int) {}
-void PluginProcessor::reset() {}
-void PluginProcessor::processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
-void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
+void FirConvProcessor::prepareToPlay (double, int) {}
+void FirConvProcessor::reset() {}
+void FirConvProcessor::processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
+void FirConvProcessor::processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
 #endif
 
-void PluginProcessor::releaseResources()
+void FirConvProcessor::releaseResources()
 {
     // When playback stops, you can use this as an opportunity to free up any
     // spare memory, etc.
 }
 
 #ifndef JucePlugin_PreferredChannelConfigurations
-bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool FirConvProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
   #if JucePlugin_IsMidiEffect
     juce::ignoreUnused (layouts);
@@ -162,35 +162,35 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 //==============================================================================
 #if SPEAKER_HEADLESS
 // The headless build runs on the speaker, where nobody opens a window.
-bool PluginProcessor::hasEditor() const
+bool FirConvProcessor::hasEditor() const
 {
     return false;
 }
 
-juce::AudioProcessorEditor* PluginProcessor::createEditor()
+juce::AudioProcessorEditor* FirConvProcessor::createEditor()
 {
     return nullptr;
 }
 #else
-bool PluginProcessor::hasEditor() const
+bool FirConvProcessor::hasEditor() const
 {
     return true;
 }
 
-juce::AudioProcessorEditor* PluginProcessor::createEditor()
+juce::AudioProcessorEditor* FirConvProcessor::createEditor()
 {
-    return new PluginEditor (*this, apvts);
+    return new FirConvEditor (*this, apvts);
 }
 #endif
 
 //==============================================================================
-void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
+void FirConvProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, destData);
 }
 
-void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
+void FirConvProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     // A state that is not ours, or not a state at all, is ignored: getXmlFromBinary() returns
     // nullptr for it, and dereferencing that crashed the host.
@@ -204,13 +204,13 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 // This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new PluginProcessor();
+    return new FirConvProcessor();
 }
 
 //==============================================================================
-// The plot helpers the editor's PlotComponent calls: in every build that has an editor, the
+// The plot helpers the editor's FirConvPlotComponent calls: in every build that has an editor, the
 // control build included, which has no DSP to read the response from.
-void PluginProcessor::createFrequencyPlot(juce::Path& p, const std::vector<double>& freqs,  const std::vector<double>& mags, const juce::Rectangle<int>& bounds)
+void FirConvProcessor::createFrequencyPlot(juce::Path& p, const std::vector<double>& freqs,  const std::vector<double>& mags, const juce::Rectangle<int>& bounds)
 {
     for (size_t i = 0; i < freqs.size(); ++i)
         {            
@@ -230,15 +230,15 @@ void PluginProcessor::createFrequencyPlot(juce::Path& p, const std::vector<doubl
         }
 }
 
-const std::vector<double>& PluginProcessor::getMagnitudes ()
+const std::vector<double>& FirConvProcessor::getMagnitudes ()
 {
     return magnitudes;
 }
-const std::vector<double>& PluginProcessor::getFrequencies ()
+const std::vector<double>& FirConvProcessor::getFrequencies ()
 {
     return frequencies;
 }
-void PluginProcessor::createLogFrequencyVector(std::vector<double>& frequencyVector, int numPoints, double minFreq, double maxFreq)
+void FirConvProcessor::createLogFrequencyVector(std::vector<double>& frequencyVector, int numPoints, double minFreq, double maxFreq)
 {
     frequencyVector.clear(); // Clear any existing content
     frequencyVector.reserve((size_t) numPoints);
@@ -256,7 +256,7 @@ void PluginProcessor::createLogFrequencyVector(std::vector<double>& frequencyVec
         frequencyVector.push_back(frequency);
     }
 }
-double PluginProcessor::mapLog10(double x, double inMin, double inMax, double outMin, double outMax)
+double FirConvProcessor::mapLog10(double x, double inMin, double inMax, double outMin, double outMax)
 {
     return juce::jmap(std::log10(x), std::log10(inMin), std::log10(inMax), outMin, outMax);
 }

@@ -10,7 +10,7 @@
 #include "PluginEditor.h"
 
 //==============================================================================
-PluginEditor::PluginEditor (PluginProcessor& p, juce::AudioProcessorValueTreeState& vts)
+FirConvEditor::FirConvEditor (FirConvProcessor& p, juce::AudioProcessorValueTreeState& vts)
     : AudioProcessorEditor (p), audioProcessor (p), valueTreeState (vts), plot (p, vts)
 {
     // Make sure that before the constructor has finished, you've set the
@@ -44,13 +44,13 @@ PluginEditor::PluginEditor (PluginProcessor& p, juce::AudioProcessorValueTreeSta
     
 }
 
-PluginEditor::~PluginEditor()
+FirConvEditor::~FirConvEditor()
 {
 
 }
 
 //==============================================================================
-void PluginEditor::paint (juce::Graphics& g)
+void FirConvEditor::paint (juce::Graphics& g)
 {
     // (Our component is opaque, so we must completely fill the background with a solid colour)
     // fill the whole window white
@@ -65,7 +65,7 @@ void PluginEditor::paint (juce::Graphics& g)
     g.drawFittedText ("Gain+Freq", 0, 0, getWidth(), 30, juce::Justification::centred, 1);
 }
 
-void PluginEditor::resized()
+void FirConvEditor::resized()
 {
     // This is generally where you'll want to lay out the positions of any
     // subcomponents in your editor..

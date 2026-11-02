@@ -10,7 +10,7 @@
 #include "PlotComponent.h"
 
 //==============================================================================
-PlotComponent::PlotComponent (PluginProcessor& p, juce::AudioProcessorValueTreeState& vts)
+CrossoverPlotComponent::CrossoverPlotComponent (CrossoverProcessor& p, juce::AudioProcessorValueTreeState& vts)
     : AudioProcessorEditor (p), pluginProcessor (p), valueTreeState (vts)
 {
     // Make sure that before the constructor has finished, you've set the
@@ -22,13 +22,13 @@ PlotComponent::PlotComponent (PluginProcessor& p, juce::AudioProcessorValueTreeS
     startTimerHz (30);
 }
 
-PlotComponent::~PlotComponent()
+CrossoverPlotComponent::~CrossoverPlotComponent()
 {
     stopTimer();
 }
 
 //==============================================================================
-void PlotComponent::paint (juce::Graphics& g)
+void CrossoverPlotComponent::paint (juce::Graphics& g)
 {
     // (Our component is opaque, so we must completely fill the background with a solid colour)
     // fill the whole window white
@@ -66,10 +66,10 @@ void PlotComponent::paint (juce::Graphics& g)
     g.strokePath (frequencyResponse, juce::PathStrokeType (2.5f));
 }
 
-void PlotComponent::resized()
+void CrossoverPlotComponent::resized()
 {
 }
-void PlotComponent::timerCallback()
+void CrossoverPlotComponent::timerCallback()
 {
     const float gain = gainValue->load (std::memory_order_relaxed);
     const float freq = freqValue->load (std::memory_order_relaxed);
@@ -82,7 +82,7 @@ void PlotComponent::timerCallback()
     updateFrequencyResponses();
     repaint();
 }
-void PlotComponent::updateFrequencyResponses ()
+void CrossoverPlotComponent::updateFrequencyResponses ()
 {
     //auto pixelsPerDouble = 2.0f * getParentHeight() / juce::Decibels::decibelsToGain (20.0f);
 

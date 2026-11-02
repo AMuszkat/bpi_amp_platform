@@ -20,7 +20,7 @@
 #include <cmath>
 
 //==============================================================================
-PluginProcessor::PluginProcessor()
+CrossoverProcessor::CrossoverProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
     : AudioProcessor (BusesProperties()
                      #if ! JucePlugin_IsMidiEffect
@@ -39,14 +39,14 @@ PluginProcessor::PluginProcessor()
     magnitudes.resize (frequencies.size());
 }
 
-PluginProcessor::~PluginProcessor()
+CrossoverProcessor::~CrossoverProcessor()
 {
     
 }
 
 
 //==============================================================================
-juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::create_param_layout()
+juce::AudioProcessorValueTreeState::ParameterLayout CrossoverProcessor::create_param_layout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
@@ -58,12 +58,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::create_para
     return layout;
 }
 //==============================================================================
-const juce::String PluginProcessor::getName() const
+const juce::String CrossoverProcessor::getName() const
 {
     return JucePlugin_Name;
 }
 
-bool PluginProcessor::acceptsMidi() const
+bool CrossoverProcessor::acceptsMidi() const
 {
    #if JucePlugin_WantsMidiInput
     return true;
@@ -72,7 +72,7 @@ bool PluginProcessor::acceptsMidi() const
    #endif
 }
 
-bool PluginProcessor::producesMidi() const
+bool CrossoverProcessor::producesMidi() const
 {
    #if JucePlugin_ProducesMidiOutput
     return true;
@@ -81,7 +81,7 @@ bool PluginProcessor::producesMidi() const
    #endif
 }
 
-bool PluginProcessor::isMidiEffect() const
+bool CrossoverProcessor::isMidiEffect() const
 {
    #if JucePlugin_IsMidiEffect
     return true;
@@ -90,32 +90,32 @@ bool PluginProcessor::isMidiEffect() const
    #endif
 }
 
-double PluginProcessor::getTailLengthSeconds() const
+double CrossoverProcessor::getTailLengthSeconds() const
 {
     return 0.0;
 }
 
-int PluginProcessor::getNumPrograms()
+int CrossoverProcessor::getNumPrograms()
 {
     return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
                 // so this should be at least 1, even if you're not really implementing programs.
 }
 
-int PluginProcessor::getCurrentProgram()
+int CrossoverProcessor::getCurrentProgram()
 {
     return 0;
 }
 
-void PluginProcessor::setCurrentProgram (int)
+void CrossoverProcessor::setCurrentProgram (int)
 {
 }
 
-const juce::String PluginProcessor::getProgramName (int)
+const juce::String CrossoverProcessor::getProgramName (int)
 {
     return {};
 }
 
-void PluginProcessor::changeProgramName (int, const juce::String&)
+void CrossoverProcessor::changeProgramName (int, const juce::String&)
 {
 }
 
@@ -125,13 +125,13 @@ void PluginProcessor::changeProgramName (int, const juce::String&)
 // running the headless build does the processing. It never processes audio itself, so the DSP
 // (CrossoverDsp.cpp, the coefficient header with it) is not compiled in, and the audio passes
 // through untouched, bypassed or not.
-void PluginProcessor::prepareToPlay (double, int) {}
-void PluginProcessor::reset() {}
-void PluginProcessor::processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
-void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
+void CrossoverProcessor::prepareToPlay (double, int) {}
+void CrossoverProcessor::reset() {}
+void CrossoverProcessor::processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
+void CrossoverProcessor::processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) {}
 #endif
 
-void PluginProcessor::releaseResources()
+void CrossoverProcessor::releaseResources()
 {
     // When playback stops, you can use this as an opportunity to free up any
     // spare memory, etc.
@@ -139,7 +139,7 @@ void PluginProcessor::releaseResources()
 
 
 #ifndef JucePlugin_PreferredChannelConfigurations
-bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool CrossoverProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
   #if JucePlugin_IsMidiEffect
     juce::ignoreUnused (layouts);
@@ -163,35 +163,35 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 //==============================================================================
 #if SPEAKER_HEADLESS
 // The headless build runs on the speaker, where nobody opens a window.
-bool PluginProcessor::hasEditor() const
+bool CrossoverProcessor::hasEditor() const
 {
     return false;
 }
 
-juce::AudioProcessorEditor* PluginProcessor::createEditor()
+juce::AudioProcessorEditor* CrossoverProcessor::createEditor()
 {
     return nullptr;
 }
 #else
-bool PluginProcessor::hasEditor() const
+bool CrossoverProcessor::hasEditor() const
 {
     return true;
 }
 
-juce::AudioProcessorEditor* PluginProcessor::createEditor()
+juce::AudioProcessorEditor* CrossoverProcessor::createEditor()
 {
-    return new PluginEditor (*this, apvts);
+    return new CrossoverEditor (*this, apvts);
 }
 #endif
 
 //==============================================================================
-void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
+void CrossoverProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, destData);
 }
 
-void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
+void CrossoverProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     // A state that is not ours, or not a state at all, is ignored: getXmlFromBinary() returns
     // nullptr for it, and dereferencing that crashed the host.
@@ -205,13 +205,13 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 // This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new PluginProcessor();
+    return new CrossoverProcessor();
 }
 
 //==============================================================================
-// The plot helpers the editor's PlotComponent calls: in every build that has an editor, the
+// The plot helpers the editor's CrossoverPlotComponent calls: in every build that has an editor, the
 // control build included, which has no DSP to read the response from.
-void PluginProcessor::createFrequencyPlot(juce::Path& p, const std::vector<double>& freqs,  const std::vector<double>& mags, const juce::Rectangle<int>& bounds)
+void CrossoverProcessor::createFrequencyPlot(juce::Path& p, const std::vector<double>& freqs,  const std::vector<double>& mags, const juce::Rectangle<int>& bounds)
 {
     for (size_t i = 0; i < freqs.size(); ++i)
         {            
@@ -231,15 +231,15 @@ void PluginProcessor::createFrequencyPlot(juce::Path& p, const std::vector<doubl
         }
 }
 
-const std::vector<double>& PluginProcessor::getMagnitudes ()
+const std::vector<double>& CrossoverProcessor::getMagnitudes ()
 {
     return magnitudes;
 }
-const std::vector<double>& PluginProcessor::getFrequencies ()
+const std::vector<double>& CrossoverProcessor::getFrequencies ()
 {
     return frequencies;
 }
-void PluginProcessor::createLogFrequencyVector(std::vector<double>& frequencyVector, int numPoints, double minFreq, double maxFreq)
+void CrossoverProcessor::createLogFrequencyVector(std::vector<double>& frequencyVector, int numPoints, double minFreq, double maxFreq)
 {
     frequencyVector.clear(); // Clear any existing content
     frequencyVector.reserve((size_t) numPoints);
@@ -257,7 +257,7 @@ void PluginProcessor::createLogFrequencyVector(std::vector<double>& frequencyVec
         frequencyVector.push_back(frequency);
     }
 }
-double PluginProcessor::mapLog10(double x, double inMin, double inMax, double outMin, double outMax)
+double CrossoverProcessor::mapLog10(double x, double inMin, double inMax, double outMin, double outMax)
 {
     return juce::jmap(std::log10(x), std::log10(inMin), std::log10(inMax), outMin, outMax);
 }

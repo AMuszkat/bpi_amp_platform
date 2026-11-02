@@ -15,12 +15,12 @@
 //==============================================================================
 /**
 */
-class PluginProcessor  : public juce::AudioProcessor
+class CrossoverProcessor  : public juce::AudioProcessor
 {
 public:
     //==============================================================================
-    PluginProcessor();
-    ~PluginProcessor() override;
+    CrossoverProcessor();
+    ~CrossoverProcessor() override;
 
     //==============================================================================
     // The audio processing (prepareToPlay, reset, processBlock, processBlockBypassed and the
@@ -78,14 +78,14 @@ public:
     
 private:
     //==============================================================================
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CrossoverProcessor)
     
     juce::AudioProcessorValueTreeState apvts;
     juce::AudioProcessorValueTreeState::ParameterLayout create_param_layout();
 
     // The gain is read on the audio thread at the start of every block. Nothing of this
     // plugin runs when a parameter changes: a host may change one on the audio thread, and
-    // the editor's plot polls the parameters from its own timer (PlotComponent).
+    // the editor's plot polls the parameters from its own timer (CrossoverPlotComponent).
     std::atomic<float>* gainParam = nullptr;
     float appliedGainDb = std::numeric_limits<float>::quiet_NaN();   // audio thread only
     

@@ -14,7 +14,7 @@
 #include <iterator>
 
 //==============================================================================
-void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
+void CrossoverProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
 {
     // A host may prepare before it has an audio device (JUCE's LV2 wrapper instantiates with a
     // block size of 0); a later block of any size is still handled, in chunks.
@@ -60,7 +60,7 @@ void PluginProcessor::prepareToPlay (double newSampleRate, int samplesPerBlock)
     reset();
 }
 
-void PluginProcessor::reset()
+void CrossoverProcessor::reset()
 {
     lpGain.reset();
     lpFir.reset();
@@ -71,17 +71,17 @@ void PluginProcessor::reset()
 }
 
 //==============================================================================
-void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void CrossoverProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     process (buffer, false);
 }
 
-void PluginProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void CrossoverProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     process (buffer, true);
 }
 
-void PluginProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
+void CrossoverProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -124,7 +124,7 @@ void PluginProcessor::process (juce::AudioBuffer<float>& buffer, bool bypassed) 
         buffer.clear (ch, 0, numSamples);
 }
 
-void PluginProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start, int numSamples) noexcept
+void CrossoverProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start, int numSamples) noexcept
 {
     const auto n = (size_t) numSamples;
 
