@@ -396,16 +396,6 @@ namespace speakerd::filtergraph
                               + String (dst.uid) + ":" + String (documentDstChannel) + channelName (dst.uid, documentDstChannel);
             mappedConnections.add (where + " becomes " + mapped);
 
-            if (src.kind == Kind::input && dst.kind == Kind::output && documentDstChannel == 1)
-            {
-                const auto unsafe = mapped + ": the stream, full range, goes straight to the tweeter; only a crossover may feed it";
-
-                if (! options.allowUnsafeRouting)
-                    return Result::fail (where + " becomes " + unsafe + unsafeHint);
-
-                warnings.add (unsafe + " (--allow-unsafe-routing)");
-            }
-
             connected.insert (srcSession);
             connected.insert (dstSession);
             reachesAmplifier = reachesAmplifier || dst.kind == Kind::output;

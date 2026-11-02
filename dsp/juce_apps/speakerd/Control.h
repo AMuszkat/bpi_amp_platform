@@ -39,7 +39,7 @@ namespace speakerd
         static constexpr int maxWaitingApplies = 8;
         static constexpr int protocolVersion = 1;
 
-        Control (Engine&, GraphBuilder&, const juce::String& versionText, TweeterRule);
+        Control (Engine&, GraphBuilder&, const juce::String& versionText);
         ~Control() override;
 
         void setLink (LocalLink* l)        { link = l; }
@@ -129,7 +129,6 @@ namespace speakerd
         Engine& engine;
         GraphBuilder& builder;
         const juce::String version;
-        const TweeterRule tweeterRule;
         LocalLink* link = nullptr;
         Monitor* monitor = nullptr;
 

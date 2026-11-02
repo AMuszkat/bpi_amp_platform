@@ -3,7 +3,6 @@
 #include "LV2State.h"
 
 #include <limits>
-#include <map>
 #include <set>
 #include <tuple>
 
@@ -283,110 +282,6 @@ namespace speakerd
             out.connections.push_back (connection);
         }
 
-        return Result::ok();
-    }
-
-    //==============================================================================
-    bool GraphDocument::isCrossover (const Node& node)
-    {
-        const auto name = node.identifier.trimCharactersAtEnd ("/").fromLastOccurrenceOf ("/", false, false).toLowerCase();
-        return name.startsWith ("crossover") && ! name.endsWith ("_control") && ! node.bypassed;
-    }
-
-    juce::StringArray GraphDocument::tweeterFeedsWithoutCrossover() const
-    {
-        using Output = std::pair<juce::uint32, int>;    // (node, channel)
-
-        std::map<juce::uint32, const Node*> byUid;
-        for (const auto& node : nodes)
-            byUid[node.uid] = &node;
-
-        // A connection to the tweeter makes its source a feeder; any other is an edge from its
-        // source to its destination node.
-        std::map<Output, std::set<juce::uint32>> edges;
-        std::set<Output> feeders;
-
-        for (const auto& c : connections)
-        {
-            const Output src { c.srcNode, c.srcChannel };
-
-            if (c.dstNode == outputNode && c.dstChannel == 1)
-                feeders.insert (src);
-            else
-                edges[src].insert (c.dstNode);
-        }
-
-        // The outputs of a node that carry the stream unfiltered for a tweeter: all of them,
-        // except a crossover's high band.
-        const auto unsafeOutputs = [&] (juce::uint32 uid)
-        {
-            std::set<Output> outputs;
-            const auto it = byUid.find (uid);
-            const bool crossover = it != byUid.end() && isCrossover (*it->second);
-            const auto add = [&] (const Output& o)
-            {
-                if (o.first == uid && ! (crossover && o.second == crossoverHighBand))
-                    outputs.insert (o);
-            };
-
-            for (const auto& [o, to] : edges)
-                add (o);
-
-            for (const auto& o : feeders)
-                add (o);
-
-            return outputs;
-        };
-
-        std::set<juce::uint32> reached { inputNode };
-        std::vector<juce::uint32> todo { inputNode };
-        std::set<Output> unsafeOut;
-
-        while (! todo.empty())
-        {
-            const auto uid = todo.back();
-            todo.pop_back();
-
-            for (const auto& out : unsafeOutputs (uid))
-            {
-                unsafeOut.insert (out);
-
-                if (const auto e = edges.find (out); e != edges.end())
-                    for (const auto next : e->second)
-                        if (reached.insert (next).second)
-                            todo.push_back (next);
-            }
-        }
-
-        juce::StringArray unsafe;
-
-        for (const auto& f : feeders)
-            if (unsafeOut.count (f) > 0)
-                unsafe.add (String (f.first) + ":" + String (f.second));
-
-        unsafe.sort (false);    // as text, as setup-helper.py's sorted()
-        return unsafe;
-    }
-
-    Result TweeterRule::check (const GraphDocument& doc, juce::StringArray& warnings) const
-    {
-        if (! tweeterOn)
-            return Result::ok();
-
-        const auto unsafe = doc.tweeterFeedsWithoutCrossover();
-
-        if (unsafe.isEmpty())
-            return Result::ok();
-
-        const auto message = "the stream reaches the tweeter other than through a crossover's high band (output "
-                           + unsafe.joinIntoString (", ") + "; a crossover's channel 0 is its low band): full range "
-                             "or the woofer's band on a tweeter can destroy it, and device.json's limits say the "
-                             "tweeter is on";
-
-        if (! allowWithoutCrossover)
-            return Result::fail (message);
-
-        warnings.add (message + " (allowed by --allow-tweeter-without-crossover)");
         return Result::ok();
     }
 }

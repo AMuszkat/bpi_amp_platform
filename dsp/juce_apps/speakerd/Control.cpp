@@ -26,8 +26,8 @@ namespace speakerd
         bool isNewer (juce::uint32 a, juce::uint32 b)  { return (juce::int32) (a - b) > 0; }
     }
 
-    Control::Control (Engine& e, GraphBuilder& b, const juce::String& versionText, TweeterRule rule)
-        : engine (e), builder (b), version (versionText), tweeterRule (rule)
+    Control::Control (Engine& e, GraphBuilder& b, const juce::String& versionText)
+        : engine (e), builder (b), version (versionText)
     {
     }
 
@@ -468,14 +468,6 @@ namespace speakerd
 
         if (auto r = GraphDocument::parse (documentJson, doc); r.failed())
             return failed (r.getErrorMessage());
-
-        // A tweeter that plays only ever gets a crossover's high band.
-        juce::StringArray ruleWarnings;
-        if (auto r = tweeterRule.check (doc, ruleWarnings); r.failed())
-            return failed (r.getErrorMessage());
-
-        for (const auto& warning : ruleWarnings)
-            log (prefix + "warning: " + warning);
 
         const auto rate = engine.getSampleRate();
         const auto maxBlock = engine.getMaxBlock();

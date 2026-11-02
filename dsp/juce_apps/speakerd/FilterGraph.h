@@ -31,9 +31,9 @@ namespace speakerd::filtergraph
           out when nothing is connected to them.
         Anything else fails: another plugin format, an internal plugin other than those four, a
         MIDI connection, a channel the stream or the amplifier does not have, a disabled bus, an
-        attribute that is not what AudioPluginHost writes. So does what is unsafe on a speaker,
-        unless allowUnsafeRouting: the stream straight to the tweeter, and a control build (no
-        DSP: it passes the stream through at full level). With preferHeadless, a complete or a
+        attribute that is not what AudioPluginHost writes. So does a control build (no DSP: it
+        passes the stream through at full level), unless allowUnsafeRouting, which imports it
+        with a warning. With preferHeadless, a complete or a
         control build's URI becomes its `_headless` sibling's when `formats` finds that plugin. */
     struct ImportOptions
     {

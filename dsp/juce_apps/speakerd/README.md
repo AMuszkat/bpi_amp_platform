@@ -33,14 +33,13 @@ speakerd --version
 | `--from LAYER` | start trying at this layer: `current` (the default), `last-known-good`, `factory` or `passthrough`. speakerd keeps no count of its own crashes, since it writes no file. Whatever restarts it after a crash (systemd, `ampd`) says where to start |
 | `--control-socket PATH` | the [local link](#the-local-link): listen on this Unix socket instead of `$XDG_RUNTIME_DIR/speakerd/control.sock`. For several speakerds on one machine (each with its own path), and for tests. Live mode only |
 | `--no-control-socket` | no local link at all: nothing changes the graph while speakerd runs. Live mode only; not with `--control-socket` |
-| `--allow-tweeter-without-crossover` | with `device.json`'s tweeter on, load a document that feeds the tweeter other than through a crossover's high band, with a warning, instead of refusing it ([the tweeter rule](#the-tweeter-rule)). For measurements on the virtual pair, never on a speaker; live mode and render |
 | `--lv2-bundle PATH` | also load this LV2 bundle (repeatable). Plugins are otherwise found by URI in `~/.lv2`, `/usr/lib/lv2` and `/usr/local/lib/lv2`; JUCE ignores `$LV2_PATH` |
 | `--render IN.wav OUT.wav` | the offline render: no PipeWire (see below) |
 | `--block N` | the render's block size, default 1024 (the speaker's quantum). Render only: the live node runs at PipeWire's quantum, and `--block` without `--render` is a bad command line |
 | `--import-filtergraph FILE` | no PipeWire, no state directory: writes an AudioPluginHost session as a graph document to stdout (see [Importing an AudioPluginHost session](#importing-an-audiopluginhost-session)). It takes `--device`, `--prefer-headless`, `--allow-unsafe-routing` and `--lv2-bundle` only; those three are for it only |
 | `--device DEVICE_JSON` | with `--import-filtergraph`: the speaker's `device.json`, which says whether the session's output channel 0 (`playback_FL`) or 1 (`playback_FR`) is the woofer. Without it, `playback_FL` is |
 | `--prefer-headless` | with `--import-filtergraph`: a complete or control build's URI becomes its `_headless` sibling's, when that plugin is found (in the default paths or a `--lv2-bundle`) |
-| `--allow-unsafe-routing` | with `--import-filtergraph`: import the stream straight to the tweeter, or a control build, with a warning, instead of failing |
+| `--allow-unsafe-routing` | with `--import-filtergraph`: import a control build, with a warning, instead of failing |
 | `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.1 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
 
 | Exit status | |
@@ -385,11 +384,7 @@ what an `apply` on the [local link](#the-local-link) carries.
 
 This plays FL through loudness to the woofer, and leaves the tweeter silent. With
 `{ "node": 1, "channel": 2 }` as the first source it plays the speaker's own channel (Mine), FL
-on a left speaker and FR on a right one, so one document serves both speakers of a pair. **Only a crossover
-may feed the tweeter** (output channel 1): a full-range signal can destroy it, and with the tweeter
-on speakerd refuses any other document ([the tweeter rule](#the-tweeter-rule)). A test on the
-virtual pair may route a plugin to both channels, to measure both, with
-`--allow-tweeter-without-crossover`; a document for a board never does.
+on a left speaker and FR on a right one, so one document serves both speakers of a pair.
 
 | Key | |
 |---|---|
@@ -448,33 +443,6 @@ layer: the safe side.
 
 Not in version 1: bus layouts (each plugin keeps its default).
 
-## The tweeter rule
-
-When `device.json`'s limits say `"tweeter": "on"`, a document in which anything but a crossover's
-high band reaches the tweeter (output node 2, channel 1) does not load: a layer at boot fails
-(speakerd tries the next one), and an `apply` fails, with the old graph playing on. It is the rule
-of the installer, `firmware/speakerd/setup-helper.py graph`, and of `ampd`, so all three agree:
-
-- **A crossover** is a node whose plugin identifier's last segment starts with `crossover` (any
-  case: the complete or the headless build) and does not end with `_control` (a control build
-  has no DSP), and that is not bypassed.
-- **The walk.** From the input node, along every output of every node reached, except a
-  crossover's high band (its output channel 1); a crossover's low band (channel 0) is walked like
-  any other output. An output that was walked and is connected to the tweeter is unsafe. So a
-  crossover's high band may reach the tweeter straight or through other plugins; the stream
-  straight from the input, a crossover's low band, a bypassed or control-build crossover's high
-  band, or anything downstream of those may not.
-- **The refusal**, logged as the layer's or the apply's failure: `the stream reaches the tweeter
-  other than through a crossover's high band (output 16:0; a crossover's channel 0 is its low
-  band): full range or the woofer's band on a tweeter can destroy it, and device.json's limits say
-  the tweeter is on`, naming every unsafe output (`<node>:<channel>`).
-- **With the tweeter muted** (and with a `device.json` that is missing, invalid or without
-  `limits`, which mutes it) nothing is checked: the tweeter gets exact zeros whatever the graph.
-- **`--allow-tweeter-without-crossover`** loads such a document anyway, with the same text as a
-  warning, ending `(allowed by --allow-tweeter-without-crossover)`, and says so loudly at start.
-  The virtual pair's measurements route one plugin to both channels with the tweeter on; a speaker
-  never runs with it.
-
 ## The Mine channel
 
 The input node's channel 2, **Mine**, is the speaker's own channel of the stream, from the role
@@ -496,7 +464,7 @@ silence. Left plays FL, right plays FR, and mono plays
 (FL + FR) / 2. The woofer is then clamped to +-0.1, and NaN or infinity becomes 0, so the
 woofer never sees more than -20 dBFS, even from a stream above full scale (a player's volume
 above 1, or a float WAV over 0 dBFS). No plugin is involved, so it works even with no LV2 plugin
-installed at all. With no crossover running, a full-range signal must never reach the tweeter.
+installed at all. No crossover runs in passthrough, so the tweeter gets nothing.
 speakerd announces passthrough loudly:
 
 ```
@@ -833,7 +801,6 @@ stable.
 | `pipewire: connection error: <message> (<error>)`, `pipewire: node '<name>-dsp' failed: <error>`, `pipewire: the input sink '<name>' failed: ...` | the connection to PipeWire was lost (the core reports `-EPIPE`), or the filter or the input sink failed; `lost PipeWire` follows |
 | `pipewire: node '<name>-dsp' went away`, possibly followed by ` (<reason>)` | the filter node was destroyed (by PipeWire, or with `pw-cli destroy`); `lost PipeWire` follows, and often a `pipewire: error, carrying on: ...` line before it |
 | `lost PipeWire` | after one of those; `stopping` and exit status 3 follow |
-| `*** --allow-tweeter-without-crossover: the tweeter is on, and a document may feed it other than through a crossover's high band; for measurements, never on a speaker ***` | at start, with that option and the tweeter on |
 | `local link: listening on <path>` | the local link is up (after the PipeWire node, before `playing:`) |
 | `local link: off (--no-control-socket)` | no local link, as asked |
 | `local link: FAILED: <reason>: speakerd plays without it` | the socket could not be made: no `XDG_RUNTIME_DIR` and no `--control-socket`, a path too long, a folder that cannot be made, something that is not a socket at the path, `another process listens on <path> (another speakerd?)`. Not fatal |
@@ -858,7 +825,7 @@ stable.
 | `import: node <uid> (Audio Output) becomes node 2, the amplifier: session channel 0 (playback_FL) = <woofer\|tweeter>, 1 (playback_FR) = <tweeter\|woofer>, ` then `as --device says (woofer <port>, tweeter <port>)` or `assumed: no --device, and playback_FL is the woofer unless device.json says otherwise` | which of the session's output channels is the woofer |
 | `import: node <uid> (<name>), LV2 <URI>, becomes node <n>[, <URI'>_headless (--prefer-headless) \| , keeping <URI>: no <URI>_headless found], state: <k> bytes of the plugin's own`, or `..., state: empty, left out`, or `..., no STATE: the plugin starts from its defaults` | each plugin node |
 | `import: connection <src>:<ch> -> <dst>:<ch> becomes <src'>:<ch> (<FL\|FR>) -> <dst'>:<ch> (<woofer\|tweeter>)` | each connection, in the session's uids and then the document's |
-| `import: warning: <text>` | something the document does that is allowed but suspect: a plugin not connected, nothing reaching the amplifier; with `--allow-unsafe-routing`, the stream straight to the tweeter or a control build |
+| `import: warning: <text>` | something the document does that is allowed but suspect: a plugin not connected, nothing reaching the amplifier; with `--allow-unsafe-routing`, a control build |
 | `import: a graph document, version 1, revision 1: <k> plugin node(s), <m> connection(s)` | the import worked; the document is on stdout, exit status 0 |
 | `import: FAILED: <reason>` | the import failed; exit status 2 follows, nothing is on stdout |
 
@@ -898,11 +865,9 @@ With `--prefer-headless`, a complete build's URI (one that ends neither in `_hea
 the default LV2 paths or a `--lv2-bundle`; the state stays the same, since all builds of a
 plugin share their state's format. Without it, the document names the builds the session names.
 
-**What is unsafe fails,** unless `--allow-unsafe-routing` (then it is a warning): the stream
-from Audio Input straight to the tweeter (after the mapping above), and a control build, which
-has no DSP and passes the stream through at full level (`--prefer-headless` replaces it by its
-headless build when that is found). A plugin between the stream and the tweeter is not
-checked: whether it is a crossover is not something the session says.
+**A control build fails,** unless `--allow-unsafe-routing` (then it is a warning): it has no
+DSP and passes the stream through at full level (`--prefer-headless` replaces it by its
+headless build when that is found).
 
 The import also fails, exit 2, on: a file larger than 64 MB, not XML or not a `<FILTERGRAPH>`;
 a `<!DOCTYPE>`, `<!ENTITY>` or any other declaration (AudioPluginHost writes none, and JUCE's
