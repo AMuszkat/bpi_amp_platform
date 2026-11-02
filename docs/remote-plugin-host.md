@@ -401,8 +401,8 @@ speaker in place of AudioPluginHost:
   the session's output channels is the woofer), each LV2 node a plugin node whose LV2 state is
   unwrapped into the plugin's own, and with `--prefer-headless` a complete or control build
   becomes its headless sibling. Anything that does not map (another format, MIDI, a channel the
-  amplifier does not have), and anything unsafe on a speaker (the stream straight to the
-  tweeter, a control build that passes it through), fails with the reason. Rendered, an imported
+  amplifier does not have), and a control build (an editor that passes the stream through),
+  fails with the reason. Rendered, an imported
   session gives exactly what the same settings given as parameter values give, so "the same
   sound as today" is a document `speakerd` can play.
 - **Installed on a board by `firmware/`.** `firmware/speakerd-setup.sh` installs a bundle (the
@@ -446,12 +446,6 @@ details, [protocol.md](protocol.md) the messages):
   `output/level` is measured by the audio thread into a lock-free ring only while subscribed (3
   us per 1024-sample cycle on x86_64) and tracks a stepped tone within 0.01 dB; a plugin's
   monitor is the value JUCE's LV2 hosting last received from it (section 5).
-- **A tweeter that plays only ever gets a crossover's high band.** With `device.json`'s tweeter
-  on, `speakerd` refuses a layer or a revision in which anything else reaches the tweeter, by the
-  same graph walk as the installer and `ampd` (a crossover is the crossover plugin, complete or
-  headless, not a control build, not bypassed; only its output channel 1 may lead to the
-  tweeter). With the tweeter muted nothing is checked. The virtual pair's measurements, which
-  route one plugin to both channels, run with `--allow-tweeter-without-crossover`.
 - **A bypassed node is the plugin's own bypass.** `speakerd` bypasses a node with JUCE's
   `Node::setBypassed`, which for a hosted LV2 plugin clears its `lv2:enabled` port, and JUCE's LV2
   wrapper then calls the plugin's `processBlockBypassed()`
@@ -524,8 +518,8 @@ ignore echoes without their token, and the right speaker takes no OSC at all, on
 TCP link. A controller connects to a hub without a secret only when told to (`--insecure`).
 This authenticates the links; it does not encrypt them, so someone placed in the network path
 could still alter messages after a handshake ([protocol.md](protocol.md), "Authentication").
-Whatever reaches a speaker, the output cap, the tweeter mute and the tweeter rule are enforced
-on the speaker itself.
+Whatever reaches a speaker, the output cap and the tweeter mute are enforced on the speaker
+itself.
 
 ## 4. Editing the graph
 
@@ -1192,7 +1186,7 @@ flowchart TB
         direction TB
         systemd[["«process» systemd --user<br/>starts and restarts the units,<br/>with linger: at boot, nobody logged in"]]:::sys
         units["«units» speakerd.service, ampd.service,<br/>pipewire, wireplumber, snapclient"]:::sys
-        ampd[["«process» ampd<br/>python3 running ampd.py and tweeter_rule.py<br/>the standard library only"]]:::ctl
+        ampd[["«process» ampd<br/>python3 running ampd.py<br/>the standard library only"]]:::ctl
         files[("«files» ~/.local/state/speakerd<br/>graph.json, graph.lkg.json, factory.json,<br/>ampd.json, device.json")]:::sto
         subgraph SD["«process» speakerd"]
             direction TB
@@ -1236,7 +1230,7 @@ inside it are calls.
 |---|---|---|---|---|
 | the controller app | one process on the desktop, `controller`, a JUCE application | C++, JUCE 8 (`juce_gui_extra`, `juce_audio_processors`, `juce_osc`, `juce_cryptography`); no `juce_audio_devices` | the hub's address and the pair's secret | process audio, scan or load a plugin from disk, hold a graph of its own |
 | control builds | not a process: `loudness_control`, `crossover_control` and `firConv_control`, a plugin's processor and editor sources, compiled into the controller's binary | the same JUCE modules as the controller | nothing of the speaker | contain DSP (`processBlock` is empty) |
-| `ampd` | one process on each speaker: `python3` running `ampd.py` and `tweeter_rule.py`, as a systemd user unit | Python 3.9, the standard library only (a board has no pip) | `speakerd`'s socket, `ampd.json`; the hub's address when it is an agent | touch audio; change `device.json` |
+| `ampd` | one process on each speaker: `python3` running `ampd.py`, as a systemd user unit | Python 3.9, the standard library only (a board has no pip) | `speakerd`'s socket, `ampd.json`; the hub's address when it is an agent | touch audio; change `device.json` |
 | `speakerd` | one process on each speaker, a JUCE console application, as a systemd user unit started through `speakerd-run` | C++, JUCE 8 (`juce_audio_processors_headless` with its LV2 hosting, `juce_audio_formats`) and libpipewire-0.3 | PipeWire and the bundles named on its command line | touch the network; write a file |
 | headless builds | not a process: LV2 bundles (`loudness_headless.lv2`: `libloudness_headless.so` and its `.ttl`), loaded into `speakerd`'s process at run time by JUCE's LV2 hosting; complete builds the same way, without a window | a plugin's processor and DSP sources, JUCE's LV2 wrapper | the host's `patch:Set` for parameters | open an editor (`hasEditor()` is false) |
 | the audio server | two processes, the distribution's, as systemd user units: `pipewire` (0.3.65, the graph and the devices) and `wireplumber` (0.4.13, the session manager that links players to sinks) | C | the drop-in that declares the `speakerd` sink | know anything about plugins |
@@ -1331,7 +1325,7 @@ plugin knows no socket, no file and no clock.
 |---|---|---|
 | `Main` | command line, signals, the live mode's controller timer, the render mode | main |
 | `StateLayers` | the boot order: `current`, `last-known-good`, `factory`, passthrough; the first that loads | main |
-| `GraphDocument` | the document, version 1: parsing, checks, the tweeter rule | main, link |
+| `GraphDocument` | the document, version 1: parsing, checks | main, link |
 | `GraphBuilder`, `LV2State` | the document as an `AudioProcessorGraph`: hosted instances, connections, the plugins' own state | main |
 | `PluginBundles` | which bundle each plugin URI runs from (read once at start, by lilv's rules) and that bundle's build identity (`buildinfo.ttl`); the Turtle reader | main |
 | `Engine` | the running graph, the audio-thread entry point, the Mine channel, the parameter inbox, the level and timing rings, the fades, the hand-over | audio (process), main (swap) |
@@ -1437,7 +1431,6 @@ so a slow disk holds up no connection. Its classes:
 | `Agent(Role)` | the right speaker: connects to the hub every second, forwards its `param` and `apply` to `speakerd`, reports `speakerd`'s layer and revision, ignores OSC |
 | `Monitor`, `MonitorClient`, `Subscription` | the monitor link's server: the union of the clients' subscriptions, at the highest rate any asked, is what `speakerd` is asked for, except `board/cpu`, which `ampd` makes itself from `/proc/stat` while anyone subscribes. It keeps the newest line of each stream (a value of a subscribed stream, at most 64 KiB, its numbers finite, nothing else) as `speakerd` sent it, or encoded once more, for all the clients, when it does not start with `{` or holds `NaN` or `Infinity`. It flushes once per pass of the event loop, so of the lines read at once only the newest of each stream goes out, never encoded again for each client, to each subscriber whose token bucket (one per client and stream, filling at its rate, starting with one token, which the newest value takes, and holding at most two) has one. A new subscription gets the newest value at once; a client further than 256 KiB behind skips values; no task or timer per client |
 | `Knobs` | the UDP socket: OSC datagrams, checked for the token of an authenticated controller at that address |
-| `tweeter_rule` | the one Python definition of the tweeter rule, shared with the installer's `setup-helper.py` |
 
 What the hub does with a change decides the whole system's behaviour, so here it is in order.
 A **parameter** arrives from a controller (TCP, or OSC with a valid token); the hub stamps the
@@ -1445,10 +1438,9 @@ next `seq`, applies it to its own document, sends it to its own `speakerd` over 
 and to every agent over TCP (agents get no OSC), echoes it to every controller (over OSC to the
 ones that gave an `osc_port`, with that connection's token), and schedules the persistence of
 `graph.json`. A **proposal** of a revision takes the hub's one revision lock; the hub checks that
-the base is its revision, that the document parses, that the tweeter rule holds, and that
-every plugin in it is in the catalogue; then it sends `apply` to its own `speakerd` and to every
-agent that is online, waits for their answers (10 s each), and answers `applied` when all of them
-did, or `rejected` with the first failure's reason, after sending the previous revision back to
+the base is its revision, that the document parses, and that every plugin in it is in the
+catalogue; then it sends `apply` to its own `speakerd` and to every agent that is online, waits
+for their answers (10 s each), and answers `applied` when all of them did, or `rejected` with the first failure's reason, after sending the previous revision back to
 the speakers that had applied the new one. A speaker that was offline catches up when its agent
 reconnects: the hub sends it the current revision and its values.
 
@@ -1584,7 +1576,7 @@ sequenceDiagram
     participant SR as «process» speakerd right
     C->>B: the graph changed
     B->>H: TCP graph, revision N+1, base N, the whole document
-    Note over H: one proposal at a time. Base is N,<br/>the document parses, the tweeter rule holds,<br/>every plugin is in the catalogue
+    Note over H: one proposal at a time. Base is N,<br/>the document parses,<br/>every plugin is in the catalogue
     H->>SL: local apply N+1
     H->>A: TCP apply N+1
     A->>SR: local apply N+1
@@ -1601,9 +1593,8 @@ sequenceDiagram
 And the flow with nobody there, a speaker booting with no network: systemd starts
 `speakerd-run`, which reads the history of starts and exits and picks the layer; `speakerd`
 reads `device.json`, tries `graph.json`, then `graph.lkg.json`, then `factory.json`, then plays
-passthrough, applying the tweeter rule to each when the tweeter is on; it creates its node,
-links to the amplifier when its ports appear, and fades in once every link is active. `ampd`
-starts after it, connects to the socket, reads the `hello` and follows the revision `speakerd`
+passthrough; it creates its node, links to the amplifier when its ports appear, and fades in
+once every link is active. `ampd` starts after it, connects to the socket, reads the `hello` and follows the revision `speakerd`
 plays. Nothing in that sequence waits for the network, the hub or the controller.
 
 ### 10.8 Where safety lives
@@ -1615,11 +1606,6 @@ Each rule is enforced at the lowest layer that can hold it, so that nothing abov
   NaN and infinity turned to 0 and every sample clamped to the ceiling. No message on any link
   changes them; only the installer's `limits` action, on the board, rewrites the file and
   restarts `speakerd`. There is no cap since 2026-11-01: an install writes no limit.
-- **The tweeter rule** (only a crossover's high band reaches the tweeter while it is on) is
-  checked in three places that must agree: `speakerd` when it loads a layer or an `apply`
-  (C++, `GraphDocument`), the hub before it applies a proposal and the installer before it
-  writes a factory graph (both `firmware/speakerd/tweeter_rule.py`); the virtual pair checks the
-  two implementations against each other.
 - **The catalogue**: the hub refuses a revision naming a plugin no speaker has loaded, so a
   revision is never applied on one speaker and failed on the other for a missing bundle.
 - **Authentication**: every TCP link starts with the two HMAC proofs of the pair's secret, every
@@ -1640,7 +1626,7 @@ Each rule is enforced at the lowest layer that can hold it, so that nothing abov
 | the version and source identity of every plugin; the version rule's check; their tests | `dsp/juce_plugins/cmake/SourceId.cmake`, `dsp/juce_plugins/tools/plugin-versions.sh`, `dsp/juce_plugins/tests/{buildinfo,plugin-versions}` |
 | `plugin-check`, `speakerd`, the controller app (JUCE applications, one build system) | `dsp/juce_apps/` |
 | `ampd`, its systemd unit | `firmware/ampd/` |
-| `speakerd`'s unit, `speakerd-run`, the installer's JSON helper, the tweeter rule | `firmware/speakerd/` |
+| `speakerd`'s unit, `speakerd-run`, the installer's JSON helper | `firmware/speakerd/` |
 | PipeWire configuration, the `speakerd` sink drop-in, the installers | `firmware/pipewire/`, `firmware/*.sh` |
 | the protocol between the three programs | `docs/protocol.md` |
 | the virtual pair, its harness and the scenarios | `tests/vpair/` |

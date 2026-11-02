@@ -25,8 +25,7 @@
 # smoke, rollback and uninstall include it when it is installed.
 #
 # An install keeps device.json's limits; a first install writes none (output at 0 dB, tweeter
-# on). The limits action sets them. The tweeter is protected by the tweeter rule: while it is on,
-# install and limits refuse any layer that feeds it other than through a crossover's high band.
+# on). The limits action sets them.
 # install refuses everything it can refuse before it changes anything.
 #
 # Usage:
@@ -75,7 +74,6 @@ WOOFER_PORT=""
 TWEETER_PORT=""
 FACTORY=""
 IMPORT_FILTERGRAPH=""
-ALLOW_FULL_RANGE_TWEETER=0
 STOP_PLUGIN_HOST=0
 KEEP_VERSIONS=3
 PURGE=0
@@ -153,10 +151,6 @@ Options:
                               there is (refused when it names a plugin the bundle lacks).
   --import-filtergraph <file> an AudioPluginHost .filtergraph on the board: speakerd converts it into
                               factory.json (speakerd --import-filtergraph --prefer-headless --device).
-  --allow-tweeter-without-crossover
-                              accept a factory graph in which the stream reaches the tweeter other than
-                              through a crossover's high band. Only with --home (the virtual pair tests):
-                              refused on a board and in target-remote mode.
   --stop-plugin-host          stop a running AudioPluginHost (and disable a systemd unit that starts
                               it) instead of refusing to install while one runs. It is stopped only
                               once every other check has passed.
@@ -210,7 +204,6 @@ while [ $# -gt 0 ]; do
         --tweeter-port)    TWEETER_PORT="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --factory)         FACTORY="${2:?}"; shift 2 ;;
         --import-filtergraph) IMPORT_FILTERGRAPH="${2:?}"; remote "$1" "$2"; shift 2 ;;
-        --allow-tweeter-without-crossover) ALLOW_FULL_RANGE_TWEETER=1; shift ;;
         --stop-plugin-host) STOP_PLUGIN_HOST=1; remote "$1"; shift ;;
         --keep)            KEEP_VERSIONS="${2:?}"; remote "$1" "$2"; shift 2 ;;
         --purge)           PURGE=1; remote "$1"; shift ;;
@@ -235,11 +228,6 @@ case "$ARCH" in aarch64 | native) ;; *) die "--arch is aarch64 or native" ;; esa
 case "$ROLE" in "" | left | right | mono) ;; *) die "--role is left, right or mono" ;; esac
 case "$KEEP_VERSIONS" in [2-9] | [1-9][0-9]) ;; *) die "--keep takes a number of versions, 2 or more" ;; esac
 case "$WINDOW" in [0-9] | [0-9][0-9] | [0-9][0-9][0-9]) ;; *) die "--window takes whole seconds, 0 to 999" ;; esac
-# A factory graph that feeds the tweeter other than through a crossover's high band is for the
-# virtual pair tests only (--home), never for a board.
-if [ "$ALLOW_FULL_RANGE_TWEETER" -eq 1 ] && { [ "$MODE" = target-remote ] || [ -z "$HOME_OVERRIDE" ]; }; then
-    die "--allow-tweeter-without-crossover is for the virtual pair tests (--home) only, never for a board"
-fi
 
 # ----------------------------------------------------------------------------
 # bundle (development machine) and the remote mode
@@ -814,7 +802,7 @@ restart_pipewire() {
 # install: everything that can refuse first, then the changes
 # ----------------------------------------------------------------------------
 
-# device.json as it will be, in $WORK/device.json (nothing written yet). Sets DEVICE_LIMITS.
+# device.json as it will be, in $WORK/device.json (nothing written yet).
 prepare_device() {
     local out changed="" role="" amplifier="" woofer="" tweeter="" limits="" note=""
     rm -f "$WORK/device.json"
@@ -827,13 +815,12 @@ prepare_device() {
         || die "cannot write device.json (see above)"
     eval "$out"
     : "$changed$note"
-    DEVICE_TWEETER="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("limits") or {}).get("tweeter", ""))' "$WORK/device.json")"
     info "device.json: role $role, amplifier '$amplifier' (woofer $woofer, tweeter $tweeter), limits $limits"
 }
 
 # The plugins a chain document names that $2 (a folder of .lv2 bundles: the bundle's lv2/, or an
 # installed version's) does not have, one URI per line; nothing when it has every one. A document
-# that cannot be read names nothing (the tweeter rule's check says what is wrong with it).
+# that cannot be read names nothing (the graph check says what is wrong with it).
 lacking_plugins() {   # $1 = the document, $2 = the lv2 folder
     local manifests=() m
     for m in "$2"/*.lv2/manifest.ttl; do [ -f "$m" ] && manifests+=("$m"); done
@@ -880,9 +867,8 @@ note_ampd_layers() {
 # names, else speakerd plays passthrough, said loudly. Whatever is installed or kept must name only
 # plugins of the bundle (require_bundle_plugins).
 prepare_factory() {
-    local doc="$WORK/factory.json" out allow=() summary="" warning="" b bundles=() what lacking
+    local doc="$WORK/factory.json" out summary="" b bundles=() what lacking
     rm -f "$doc"
-    [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ] || allow=(--allow-tweeter-without-crossover)
     if [ -n "$IMPORT_FILTERGRAPH" ]; then
         [ -f "$IMPORT_FILTERGRAPH" ] || die "no .filtergraph at $IMPORT_FILTERGRAPH"
         for b in "$BUNDLE"/lv2/*.lv2; do [ -d "$b" ] && bundles+=(--lv2-bundle "$b"); done
@@ -898,7 +884,7 @@ prepare_factory() {
         cp "$FACTORY" "$doc"
         what="the --factory document $FACTORY"
     elif [ -f "$STATE/factory.json" ]; then
-        helper graph "$STATE/factory.json" "${allow[@]}" > /dev/null \
+        helper graph "$STATE/factory.json" > /dev/null \
             || die "the factory.json there is (kept) is refused (see above): replace it with --factory or --import-filtergraph"
         require_bundle_plugins "$STATE/factory.json" "the factory.json there is (kept)"
         ok "Keeping $STATE/factory.json"
@@ -919,10 +905,9 @@ prepare_factory() {
             return 0
         fi
     fi
-    out="$(helper graph "$doc" "${allow[@]}")" || die "refusing this factory chain (see above)"
+    out="$(helper graph "$doc")" || die "refusing this factory chain (see above)"
     require_bundle_plugins "$doc" "$what"
     eval "$out"
-    [ -z "$warning" ] || loud "$warning"
     info "factory.json: $summary"
 }
 
@@ -939,8 +924,6 @@ install_version() {
     cp -p "$FIRMWARE_DIR/speakerd/speakerd-run" "$tmpdst/bin/speakerd-run"
     # ampd, the network agent, comes with the version: a rollback takes both back together.
     cp -p "$FIRMWARE_DIR/ampd/ampd.py" "$tmpdst/bin/ampd"
-    # The tweeter rule's one definition, which ampd imports from beside itself.
-    cp -p "$FIRMWARE_DIR/speakerd/tweeter_rule.py" "$tmpdst/bin/tweeter_rule.py"
     chmod 755 "$tmpdst/bin/speakerd" "$tmpdst/bin/speakerd-run" "$tmpdst/bin/ampd"
     if [ -d "$BUNDLE/lv2" ]; then cp -a "$BUNDLE/lv2" "$tmpdst/lv2"; else mkdir -p "$tmpdst/lv2"; fi
     cp -p "$BUNDLE/VERSION" "$tmpdst/VERSION"
@@ -951,27 +934,6 @@ install_version() {
     rm -rf "$dst"; mv "$tmpdst" "$dst"
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUNDLE_ID" >> "$LIB/installed.log"
     ok "Installed version $BUNDLE_ID in $dst"
-}
-
-# The tweeter rule over every layer speakerd may load: graph.json and graph.lkg.json (ampd's)
-# load before factory.json. $1 = refuse (any layer that breaks it refuses) | warn; then the
-# layers to check (default all three).
-check_layers() {
-    local mode="$1" f out bad=()
-    shift
-    [ $# -gt 0 ] || set -- graph.json graph.lkg.json factory.json
-    for f in "$@"; do
-        [ -f "$STATE/$f" ] || continue
-        out="$(helper graph "$STATE/$f" 2>&1)" || bad+=("$f: ${out#setup-helper: }")
-    done
-    [ ${#bad[@]} -gt 0 ] || return 0
-    if [ "$mode" = refuse ]; then
-        loud "Refusing: a layer speakerd may load feeds the tweeter other than through a crossover's high band:" \
-             "${bad[@]/#/    }"
-        exit 1
-    fi
-    loud "A layer speakerd may load feeds the tweeter other than through a crossover's high band (the" \
-         "tweeter is muted in device.json; turning it on will be refused):" "${bad[@]/#/    }"
 }
 
 # Writes what prepare_device and prepare_factory made. Sets DEVICE_CHANGED, FACTORY_CHANGED.
@@ -1087,7 +1049,6 @@ do_install() {
     prepare_device
     prepare_factory
     note_ampd_layers
-    if [ "$DEVICE_TWEETER" = on ] && [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ]; then check_layers refuse graph.json graph.lkg.json; fi
     [ ! -e "$LIB/home/.lv2" ] || die "$LIB/home/.lv2 exists: it would shadow the bundles. Remove it."
 
     # Nothing has changed so far. From here on it changes things.
@@ -1111,7 +1072,6 @@ do_install() {
         fi
     fi
     prune_versions
-    [ "$DEVICE_TWEETER" = on ] || dry || check_layers warn
 
     if dry; then ok "Dry run: nothing changed"; return 0; fi
     [ "$unit_changed" -eq 0 ] || sc daemon-reload
@@ -1347,9 +1307,6 @@ do_limits() {
     check_device_json
     [ -n "$GAIN_DB" ] && [ -n "$TWEETER_LIMIT" ] || die "limits: --gain-db <dB> --tweeter-limit <muted|on>"
     gain="$GAIN_DB"; tweeter="$TWEETER_LIMIT"
-    # The tweeter goes on only if no layer speakerd may load feeds it other than through a
-    # crossover's high band: what it plays now may be ampd's graph.json, not the factory.
-    if [ "$tweeter" = on ] && [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ]; then check_layers refuse; fi
     if dry; then info "(dry-run) would set the limits to output at $gain dB, tweeter $tweeter"; return 0; fi
     out="$(helper device "$STATE/device.json" --gain-db "$gain" --tweeter-limit "$tweeter")" || die "cannot write device.json"
     eval "$out"

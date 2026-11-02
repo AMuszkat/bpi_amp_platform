@@ -109,9 +109,8 @@ def bundle(plugin, previous=False):
 
 def render(plugin, wav, gain_db, bypassed, name, previous=False):
     """speakerd --render of `wav` through `plugin` as node 16, its gain at `gain_db`: firConv to the
-    woofer; crossover's low band to the woofer and its high band to the tweeter (the tweeter on,
-    with --allow-tweeter-without-crossover, since a bypassed crossover's high band is refused
-    there otherwise). `previous`: the version before the bypass. Returns (woofer, tweeter)."""
+    woofer; crossover's low band to the woofer and its high band to the tweeter (the tweeter on).
+    `previous`: the version before the bypass. Returns (woofer, tweeter)."""
     b = bundle(plugin, previous)
     work = OUT / "renders" / name
     shutil.rmtree(work, ignore_errors=True)
@@ -130,8 +129,7 @@ def render(plugin, wav, gain_db, bypassed, name, previous=False):
     (work / "state/factory.json").write_text(json.dumps({
         "format": "speakerd-graph", "version": 1, "revision": 1, "nodes": [node], "connections": connections}))
     command = [str(ROOT / "build/speakerd/speakerd_artefacts/Release/speakerd"), "--state-dir", str(work / "state"),
-               "--render", str(wav), str(work / "out.wav"), "--block", str(BLOCK), "--lv2-bundle", str(b),
-               "--allow-tweeter-without-crossover"]
+               "--render", str(wav), str(work / "out.wav"), "--block", str(BLOCK), "--lv2-bundle", str(b)]
     with open(work / "speakerd.log", "w") as log:
         status = subprocess.run(command, env=dict(os.environ, HOME=str(work / "home")), stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.STDOUT, timeout=600).returncode

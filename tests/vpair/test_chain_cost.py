@@ -2,9 +2,8 @@
 audio thread, measured by speakerd itself, on the virtual pair.
 
 The chain is the board's: the Mine pin -> loudness_headless (16) -> firConv (17) -> crossover
-(18), its low band to the woofer and its high band to the tweeter (which keeps the tweeter rule,
-so speakerd runs as on a board: the tweeter on, no --allow-tweeter-without-crossover). All three are
-their headless builds (`loudness_headless`, `firConv_headless`, `crossover_headless`: what a speaker
+(18), its low band to the woofer and its high band to the tweeter, with the tweeter on, as on a
+board. All three are their headless builds (`loudness_headless`, `firConv_headless`, `crossover_headless`: what a speaker
 runs, firmware/install-lib.sh's DEFAULT_PLUGINS). speakerd runs on the left virtual speaker at the pair's own 48 kHz and quantum 1024 (nothing here changes either), with stereo
 noise at a moderate level playing into its sink (-26 dBFS RMS a channel). A client of its local
 link subscribes to `speakerd/timing` (docs/protocol.md, "Monitoring": per plugin node, the graph
@@ -141,8 +140,7 @@ class ChainCost(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         bundles = chain_bundles()
         state = state_dir(tmp / "left", role="left", current=chain_document(), limits=NO_LIMITS)
-        with Pair() as pair, Speakerd(pair["left"], state, bundles=list(bundles.values()),
-                                      allow_tweeter=False) as sd:
+        with Pair() as pair, Speakerd(pair["left"], state, bundles=list(bundles.values())) as sd:
             playing = sd.lines_starting("playing: ")[-1]
             self.assertIn(f"playing: layer current (graph.json), revision 1, {RATE} Hz, quantum {QUANTUM}", playing,
                           f"speakerd does not play the chain at quantum {QUANTUM}:\n{sd.log()}")

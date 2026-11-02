@@ -60,14 +60,6 @@ Pass when:
   --stop-plugin-host it still refuses, stopping nothing, while a desktop autostart or a profile
   line would start it again, naming each and what to do; once they are gone it stops it,
   disables the user unit that starts it, and uninstall re-enables that unit;
-- a factory graph that sends the stream to the tweeter other than through a crossover's high
-  band (channel 1) is refused: straight, through a bypassed crossover, and from a crossover's low
-  band (channel 0); it is accepted with --allow-tweeter-without-crossover (with --home), and a
-  later install that keeps it refuses it; `limits` turning the tweeter on refuses, leaving
-  device.json as it was, while factory.json or ampd's graph.json breaks that rule (naming the
-  layer), and turns it on once none does; with the tweeter on, an install refuses while ampd's
-  graph.json breaks it; status marks such a layer with ***; the allow flag
-  without --home, and in the remote mode, is refused before anything is changed or contacted;
 - a plugin bundle with one of the bundle's URIs in a system LV2 folder is named loudly, once per
   system bundle, with its version against the bundle's: with one of the same version or a newer
   one among them, as making speakerd refuse to start (status 2); with older ones only, as
@@ -151,12 +143,11 @@ Pass when:
 - the remote mode (target-remote) copies one bundle to the board's ~/.cache and runs the board's
   side there, also for check (with the artifacts) and for --dry-run (the board-side dry run,
   which installs nothing), every argument arriving as given (a path with a space, a value with a
-  semicolon that runs nothing), and the copy is removed afterwards; ssh as root is refused;
-  --allow-tweeter-without-crossover is refused before the stand-in ssh is called; setup.sh
+  semicolon that runs nothing), and the copy is removed afterwards; ssh as root is refused; setup.sh
   --mode target-remote --only speakerd ends with hints that name
   ~/.local/lib/speakerd/current/setup/speakerd-setup.sh (smoke, rollback), not the bundle's
   copy in ~/.cache, which is gone; snapcast-setup.sh --mode target-remote copies the script with
-  speakerd/setup-helper.py and tweeter_rule.py to a fresh mktemp -d folder on the board, where a
+  speakerd/setup-helper.py to a fresh mktemp -d folder on the board, where a
   --route speakerd run finds the helper and checks the running PipeWire's sink with it (passing
   with the drop-in's sink, refusing without one), the folder removed afterwards either way, and
   its --dry-run prints those steps and contacts nothing; and, for a
@@ -549,8 +540,7 @@ class Install(Setup):
         state.mkdir(parents=True)
         (state / "graph.json").write_text('{"ampd": "current"}')
         (state / "graph.lkg.json").write_text('{"ampd": "last known good"}')
-        result = self.install(home, "--role", "left", "--factory", self.factory,
-                              "--allow-tweeter-without-crossover")
+        result = self.install(home, "--role", "left", "--factory", self.factory)
         self.assertIn("Every library speakerd and its plugins need is here", result.stdout)
         self.assertIn("installed. The limits: output at 0.0 dB, tweeter on.", result.stdout)
         vid = version_file(self.bundle / "VERSION")["id"]
@@ -772,117 +762,22 @@ class Install(Setup):
 
         # ampd's graph.json names the chain (revision 31): the install goes on with a factory the
         # bundle can load, leaves graph.json alone and says what speakerd will do with it.
-        woofer_only = json.loads(json.dumps(DOCUMENT))
-        woofer_only["connections"] = [c for c in woofer_only["connections"] if c["dst"] != {"node": 2, "channel": 1}]
-        (self.tmp / "woofer-only-kept.json").write_text(json.dumps(woofer_only))
         revision_31 = json.dumps(dict(CHAIN_DOCUMENT, revision=31), indent=1)
         (state / "graph.json").write_text(revision_31)
         (state / "graph.lkg.json").write_text(json.dumps(dict(CHAIN_DOCUMENT, revision=30)))
-        result = self.install(home, "--factory", self.tmp / "woofer-only-kept.json")
+        result = self.install(home, "--factory", self.factory)
         self.assertIn("graph.json (ampd's, revision 31) names plugins this bundle lacks:", result.stdout)
         self.assertIn("graph.lkg.json (ampd's, revision 30) names plugins this bundle lacks:", result.stdout)
         self.assertIn("falls back to the factory layer, ampd follows it, and revision 31's", result.stdout)
         self.assertIn("settings are gone", result.stdout)
         self.assertIn("To carry them over", result.stdout)
         self.assertEqual((state / "graph.json").read_text(), revision_31)
-        self.assertEqual(json.loads((state / "factory.json").read_text()), woofer_only)
+        self.assertEqual(json.loads((state / "factory.json").read_text()), DOCUMENT)
         status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
         self.assertRegex(status, r"(?m)^  graph\.json: revision 31, 3 plugin node\(s\): firConv, crossover, loudness "
                                  r"\*\*\* names plugins the current version lacks: \S*firConv_headless \S*crossover_headless: "
                                  r"speakerd plays the next layer \*\*\*$")
         self.assertRegex(status, r"(?m)^  factory\.json: revision 1, 1 plugin node\(s\): loudness_headless$")
-
-    def test_refuses_a_tweeter_without_a_crossovers_high_band(self):
-        # The board bundle: a factory.json may name only plugins of the bundle, and these name a crossover.
-        home = self.fresh_home("tweeter")
-        bundle = self.board_bundle
-        result = self.install(home, "--role", "left", "--factory", self.factory, bundle=bundle, check=False)
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("reaches the tweeter other than through a crossover's high band", result.stdout)
-        self.assertFalse((home / ".local/state/speakerd/factory.json").exists())
-
-        def crossover(high_to_tweeter=1, bypassed=False):
-            document = json.loads(json.dumps(DOCUMENT))
-            document["nodes"].append({"uid": 17, "plugin": {"format": "LV2", "identifier": lv2_uri("crossover_headless")},
-                                      **({"bypassed": True} if bypassed else {})})
-            document["connections"] = [
-                {"src": {"node": 1, "channel": 0}, "dst": {"node": 16, "channel": 0}},
-                {"src": {"node": 16, "channel": 0}, "dst": {"node": 17, "channel": 0}},
-                {"src": {"node": 17, "channel": 1 - high_to_tweeter}, "dst": {"node": 2, "channel": 0}},
-                {"src": {"node": 17, "channel": high_to_tweeter}, "dst": {"node": 2, "channel": 1}}]
-            path = self.tmp / f"crossover-{high_to_tweeter}-{bypassed}.json"
-            path.write_text(json.dumps(document))
-            return path
-
-        self.install(home, "--role", "left", "--factory", crossover(), bundle=bundle)
-        for unsafe, what in ((crossover(bypassed=True), "a bypassed crossover"), (crossover(0), "the low band")):
-            refused = self.install(home, "--factory", unsafe, bundle=bundle, check=False)
-            self.assertNotEqual(refused.returncode, 0, f"{what} reached the tweeter:\n{refused.stdout}")
-        self.install(home, "--factory", self.factory, "--allow-tweeter-without-crossover", bundle=bundle)
-        self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), DOCUMENT)
-
-        # The factory.json there is, kept by a later install, is checked as a new one is.
-        kept = self.install(home, bundle=bundle, check=False)
-        self.assertNotEqual(kept.returncode, 0, kept.stdout)
-        self.assertIn("the factory.json there is (kept) is refused", kept.stdout)
-
-    def test_the_tweeter_goes_on_only_over_a_crossovers_high_band(self):
-        """limits turns the tweeter on only if no layer speakerd may load (graph.json and
-        graph.lkg.json, ampd's, before factory.json) feeds it other than through a crossover's
-        high band; status names a layer that does."""
-        home = self.fresh_home("tweeter-on")
-        state = home / ".local/state/speakerd"
-        self.install(home, "--role", "left", "--factory", self.factory, "--allow-tweeter-without-crossover")
-        device_json = state / "device.json"
-        firmware("speakerd-setup.sh", "limits", "--gain-db", "-20", "--tweeter-limit", "muted", "--home", home,
-                 "--no-systemd", env=self.env)
-        before = device_json.read_text()
-
-        def tweeter_on(*extra):
-            return firmware("speakerd-setup.sh", "limits", "--gain-db", "-20", "--tweeter-limit", "on",
-                            "--home", home, "--no-systemd", *extra, env=self.env, check=False)
-
-        refused = tweeter_on()
-        self.assertNotEqual(refused.returncode, 0, refused.stdout)
-        self.assertIn("a layer speakerd may load feeds the tweeter", refused.stdout)
-        self.assertIn("factory.json: ", refused.stdout)
-        self.assertEqual(device_json.read_text(), before)
-        status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
-        self.assertRegex(status, r"(?m)^  factory\.json: \*\*\* .*tweeter")
-
-        # A safe factory, but ampd's graph.json is not: still refused, naming graph.json.
-        safe = json.loads(json.dumps(DOCUMENT))
-        safe["connections"] = [c for c in safe["connections"] if c["dst"] != {"node": 2, "channel": 1}]
-        (self.tmp / "woofer-only.json").write_text(json.dumps(safe))
-        self.install(home, "--factory", self.tmp / "woofer-only.json")
-        (state / "graph.json").write_text(json.dumps(DOCUMENT))
-        refused = tweeter_on()
-        self.assertNotEqual(refused.returncode, 0, refused.stdout)
-        self.assertIn("graph.json: ", refused.stdout)
-        self.assertEqual(json.loads(device_json.read_text())["limits"], CAPPED)
-
-        (state / "graph.json").unlink()
-        lifted = tweeter_on()
-        self.assertEqual(lifted.returncode, 0, lifted.stdout)
-        self.assertEqual(json.loads(device_json.read_text())["limits"], {"gain_db": -20.0, "tweeter": "on"})
-
-        # With the tweeter on, an install refuses while ampd's graph.json breaks the rule.
-        (state / "graph.json").write_text(json.dumps(DOCUMENT))
-        refused = self.install(home, "--factory", self.tmp / "woofer-only.json", check=False)
-        self.assertNotEqual(refused.returncode, 0, refused.stdout)
-        self.assertIn("graph.json: ", refused.stdout)
-        (state / "graph.json").unlink()
-        firmware("speakerd-setup.sh", "limits", "--gain-db", "-20", "--tweeter-limit", "muted", "--home", home,
-                 "--no-systemd", env=self.env)
-        self.assertEqual(json.loads(device_json.read_text())["limits"], CAPPED)
-
-        # The allow flag is for these tests (--home), never for a board.
-        refused = firmware("speakerd-setup.sh", "limits", "--gain-db", "0", "--tweeter-limit", "on",
-                           "--allow-tweeter-without-crossover", "--no-systemd",
-                           env=dict(self.env, HOME=str(self.fresh_home("no-home-given"))), check=False)
-        self.assertNotEqual(refused.returncode, 0, refused.stdout)
-        self.assertIn("--allow-tweeter-without-crossover is for the virtual pair tests (--home) only", refused.stdout)
-        self.assertFalse((self.tmp / "no-home-given").exists())
 
     def test_names_a_bundle_shadowed_by_a_system_lv2_folder(self):
         # lilv keeps the first bundle of a URI unless a later one is newer: a system copy of the
@@ -950,8 +845,7 @@ class Install(Setup):
         (self.tmp / "stub/calls").unlink(missing_ok=True)
         env = dict(self.env, STUB_IMPORT=str(converted))
         result = firmware("speakerd-setup.sh", "install", "--bundle", self.bundle, "--home", home, "--no-systemd",
-                          "--amplifier", "amplifier", "--role", "left", "--import-filtergraph", session,
-                          "--allow-tweeter-without-crossover", env=env)
+                          "--amplifier", "amplifier", "--role", "left", "--import-filtergraph", session, env=env)
         self.assertIn("Converting", result.stdout)
         self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), DOCUMENT)
         calls = [line for line in (self.tmp / "stub/calls").read_text().splitlines() if line.startswith("import: ")]
@@ -1947,10 +1841,10 @@ class Remote(Setup):
 
     def test_snapcast_remote_ships_the_route_check(self):
         """snapcast-setup.sh --mode target-remote: the board gets the script and what its target
-        mode loads from beside it (speakerd/setup-helper.py and the tweeter_rule.py it imports) in
-        a fresh mktemp -d folder, in the same layout; a --route speakerd run there finds the helper
-        and checks the running PipeWire's speakerd sink with it, either way; the folder is gone
-        afterwards; --dry-run says so and contacts nothing."""
+        mode loads from beside it (speakerd/setup-helper.py) in a fresh mktemp -d folder, in the same
+        layout; a --route speakerd run there finds the helper and checks the running PipeWire's
+        speakerd sink with it, either way; the folder is gone afterwards; --dry-run says so and
+        contacts nothing."""
         board, env = self.board("snapcast")
         # The board's sudo (the remote command runs the script under it) and its PipeWire.
         write_script(board / "bin/sudo",
@@ -1983,7 +1877,7 @@ class Remote(Setup):
         result = remote("--dry-run")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn(f"(dry-run) ssh {host} mktemp -d", result.stdout)
-        self.assertIn("snapcast-setup.sh speakerd/setup-helper.py speakerd/tweeter_rule.py | ssh", result.stdout)
+        self.assertIn("snapcast-setup.sh speakerd/setup-helper.py | ssh", result.stdout)
         self.assertIn(f"(dry-run) ssh -t {host} sudo bash DIR/snapcast-setup.sh --mode target", result.stdout)
         self.assertEqual((board / "hosts").read_text(), "", "--dry-run contacted the board")
 
@@ -2072,15 +1966,6 @@ class Remote(Setup):
         result = self.remote(env, "status", host="root@bpi-amp.invalid")
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("not root", result.stdout)
-        self.assertEqual((board / "hosts").read_text(), "")
-
-    def test_the_allow_flag_never_reaches_a_board(self):
-        board, env = self.board("allow")
-        for action in ("install", "limits"):
-            result = self.remote(env, action, "--role", "left", "--allow-tweeter-without-crossover", "--home",
-                                 board / "home")
-            self.assertNotEqual(result.returncode, 0, result.stdout)
-            self.assertIn("--allow-tweeter-without-crossover is for the virtual pair tests (--home) only", result.stdout)
         self.assertEqual((board / "hosts").read_text(), "")
 
     def test_the_board_script(self):

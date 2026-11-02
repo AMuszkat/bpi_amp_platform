@@ -316,7 +316,7 @@ class TheRealMap(unittest.TestCase):
 
     def test_what_needs_the_full_run(self):
         for path in ("dsp/juce_apps/speakerd/Engine.cpp", "dsp/juce_plugins/firConv/filters.hpp",
-                     "firmware/ampd/ampd.py", "firmware/speakerd/tweeter_rule.py", "firmware/install-lib.sh",
+                     "firmware/ampd/ampd.py", "firmware/install-lib.sh",
                      "tests/vpair/harness.py", "tests/vpair/stub_speakerd.c", "tools/status.py", "tools/test.sh",
                      "tests/impact.json", ".claude/hooks/pre-bash.py", ".claude/settings.json",
                      ".github/workflows/ci.yml", "dsp/juce_plugins/JUCE"):

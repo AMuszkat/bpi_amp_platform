@@ -10,8 +10,7 @@ client on each speaker's ampd (the monitor link, straight to that speaker) subsc
 `node/16/mon_levelDb` (its detector's level of the input), at 30 Hz. Each step is judged on the
 values that arrived from 0.8 s to 1.8 s into it (after the detector's ballistics), by their median.
 
-The tweeter is muted in device.json (a document that sends a plugin to the tweeter is refused
-with the tweeter on: the tweeter rule), so the tweeter's values are the floor. A second run makes
+The tweeter is muted in device.json, so the tweeter's values are the floor. A second run makes
 the right speaker mono, whose Mine is (FL + FR) / 2.
 
 Pass when, on each speaker and at each step:

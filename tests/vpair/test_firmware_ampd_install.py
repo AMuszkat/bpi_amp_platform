@@ -148,7 +148,6 @@ class AmpdInstall(unittest.TestCase):
         status = self.ampd_setup(folder, "status")
         self.assertNotIn(SECRET, status.stdout)
         self.assertIn('"secret": "(set)"', status.stdout)
-        self.assertEqual((lib / "bin/tweeter_rule.py").read_bytes(), (FIRMWARE / "speakerd/tweeter_rule.py").read_bytes())
         unit = folder / ".config/systemd/user/ampd.service"
         self.assertEqual(unit.read_bytes(), (FIRMWARE / "ampd/ampd.service").read_bytes())
         self.assertIn("left, the hub, listening on 0.0.0.0", result.stdout)
@@ -279,10 +278,6 @@ class AmpdInstall(unittest.TestCase):
             run.mkdir()
             envs[name] = dict(os.environ, XDG_RUNTIME_DIR=str(run))
             (folder / ".local/state/speakerd/graph.json").write_text(json.dumps(DOCUMENT))
-            # DOCUMENT feeds the tweeter straight: the tweeter muted, or a reinstall refuses it.
-            device_json = folder / ".local/state/speakerd/device.json"
-            device_json.write_text(json.dumps(dict(json.loads(device_json.read_text()),
-                                                   limits={"gain_db": 0, "tweeter": "muted"})))
             speaker = type("Speaker", (), {"env": envs[name]})()
             units[name] = UserUnit(folder / ".config/systemd/user/ampd.service", folder, speaker)
             sds[name] = StandInSpeakerd(envs[name], folder / ".local/state/speakerd").start()

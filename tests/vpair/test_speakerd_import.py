@@ -1,6 +1,6 @@
 """speakerd_import (docs/autonomous-development.md, section 5): speakerd turns an
 AudioPluginHost session into a graph document that sounds exactly like the same settings
-written as parameters, and refuses a session it cannot read or that would be unsafe.
+written as parameters, and refuses a session it cannot read.
 
 This is how a board's current AudioPluginHost session becomes speakerd's factory layer
 (firmware/speakerd-setup.sh --import-filtergraph). The session is speakerd's example,
@@ -17,19 +17,16 @@ Pass when:
   the parameters' render through the headless build, sample for sample;
 - an empty file, text that is not XML, XML that is not a FILTERGRAPH, and a session with a
   connection to an output channel the amplifier does not have (2) each exit with status 2 and
-  print nothing on stdout;
-- the example with one more connection, from the input straight to the tweeter (output channel
-  1), exits with status 2 and prints nothing on stdout.
+  print nothing on stdout.
 
-The example and the import came with speakerd's board readiness, after commit 2cb3278 (and the
-refusal of a session that feeds the tweeter after b10e23b): before them this fails, and says so.
+The example and the import came with speakerd's board readiness, after commit 2cb3278: before
+them this fails, and says so.
 
     python3 -m unittest -v tests.vpair.test_speakerd_import
 """
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -124,18 +121,6 @@ class Import(unittest.TestCase):
                 print(f"\n  {name}: status {result.returncode}, {result.stderr.strip().splitlines()[-1:]}")
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertEqual(result.stdout, "")
-
-    def test_refuses_the_input_straight_to_the_tweeter(self):
-        text = SESSION.read_text()
-        straight = re.sub(r"(</FILTERGRAPH>)",
-                          '  <CONNECTION srcFilter="1" srcChannel="0" dstFilter="3" dstChannel="1"/>\n\\1', text)
-        self.assertNotEqual(straight, text)
-        path = self.tmp / "straight-to-the-tweeter.filtergraph"
-        path.write_text(straight)
-        result = self.run_import(path, "--lv2-bundle", self.complete)
-        print(f"\n  straight to the tweeter: status {result.returncode}, {result.stderr.strip().splitlines()[-1:]}")
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":

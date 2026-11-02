@@ -37,12 +37,7 @@ Pass when:
     `connect-pins 16:0 <new>:0` and `connect-pins <new>:0 2:0` are applied (revisions 4 and 5) and
     heard: both woofers back at the render's 200 Hz level (the new node is flat) within 0.1 dB; both
     graph.json are revision 5 with the controller's connections; the controller's state (nodes, their
-    values, connections) is the hub's. Then, with the right's device.json saying the tweeter is on
-    (ampd reads it at every revision; speakerd plays on muted), a second controller run's
-    `connect-pins 1:0 2:1` (the stream straight to the tweeter) is rejected with "right: the tweeter
-    is on here (device.json)", undone in the controller (no such connection, revision 5), the left
-    rolls back to revision 5, both graph.json stay on revision 5, and the controller's state is the
-    hub's.
+    values, connections) is the hub's.
 (d) Monitors. With node 16's window open (`open 16`, the left speaker first), the medians of 8
     `node/16/mon_levelDb` values from the left are the left's input level as loudness's detector
     reads it (JUCE's BallisticsFilter, 100 ms attack, 300 ms release, computed here for the 200 Hz
@@ -78,7 +73,7 @@ from pathlib import Path
 
 import numpy as np
 
-from harness import (ADDRESS, BUILD, NO_LIMITS, RATE, TEST_SECRET, Controller, ControllerScript, Player, Profiler,
+from harness import (ADDRESS, BUILD, RATE, TEST_SECRET, Controller, ControllerScript, Player, Profiler,
                      ScriptedController, SpeakerPair, TimedRecorder, VirtualDisplay, built, graph_document, lv2_uri,
                      render, require_speakerd_local_link, revision_document, sine_amplitudes_dbfs, state_dir, tone)
 from test_knob_latency import onset
@@ -231,7 +226,6 @@ class ControllerEndToEnd(unittest.TestCase):
                 for name in ("left", "right"):
                     refused = pair.ampd[name].lines_starting("refused ", after=mark[name])
                     self.check(not refused, f"(a) {name}'s ampd refused a hello of the controller's: {refused}")
-                self.refusal_run(pair)
                 self.wrong_secret_run(pair)
             self.gui_run(pair)
         self.assertEqual(self.failures, [], "\n".join(self.failures))
@@ -511,38 +505,6 @@ class ControllerEndToEnd(unittest.TestCase):
         self.check(differences(state, document) == [], f"(c) the controller's state is not the hub's: {differences(state, document)}")
         self.check(same(self.graph_value_of(document, 16, "s0_e0_gain"), DRAG_TO),
                    f"(b) the hub's state has s0_e0_gain {self.graph_value_of(document, 16, 's0_e0_gain')}, not {DRAG_TO:g}")
-
-    def refusal_run(self, pair):
-        """(c) A proposal the right must refuse: its device.json turns the tweeter on."""
-        device = pair.state["right"] / "device.json"
-        original = device.read_text()
-        device.write_text(json.dumps(dict(json.loads(original), limits=NO_LIMITS), indent=2))
-        try:
-            s, n = ControllerScript(), {}
-            s.add("wait-synced 15")
-            s.add("expect-revision 5")
-            s.add("connect-pins 1:0 2:1")
-            n["rejected"] = s.add("expect-rejected right: the tweeter is on here (device.json)")
-            s.add("expect-no-connection 1:0 2:1")
-            s.add("expect-revision 5")
-            n["state"] = s.add("state")
-            mark = pair.ampd["left"].mark()
-            with ScriptedController(s, name="ctl-e2e-2") as ctl:
-                status, result = ctl.finish(timeout=60)
-                lines = {obj["step"]: obj for _, obj in ctl.steps()}
-                self.assertEqual((status, result and result.get("result")), (0, "pass"), ctl.report("the refusal script failed"))
-            print(f"\n  (c) the tweeter on at the right, 1:0 -> 2:1: {lines[n['rejected']]['outcome'][:120]}", end="")
-            pair.ampd["left"].wait_for("revision 6: rolling back to revision 5 on left", timeout=10, after=mark)
-            graphs = self.wait_graphs(pair, lambda g: g.get("revision") == 5)
-            self.check({name: g.get("revision") for name, g in graphs.items()} == {"left": 5, "right": 5},
-                       f"(c) after the rejection graph.json: left {graphs['left'].get('revision')}, right {graphs['right'].get('revision')}")
-            document, hub = self.hub_document()
-            self.check(hub["revision"] == 5, f"(c) the hub is on revision {hub['revision']} after the rejection")
-            self.check(differences(lines[n["state"]]["state"], document) == [],
-                       f"(c) after the rejection the controller's state is not the hub's: "
-                       f"{differences(lines[n['state']]['state'], document)}")
-        finally:
-            device.write_text(original)
 
     # (e) ---------------------------------------------------------------------------------------
 

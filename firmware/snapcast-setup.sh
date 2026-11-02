@@ -1255,11 +1255,10 @@ setup_target_remote() {
     if [ -z "$CLIENT_USER" ]; then CLIENT_USER="${BOARD_USER:-}"; fi
     info "Configuring the board ($TARGET_HOST) as a Snapcast CLIENT over ssh (server $SERVER${CLIENT_USER:+, user $CLIENT_USER})"
     # Target mode reads files beside the script (the speakerd sink's live check runs
-    # speakerd/setup-helper.py, which imports tweeter_rule.py from beside it): all of them go,
-    # in the same layout, to a fresh private folder on the board (mktemp -d there), which is
-    # removed afterwards whatever happens.
+    # speakerd/setup-helper.py): all of them go, in the same layout, to a fresh private folder
+    # on the board (mktemp -d there), which is removed afterwards whatever happens.
     local here; here="$(dirname "$SELF")"
-    local -a files=(snapcast-setup.sh speakerd/setup-helper.py speakerd/tweeter_rule.py)
+    local -a files=(snapcast-setup.sh speakerd/setup-helper.py)
     local -a rargs=(--mode target --server "$SERVER" --client-latency "$CLIENT_LATENCY"
                     --snapclient-version "$SNAPCLIENT_VERSION" --scope system --route "$ROUTE")
     [ -n "$CLIENT_USER" ]        && rargs+=(--client-user "$CLIENT_USER")

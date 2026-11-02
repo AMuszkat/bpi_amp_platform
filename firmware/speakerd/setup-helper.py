@@ -6,8 +6,7 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
     setup-helper.py node DUMP NAME                one node of a pw-dump: id, process, priority.driver
     setup-helper.py device FILE [--role R] [--amplifier NODE] [--woofer PORT] [--tweeter PORT]
                                 [--gain-db G --tweeter-limit muted|on] [--show | --check]
-    setup-helper.py graph FILE [--allow-tweeter-without-crossover]
-                                                   the tweeter rule (tweeter_rule.py, beside it)
+    setup-helper.py graph FILE                     a graph document's structure, and its summary
     setup-helper.py plugins FILE [MANIFEST...]     the plugin identifiers a chain document names, one
                                                    per line; with LV2 manifests, only those none of
                                                    them declares (what a bundle lacks)
@@ -32,9 +31,6 @@ import re
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import tweeter_rule  # noqa: E402  (beside this file: the tweeter rule's one definition)
-
 ROLES = ("left", "right", "mono")
 # The keys speakerd knows. It rejects a device.json with any other key, or a key twice, and
 # then plays with its fail-safe defaults (mono, bpi-alsa-playback-pcm, -20 dB, tweeter muted).
@@ -45,7 +41,8 @@ TWEETER_LIMITS = ("muted", "on")
 # The amplifier's node name in the repository's pipewire.conf, and on the boards (the name
 # snapcast-setup.sh's client-rt.conf and speakerd's default use).
 KNOWN_AMPLIFIERS = ("bpi-alsa-playback-pcm", "alsa-playback-pcm")
-INPUT_NODE, OUTPUT_NODE = tweeter_rule.INPUT_NODE, tweeter_rule.OUTPUT_NODE
+# The graph's fixed nodes (dsp/juce_apps/speakerd/README.md): the input and the output.
+INPUT_NODE, OUTPUT_NODE = 1, 2
 
 
 def fail(message):
@@ -378,7 +375,6 @@ def parse_options(args, with_value, flags=()):
 
 def cmd_graph(args):
     path = args[0]
-    allow = "--allow-tweeter-without-crossover" in args[1:]
     doc = load_json(path, "the graph document")
     if not isinstance(doc, dict):
         fail(f"{path}: not a JSON object")
@@ -404,15 +400,8 @@ def cmd_graph(args):
         for end, _ in ends:
             if end not in (INPUT_NODE, OUTPUT_NODE) and end not in by_uid:
                 fail(f"{path}: a connection names node {end}, which is not in the document")
-    # The tweeter rule, defined once in tweeter_rule.py (ampd checks the same).
-    unsafe = tweeter_rule.unsafe_tweeter_feeds(doc)
     names = ", ".join(str(by_uid[u].get("name") or str(by_uid[u]["plugin"]["identifier"]).rsplit("/", 1)[-1])
                       for u in sorted(by_uid)) or "no plugin"
-    if unsafe:
-        message = tweeter_rule.MESSAGE.format(outputs=", ".join(unsafe))
-        if not allow:
-            fail(f"{path}: {message}")
-        print(f"warning={quote(message + ' (allowed by --allow-tweeter-without-crossover)')}")
     summary = f"revision {doc.get('revision', 0)}, {len(by_uid)} plugin node(s): {names}"
     print(f"summary={quote(summary)}")
 

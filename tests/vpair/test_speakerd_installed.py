@@ -20,9 +20,9 @@ Pass when:
 - with a stream playing into the sink, pw-profiler shows the amplifier as the only driver on
   each speaker, with the speakerd sink, speakerd-dsp and the stream among its followers: the
   null sink never clocks the amplifier, whether the amplifier has priority 1000 or none;
-- speakerd says `device: limits: output at 0 dB, tweeter muted` (the factory graph feeds the
-  tweeter straight, which speakerd refuses with the tweeter on, so the test mutes it in
-  device.json after the installs), every sample of the tweeter capture is 0, and the woofer's
+- speakerd says `device: limits: output at 0 dB, tweeter muted` (the test mutes the tweeter in
+  device.json after the installs), every sample of the tweeter capture is 0, although the factory
+  graph feeds it, and the woofer's
   gain for a 100 Hz tone is the complete build's offline render of the same document, within
   0.05 dB;
 - speakerd loads loudness_headless from the current version's lv2/ folder, although the copy
@@ -104,12 +104,11 @@ class Installed(unittest.TestCase):
         factory = cls.tmp / "factory.json"
         factory.write_text(json.dumps(DOCUMENT, indent=2))
         firmware("speakerd-setup.sh", "install", "--bundle", bundles[0], "--home", cls.user_home, "--no-systemd",
-                 "--role", "left", "--amplifier", "amplifier", "--factory", factory,
-                 "--allow-tweeter-without-crossover", env=no_pipewire)
+                 "--role", "left", "--amplifier", "amplifier", "--factory", factory, env=no_pipewire)
         firmware("speakerd-setup.sh", "install", "--bundle", bundles[1], "--home", cls.user_home, "--no-systemd",
-                 "--allow-tweeter-without-crossover", env=no_pipewire)
-        # The factory feeds the tweeter straight: with the tweeter on (a first install's limits)
-        # speakerd refuses that layer, so this speaker has no gain limit and the tweeter muted.
+                 env=no_pipewire)
+        # No gain limit and the tweeter muted: the tweeter capture is silence although the factory
+        # graph feeds it.
         device_json = cls.user_home / ".local/state/speakerd/device.json"
         device_json.write_text(json.dumps(dict(json.loads(device_json.read_text()),
                                                limits={"gain_db": 0, "tweeter": "muted"}), indent=2))

@@ -31,15 +31,6 @@ import struct
 import sys
 import time
 
-# The tweeter rule's one definition (firmware/speakerd/tweeter_rule.py), beside this file when
-# installed (bin/), in ../speakerd in the repository and in a bundle.
-_HERE = os.path.dirname(os.path.realpath(__file__))
-for _folder in (_HERE, os.path.join(os.path.dirname(_HERE), "speakerd")):
-    if os.path.isfile(os.path.join(_folder, "tweeter_rule.py")):
-        sys.path.insert(0, _folder)
-        break
-import tweeter_rule  # noqa: E402
-
 VERSION = "0.2.0"
 PROTOCOL = 1
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
@@ -560,24 +551,6 @@ class Core:
             return role if role in ("left", "right", "mono") else "mono"
         except (OSError, ValueError, AttributeError):
             return "mono"
-
-    def tweeter_on(self):
-        """Whether this speaker's device.json turns the tweeter on (limits.tweeter "on"); a file
-        that cannot be read is speakerd's fail-safe, the tweeter muted."""
-        try:
-            with open(os.path.join(self.state_dir, "device.json")) as f:
-                limits = json.load(f).get("limits")
-            return isinstance(limits, dict) and limits.get("tweeter") == "on"
-        except (OSError, ValueError, AttributeError):
-            return False
-
-    def tweeter_refusal(self, doc):
-        """Why this speaker must not apply `doc`: with its tweeter on, the tweeter rule
-        (tweeter_rule.py: only a crossover's high band reaches the tweeter). None when it may."""
-        if not self.tweeter_on():
-            return None
-        why = tweeter_rule.violation(doc)
-        return None if why is None else f"the tweeter is on here (device.json) and {why}"
 
     def read_layer(self, layer):
         """(document, time, origin) of a state layer, or None."""
@@ -1235,9 +1208,6 @@ class Hub(Role):
             missing = sorted(plugins_of(document) - self.seen)
             if missing:
                 return refuse("no speaker has loaded " + ", ".join(missing))
-            why = core.tweeter_refusal(document)
-            if why is not None:
-                return refuse(f"{core.name}: {why}")
             rev_time = valid_time(msg.get("time")) or now_iso()
             rev_origin = msg["origin"] if isinstance(msg.get("origin"), str) and msg["origin"] else controller.name
             doc = copy.deepcopy(document)
@@ -1345,8 +1315,6 @@ class Hub(Role):
         why = check_document(document)
         if why is None and plugins_of(document) - self.seen:
             why = "no speaker has loaded " + ", ".join(sorted(plugins_of(document) - self.seen))
-        if why is None:
-            why = core.tweeter_refusal(document)
         if why is not None:
             log(f"agent {peer.name}: its revision is refused ({why}): keeping revision {core.revision}")
             return False
@@ -1597,11 +1565,6 @@ class Agent(Role):
         why = check_document(document) if good_int(revision, 0, BIG) else "no revision"
         if why is not None:
             conn.send({"op": "failed", "revision": revision, "reason": f"the document does not parse: {why}"})
-            return
-        refusal = core.tweeter_refusal(document)
-        if refusal is not None:
-            log(f"revision {revision}: refused: {refusal}")
-            conn.send({"op": "failed", "revision": revision, "reason": refusal})
             return
         doc = copy.deepcopy(document)
         doc["revision"] = revision

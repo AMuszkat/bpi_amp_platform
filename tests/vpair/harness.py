@@ -621,8 +621,7 @@ def with_plugin(document, plugin_uri):
 
 NO_LIMITS = {"gain_db": 0, "tweeter": "on"}
 # No output limit, the tweeter muted: what a board has once a person lifted the gain but not yet the
-# tweeter. The step 3 scenarios run so (their documents send a plugin to both amplifier channels,
-# which ampd refuses with the tweeter on: the tweeter rule); test_tweeter_rule turns it on.
+# tweeter. The step 3 scenarios run so, unless they say otherwise.
 TWEETER_MUTED = {"gain_db": 0, "tweeter": "muted"}
 
 
@@ -673,14 +672,9 @@ class Speakerd:
     """
 
     def __init__(self, speaker, state, bundles=(), args=(), wait_for="playing: ", timeout=30,
-                 prefix=(), exit_status=0, allow_tweeter=True):
+                 prefix=(), exit_status=0):
         self.speaker = speaker
         self.command = [*prefix, str(built("speakerd")), "--state-dir", str(state)]
-        # Test documents route full range to both channels to measure them, which speakerd's
-        # tweeter rule refuses while device.json says the tweeter is on; allow_tweeter=False
-        # runs speakerd as a board does, for the scenarios that test the rule itself.
-        if allow_tweeter:
-            self.command.append("--allow-tweeter-without-crossover")
         for bundle in bundles:
             self.command += ["--lv2-bundle", str(bundle)]
         self.command += list(args)
@@ -814,7 +808,7 @@ class Speakerd:
             shutil.rmtree(self._home, ignore_errors=True)
 
 
-def render(state, samples, bundles=(), args=(), timeout=120, allow_tweeter=True):
+def render(state, samples, bundles=(), args=(), timeout=120):
     """speakerd's offline render (--render): runs `samples` (mono, or (n, 2) for FL and FR)
     through the graph of the first layer of `state` that loads, with the `bundles` given and an
     empty HOME, and returns the output, (n, 2) woofer and tweeter, and speakerd's output."""
@@ -823,8 +817,6 @@ def render(state, samples, bundles=(), args=(), timeout=120, allow_tweeter=True)
         home.mkdir()
         _write_wav(src, samples)
         command = [str(built("speakerd")), "--state-dir", str(state), "--render", str(src), str(out)]
-        if allow_tweeter:
-            command.append("--allow-tweeter-without-crossover")
         for bundle in bundles:
             command += ["--lv2-bundle", str(bundle)]
         command += list(args)

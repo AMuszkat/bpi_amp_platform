@@ -66,9 +66,7 @@ instance starts in its state with no fade (`BypassFade::reset`), under `speakerd
 around the swap. It is `processBlockBypassed()`, which every
 host calls for a bypass (JUCE's LV2 wrapper when its `lv2:enabled` port is 0, as a node bypass in
 `speakerd` sets it); the crossover has no bypass parameter of its own, so no saved state carries
-one ([lv2-bypass.md](../../docs/juce-knowledge/hosting/lv2-bypass.md)). The tweeter rule of
-`speakerd`, the installer and `ampd` still treats a bypassed crossover as no crossover: with the
-tweeter on, a document that routes its output 2 to the tweeter does not load.
+one ([lv2-bypass.md](../../docs/juce-knowledge/hosting/lv2-bypass.md)).
 
 Up to 0.0.2 a bypass was JUCE's default: output 1 the input as it is, output 2 silence. Measured as
 for firConv ([its README](../firConv/README.md#bypass), `../tests/bypass`), output 1:

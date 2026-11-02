@@ -95,10 +95,6 @@ Pass when:
 - a value set while a revision applies (the right's speakerd takes 1.5 s) is kept by the new
   revision: in the graph sent to the controllers, both graph.json, every controller's values, and
   given again to both speakerds when they restart;
-- the tweeter rule: with the right's tweeter on (device.json), a revision feeding the tweeter
-  straight is failed by the right, never reaches its speakerd, is rejected with "right: the tweeter
-  is on here (device.json) and ..." and rolled back on the left; with the hub's on, it is rejected
-  before any speaker gets it;
 - a line that is not JSON closes the connection; an unknown op is ignored;
 - before a peer proved the pair's secret, and on the monitor link, a line is at most 64 KiB: a
   100 KiB hello closes the connection on the control and the monitor link, and an agent hangs up
@@ -960,29 +956,6 @@ class Protocol(unittest.TestCase):
                 sd.wait_event(lambda e: e.get("op") == "param" and e.get("id") == "s0_e0_gain", what="the value again")
                 self.assertEqual([e["value"] for e in sd.events("param", "in") if e["id"] == "s0_e0_gain"], [7.25], name)
 
-    def test_the_tweeter_rule(self):
-        direct = {"format": "speakerd-graph", "version": 1, "nodes": [],
-                  "connections": [{"src": {"node": 1, "channel": 2}, "dst": {"node": 2, "channel": 1}}]}
-        on = {"gain_db": 0, "tweeter": "on"}
-        # The agent's tweeter on: it fails the revision, the hub rejects it and rolls the left back.
-        with StandInPair(self.tmp / "agent", documents(), limits={"right": on}) as pair, Controller("ctl-a") as a:
-            answer = a.propose(direct)
-            print(f"\n  the right's tweeter on: {answer['reason']}")
-            self.assertEqual(answer["op"], "rejected")
-            self.assertTrue(answer["reason"].startswith("right: the tweeter is on here (device.json) and the stream "
-                                                        "reaches the tweeter other than through a crossover's high band"))
-            self.assertEqual(pair.sd["right"].events("apply", "in"), [], "the right's speakerd got the revision")
-            pair.sd["left"].wait_event(lambda e: e.get("op") == "apply" and len(pair.sd["left"].events("apply", "in")) == 2,
-                                       what="the roll back on the left")
-            self.assertEqual([e["revision"] for e in pair.sd["left"].events("apply", "in")], [4, 3])
-        # The hub's tweeter on: rejected before anything is applied.
-        with StandInPair(self.tmp / "hub", documents(), limits={"left": on}) as pair, Controller("ctl-a") as a:
-            answer = a.propose(direct)
-            self.assertEqual(answer["op"], "rejected")
-            self.assertTrue(answer["reason"].startswith("left: the tweeter is on here"), answer["reason"])
-            for name in ("left", "right"):
-                self.assertEqual(pair.sd[name].events("apply", "in"), [])
-
     def test_the_authentication_vector(self):
         """tests/vpair/auth_vector.json, computed here from docs/protocol.md's definitions, and by
         ampd's own functions: a drift in ampd's strings fails here (the controller's tests assert
@@ -1041,7 +1014,8 @@ class Protocol(unittest.TestCase):
             self.assertEqual(json.loads(f.readline())["op"], "state")
             f.close()
             conn.close()
-            self.assertTrue(pair.ampd["left"].lines_starting("controller padded connected"))
+            # ampd logs the connection as it sends the state: wait for its reader to have the line.
+            self.assertTrue(pair.ampd["left"].wait_for("controller padded connected", timeout=5))
 
     def test_a_large_document_keeps_every_controller(self):
         """A legal document of 24 MiB (a plugin state) reaches a controller that does not read for
