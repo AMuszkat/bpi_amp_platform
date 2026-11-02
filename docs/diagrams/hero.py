@@ -253,23 +253,30 @@ def scene():
     o += text(80, 132, "Stream from anything. Tune the pair from one app. Each speaker runs its own DSP.",
               20, MUTED, italic=True)
 
-    # the music: out of the phone at the top, straight into the speakers' DSP plugins (drawn first:
-    # it passes behind the phone's edge)
-    o += wave(282, 966, 330, 34, 5.0, width=7, color=BLUE, opacity=0.18)
-    o += wave(282, 966, 330, 26, 5.0, width=4.5, color=BLUE)
+    # your devices: the phone above, the controller below, in a frame of their own drawn like the
+    # speakers', so the page reads as three boxes joined by two lines
+    fx, fy, fw, fh = 80, 180, 400, 600
+    o += (f'<rect x="{fx}" y="{fy}" width="{fw}" height="{fh}" rx="18" fill="#FFFFFF" fill-opacity="0.55" '
+          f'stroke="{INK}" stroke-width="1.2"/>\n')
+    o += text(fx + 20, fy + 30, "YOUR DEVICES", 13, INK, mono=True, weight=600, spacing="0.16em")
+    o += f'<g transform="translate({fx + 140} {fy + 52}) scale(0.72)">\n' + phone(0, 0) + '</g>\n'
+    o += text(fx + 70, fy + 170, "any player", 15, MUTED, italic=True, anchor="middle")
+    o += f'<g transform="translate({fx + 30} {fy + 300}) scale(0.78)">\n' + laptop(24, 0) + '</g>\n'
+    o += text(fx + 60, fy + 290, "the controller", 15, MUTED, italic=True, anchor="start")
+    x_out = fx + fw + 2    # where both lines leave the frame
+
+    # the music: out of the frame at the phone's height, straight into the speakers' DSP plugins
+    o += wave(x_out, 966, 330, 34, 5.0, width=7, color=BLUE, opacity=0.18)
+    o += wave(x_out, 966, 330, 26, 5.0, width=4.5, color=BLUE)
     o += transport(640, 330, "AUDIO", "Snapcast · TCP", BLUE_DIM, "#E6EEFB")
     o += text(640, 274, "the music, to both speakers in sync", 19, MUTED, italic=True, anchor="middle")
-
-    # sources: the phone above, the controller below, each whole
-    o += phone(130, 160)
-    o += laptop(96, 500)
 
     # network, between the two lines
     o += wifi(720, 470)
     o += text(720, 512, "WI-FI", 14, MUTED, mono=True, weight=600, anchor="middle", spacing="0.16em")
-    # settings: out of the controller at the bottom, into the speakers' boards
-    o += (f'<path d="M500 640 C 600 668, 800 610, 958 578" fill="none" stroke="{ORANGE}" stroke-width="3" '
-          f'stroke-dasharray="2 9" stroke-linecap="round"/>\n')
+    # settings: out of the frame at the controller's height, into the speakers' boards
+    o += (f'<path d="M{x_out} 640 C {x_out + 100} 668, 800 610, 958 578" fill="none" stroke="{ORANGE}" '
+          f'stroke-width="3" stroke-dasharray="2 9" stroke-linecap="round"/>\n')
     o += arrow_head(966, 576, -12, ORANGE, 16)
     o += transport(735, 700, "CONTROL", "settings + meters TCP · knobs UDP", ORANGE, "#FBEDE6")
     o += text(735, 752, "settings and knobs, on both speakers within milliseconds", 19, MUTED, italic=True,
