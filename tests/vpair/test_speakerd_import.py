@@ -17,7 +17,13 @@ Pass when:
   the parameters' render through the headless build, sample for sample;
 - an empty file, text that is not XML, XML that is not a FILTERGRAPH, and a session with a
   connection to an output channel the amplifier does not have (2) each exit with status 2 and
-  print nothing on stdout.
+  print nothing on stdout;
+- a session naming loudness's control build (`.../loudness_control`, which has no DSP; the
+  example with that URI and no STATE) exits with status 2, nothing on stdout, saying it "is a
+  control build", and so does --prefer-headless with no headless build to be found ("no
+  _headless build of it was found"); --prefer-headless with the headless bundle exits 0 with a
+  document naming loudness_headless; --allow-unsafe-routing exits 0 with a document naming the
+  control build and an `import: warning:` line saying it is a control build.
 
 The example and the import came with speakerd's board readiness, after commit 2cb3278: before
 them this fails, and says so.
@@ -27,6 +33,7 @@ them this fails, and says so.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -121,6 +128,40 @@ class Import(unittest.TestCase):
                 print(f"\n  {name}: status {result.returncode}, {result.stderr.strip().splitlines()[-1:]}")
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertEqual(result.stdout, "")
+
+    def test_a_control_build(self):
+        text = SESSION.read_text()
+        session = re.sub(r"<STATE>\d+\.[^<]{40,}</STATE>\s*", "",
+                         text.replace(f'file="{lv2_uri("loudness")}"', f'file="{lv2_uri("loudness_control")}"'))
+        self.assertIn(lv2_uri("loudness_control"), session)
+        self.assertEqual(session.count("<STATE>"), text.count("<STATE>") - 1, "the plugin's STATE is still there")
+        path = self.tmp / "control.filtergraph"
+        path.write_text(session)
+        said = f"{lv2_uri('loudness_control')} is a control build"
+
+        for name, args, reason in (("refused", ["--lv2-bundle", self.complete], "--prefer-headless takes its _headless build"),
+                                   ("no headless build", ["--prefer-headless", "--lv2-bundle", self.complete],
+                                    "no _headless build of it was found")):
+            with self.subTest(name):
+                result = self.run_import(path, *args)
+                print(f"\n  {name}: status {result.returncode}, {result.stderr.strip().splitlines()[-1:]}")
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertRegex(result.stderr, rf"(?m)^speakerd: import: FAILED: .*{re.escape(said)}.*{re.escape(reason)}")
+
+        with self.subTest("--prefer-headless"):
+            result = self.run_import(path, "--prefer-headless", "--lv2-bundle", self.headless)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = json.loads(result.stdout)
+            self.assertEqual([n["plugin"]["identifier"] for n in document["nodes"]], [lv2_uri("loudness_headless")])
+            self.assertNotIn("is a control build", result.stderr)
+
+        with self.subTest("--allow-unsafe-routing"):
+            result = self.run_import(path, "--allow-unsafe-routing", "--lv2-bundle", self.complete)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = json.loads(result.stdout)
+            self.assertEqual([n["plugin"]["identifier"] for n in document["nodes"]], [lv2_uri("loudness_control")])
+            self.assertRegex(result.stderr, rf"(?m)^speakerd: import: warning: .*{re.escape(said)}")
 
 
 if __name__ == "__main__":

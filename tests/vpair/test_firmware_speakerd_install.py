@@ -32,6 +32,10 @@ Pass when:
   plugins the bundle lacks for them, with their revision, that speakerd falls back to the factory
   layer, that ampd follows it and the revision's settings are gone, and how to carry them over;
   status marks such a layer with *** and the installed version's plugins;
+- a --factory file, or a factory.json kept by an install, that setup-helper.py graph refuses (a
+  connection to node 99, which the document lacks) is refused before anything changes (every
+  file of the home as it was, factory.json unchanged), by install and check, naming the helper's
+  reason; status marks such a layer `*** <that reason> ***`;
 - a speakerd that cannot say its version, one older than the minimum, and one that cannot be
   executed (as from a noexec /tmp: said so) are refused by install, which installs nothing, and
   rollback refuses an older one;
@@ -53,6 +57,9 @@ Pass when:
   --role right changes the role alone; one of --amplifier, --woofer-port, --tweeter-port
   changes that alone and keeps device.json's others; a device.json with a key speakerd does not
   know, or a key twice, is refused (speakerd would reject it and play its fail-safe defaults);
+- `limits --gain-db <g> --tweeter-limit <muted|on>` writes exactly {gain_db g, tweeter ...} into
+  device.json's limits and changes nothing else of it (-20 on, -20 muted, 0 on in turn), and a
+  gain above 0 dB or another tweeter limit is refused, device.json unchanged;
 - a second, different bundle becomes current, the first previous; rollback swaps them, and
   rollback again swaps them back, keeping device.json's limits; with --keep 2 a third version removes the oldest, never current or
   previous;
@@ -133,8 +140,9 @@ Pass when:
 - under (stand-in) systemd, install fails unless speakerd, after its start, runs and says
   exactly the limits device.json gives: no line within the wait, an inactive service, a
   fail-safe suffix, a FAILED line and NO INPUT SINK CONFIGURED each fail it; `limits` and
-  `rollback` restarting a speakerd that runs pass, although the old instance's `speakerd ended`
-  line precedes the new start, and fail on a `speakerd ended` after it; the same install again
+  `rollback` restarting a speakerd that runs pass (limits having written its limits into
+  device.json), although the old instance's `speakerd ended` line precedes the new start, and
+  fail on a `speakerd ended` after it; the same install again
   (speakerd-setup.sh install, and setup.sh --only pipewire,speakerd) restarts neither PipeWire
   nor speakerd and writes no file of the home; setup.sh stops on a
   PipeWire restart that fails, before anything is routed into speakerd; and, the whole
@@ -626,6 +634,31 @@ class Install(Setup):
             self.assertIn(said, refused.stdout)
             self.assertEqual(device_json.read_text(), text, "a refused device.json was changed")
 
+    def test_limits_writes_device_json(self):
+        """`limits` writes exactly the limits given into device.json and nothing else of it; a gain
+        above 0 dB or another tweeter limit is refused, device.json unchanged."""
+        home = self.fresh_home("limits")
+        self.install(home, "--role", "left")
+        device_json = home / ".local/state/speakerd/device.json"
+        device = json.loads(device_json.read_text())
+        for gain, tweeter, limits in (("-20", "on", {"gain_db": -20.0, "tweeter": "on"}),
+                                      ("-20", "muted", {"gain_db": -20.0, "tweeter": "muted"}),
+                                      ("0", "on", OPEN)):
+            with self.subTest(gain=gain, tweeter=tweeter):
+                result = firmware("speakerd-setup.sh", "limits", "--gain-db", gain, "--tweeter-limit", tweeter,
+                                  "--home", home, "--no-systemd", env=self.env)
+                self.assertEqual(json.loads(device_json.read_text()), dict(device, limits=limits))
+                self.assertIn(f"device.json limits: output at {limits['gain_db']:.1f} dB, tweeter {tweeter}",
+                              result.stdout)
+        before = device_json.read_text()
+        for gain, tweeter, said in (("3", "on", "cannot be above 0 dB"), ("-20", "loud", "muted or on")):
+            with self.subTest(gain=gain, tweeter=tweeter):
+                result = firmware("speakerd-setup.sh", "limits", "--gain-db", gain, "--tweeter-limit", tweeter,
+                                  "--home", home, "--no-systemd", env=self.env, check=False)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(said, result.stdout)
+                self.assertEqual(device_json.read_text(), before)
+
     def test_versions_rollback_and_pruning(self):
         home = self.fresh_home("versions")
         lib = home / ".local/lib/speakerd"
@@ -778,6 +811,43 @@ class Install(Setup):
                                  r"\*\*\* names plugins the current version lacks: \S*firConv_headless \S*crossover_headless: "
                                  r"speakerd plays the next layer \*\*\*$")
         self.assertRegex(status, r"(?m)^  factory\.json: revision 1, 1 plugin node\(s\): loudness_headless$")
+
+    def test_refuses_a_factory_that_is_not_a_graph_document(self):
+        """A --factory file, or a kept factory.json, that `setup-helper.py graph` refuses (here a
+        connection to node 99, which the document lacks) is refused before anything changes;
+        status marks such a layer with the helper's reason."""
+        home = self.fresh_home("broken-factory")
+        state = home / ".local/state/speakerd"
+        self.install(home, "--role", "left", "--factory", self.factory)
+        broken = dict(DOCUMENT, connections=DOCUMENT["connections"] + [
+            {"src": {"node": 99, "channel": 0}, "dst": {"node": DOCUMENT["nodes"][0]["uid"], "channel": 0}}])
+        broken_file = self.tmp / "broken-factory.json"
+        broken_file.write_text(json.dumps(broken))
+        reason = "a connection names node 99, which is not in the document"
+
+        before = snapshot(home)
+        result = self.install(home, "--factory", broken_file, check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(reason, result.stdout)
+        self.assertIn("refusing this factory chain", result.stdout)
+        self.assertEqual(snapshot(home), before, "a refused --factory file changed the home")
+        self.assertEqual(json.loads((state / "factory.json").read_text()), DOCUMENT)
+
+        (state / "factory.json").write_text(json.dumps(broken))
+        before = snapshot(home)
+        for what, result in (("install", self.install(home, check=False)),
+                             ("check", firmware("speakerd-setup.sh", "check", "--bundle", self.bundle, "--home", home,
+                                                "--no-systemd", "--amplifier", "amplifier", env=self.env,
+                                                check=False))):
+            with self.subTest(what):
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertIn("the factory.json there is (kept) is refused", result.stdout)
+                self.assertIn("replace it with --factory or --import-filtergraph", result.stdout)
+                self.assertEqual(snapshot(home), before, f"{what} changed the home")
+        self.assertEqual(json.loads((state / "factory.json").read_text()), broken)
+        status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
+        self.assertRegex(status, rf"(?m)^  factory\.json: \*\*\* \S*factory\.json: {reason} \*\*\*$")
 
     def test_names_a_bundle_shadowed_by_a_system_lv2_folder(self):
         # lilv keeps the first bundle of a URI unless a later one is newer: a system copy of the
@@ -1593,6 +1663,7 @@ class Systemd(Setup):
         print(f"\n  limits: {(d / 'before').read_text().strip()}")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("speakerd ended", (d / "before").read_text())
+        self.assertEqual(json.loads(device_json.read_text())["limits"], {"gain_db": -30.0, "tweeter": "muted"})
 
         # rollback keeps device.json's limits, as an install does.
         device = json.loads(device_json.read_text())

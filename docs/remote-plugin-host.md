@@ -402,9 +402,9 @@ speaker in place of AudioPluginHost:
   unwrapped into the plugin's own, and with `--prefer-headless` a complete or control build
   becomes its headless sibling. Anything that does not map (another format, MIDI, a channel the
   amplifier does not have), and a control build (an editor that passes the stream through),
-  fails with the reason. Rendered, an imported
-  session gives exactly what the same settings given as parameter values give, so "the same
-  sound as today" is a document `speakerd` can play.
+  fails with the reason. Rendered, an imported session gives exactly what the same settings
+  given as parameter values give, so "the same sound as today" is a document `speakerd` can
+  play.
 - **Installed on a board by `firmware/`.** `firmware/speakerd-setup.sh` installs a bundle (the
   aarch64 `speakerd`, the plugins, the installer) into a versioned folder of the audio user's
   home with a `current` and a `previous` link for rollback, runs `speakerd` as a systemd user
@@ -1437,12 +1437,13 @@ A **parameter** arrives from a controller (TCP, or OSC with a valid token); the 
 next `seq`, applies it to its own document, sends it to its own `speakerd` over the local link
 and to every agent over TCP (agents get no OSC), echoes it to every controller (over OSC to the
 ones that gave an `osc_port`, with that connection's token), and schedules the persistence of
-`graph.json`. A **proposal** of a revision takes the hub's one revision lock; the hub checks that
-the base is its revision, that the document parses, and that every plugin in it is in the
+`graph.json`. A **proposal** of a revision takes the hub's one revision lock; the hub checks
+that the base is its revision, that the document parses, and that every plugin in it is in the
 catalogue; then it sends `apply` to its own `speakerd` and to every agent that is online, waits
-for their answers (10 s each), and answers `applied` when all of them did, or `rejected` with the first failure's reason, after sending the previous revision back to
-the speakers that had applied the new one. A speaker that was offline catches up when its agent
-reconnects: the hub sends it the current revision and its values.
+for their answers (10 s each), and answers `applied` when all of them did, or `rejected` with
+the first failure's reason, after sending the previous revision back to the speakers that had
+applied the new one. A speaker that was offline catches up when its agent reconnects: the hub
+sends it the current revision and its values.
 
 ### 10.5 The controller: UI, model, bridge
 
@@ -1594,8 +1595,9 @@ And the flow with nobody there, a speaker booting with no network: systemd start
 `speakerd-run`, which reads the history of starts and exits and picks the layer; `speakerd`
 reads `device.json`, tries `graph.json`, then `graph.lkg.json`, then `factory.json`, then plays
 passthrough; it creates its node, links to the amplifier when its ports appear, and fades in
-once every link is active. `ampd` starts after it, connects to the socket, reads the `hello` and follows the revision `speakerd`
-plays. Nothing in that sequence waits for the network, the hub or the controller.
+once every link is active. `ampd` starts after it, connects to the socket, reads the `hello`
+and follows the revision `speakerd` plays. Nothing in that sequence waits for the network, the
+hub or the controller.
 
 ### 10.8 Where safety lives
 

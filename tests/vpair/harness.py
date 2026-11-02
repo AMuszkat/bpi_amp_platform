@@ -1894,9 +1894,9 @@ class StandInPair:
     revision_document() makes them). Entering waits until the agent has said hello to the hub
     and the hub has caught it up."""
 
-    def __init__(self, tmp, documents, ampd_args=(), control=None, limits=None, secret=TEST_SECRET):
+    def __init__(self, tmp, documents, ampd_args=(), control=None, secret=TEST_SECRET):
         self.tmp, self.documents, self.ampd_args = Path(tmp), documents, ampd_args
-        self.limits, self.secret = limits or {}, secret
+        self.secret = secret
         self.control = control or {}
         self.env, self.state, self.sd, self.ampd = {}, {}, {}, {}
         self._stack = None
@@ -1910,7 +1910,7 @@ class StandInPair:
                 run.mkdir(parents=True, exist_ok=True)
                 self.env[name] = dict(os.environ, XDG_RUNTIME_DIR=str(run))
                 self.state[name] = state_dir(self.tmp / name / "state", role=name, current=self.documents.get(name),
-                                             limits=self.limits.get(name, TWEETER_MUTED))
+                                             limits=TWEETER_MUTED)
                 self.sd[name] = self._stack.enter_context(
                     StandInSpeakerd(self.env[name], self.state[name], self.control.get(name)))
             for name in ("left", "right"):
