@@ -29,7 +29,7 @@ namespace speakerd
     }
 
     LoadedLayer loadFirstWorkingLayer (const juce::File& stateDir, GraphBuilder& builder, Role role,
-                                       const TweeterRule& tweeterRule, double sampleRate, int maxBlock,
+                                       double sampleRate, int maxBlock,
                                        const juce::String& firstLayer)
     {
         const auto first = juce::jmax (0, layerNames().indexOf (firstLayer));
@@ -63,23 +63,12 @@ namespace speakerd
                 continue;
             }
 
-            // A tweeter that plays only ever gets a crossover's high band.
-            juce::StringArray ruleWarnings;
-            if (const auto r = tweeterRule.check (doc, ruleWarnings); r.failed())
-            {
-                log (prefix + "FAILED: " + r.getErrorMessage());
-                continue;
-            }
-
             LoadedLayer loaded;
             if (const auto r = builder.build (doc, sampleRate, maxBlock, loaded.built); r.failed())
             {
                 log (prefix + "FAILED: " + r.getErrorMessage());
                 continue;
             }
-
-            for (const auto& warning : ruleWarnings)
-                log (prefix + "warning: " + warning);
 
             for (const auto& warning : loaded.built.warnings)
                 log (prefix + "warning: " + warning);
