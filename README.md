@@ -1,6 +1,6 @@
 # BPI AMP Platform
 
-![The BPI AMP Platform: a phone and the controller on a laptop, the Wi-Fi, and speaker 1 and speaker 2, each a board running DSP plugins and driving a loudspeaker](docs/images/hero.png)
+![The BPI AMP Platform: a phone and the controller on a laptop, the Wi-Fi, and speaker 1 and speaker 2, each a board running JUCE DSP plugins and driving a loudspeaker](docs/images/hero.png)
 
 A Linux audio streaming platform for **custom loudspeaker tuning**. Each speaker is a
 BananaPi BPI-CM4 module on the two boards of this repository. It receives music over the

@@ -178,10 +178,10 @@ def pcb(x, y):
 
 
 def dsp_card(x, y, w=232):
-    """The DSP plugins a speaker runs, as three generic blocks: an EQ, a filter, a dynamics curve."""
+    """The DSP plugins a speaker runs, as three generic blocks (an EQ, a filter, a dynamics curve), built with JUCE."""
     h = 88
     o = f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{CARD}" stroke="{INK}" stroke-width="1"/>\n'
-    o += text(x + 12, y + 20, "DSP PLUGINS", 9.5, MUTED, mono=True, weight=600, spacing="0.14em")
+    o += text(x + 12, y + 20, "JUCE DSP PLUGINS", 9.5, MUTED, mono=True, weight=600, spacing="0.14em")
     bw, gap = (w - 24 - 2 * 14) / 3, 14
     curves = (
         lambda bx, by: f"M{bx+6} {by+22} C{bx+18} {by+22} {bx+20} {by+8} {bx+bw/2} {by+8} C{bx+bw-20} {by+8} {bx+bw-18} {by+26} {bx+bw-6} {by+26}",
@@ -269,7 +269,7 @@ def scene():
     # captions
     o += caption(300, 838, "YOUR MUSIC", "Play from a phone or a computer, as always")
     o += caption(760, 838, "OVER THE NETWORK", "Snapcast or AirPlay carry it to both speakers")
-    o += caption(1254, 838, "IN EACH SPEAKER", "A Linux board runs your DSP plugins")
+    o += caption(1254, 838, "IN EACH SPEAKER", "A Linux board runs your JUCE DSP plugins")
     return o
 
 
