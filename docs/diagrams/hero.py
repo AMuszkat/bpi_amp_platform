@@ -4,9 +4,10 @@
     python3 docs/diagrams/hero.py && node docs/diagrams/render.js hero
 
 Writes docs/diagrams/hero.html, an inline SVG that render.js turns into docs/images/hero.png.
-A phone and a laptop on the left (the laptop runs the controller), the Wi-Fi in the middle, two
-speakers on the right, one of them opened to show the boards of this repository and the plugin
-chain speakerd runs on them. Same type as the diagrams (IBM Plex Serif and Mono, from
+A phone and a laptop on the left (the laptop runs the controller), the Wi-Fi in the middle, and
+on the right two speakers, speaker 1 and speaker 2: each the board of this repository, the DSP
+plugins it runs and a small loudspeaker beside it. No plugin is named: any DSP plugin runs there.
+Same type as the diagrams (IBM Plex Serif and Mono, from
 diagrams.py), on paper, with the audio blue and the settings orange a little softer than the diagrams'.
 """
 import math
@@ -72,9 +73,9 @@ def laptop(x, y):
     cx, cy = x + 12, y + 12
     o += f'<rect x="{cx}" y="{cy}" width="{sw-24}" height="22" fill="#E3E8EE"/>\n'
     o += text(cx + 10, cy + 15, "BPI Controller", 10, INK, mono=True, weight=600)
-    o += text(cx + 120, cy + 15, "revision 14 from hub left", 9.5, "#515C6F", mono=True)
-    nodes = [(cx + 14, cy + 48, 62, "Stream in"), (cx + 96, cy + 48, 62, "firConv"),
-             (cx + 178, cy + 48, 66, "crossover"), (cx + 96, cy + 110, 62, "loudness"),
+    o += text(cx + 120, cy + 15, "2 speakers online", 9.5, "#515C6F", mono=True)
+    nodes = [(cx + 14, cy + 48, 62, "Stream in"), (cx + 96, cy + 48, 62, "DSP plugin"),
+             (cx + 178, cy + 48, 66, "DSP plugin"), (cx + 96, cy + 110, 62, "DSP plugin"),
              (cx + 178, cy + 150, 78, "Amplifier out")]
     for nx, ny, nw, name in nodes:
         o += f'<rect x="{nx}" y="{ny}" width="{nw}" height="30" rx="3" fill="#E3E8EE" stroke="{INK}" stroke-width="1"/>\n'
@@ -92,7 +93,7 @@ def laptop(x, y):
     # the speakers panel
     px0 = cx + 272
     o += f'<rect x="{px0}" y="{cy+22}" width="{sw-24-272}" height="{sh-24-22}" fill="#E3E8EE"/>\n'
-    for i, (name, lvl) in enumerate((("left", 0.72), ("right", 0.66))):
+    for i, (name, lvl) in enumerate((("speaker 1", 0.72), ("speaker 2", 0.66))):
         py = cy + 40 + i * 80
         o += f'<circle cx="{px0+12}" cy="{py+5}" r="4" fill="#5FB08A"/>\n'
         o += text(px0 + 22, py + 9, name, 10, INK, mono=True, weight=600)
@@ -129,20 +130,16 @@ def wave(x1, x2, y, amp, periods, width=6, color=BLUE, opacity=1):
             f'stroke-linecap="round" stroke-linejoin="round" opacity="{opacity}"/>\n')
 
 
-def speaker(x, y, name):
-    w, h = 170, 500
-    o = f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="16" fill="{CABINET}" stroke="{INK}" stroke-width="1.5"/>\n'
-    o += f'<rect x="{x+12}" y="{y+12}" width="{w-24}" height="{h-24}" rx="10" fill="{BAFFLE}"/>\n'
-    # tweeter
-    tx, ty = x + w / 2, y + 90
-    o += f'<circle cx="{tx}" cy="{ty}" r="26" fill="{CONE}" stroke="{ORANGE}" stroke-width="2.5"/>\n'
-    o += f'<circle cx="{tx}" cy="{ty}" r="10" fill="{ORANGE}"/>\n'
-    # woofer
-    wx, wy = x + w / 2, y + 250
-    o += f'<circle cx="{wx}" cy="{wy}" r="62" fill="{CONE}" stroke="{BLUE}" stroke-width="3"/>\n'
-    o += f'<circle cx="{wx}" cy="{wy}" r="44" fill="{BAFFLE}"/>\n'
-    o += f'<circle cx="{wx}" cy="{wy}" r="16" fill="{BLUE}"/>\n'
-    o += text(x + w / 2, y + h - 30, name, 13, MUTED, mono=True, weight=600, anchor="middle", spacing="0.16em")
+def loudspeaker(x, y, size=1.0):
+    """The loudspeaker symbol: a magnet and a cone, with sound coming out of it."""
+    def p(px_, py_):
+        return f"{x + px_ * size:.1f} {y + py_ * size:.1f}"
+    o = (f'<path d="M{p(0, -12)} L{p(12, -12)} L{p(12, 12)} L{p(0, 12)} Z" fill="{DEEP}"/>\n'
+         f'<path d="M{p(12, -12)} L{p(32, -30)} L{p(32, 30)} L{p(12, 12)} Z" fill="{CONE}" stroke="{DEEP}" '
+         f'stroke-width="{2 * size:.1f}" stroke-linejoin="round"/>\n')
+    for r, op in ((14, 0.9), (26, 0.6), (38, 0.35)):
+        o += (f'<path d="M{p(40 + r * 0.25, -r * 0.8)} A{r * size:.1f} {r * size:.1f} 0 0 1 {p(40 + r * 0.25, r * 0.8)}" '
+              f'fill="none" stroke="{BLUE}" stroke-width="{2.5 * size:.1f}" stroke-linecap="round" opacity="{op}"/>\n')
     return o
 
 
@@ -180,23 +177,41 @@ def pcb(x, y):
     return o
 
 
-def dsp_card(x, y):
-    w, h = 260, 96
+def dsp_card(x, y, w=232):
+    """The DSP plugins a speaker runs, as three generic blocks: an EQ, a filter, a dynamics curve."""
+    h = 88
     o = f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{CARD}" stroke="{INK}" stroke-width="1"/>\n'
-    o += text(x + 14, y + 22, "SPEAKERD · THE PLUGIN GRAPH", 9.5, MUTED, mono=True,
-              weight=600, spacing="0.12em")
-    chain = (("firConv", BLUE_DIM), ("crossover", BLUE_DIM), ("loudness", BLUE_DIM))
-    bx = x + 14
-    for i, (name, c) in enumerate(chain):
-        bw = 70
-        o += f'<rect x="{bx}" y="{y+38}" width="{bw}" height="34" rx="3" fill="{c}"/>\n'
-        o += text(bx + bw / 2, y + 60, name, 10.5, PAPER, mono=True, weight=600, anchor="middle")
+    o += text(x + 12, y + 20, "DSP PLUGINS", 9.5, MUTED, mono=True, weight=600, spacing="0.14em")
+    bw, gap = (w - 24 - 2 * 14) / 3, 14
+    curves = (
+        lambda bx, by: f"M{bx+6} {by+22} C{bx+18} {by+22} {bx+20} {by+8} {bx+bw/2} {by+8} C{bx+bw-20} {by+8} {bx+bw-18} {by+26} {bx+bw-6} {by+26}",
+        lambda bx, by: f"M{bx+6} {by+10} L{bx+bw/2-4} {by+10} C{bx+bw/2+6} {by+10} {bx+bw/2+8} {by+28} {bx+bw-6} {by+28}",
+        lambda bx, by: f"M{bx+6} {by+28} L{bx+bw/2} {by+14} L{bx+bw-6} {by+10}",
+    )
+    bx = x + 12
+    for i, curve in enumerate(curves):
+        by = y + 34
+        o += f'<rect x="{bx:.1f}" y="{by}" width="{bw:.1f}" height="38" rx="3" fill="{BLUE_DIM}"/>\n'
+        o += f'<path d="{curve(bx, by)}" fill="none" stroke="{PAPER}" stroke-width="2" stroke-linecap="round"/>\n'
         if i < 2:
-            o += f'<path d="M{bx+bw} {y+55} L{bx+bw+16} {y+55}" stroke="{INK}" stroke-width="2"/>\n'
-            o += f'<path d="M{bx+bw+10} {y+50} L{bx+bw+17} {y+55} L{bx+bw+10} {y+60} Z" fill="{INK}"/>\n'
-        bx += bw + 16
-    o += wave(x + 14, x + 84, y + 84, 3, 4, width=1.5, color=INK)
-    o += wave(x + 176, x + 246, y + 84, 3, 2.2, width=1.5, color=INK)
+            o += f'<path d="M{bx+bw:.1f} {by+19} L{bx+bw+gap-3:.1f} {by+19}" stroke="{INK}" stroke-width="1.5"/>\n'
+        bx += bw + gap
+    return o
+
+
+def speaker_unit(x, y, number):
+    """One speaker: its frame and name, the DSP plugins, the board, and the loudspeaker it drives."""
+    w, h = 272, 412
+    o = (f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="18" fill="#FFFFFF" fill-opacity="0.55" '
+         f'stroke="{INK}" stroke-width="1.2"/>\n')
+    o += text(x + 20, y + 30, f"SPEAKER {number}", 13, INK, mono=True, weight=600, spacing="0.16em")
+    o += dsp_card(x + 20, y + 48, w - 40)
+    bx, by, scale = x + 20, y + 156, 0.8
+    o += f'<g transform="translate({bx} {by}) scale({scale})">\n' + pcb(0, 0) + '</g>\n'
+    # the board's outputs to the loudspeaker
+    sx, sy = x + w - 58, by + 150
+    o += (f'<path d="M{bx + 220 * scale:.1f} {sy} L{sx} {sy}" fill="none" stroke="{BLUE_DIM}" stroke-width="2"/>\n')
+    o += loudspeaker(sx, sy, 0.95)
     return o
 
 
@@ -228,8 +243,8 @@ def scene():
               20, MUTED, italic=True)
 
     # the music: out of the phone, across the picture, into the speakers (drawn first: it passes behind them)
-    o += wave(270, 1030, 470, 34, 5.5, width=7, color=BLUE, opacity=0.18)
-    o += wave(270, 1030, 470, 26, 5.5, width=4.5, color=BLUE)
+    o += wave(270, 970, 470, 34, 5.0, width=7, color=BLUE, opacity=0.18)
+    o += wave(270, 970, 470, 26, 5.0, width=4.5, color=BLUE)
     o += text(620, 545, "the music, to both speakers in sync", 15, MUTED, italic=True)
 
     # sources
@@ -240,27 +255,21 @@ def scene():
     o += wifi(760, 370)
     o += text(760, 412, "WI-FI", 11.5, MUTED, mono=True, weight=600, anchor="middle", spacing="0.16em")
     # settings: the controller to the plugin graph
-    o += (f'<path d="M496 486 C 560 180, 900 200, 1136 215" fill="none" stroke="{ORANGE}" stroke-width="2.5" '
+    o += (f'<path d="M496 486 C 560 200, 850 200, 980 222" fill="none" stroke="{ORANGE}" stroke-width="2.5" '
           f'stroke-dasharray="10 8" stroke-linecap="round"/>\n')
-    o += arrow_head(1142, 215, 2, ORANGE, 16)
+    o += arrow_head(986, 223, 9, ORANGE, 16)
     o += text(590, 196, "settings and knobs, within milliseconds", 15, ORANGE, italic=True)
 
-    # speakers, and between them what is inside each: the boards and the plugin graph
-    o += speaker(980, 240, "LEFT")
-    o += speaker(1400, 240, "RIGHT")
-    o += dsp_card(1145, 170)
-    o += pcb(1165, 400)
-    o += text(1275, 716, "the boards of this repository", 13, MUTED, italic=True, anchor="middle")
-    o += text(1275, 734, "BPI-CM4 · two MAX98397 amplifiers", 10.5, MUTED, mono=True, anchor="middle")
-    # sound out of the right speaker
-    for r, op in ((26, 0.9), (44, 0.6), (62, 0.35)):
-        o += (f'<path d="M{1582} {490-r*0.7:.1f} A{r} {r} 0 0 1 {1582} {490+r*0.7:.1f}" fill="none" '
-              f'stroke="{MUTED}" stroke-width="2.5" stroke-linecap="round" opacity="{op}"/>\n')
+    # the two speakers, each a board with its DSP plugins and a loudspeaker
+    o += speaker_unit(968, 214, 1)
+    o += speaker_unit(1268, 214, 2)
+    o += text(1254, 656, "the boards of this repository: BPI-CM4 · two MAX98397 amplifiers", 12, MUTED,
+              mono=True, anchor="middle")
 
     # captions
     o += caption(300, 838, "YOUR MUSIC", "Play from a phone or a computer, as always")
     o += caption(760, 838, "OVER THE NETWORK", "Snapcast or AirPlay carry it to both speakers")
-    o += caption(1275, 838, "IN EACH SPEAKER", "A Linux board runs the crossover, correction and loudness")
+    o += caption(1254, 838, "IN EACH SPEAKER", "A Linux board runs your DSP plugins")
     return o
 
 
