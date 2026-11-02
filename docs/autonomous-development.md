@@ -99,11 +99,11 @@ flowchart TB
 
 Each area agent updates the documents its change affects in the same commit and ends its
 report with its documentation impact. The rules in the `CLAUDE.md` files and everything in
-`.claude/` stay the person's. While working, an agent builds what it changed and runs only
-the scenario that covers it; the full suite runs once, on the merged branch, before the push.
+`.claude/` stay the person's. While working, an agent runs only the check that covers its
+change; the levels run once, on the merged branch, before the push.
 
 Skills are the verbs, each a `SKILL.md` with the script it runs in `tools/`, so no agent
-improvises a `pw-cli` or `ssh` line: `/build`, `/test` (`unit`, `vpair`, `all`, `affected`),
+improvises a `pw-cli` or `ssh` line: `/build`, `/test` (the checks, and the levels `unit`, `vpair`, `all`),
 `/vpair`, `/pw-inspect`, `/board`, `/juce`, `/render`, `/roadmap`. Planned and not built:
 `/measure` (a capture against the expected response) and `/release` (the plugin catalogue).
 
@@ -117,10 +117,9 @@ flowchart LR
     pre --> post
 ```
 
-No hook runs tests. `/test` records each run in `tests/.status/<commit>.json`, and
-`tools/status.py gate` says whether a commit is green, in full (both levels on a clean tree) or
-by an affected run (`/test affected`: only the level 2 modules that cover the files changed since
-a commit green in full, by `tests/impact.json`). Nothing enforces it.
+No hook runs tests. `/test` records each level's run in `tests/.status/<commit>.json`, and
+`tools/status.py gate` says whether a commit is green: both levels on a clean tree. Nothing
+enforces it.
 
 ## 4. The tests
 
@@ -149,7 +148,8 @@ Two plugin tests are standalone: firConv's response test and the level-matched b
 
 **Level 2** is the virtual pair's scenarios, one Python module each in `tests/vpair/`. Each
 module's docstring says exactly what it proves and the thresholds it uses; the README there
-lists them. In short:
+lists them. The checks of `tools/test.sh` run them a few at a time (`speakerd`, `ampd`,
+`pair`, `controller`, `installers`, `chain`); in short:
 
 | Scenarios | Prove that |
 |---|---|

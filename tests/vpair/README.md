@@ -21,8 +21,10 @@ monitor, which is exactly what the MAX98397s would have received.
 ## Running
 
 ```bash
-python3 -m unittest discover -s tests/vpair -v     # or tools/test.sh vpair, which records the result
-python3 -m unittest -v tests.vpair.test_passthrough_safety    # one module, from the repository root
+tools/test.sh speakerd | ampd | pair | controller | installers | chain   # a check: a few modules
+tools/test.sh module passthrough_safety                                  # one module, or several
+tools/test.sh vpair                  # every module (level 2), recording the result; or
+python3 -m unittest discover -s tests/vpair -v
 ```
 
 `tools/test.sh vpair` records `vpair: pass` or `fail` in the test status, with a note

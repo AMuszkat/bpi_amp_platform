@@ -1,50 +1,45 @@
 ---
 name: test
-description: Run the remote plugin host's tests and record the result (tools/status.py). `/test unit` runs plugin-check on every plugin that builds control and headless targets, the build identity checks, the block FIR test (x86_64 and aarch64 under qemu), the plugin-versions test, the controller's test and the test of tools/status.py and the lab lock (level 1); `/test vpair` runs the virtual pair tests (level 2); `/test all` runs both; `/test affected` runs only the virtual pair tests that cover the files changed since the last commit green in full, and refuses when a changed file needs both levels. Use before any deploy, after changing a plugin, speakerd, ampd or tests/vpair, and whenever asked whether the build is green.
+description: Run the tests. Checks are focused and take minutes: `/test plugin <name>`, `plugins`, `speakerd`, `ampd`, `pair`, `controller`, `installers`, `chain`, `tools`, `module <name>...`, and `/test changed` runs the checks that cover the files changed. The levels are end to end and run only when asked and before a push: `/test unit` (level 1: every plugin-check, the aarch64 build, the block FIR under qemu, the controller, the tools), `/test vpair` (level 2: every virtual pair scenario), `/test all` (both; what CI runs). Use a check after changing a plugin, speakerd, ampd, the controller, an installer or a scenario; the levels before a push, or when asked whether the build is green.
 ---
 
 # /test
 
 ```
-tools/test.sh unit | vpair | all | affected
+tools/test.sh <check> [args]      minutes: while working (several: tools/test.sh speakerd installers)
+tools/test.sh changed [REF]       the checks that cover the files changed since REF
+tools/test.sh unit | vpair | all  the levels, end to end: when asked, and before a push
 ```
 
 Runs from the repository root, in the development container when Podman is installed
-(`tools/container.sh`), natively with `BPI_CONTAINER=0`. Every run records its result for the current commit with
-`tools/status.py`, in `tests/.status/<commit>.json`. `tools/status.py gate` says whether a
-commit is green: `unit` and `vpair` both `pass` on a clean tree, or a passing `affected` run
-that covers what changed since a commit green in full. Nothing enforces it before a deploy
-(2026-11-02, the person's decision).
+(`tools/container.sh`), natively with `BPI_CONTAINER=0`.
 
-| Level | What runs | Natively, needs |
+| Check | What runs | Takes |
 |---|---|---|
-| `unit` | `dsp/juce_apps/plugin-check/run.sh <plugin>` for each plugin whose `CMakeLists.txt` lists `TARGETS`, and `tests/buildinfo/check.sh` on the bundles it built; `tools/build.sh loudness aarch64 headless` and the same check on it and its copy; `dsp/juce_plugins/tests/blockfir/run.sh`; `dsp/juce_plugins/tests/plugin-versions/run.sh`; the controller's `tests/run.sh` | the JUCE build packages; Xvfb and openbox for the editor check, else it is skipped; for the aarch64 half, which fails without them, the cross compiler, `qemu-user-static` and the `:arm64` libraries of `dsp/juce_plugins/tools/Containerfile`. The JUCE install is made on first use |
-| `vpair` | `python3 -m unittest discover -s tests/vpair` | `pipewire`, `wireplumber`, `dbus`, `python3-numpy` |
-| `affected` | the `tests/vpair` modules `tools/status.py plan` names; nothing of `unit` | as `vpair` |
+| `plugin <name>` | `plugin-check/run.sh <name>`: the plugin's three builds fit together; its bundles' build identity | 2 to 3 min |
+| `plugins` | `plugin <name>` for every plugin with three targets, the block FIR test, the plugin-versions test | 10 min |
+| `speakerd` | the `speakerd_*` scenarios, `audio_path`, `passthrough_safety`: speakerd alone on the virtual pair | 1.5 min |
+| `ampd` | `ampd_protocol`, `two_controllers`: ampd against a stand-in speakerd, no audio | 1.5 min |
+| `pair` | `knob_latency`, `graph_edit`, `hub_down`, `drag_during_revision`, `ampd_restart`, `ampd_persistence`, `meter_values`, `monitor_fanout`, `board_cpu` | 3.5 min |
+| `controller` | the controller built, its tests against the fake hub, `controller_end_to_end` | 2 min |
+| `installers` | `firmware_speakerd_install`, `firmware_ampd_install`, `speakerd_installed`, `speakerd_crash_restart` | 2.5 min |
+| `chain` | `chain_cost`, `plugin_identity`: the board's chain | 0.5 min |
+| `tools` | `tools/tests/`: status.py, impact.py, the hook's lab lock | seconds |
+| `module <name>...` | the named scenarios of `tests/vpair` | |
 
-The container has all of them. `unit` also runs `tools/tests/test_status_gate.py`, the test of
-`tools/status.py` and of the hook's lab lock.
+`changed` asks `tools/impact.py`, which maps the files changed (uncommitted, untracked, and
+since the merge base with `develop` when on a branch; `REF` instead) to checks through
+`tests/impact.json`: a changed plugin runs its own check, a scenario runs itself and what
+imports it. A file no rule names is printed: only the levels cover it.
 
-**`affected`** is for a fix on top of a commit green in full, typically one found at the
-bench: an installer, the board script, a test module, the documentation. `tools/status.py plan`
-finds the nearest commit green in full among HEAD and its ancestors (the base), lists the
-files changed since (in the working tree, untracked ones included) and looks each one up in
-the base's `tests/impact.json`: the first rule that matches says which test modules run again
-(`self` is a changed test module itself; a module that imports one that runs runs too). A
-file that no rule names (the plugins, `speakerd`, the controller, `ampd.py`,
-the harness, the build and test tools, the gate, the map itself, CI) needs both levels:
-`affected` names it and stops, recording nothing. Otherwise it runs those modules, or nothing
-when only documentation changed, and records `affected`, its base and what ran. No part of
-`unit` runs: what `unit` covers always needs the full run. The gate does not take the record's
-word for what changed or what had to run: it recomputes the files changed between the base and
-HEAD, and the modules they need, from git and the base's map. A full run that failed on a clean
-tree, on HEAD or since the base, bars an affected run until a full run passes. The base must be
-green in full, not by an affected run, so fixes add up against the same base until the next
-full run.
+The levels: `unit` is every `plugin` check plus the aarch64 build identity, the block FIR
+under qemu, the plugin-versions test, `controller` and `tools`; `vpair` is every scenario
+of `tests/vpair`. Each records its result for the commit with `tools/status.py`
+(`tests/.status/<commit>.json`; `--no-record` not to); `tools/status.py gate` says whether
+a commit is green: both on a clean tree. Nothing enforces it.
 
-Read the report, not just the exit status. `vpair` writes a `vpair_note` into the status
-file: how many tests ran, which failed and which were skipped and why, so a pass with skipped
-scenarios is visible. `unit` writes
-`dsp/juce_apps/plugin-check/build-check/<plugin>-report.txt` with one line per check, and a
-screenshot of the control editor next to it. When a check fails, quote the failing line in
-your answer and fix the cause; never mark a level as passed by hand with `tools/status.py`.
+Read the output, not just the exit status: a scenario run ends with a note (tests run,
+failed, skipped and why), and `plugin` writes
+`dsp/juce_apps/plugin-check/build-check/<name>-report.txt` with a screenshot of the control
+editor beside it. When a check fails, quote the failing line and fix the cause; never mark a
+level as passed by hand.

@@ -26,7 +26,8 @@ Rules:
   Mermaid block parsing. The rules in the `CLAUDE.md` files and `.claude/` stay the person's.
   End every report with **Documentation impact**: the documents you changed, and any you
   think another area must change.
-- Test only what you touched while you work: `/build` the target, or run the one scenario
-  that covers your change by name (`python3 -m unittest -v tests.vpair.<module>`). Never
-  run the full suite (`tools/test.sh all` or `vpair`): the orchestrator runs it once on the
-  merged branch, before the push. Say in your report which scenarios you ran.
+- Test only what you touched while you work: `/build` the target, then the check that
+  covers your change (`tools/test.sh changed`, or one by name: `speakerd`, `plugin <name>`,
+  `installers`, `module <scenario>`...). Never run the levels (`tools/test.sh all`, `unit` or
+  `vpair`): the orchestrator runs them once on the merged branch, before the push. Say in
+  your report which checks you ran.
