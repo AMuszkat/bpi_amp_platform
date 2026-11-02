@@ -20,6 +20,9 @@ Pass when:
   speakerd's render of the left's graph.json (with +6 dB) within 0.05 dB, and at least 3 dB from
   the render of revision 2's document as B sent it (0 dB).
 
+A capture an xrun broke (a 200 Hz period more than 1 dB quieter than the others) is played again,
+up to three times, and said; a period more than 1 dB louder fails at once.
+
 It needs step 3's speakerd (the local socket, 0.3.0): with an older one it fails, saying so.
 
     python3 -m unittest -v tests.vpair.test_drag_during_revision
@@ -33,12 +36,16 @@ import time
 import unittest
 from pathlib import Path
 
-from harness import (Controller, SpeakerPair, active, built, graph_document, lv2_uri, render,
+import numpy as np
+
+from harness import (RATE, Controller, SpeakerPair, active, block_levels, built, graph_document, lv2_uri, render,
                      require_speakerd_local_link, revision_document, sine_amplitudes_dbfs, state_dir, steady, tone,
                      with_plugin)
 from test_graph_edit import chained
 
 FREQ, LEVEL = 200.0, -20.0
+PERIOD = int(RATE / FREQ)    # samples of one 200 Hz period
+ATTEMPTS = 3                 # plays of a capture an xrun broke
 FLAT = {"mode": "Force 1", "s0_e0_freq": 1000.0, "s0_e0_gain": 0.0, "glide": 1.0}
 DOCUMENT = revision_document(graph_document(lv2_uri("loudness_headless"), FLAT), 1)
 
@@ -94,7 +101,23 @@ class DragDuringRevision(unittest.TestCase):
             pair.ampd["left"].wait_for("speakerd: connected", after=mark)
             time.sleep(0.5)
             x = tone(FREQ, LEVEL, 2.0)
-            live = gain_200(pair["left"].play_and_record(x, target="speakerd", record_target="amplifier"))
+            # A capture an xrun broke (a runner loaded with the other scenarios) is played again,
+            # up to three times, as in test_passthrough_safety: an xrun only makes samples
+            # quieter, so a 200 Hz period more than 1 dB louder than the others fails at once and
+            # only a quieter one is played again. A speakerd that plays the wrong gain plays it
+            # on every attempt, and fails the comparison below.
+            for attempt in range(1, ATTEMPTS + 1):
+                capture = pair["left"].play_and_record(x, target="speakerd", record_target="amplifier")
+                part = steady(active(capture)[:, 0])
+                blocks = block_levels(part[:len(part) // PERIOD * PERIOD], PERIOD / RATE)
+                self.assertLess(float(np.max(blocks - np.median(blocks))), 1.0,
+                                f"attempt {attempt}: a 200 Hz period is louder than the others, which no xrun does")
+                worst = float(np.max(np.median(blocks) - blocks))
+                if worst < 1.0:
+                    break
+                print(f"\n  attempt {attempt}: the capture was interrupted (a 200 Hz period {worst:.1f} dB quieter "
+                      "than the others: an xrun?)" + (": playing it again" if attempt < ATTEMPTS else ""), end="")
+            live = gain_200(capture)
             kept_render, _ = render(state_dir(tmp / "ref-kept", current=with_plugin(pair.graph("left"), lv2_uri("loudness"))),
                                     x, bundles=[built("loudness", "complete")])
             sent = dict(chained(0.0), revision=2)
