@@ -27,8 +27,7 @@ person's decision): nothing checks that the commit passed the tests, so run `/te
 whenever the code changed.
 
 **The limits.** There is no output cap. A deploy keeps `device.json`'s limits, and a first
-install writes none (`"limits": { "gain_db": 0, "tweeter": "on" }`). With the tweeter on, the
-installer refuses any layer that feeds the tweeter other than through a crossover's high band.
+install writes none (`"limits": { "gain_db": 0, "tweeter": "on" }`).
 `firmware/speakerd-setup.sh limits --gain-db G --tweeter-limit muted|on` sets limits.
 
 **What stays human** (`docs/autonomous-development.md`, section 6): the first deploy of a new

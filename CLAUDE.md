@@ -35,7 +35,7 @@ plugins and drives two MAX98397 amplifiers. Two such boards make a stereo pair.
   tests before deploying all the same (`tools/test.sh all`, or `tools/test.sh affected` for a
   fix on top of a commit green in full). There is no output cap
   (2026-11-01, the person's decision): an install keeps `device.json`'s limits and writes none
-  on a first install; the tweeter rule still protects the tweeter.
+  on a first install.
 - **Real-time code never blocks:** no allocation, lock or syscall on the audio thread, in
   plugins and in `speakerd` alike.
 

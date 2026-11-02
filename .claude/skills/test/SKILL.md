@@ -31,7 +31,7 @@ finds the nearest commit green in full among HEAD and its ancestors (the base), 
 files changed since (in the working tree, untracked ones included) and looks each one up in
 the base's `tests/impact.json`: the first rule that matches says which test modules run again
 (`self` is a changed test module itself; a module that imports one that runs runs too). A
-file that no rule names (the plugins, `speakerd`, the controller, `ampd.py`, the tweeter rule,
+file that no rule names (the plugins, `speakerd`, the controller, `ampd.py`,
 the harness, the build and test tools, the gate, the map itself, CI) needs both levels:
 `affected` names it and stops, recording nothing. Otherwise it runs those modules, or nothing
 when only documentation changed, and records `affected`, its base and what ran. No part of

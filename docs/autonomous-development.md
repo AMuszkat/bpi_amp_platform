@@ -63,8 +63,7 @@ amplifier's telemetry with the expected response: that probe is planned, not bui
 |---|---|---|
 | No hostname, IP, user name or home path in a tracked file | the repository is public | the pre-edit hook and the commit check |
 | Nothing reaches a board while `.claude/lab.lock` exists | the boards may be on a bench | the pre-bash hook, `tools/board.sh` and the installers |
-| No test gate on a deploy (2026-11-02, the person's decision): run the tests before deploying, but nothing refuses a deploy | the person deploys what they choose | nothing |
-| No output cap (2026-11-01); while the tweeter is on, only a crossover's high band reaches it | a wrong graph must not reach a tweeter | the installer, `ampd` and `speakerd` (the tweeter rule) |
+| Run the tests before deploying, but nothing refuses a deploy | the person deploys what they choose | nothing |
 | No push to `main`, no force push | agents work on branches and open pull requests | the pre-bash hook |
 | No allocation, lock or syscall on the audio thread | an xrun is a click | the reviewer |
 | No change to a board's network, Wi-Fi or boot configuration | a failed run strands the board | `/board` exposes only audio-side actions |
@@ -155,7 +154,7 @@ lists them. In short:
 | Scenarios | Prove that |
 |---|---|
 | `audio_path`, `speakerd_same_sound`, `speakerd_state_layers`, `speakerd_start_order`, `speakerd_restart`, `speakerd_second_instance`, `speakerd_quantum_change`, `passthrough_safety`, `speakerd_device_limits`, `speakerd_import` | `speakerd` plays what the complete build renders, within 0.05 dB; falls back layer by layer; survives PipeWire, amplifier and quantum changes; plays safe with nothing loaded; holds `device.json`'s limits; imports an AudioPluginHost session |
-| `knob_latency`, `graph_edit`, `hub_down`, `two_controllers`, `drag_during_revision`, `ampd_protocol`, `ampd_restart`, `ampd_persistence`, `tweeter_rule`, `speakerd_tweeter_rule` | a knob is heard on both speakers within 60 ms; an edit is applied on both or on neither; the hub's and the agent's logic follow `docs/protocol.md`, the pair's secret included; `graph.json` persists what played; the tweeter rule holds |
+| `knob_latency`, `graph_edit`, `hub_down`, `two_controllers`, `drag_during_revision`, `ampd_protocol`, `ampd_restart`, `ampd_persistence` | a knob is heard on both speakers within 60 ms; an edit is applied on both or on neither; the hub's and the agent's logic follow `docs/protocol.md`, the pair's secret included; `graph.json` persists what played |
 | `meter_values`, `monitor_fanout`, `board_cpu` | the monitors report the right levels, reach every window within 5 ms, and the board's CPU stream behaves |
 | `controller_end_to_end` | the real controller, against the real pair: connects, is heard, edits, is refused with another secret, and its GUI under Xvfb |
 | `chain_cost`, `plugin_identity` | the board's chain costs what the block FIR promises; every bundle and `speakerd` say which build they are |
