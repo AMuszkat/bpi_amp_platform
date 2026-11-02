@@ -846,7 +846,7 @@ speaker_add_plugin(loudness
 |---|---|---|---|
 | `loudness` | `SPEAKER_COMPLETE` | all | the desktop plugin host, tuning |
 | `loudness_control` | `SPEAKER_CONTROL` | `SOURCES` + `EDITOR`; `prepareToPlay`, `reset` and `processBlock` are empty stubs | compiled into the controller app |
-| `loudness_headless` | `SPEAKER_HEADLESS` | `SOURCES` + `DSP`; `hasEditor()` is false | `~/.lv2` on the speakers, hosted by `speakerd` |
+| `loudness_headless` | `SPEAKER_HEADLESS` | `SOURCES` + `DSP`; `hasEditor()` is false | the speakers, hosted by `speakerd` from the installed version's `lv2/` (`firmware/speakerd-setup.sh`); the only build a speaker runs, of every plugin |
 
 The control and headless targets get their own plugin code (the last character of `CODE`
 replaced by 1 or 2) and their own LV2 URI (`.../loudness_control`, `.../loudness_headless`), so

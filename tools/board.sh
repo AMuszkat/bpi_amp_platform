@@ -10,8 +10,12 @@
 #                                                board (reads only)
 #     tools/board.sh deploy [options]            builds the aarch64 artifacts, installs them
 #                                                (firmware/setup.sh --mode target-remote; default
-#                                                --only speakerd). Options: --role, --plugin,
-#                                                --factory, --import-filtergraph, --only, --skip, and
+#                                                --only speakerd, the plugins DEFAULT_PLUGINS of
+#                                                install-lib.sh: the headless builds). Options:
+#                                                --role, --plugin, --factory (a board whose layers
+#                                                name the complete builds needs --factory
+#                                                firmware/speakerd/factory.json), --import-filtergraph,
+#                                                --only, --skip, and
 #                                                ampd's --name, --hub, --agent, --hub-address,
 #                                                --listen; anything else is a person's, run directly
 #     tools/board.sh smoke [--window S]          checks, without a sound, that speakerd plays device.json's limits,

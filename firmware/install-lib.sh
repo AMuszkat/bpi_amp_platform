@@ -14,7 +14,9 @@
 #     VERSION                 id, git commit, dirty or not, when, architecture, contents
 #     bin/speakerd            the program (with artifacts only)
 #     lv2/<target>.lv2/       the plugin bundles speakerd is given (with artifacts only)
-#     firmware/...            the installers and the files they install, ampd among them
+#     firmware/...            the installers and the files they install: ampd, the unit, the
+#                             drop-in and firmware/speakerd/factory.json, the chain document a
+#                             first install writes as factory.json
 #     extra/...               files named on the command line (--factory)
 #
 # Nothing here builds anything: make_bundle says which tools/build.sh command makes what is
@@ -70,9 +72,12 @@ elf_machine() {   # $1 = file: x86_64, aarch64, or unknown
 # ---------------------------------------------------------------------------------------------
 # The bundle
 
-# The plugin bundles a speaker gets by default: <plugin>:<build>. Only loudness has a
-# headless build; crossover and firConv are complete builds, which speakerd hosts too.
-DEFAULT_PLUGINS=(loudness:headless crossover:complete firConv:complete)
+# The plugin bundles a speaker gets by default: <plugin>:<build>. A speaker runs the headless
+# builds (the DSP alone, no editor) of every plugin, never the complete builds: loudness,
+# crossover (from 0.0.4) and firConv (from 0.0.5) each have one, with the URI
+# <base>/<plugin>_headless. firmware/speakerd/factory.json, the chain document a first install
+# writes as factory.json, names exactly these.
+DEFAULT_PLUGINS=(loudness:headless crossover:headless firConv:headless)
 
 # Where tools/build.sh puts a build: $1 = native|aarch64, $2 = speakerd or <plugin>:<build>.
 artifact_path() {
@@ -156,7 +161,7 @@ copy_installers() {
     local to="$1"
     mkdir -p "$to/speakerd" "$to/ampd" "$to/pipewire/pipewire.conf.d"
     cp -p "$FIRMWARE_DIR"/{setup.sh,install-lib.sh,speakerd-setup.sh,snapcast-setup.sh,ampd-setup.sh} "$to/"
-    cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py,tweeter_rule.py} "$to/speakerd/"
+    cp -p "$FIRMWARE_DIR"/speakerd/{speakerd-run,speakerd.service,setup-helper.py,tweeter_rule.py,factory.json} "$to/speakerd/"
     cp -p "$FIRMWARE_DIR"/ampd/{ampd.py,ampd.service} "$to/ampd/"
     cp -p "$FIRMWARE_DIR/pipewire/pipewire.conf" "$to/pipewire/"
     cp -p "$FIRMWARE_DIR"/pipewire/pipewire.conf.d/*.conf "$to/pipewire/pipewire.conf.d/"

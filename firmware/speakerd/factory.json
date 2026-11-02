@@ -1,0 +1,30 @@
+{
+  "format": "speakerd-graph",
+  "version": 1,
+  "revision": 1,
+  "nodes": [
+    {
+      "uid": 16,
+      "name": "firConv",
+      "plugin": { "format": "LV2", "identifier": "https://github.com/AMuszkat/bpi_amp_dsp_tuning/firConv_headless" },
+      "params": { "gain": -12.0 }
+    },
+    {
+      "uid": 17,
+      "name": "crossover",
+      "plugin": { "format": "LV2", "identifier": "https://github.com/AMuszkat/bpi_amp_dsp_tuning/crossover_headless" }
+    },
+    {
+      "uid": 18,
+      "name": "loudness",
+      "plugin": { "format": "LV2", "identifier": "https://github.com/AMuszkat/bpi_amp_dsp_tuning/loudness_headless" }
+    }
+  ],
+  "connections": [
+    { "src": { "node": 1,  "channel": 2 }, "dst": { "node": 16, "channel": 0 } },
+    { "src": { "node": 16, "channel": 0 }, "dst": { "node": 17, "channel": 0 } },
+    { "src": { "node": 17, "channel": 0 }, "dst": { "node": 18, "channel": 0 } },
+    { "src": { "node": 18, "channel": 0 }, "dst": { "node": 2,  "channel": 0 } },
+    { "src": { "node": 17, "channel": 1 }, "dst": { "node": 2,  "channel": 1 } }
+  ]
+}

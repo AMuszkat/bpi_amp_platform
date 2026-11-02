@@ -12,6 +12,12 @@
 #   ~/.local/lib/speakerd/home/        speakerd's HOME: empty, so no ~/.lv2 shadows the bundles
 #   ~/.local/state/speakerd/           device.json and factory.json (graph.json and
 #                                      graph.lkg.json are ampd's, left alone)
+#
+# factory.json: --factory FILE, --import-filtergraph FILE, or, on a first install, the bundle's
+# own chain document (firmware/speakerd/factory.json: the headless builds of firConv, crossover
+# and loudness) when the bundle has every plugin it names; a reinstall keeps the one there is.
+# Every factory.json installed or kept must name only plugins of the bundle being installed:
+# speakerd could not load one that does not, and the speaker would be silent.
 #   ~/.config/systemd/user/speakerd.service
 #   ~/.config/pipewire/pipewire.conf.d/60-speakerd-sink.conf    the persistent speakerd sink
 #
@@ -138,8 +144,13 @@ Options:
   --tweeter-port <port>       the amplifier port of the tweeter (default: device.json's, else playback_FR).
                               Which port is which driver is a fact of the board's wiring: confirm it at
                               the speaker.
-  --factory <file>            a graph document (version 1) to install as factory.json. In target-remote
-                              mode a file on this machine, copied with the bundle.
+  --factory <file>            a chain document (version 1) to install as factory.json; in target-remote
+                              mode a file on this machine, copied with the bundle. It may name only
+                              plugins of the bundle (firmware/speakerd/factory.json names the headless
+                              builds; it replaces a factory.json that names the complete ones). Without
+                              it a first install writes the bundle's own copy of that file, when the
+                              bundle has every plugin it names, and a reinstall keeps the factory.json
+                              there is (refused when it names a plugin the bundle lacks).
   --import-filtergraph <file> an AudioPluginHost .filtergraph on the board: speakerd converts it into
                               factory.json (speakerd --import-filtergraph --prefer-headless --device).
   --allow-tweeter-without-crossover
@@ -169,9 +180,10 @@ Options:
 
 Examples:
   # On the development machine: build, then check on the board what install would do
-  tools/build.sh speakerd aarch64 && tools/build.sh loudness aarch64 headless
-  ./speakerd-setup.sh install --mode target-remote --target-host user@bpi-amp.local --role left \\
-      --plugin loudness:headless --import-filtergraph /home/user/session.filtergraph --dry-run
+  tools/build.sh speakerd aarch64 && for p in loudness crossover firConv; do tools/build.sh \$p aarch64 headless; done
+  ./speakerd-setup.sh install --mode target-remote --target-host user@bpi-amp.local --role left --dry-run
+  # ... and a board whose factory.json names the complete builds gets the repository's chain document:
+  ./speakerd-setup.sh install --mode target-remote --factory firmware/speakerd/factory.json
 
   # On the board, from an unpacked bundle in the home (not in a noexec /tmp)
   ./firmware/speakerd-setup.sh install --role left
@@ -303,6 +315,8 @@ PLUGIN_HOST_UNITS="$STATE/plugin-host-units"
 DROPIN_SOURCE="$FIRMWARE_DIR/pipewire/pipewire.conf.d/60-speakerd-sink.conf"
 UNIT_SOURCE="$FIRMWARE_DIR/speakerd/speakerd.service"
 AMPD_UNIT="$H/.config/systemd/user/ampd.service"
+# The bundle's own chain document, written as factory.json on a first install (see the header).
+FACTORY_SOURCE="$FIRMWARE_DIR/speakerd/factory.json"
 
 if [ -n "$FACTORY" ] && [ ! -f "$FACTORY" ]; then
     if [ -n "$BUNDLE" ] && [ -f "$BUNDLE/$FACTORY" ]; then FACTORY="$BUNDLE/$FACTORY"; else die "no factory graph $FACTORY"; fi
@@ -817,10 +831,56 @@ prepare_device() {
     info "device.json: role $role, amplifier '$amplifier' (woofer $woofer, tweeter $tweeter), limits $limits"
 }
 
-# The factory graph, converted and checked, in $WORK/factory.json (nothing written yet), or
-# none. speakerd converts a .filtergraph from the bundle, with the device.json to be.
+# The plugins a chain document names that $2 (a folder of .lv2 bundles: the bundle's lv2/, or an
+# installed version's) does not have, one URI per line; nothing when it has every one. A document
+# that cannot be read names nothing (the tweeter rule's check says what is wrong with it).
+lacking_plugins() {   # $1 = the document, $2 = the lv2 folder
+    local manifests=() m
+    for m in "$2"/*.lv2/manifest.ttl; do [ -f "$m" ] && manifests+=("$m"); done
+    helper plugins "$1" "${manifests[@]}" 2> /dev/null || true
+}
+
+# A factory.json speakerd must be able to load from this bundle: one that names a plugin the
+# bundle lacks would leave the speaker silent, so it is refused before anything changes.
+require_bundle_plugins() {   # $1 = the document, $2 = what it is, for the message
+    local lacking=()
+    mapfile -t lacking < <(lacking_plugins "$1" "$BUNDLE/lv2")
+    [ ${#lacking[@]} -gt 0 ] || return 0
+    loud "Refusing: $2 names plugins this bundle lacks, so speakerd could not load it and the speaker" \
+         "would be silent:" "${lacking[@]/#/    }" \
+         "The bundle has: $(find "$BUNDLE/lv2" -mindepth 1 -maxdepth 1 -name '*.lv2' -printf '%f ' 2> /dev/null | sed 's/ $//')" \
+         "Pass --factory FILE with a chain document that names the bundle's plugins (firmware/speakerd/factory.json" \
+         "names the headless builds: --factory firmware/speakerd/factory.json), or bundle the plugin named" \
+         "(--plugin <plugin>:headless; the headless build is what a speaker runs)."
+    exit 1
+}
+
+# ampd's layers, graph.json and graph.lkg.json, which load before factory.json and which this
+# installer never rewrites: when one names a plugin the bundle lacks, say what will happen.
+note_ampd_layers() {
+    local f lacking revision
+    for f in graph.json graph.lkg.json; do
+        [ -f "$STATE/$f" ] || continue
+        mapfile -t lacking < <(lacking_plugins "$STATE/$f" "$BUNDLE/lv2")
+        [ ${#lacking[@]} -gt 0 ] || continue
+        revision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("revision", 0))' "$STATE/$f" 2> /dev/null || echo '?')"
+        loud "$f (ampd's, revision $revision) names plugins this bundle lacks:" "${lacking[@]/#/    }" \
+             "speakerd will not load it: it falls back to the factory layer, ampd follows it, and revision $revision's" \
+             "settings are gone (this installer never rewrites ampd's layers). To carry them over, before this" \
+             "install: stop ampd and speakerd on both speakers, rewrite the identifiers in graph.json and" \
+             "graph.lkg.json to the headless builds' (<base>/<plugin>_headless; the parameters are the same)," \
+             "and start them again; or keep the complete builds in the bundle too (--plugin <plugin>:complete)."
+    done
+}
+
+# The factory chain, converted and checked, in $WORK/factory.json (nothing written yet), or
+# none. speakerd converts a .filtergraph from the bundle, with the device.json to be. Without
+# --factory or --import-filtergraph, the factory.json there is stays; with none, a first install
+# writes the bundle's own chain document (FACTORY_SOURCE) when the bundle has every plugin it
+# names, else speakerd plays passthrough, said loudly. Whatever is installed or kept must name only
+# plugins of the bundle (require_bundle_plugins).
 prepare_factory() {
-    local doc="$WORK/factory.json" out allow=() summary="" warning="" b bundles=()
+    local doc="$WORK/factory.json" out allow=() summary="" warning="" b bundles=() what lacking
     rm -f "$doc"
     [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ] || allow=(--allow-tweeter-without-crossover)
     if [ -n "$IMPORT_FILTERGRAPH" ]; then
@@ -833,20 +893,34 @@ prepare_factory() {
             sed 's/^/    /' "$WORK/import.err" >&2
             die "speakerd could not convert $IMPORT_FILTERGRAPH (see above)"
         fi
+        what="the converted session"
     elif [ -n "$FACTORY" ]; then
         cp "$FACTORY" "$doc"
-    else
-        if [ -f "$STATE/factory.json" ]; then
-            helper graph "$STATE/factory.json" "${allow[@]}" > /dev/null \
-                || die "the factory.json there is (kept) is refused (see above): replace it with --factory or --import-filtergraph"
-            ok "Keeping $STATE/factory.json"
-        else
-            loud "No factory graph: until there is one (--factory or --import-filtergraph), speakerd plays" \
-                 "PASSTHROUGH: the own channel to the woofer only, at -20 dB, the tweeter muted."
-        fi
+        what="the --factory document $FACTORY"
+    elif [ -f "$STATE/factory.json" ]; then
+        helper graph "$STATE/factory.json" "${allow[@]}" > /dev/null \
+            || die "the factory.json there is (kept) is refused (see above): replace it with --factory or --import-filtergraph"
+        require_bundle_plugins "$STATE/factory.json" "the factory.json there is (kept)"
+        ok "Keeping $STATE/factory.json"
         return 0
+    else
+        lacking=""
+        [ ! -f "$FACTORY_SOURCE" ] || lacking="$(lacking_plugins "$FACTORY_SOURCE" "$BUNDLE/lv2")"
+        if [ -f "$FACTORY_SOURCE" ] && [ -z "$lacking" ]; then
+            cp "$FACTORY_SOURCE" "$doc"
+            what="the bundle's chain document"
+            info "No factory.json yet: installing the bundle's chain document (firmware/speakerd/factory.json)"
+        else
+            local said=("No factory chain: until there is one (--factory or --import-filtergraph), speakerd plays"
+                        "PASSTHROUGH: the own channel to the woofer only, at -20 dB, the tweeter muted.")
+            [ -z "$lacking" ] || said+=("The bundle's own chain document (firmware/speakerd/factory.json) is not installed: it"
+                                        "names plugins this bundle lacks: $(tr '\n' ' ' <<< "$lacking")")
+            loud "${said[@]}"
+            return 0
+        fi
     fi
-    out="$(helper graph "$doc" "${allow[@]}")" || die "refusing this factory graph (see above)"
+    out="$(helper graph "$doc" "${allow[@]}")" || die "refusing this factory chain (see above)"
+    require_bundle_plugins "$doc" "$what"
     eval "$out"
     [ -z "$warning" ] || loud "$warning"
     info "factory.json: $summary"
@@ -1012,6 +1086,7 @@ do_install() {
     note_rates
     prepare_device
     prepare_factory
+    note_ampd_layers
     if [ "$DEVICE_TWEETER" = on ] && [ "$ALLOW_FULL_RANGE_TWEETER" -eq 0 ]; then check_layers refuse graph.json graph.lkg.json; fi
     [ ! -e "$LIB/home/.lv2" ] || die "$LIB/home/.lv2 exists: it would shadow the bundles. Remove it."
 
@@ -1106,11 +1181,14 @@ do_status() {
     else
         echo "  device.json: none"
     fi
-    local out
+    local out lacking
     for id in graph.json graph.lkg.json factory.json; do
-        if [ ! -f "$STATE/$id" ]; then echo "  $id: none"
-        elif out="$(helper graph "$STATE/$id" 2>&1)"; then echo "  $id: $(sed -n "s/^summary='\(.*\)'$/\1/p" <<< "$out")"
-        else echo "  $id: *** ${out#setup-helper: } ***"; fi
+        if [ ! -f "$STATE/$id" ]; then echo "  $id: none"; continue; fi
+        if out="$(helper graph "$STATE/$id" 2>&1)"; then out="$(sed -n "s/^summary='\(.*\)'$/\1/p" <<< "$out")"
+        else out="*** ${out#setup-helper: } ***"; fi
+        # A layer speakerd cannot load from the current version: it falls through to the next.
+        lacking=""; [ ! -d "$LIB/current/lv2" ] || lacking="$(lacking_plugins "$STATE/$id" "$LIB/current/lv2" | tr '\n' ' ')"
+        echo "  $id: $out${lacking:+ *** names plugins the current version lacks: ${lacking% }: speakerd plays the next layer ***}"
     done
     if [ -f "$DROPIN" ]; then echo "  sink: $DROPIN"; else echo "  sink: not configured ($DROPIN)"; fi
     read_live_sink
@@ -1295,7 +1373,7 @@ do_check() {
     choose_amplifier
     note_rates
     prepare_device
-    [ -z "$BUNDLE" ] || prepare_factory
+    [ -z "$BUNDLE" ] || { prepare_factory; note_ampd_layers; }
     read_live_sink
     case "$LIVE_SINK" in
         yes) ok "The running PipeWire has the drop-in's speakerd sink" ;;

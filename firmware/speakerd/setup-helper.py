@@ -8,6 +8,9 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
                                 [--gain-db G --tweeter-limit muted|on] [--show | --check]
     setup-helper.py graph FILE [--allow-tweeter-without-crossover]
                                                    the tweeter rule (tweeter_rule.py, beside it)
+    setup-helper.py plugins FILE [MANIFEST...]     the plugin identifiers a chain document names, one
+                                                   per line; with LV2 manifests, only those none of
+                                                   them declares (what a bundle lacks)
     setup-helper.py write FILE                     stdin to FILE, atomically
     setup-helper.py drivers PROFILER_OUTPUT DUMP   which node drives which, from pw-profiler
     setup-helper.py sink DUMP                      the live speakerd sink: the drop-in's? the default sink
@@ -584,12 +587,39 @@ def cmd_timing(args):
         print(f"warn {summary['late']} late cycle(s) before the window ({source})")
 
 
+def cmd_plugins(args):
+    """The plugin identifiers of a chain document, each once, in the order of its nodes; with
+    LV2 manifest.ttl files after it, only those that none of them declares as a subject: the
+    plugins a bundle lacks (an empty output: it has every one). A trailing slash is not a
+    difference. A manifest that cannot be read declares nothing."""
+    doc = load_json(args[0], "the graph document")
+    nodes = doc.get("nodes") if isinstance(doc, dict) else None
+    if not isinstance(nodes, list):
+        fail(f"{args[0]}: not a graph document ('nodes' is not a list)")
+    declared = set()
+    for manifest in args[1:]:
+        try:
+            with open(manifest, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        declared.update(m.rstrip("/") for m in re.findall(r"^<([^>]+)>", text, re.M))
+    named = []
+    for node in nodes:
+        plugin = node.get("plugin") if isinstance(node, dict) else None
+        identifier = str((plugin or {}).get("identifier", "") if isinstance(plugin, dict) else "").rstrip("/")
+        if identifier and identifier not in named and identifier not in declared:
+            named.append(identifier)
+    for identifier in named:
+        print(identifier)
+
+
 def cmd_write(args):
     write_atomically(args[0], sys.stdin.read())
 
 
 COMMANDS = {"amp": (cmd_amp, 1), "node": (cmd_node, 2), "device": (cmd_device, 1), "sink": (cmd_sink, 1),
-            "graph": (cmd_graph, 1), "write": (cmd_write, 1), "drivers": (cmd_drivers, 2),
+            "graph": (cmd_graph, 1), "plugins": (cmd_plugins, 1), "write": (cmd_write, 1), "drivers": (cmd_drivers, 2),
             "stream": (cmd_stream, 2), "status": (cmd_status, 1), "timing": (cmd_timing, 0)}
 
 

@@ -34,8 +34,9 @@ time a state layer, an apply or the render builds a graph, one line per plugin n
 `..., no build identity (an older build), bundle <dir>` for a bundle without buildinfo.ttl, or
 `(buildinfo.ttl unreadable)` for one it cannot read; none of these changes what it plays.
 
-The chain is chain_cost's, the board's: Mine -> loudness_headless (16) -> firConv (17) ->
-crossover (18), its bands to the woofer and the tweeter, from the bundles this test builds.
+The chain is chain_cost's, the board's: Mine -> loudness_headless (16) -> firConv_headless (17) ->
+crossover_headless (18), its bands to the woofer and the tweeter, from the headless bundles this
+test builds (what a speaker runs).
 
 Pass when:
 
@@ -46,15 +47,15 @@ Pass when:
    with git from the plugin's own SHARED (a folder not in HEAD yet the empty tree), and ends in
    `-dirty` exactly when `git status --porcelain` over the same paths prints anything; and the
    bundles loudness_headless, loudness (the complete build: all targets share the identity),
-   firConv and crossover each carry buildinfo.ttl exactly as above with that plugin's version and
-   that source id, and their manifest.ttl does not name it;
+   firConv_headless and crossover_headless each carry buildinfo.ttl exactly as above with that
+   plugin's version and that source id, and their manifest.ttl does not name it;
 2. live, on both speakers, speakerd started on the chain says exactly one first-form line for
    each of 16, 17 and 18 (its URI, the plugin's version and source id, and the bundle directory
    the test gave it), and an apply of revision 2 over the local link on the left says them once
    more, once each;
 3. `speakerd --render` of the same document says the same lines, once each;
-4. an older build: a copy of firConv's bundle with buildinfo.ttl removed (as a build from before
-   it existed), given to speakerd alone (an empty HOME and --lv2-bundle), renders
+4. an older build: a copy of firConv_headless's bundle with buildinfo.ttl removed (as a build from
+   before it existed), given to speakerd alone (an empty HOME and --lv2-bundle), renders
    firConv alone (Mine -> firConv -> the woofer) from layer current, sample for sample as the
    original bundle does, and says `plugin node 17: <URI>, no build identity (an older build),
    bundle <the copy>`; a copy whose buildinfo.ttl is cut off inside its version (half written)
@@ -99,11 +100,12 @@ IDENTIFIED = re.compile(r"^version (\S+), source (\S+), bundle (.+)$")
 UNIDENTIFIED = re.compile(r"^no build identity \((an older build|buildinfo\.ttl unreadable)\), bundle (.+)$")
 
 # The chain's nodes: (plugin, the build's LV2 target).
-CHAIN = {LOUDNESS: ("loudness", "loudness_headless"), FIRCONV: ("firConv", "firConv"),
-         CROSSOVER: ("crossover", "crossover")}
-# The bundles of part 1: target -> (plugin, built()'s kind).
+CHAIN = {LOUDNESS: ("loudness", "loudness_headless"), FIRCONV: ("firConv", "firConv_headless"),
+         CROSSOVER: ("crossover", "crossover_headless")}
+# The bundles of part 1: target -> (plugin, built()'s kind). The headless builds are what a speaker
+# runs; loudness's complete build shows that every target of a plugin shares its identity.
 BUNDLES = {"loudness_headless": ("loudness", "headless"), "loudness": ("loudness", "complete"),
-           "firConv": ("firConv", "complete"), "crossover": ("crossover", "complete")}
+           "firConv_headless": ("firConv", "headless"), "crossover_headless": ("crossover", "headless")}
 
 # firConv alone, for the older builds: Mine -> firConv (17) -> the woofer.
 FIRCONV_ALONE = {"format": "speakerd-graph", "version": 1, "revision": 1,
@@ -324,8 +326,8 @@ class PluginIdentity(unittest.TestCase):
 
     def test_4_an_older_build_and_a_broken_buildinfo(self):
         require_speakerd_local_link(self)
-        original = self.bundles["firConv"]
-        uri = lv2_uri("firConv")
+        original = self.bundles["firConv_headless"]
+        uri = URIS[FIRCONV]
 
         # A build from before buildinfo.ttl: the same bundle without it (the manifest never names it).
         older = self.tmp / "older" / original.name

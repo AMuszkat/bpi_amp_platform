@@ -16,8 +16,22 @@ stand-in board home; the board script runs with --dry-run. Nothing here reaches 
 
 Pass when:
 
-- the bundle holds bin/speakerd, lv2/loudness_headless.lv2 and a VERSION whose id is the
-  commit, "-dirty" if the tree is, and the hash of its contents;
+- the bundle holds bin/speakerd, lv2/loudness_headless.lv2, firmware/speakerd/factory.json (the
+  repository's chain document, byte for byte) and a VERSION whose id is the commit, "-dirty" if
+  the tree is, and the hash of its contents; the default plugins are the headless builds of
+  loudness, crossover and firConv (DEFAULT_PLUGINS), and a bundle of them carries exactly those;
+- the repository's chain document names only the three headless URIs, with firConv's gain at
+  -12 dB, and wires the board's chain: Mine into firConv, then the crossover, its low band through
+  loudness to the woofer and its high band to the tweeter; a first install with no --factory and no factory.json writes it when the bundle
+  has every plugin it names (said so), and with a bundle of loudness alone writes none, says
+  passthrough and names the plugins that bundle lacks;
+- a factory.json kept by an install, or a --factory file, that names a plugin the bundle lacks is
+  refused before anything changes (no version, no file of the home), naming each missing plugin
+  and --factory (firmware/speakerd/factory.json) or the headless build; check says the same;
+  ampd's graph.json and graph.lkg.json are never rewritten: install goes on and says which
+  plugins the bundle lacks for them, with their revision, that speakerd falls back to the factory
+  layer, that ampd follows it and the revision's settings are gone, and how to carry them over;
+  status marks such a layer with *** and the installed version's plugins;
 - a speakerd that cannot say its version, one older than the minimum, and one that cannot be
   executed (as from a noexec /tmp: said so) are refused by install, which installs nothing, and
   rollback refuses an older one;
@@ -351,17 +365,24 @@ def version_file(path):
     return dict(line.split("=", 1) for line in Path(path).read_text().splitlines())
 
 
+# The plugin builds the stand-in build tree has: loudness's both, and the headless builds of
+# crossover and firConv (the default bundle's: firmware/install-lib.sh, DEFAULT_PLUGINS).
+STUB_BUILDS = (("loudness", "headless"), ("loudness", "complete"), ("crossover", "headless"), ("firConv", "headless"))
+DEFAULT_PLUGINS = re.search(r"(?m)^DEFAULT_PLUGINS=\(([^)]*)\)$", (FIRMWARE / "install-lib.sh").read_text()).group(1).split()
+CHAIN_DOCUMENT = json.loads((FIRMWARE / "speakerd/factory.json").read_text())
+
+
 def stub_build_root(root):
-    """A build tree with the stand-in speakerd and the real loudness builds, for the bundle step
-    (BUILD_ROOT)."""
+    """A build tree with the stand-in speakerd and the real plugin builds of STUB_BUILDS, for the
+    bundle step (BUILD_ROOT)."""
     (root / "speakerd/speakerd_artefacts/Release").mkdir(parents=True, exist_ok=True)
     shutil.copy(stub_speakerd(), root / "speakerd/speakerd_artefacts/Release/speakerd")
-    (root / "loudness").mkdir(exist_ok=True)
-    for kind in ("headless", "complete"):
-        target = "loudness" if kind == "complete" else f"loudness_{kind}"
-        link = root / f"loudness/{target}_artefacts"
+    for plugin, kind in STUB_BUILDS:
+        (root / plugin).mkdir(exist_ok=True)
+        target = plugin if kind == "complete" else f"{plugin}_{kind}"
+        link = root / f"{plugin}/{target}_artefacts"
         if not link.exists():
-            os.symlink(built("loudness", kind).parents[2], link)
+            os.symlink(built(plugin, kind).parents[2], link)
     return root
 
 
@@ -406,8 +427,8 @@ class Setup(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        built("loudness", "headless")
-        built("loudness", "complete")
+        for plugin, kind in STUB_BUILDS:
+            built(plugin, kind)
         cls.tmp = Path(tempfile.mkdtemp(prefix="vpair-install-"))
         cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         # No PipeWire here unless a test brings one up: pw-dump fails at once.
@@ -453,13 +474,21 @@ class Install(Setup):
         super().setUpClass()
         cls.bundle2 = cls.make_bundle("two", ["loudness:headless", "loudness:complete"])
         cls.bundle3 = cls.make_bundle("three", ["loudness:complete"])
+        # A board's bundle: the default plugins, the headless builds of all three.
+        cls.board_bundle = cls.make_bundle("board", [])
 
     def test_the_bundle(self):
         files = tree(self.bundle)
         for want in ("bin/speakerd", "lv2/loudness_headless.lv2/", "VERSION",
-                     "firmware/speakerd-setup.sh", "firmware/speakerd/speakerd-run",
+                     "firmware/speakerd-setup.sh", "firmware/speakerd/speakerd-run", "firmware/speakerd/factory.json",
                      "firmware/pipewire/pipewire.conf.d/60-speakerd-sink.conf"):
             self.assertIn(want, files)
+        self.assertEqual((self.bundle / "firmware/speakerd/factory.json").read_bytes(),
+                         (FIRMWARE / "speakerd/factory.json").read_bytes())
+        # The default bundle carries the headless builds of every plugin, and nothing else.
+        self.assertEqual(DEFAULT_PLUGINS, ["loudness:headless", "crossover:headless", "firConv:headless"])
+        self.assertEqual(sorted(d.name for d in (self.board_bundle / "lv2").iterdir()),
+                         ["crossover_headless.lv2", "firConv_headless.lv2", "loudness_headless.lv2"])
         version = version_file(self.bundle / "VERSION")
         commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=FIRMWARE, capture_output=True,
                                 text=True).stdout.strip()
@@ -685,16 +714,96 @@ class Install(Setup):
         self.assertIn("systemctl --user enable --now plugin-host.service", uninstalled)
         self.assertFalse((home / ".local/state/speakerd/plugin-host-units").exists())
 
+    def test_the_bundles_chain_document(self):
+        """firmware/speakerd/factory.json is the board's chain over the headless builds, and a first
+        install writes it when the bundle has every plugin it names."""
+        chain = CHAIN_DOCUMENT
+        uris = {node["plugin"]["identifier"] for node in chain["nodes"]}
+        self.assertEqual(uris, {lv2_uri(t) for t in ("loudness_headless", "crossover_headless", "firConv_headless")})
+        firconv = [node for node in chain["nodes"] if node["plugin"]["identifier"] == lv2_uri("firConv_headless")]
+        self.assertEqual([node["params"]["gain"] for node in firconv], [-12.0])
+        tweeter_feeds = [c["src"] for c in chain["connections"] if c["dst"] == {"node": 2, "channel": 1}]
+        crossover = [node["uid"] for node in chain["nodes"] if node["plugin"]["identifier"] == lv2_uri("crossover_headless")]
+        self.assertEqual(tweeter_feeds, [{"node": crossover[0], "channel": 1}], "the crossover's high band on the tweeter")
+
+        home = self.fresh_home("chain")
+        result = self.install(home, "--role", "left", bundle=self.board_bundle)
+        self.assertIn("No factory.json yet: installing the bundle's chain document", result.stdout)
+        self.assertIn("factory.json: revision 1, 3 plugin node(s): firConv, crossover, loudness", result.stdout)
+        self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), chain)
+        self.assertNotIn("PASSTHROUGH", result.stdout)
+
+        # A bundle without the plugins it names: no chain document, passthrough said, the plugins named.
+        home = self.fresh_home("chain-lacking")
+        result = self.install(home, "--role", "left")
+        self.assertFalse((home / ".local/state/speakerd/factory.json").exists())
+        self.assertIn("PASSTHROUGH", result.stdout)
+        self.assertIn("not installed: it", result.stdout)
+        for uri in ("firConv_headless", "crossover_headless"):
+            self.assertIn(lv2_uri(uri), result.stdout)
+        self.assertNotIn(lv2_uri("loudness_headless") + " ", result.stdout + " ")
+
+    def test_refuses_a_kept_layer_naming_a_plugin_the_bundle_lacks(self):
+        """A factory.json an install keeps, or a --factory file, must name only plugins of the bundle
+        being installed: speakerd could not load it and the speaker would be silent. ampd's layers
+        are never rewritten; install says what happens to them."""
+        home = self.fresh_home("kept")
+        state = home / ".local/state/speakerd"
+        self.install(home, "--role", "left", bundle=self.board_bundle)
+        self.assertEqual(json.loads((state / "factory.json").read_text()), CHAIN_DOCUMENT)
+        before = tree(home)
+
+        def refused(result, what):
+            self.assertNotEqual(result.returncode, 0, f"{what}:\n{result.stdout}")
+            self.assertIn("names plugins this bundle lacks", result.stdout, what)
+            for uri in ("firConv_headless", "crossover_headless"):
+                self.assertIn(lv2_uri(uri), result.stdout, what)
+            self.assertNotIn(lv2_uri("loudness_headless") + "\n", result.stdout, what)
+            self.assertIn("--factory firmware/speakerd/factory.json", result.stdout, what)
+            self.assertIn(":headless", result.stdout, what)
+            self.assertEqual(tree(home), before, f"{what} changed the home")
+
+        # The loudness-only bundle keeps the board's factory.json: refused before anything changes.
+        refused(self.install(home, check=False), "the kept factory.json")
+        refused(self.install(home, "--factory", FIRMWARE / "speakerd/factory.json", check=False), "the --factory file")
+        refused(firmware("speakerd-setup.sh", "check", "--bundle", self.bundle, "--home", home, "--no-systemd",
+                         "--amplifier", "amplifier", env=self.env, check=False), "check")
+        self.assertEqual(json.loads((state / "factory.json").read_text()), CHAIN_DOCUMENT)
+
+        # ampd's graph.json names the chain (revision 31): the install goes on with a factory the
+        # bundle can load, leaves graph.json alone and says what speakerd will do with it.
+        woofer_only = json.loads(json.dumps(DOCUMENT))
+        woofer_only["connections"] = [c for c in woofer_only["connections"] if c["dst"] != {"node": 2, "channel": 1}]
+        (self.tmp / "woofer-only-kept.json").write_text(json.dumps(woofer_only))
+        revision_31 = json.dumps(dict(CHAIN_DOCUMENT, revision=31), indent=1)
+        (state / "graph.json").write_text(revision_31)
+        (state / "graph.lkg.json").write_text(json.dumps(dict(CHAIN_DOCUMENT, revision=30)))
+        result = self.install(home, "--factory", self.tmp / "woofer-only-kept.json")
+        self.assertIn("graph.json (ampd's, revision 31) names plugins this bundle lacks:", result.stdout)
+        self.assertIn("graph.lkg.json (ampd's, revision 30) names plugins this bundle lacks:", result.stdout)
+        self.assertIn("falls back to the factory layer, ampd follows it, and revision 31's", result.stdout)
+        self.assertIn("settings are gone", result.stdout)
+        self.assertIn("To carry them over", result.stdout)
+        self.assertEqual((state / "graph.json").read_text(), revision_31)
+        self.assertEqual(json.loads((state / "factory.json").read_text()), woofer_only)
+        status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
+        self.assertRegex(status, r"(?m)^  graph\.json: revision 31, 3 plugin node\(s\): firConv, crossover, loudness "
+                                 r"\*\*\* names plugins the current version lacks: \S*firConv_headless \S*crossover_headless: "
+                                 r"speakerd plays the next layer \*\*\*$")
+        self.assertRegex(status, r"(?m)^  factory\.json: revision 1, 1 plugin node\(s\): loudness_headless$")
+
     def test_refuses_a_tweeter_without_a_crossovers_high_band(self):
+        # The board bundle: a factory.json may name only plugins of the bundle, and these name a crossover.
         home = self.fresh_home("tweeter")
-        result = self.install(home, "--role", "left", "--factory", self.factory, check=False)
+        bundle = self.board_bundle
+        result = self.install(home, "--role", "left", "--factory", self.factory, bundle=bundle, check=False)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("reaches the tweeter other than through a crossover's high band", result.stdout)
         self.assertFalse((home / ".local/state/speakerd/factory.json").exists())
 
         def crossover(high_to_tweeter=1, bypassed=False):
             document = json.loads(json.dumps(DOCUMENT))
-            document["nodes"].append({"uid": 17, "plugin": {"format": "LV2", "identifier": lv2_uri("crossover")},
+            document["nodes"].append({"uid": 17, "plugin": {"format": "LV2", "identifier": lv2_uri("crossover_headless")},
                                       **({"bypassed": True} if bypassed else {})})
             document["connections"] = [
                 {"src": {"node": 1, "channel": 0}, "dst": {"node": 16, "channel": 0}},
@@ -705,15 +814,15 @@ class Install(Setup):
             path.write_text(json.dumps(document))
             return path
 
-        self.install(home, "--role", "left", "--factory", crossover())
+        self.install(home, "--role", "left", "--factory", crossover(), bundle=bundle)
         for unsafe, what in ((crossover(bypassed=True), "a bypassed crossover"), (crossover(0), "the low band")):
-            refused = self.install(home, "--factory", unsafe, check=False)
+            refused = self.install(home, "--factory", unsafe, bundle=bundle, check=False)
             self.assertNotEqual(refused.returncode, 0, f"{what} reached the tweeter:\n{refused.stdout}")
-        self.install(home, "--factory", self.factory, "--allow-tweeter-without-crossover")
+        self.install(home, "--factory", self.factory, "--allow-tweeter-without-crossover", bundle=bundle)
         self.assertEqual(json.loads((home / ".local/state/speakerd/factory.json").read_text()), DOCUMENT)
 
         # The factory.json there is, kept by a later install, is checked as a new one is.
-        kept = self.install(home, check=False)
+        kept = self.install(home, bundle=bundle, check=False)
         self.assertNotEqual(kept.returncode, 0, kept.stdout)
         self.assertIn("the factory.json there is (kept) is refused", kept.stdout)
 

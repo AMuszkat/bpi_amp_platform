@@ -3,9 +3,9 @@ audio thread, measured by speakerd itself, on the virtual pair.
 
 The chain is the board's: the Mine pin -> loudness_headless (16) -> firConv (17) -> crossover
 (18), its low band to the woofer and its high band to the tweeter (which keeps the tweeter rule,
-so speakerd runs as on a board: the tweeter on, no --allow-tweeter-without-crossover). firConv and
-crossover are their complete builds (the bundles a board runs today). speakerd runs on the left virtual
-speaker at the pair's own 48 kHz and quantum 1024 (nothing here changes either), with stereo
+so speakerd runs as on a board: the tweeter on, no --allow-tweeter-without-crossover). All three are
+their headless builds (`loudness_headless`, `firConv_headless`, `crossover_headless`: what a speaker
+runs, firmware/install-lib.sh's DEFAULT_PLUGINS). speakerd runs on the left virtual speaker at the pair's own 48 kHz and quantum 1024 (nothing here changes either), with stereo
 noise at a moderate level playing into its sink (-26 dBFS RMS a channel). A client of its local
 link subscribes to `speakerd/timing` (docs/protocol.md, "Monitoring": per plugin node, the graph
 and the whole cycle, each as a fraction of the cycle's 21.3 ms) and to `output/level`; after 5 s
@@ -16,7 +16,8 @@ Pass when, over the window:
 - firConv's mean share of the cycle is under 5 %, and crossover's under 1.5 %.
 
 Why those numbers. On x86_64 in the development container (a 5 GHz Zen 5 laptop core), the
-plugins' juce::dsp::FIR::Filter cost firConv 15.05 % and crossover 3.80 % of the cycle; the block
+plugins' juce::dsp::FIR::Filter cost firConv 15.05 % and crossover 3.80 % of the cycle (measured
+with the complete builds; the headless builds run the same DSP sources); the block
 FIR that replaces them (phase A's P1: 61 + 2001 taps in firConv, 259 + 259 in crossover) costs
 about 1.0 % and 0.27 % in isolation. 5 % is a third of today's firConv and five times P1's; 1.5 %
 is 2.5 times under today's crossover and 5.5 times over P1's. A slower or busier machine (a
@@ -60,7 +61,8 @@ from harness import (NO_LIMITS, RATE, Pair, Player, Speakerd, SpeakerdLink, buil
                      require_speakerd_local_link, state_dir)
 
 LOUDNESS, FIRCONV, CROSSOVER = 16, 17, 18
-URIS = {LOUDNESS: lv2_uri("loudness_headless"), FIRCONV: lv2_uri("firConv"), CROSSOVER: lv2_uri("crossover")}
+URIS = {LOUDNESS: lv2_uri("loudness_headless"), FIRCONV: lv2_uri("firConv_headless"),
+        CROSSOVER: lv2_uri("crossover_headless")}
 
 QUANTUM = 1024
 SETTLE_S, WINDOW_S = 5.0, 20.0
@@ -88,8 +90,8 @@ def chain_document(revision=1, firconv_gain=-6.0):
 
 def chain_bundles():
     """The bundles of the chain, by node uid."""
-    return {LOUDNESS: built("loudness", "headless"), FIRCONV: built("firConv", "complete"),
-            CROSSOVER: built("crossover", "complete")}
+    return {LOUDNESS: built("loudness", "headless"), FIRCONV: built("firConv", "headless"),
+            CROSSOVER: built("crossover", "headless")}
 
 
 def noise(seconds, level=0.05, seed=1):

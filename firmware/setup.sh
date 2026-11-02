@@ -121,9 +121,8 @@ Options:
 
 Examples:
   # The first time, from the development machine, the board already running snapclient:
-  tools/build.sh speakerd aarch64 && tools/build.sh loudness aarch64 headless
-  ./setup.sh --mode target-remote --target-host user@bpi-amp.local --role left \\
-      --plugin loudness:headless --stop-plugin-host --dry-run
+  tools/build.sh speakerd aarch64 && for p in loudness crossover firConv; do tools/build.sh \$p aarch64 headless; done
+  ./setup.sh --mode target-remote --target-host user@bpi-amp.local --role left --stop-plugin-host --dry-run
 
   # On the board, from an unpacked bundle: only re-route snapclient into the speakerd sink
   ./firmware/setup.sh --only pipewire,snapcast
