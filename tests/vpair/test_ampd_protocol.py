@@ -96,6 +96,19 @@ Pass when:
   revision: in the graph sent to the controllers, both graph.json, every controller's values, and
   given again to both speakerds when they restart;
 - a line that is not JSON closes the connection; an unknown op is ignored;
+- the buffer size (docs/protocol.md, "The buffer size"): every speaker of the state carries its
+  speakerd's rate, quantum, quantum_range and quantum_default (the stand-in's 48000, 1024, [64, 2048],
+  1024), all null while its speakerd is down; a proposal with quantum 256 reaches both speakerds,
+  is in the state's document and both graph.json, and each speakerd's unasked status brings every
+  controller a state with quantum 256; such a status (a quantum forced by hand) changes the state and
+  sends that speakerd nothing (no apply, no value); 4096, 100, 48, 32, 0, -256, "256", true, 256.5,
+  [256] and {"q": 256} are rejected with "quantum <v>: a power of two from 64 to 2048" and reach no
+  speakerd; 2048 against a right whose range is 64 to 1024 is rejected with the right's reason and
+  the left gets the previous revision (its quantum 256) back; with a right that says no
+  quantum_range (an older speakerd), quantum 128 is rejected with "right: its speakerd cannot set
+  the buffer size (no quantum_range)" and reaches no speakerd, while a document whose quantum is null
+  is applied; a restarted hub has the document's quantum from graph.json; a graph.json whose
+  quantum is malformed ("fast") still loads, without it, and ampd says it left it out;
 - before a peer proved the pair's secret, and on the monitor link, a line is at most 64 KiB: a
   100 KiB hello closes the connection on the control and the monitor link, and an agent hangs up
   on a 100 KiB hello from a hub ("a line longer than 64 KiB"); a 60 KiB one is welcomed;
@@ -147,6 +160,18 @@ def with_node(document, uid=17, plugin=HEADLESS):
 
 def params_seen(sd, value):
     return [e for e in sd.events("param", "in") if e.get("value") == value]
+
+
+# What the stand-in speakerd says of its PipeWire by default (stand_in_speakerd.py).
+STAND_IN_PIPEWIRE = {"rate": 48000, "quantum": 1024, "quantum_range": [64, 2048], "quantum_default": 1024}
+
+
+def speakers_of(state):
+    return {entry["name"]: entry for entry in state["speakers"]}
+
+
+def pipewire_of(entry):
+    return {key: entry.get(key, "missing") for key in STAND_IN_PIPEWIRE}
 
 
 class Protocol(unittest.TestCase):
@@ -1064,6 +1089,121 @@ class Protocol(unittest.TestCase):
             self.assertEqual(seen, [4.25, 4.5, 4.75])
             self.assertEqual(a.wait(lambda m: m["op"] == "param" and m.get("value") == 4.75, what="ctl-a's echo")
                              .get("value"), 4.75)
+
+    # The buffer size (docs/protocol.md, "The buffer size") ------------------------------------------
+
+    def test_the_buffer_size(self):
+        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:
+            # Every speaker of the state says what its speakerd says of its PipeWire.
+            for name, entry in speakers_of(a.state).items():
+                self.assertEqual(pipewire_of(entry), STAND_IN_PIPEWIRE, name)
+
+            # 256: applied on both, the document keeps it, each speakerd's notice reaches the state.
+            mark = a.mark()
+            answer = a.propose(dict(with_node(DOCUMENT), quantum=256))
+            self.assertEqual(answer["op"], "applied", answer)
+            for name in ("left", "right"):
+                self.assertEqual(pair.sd[name].events("apply", "in")[-1]["document"]["quantum"], 256, name)
+            state = a.wait(lambda m: m["op"] == "state" and all(e["quantum"] == 256 for e in speakers_of(m).values()),
+                           after=mark, what="a state with both speakers at quantum 256")
+            self.assertEqual(state["document"]["quantum"], 256)
+            time.sleep(0.3)
+            for name in ("left", "right"):
+                self.assertEqual(json.loads((pair.state[name] / "graph.json").read_text())["quantum"], 256, name)
+
+            # speakerd's unasked status (here a quantum forced by hand) updates the state and
+            # nothing else: no apply, no value goes back to that speakerd.
+            seen = {name: len(pair.sd[name].events(direction="in")) for name in ("left", "right")}
+            mark = a.mark()
+            pair.sd["right"].set_control({"quantum": 512})
+            a.wait(lambda m: m["op"] == "state" and speakers_of(m)["right"]["quantum"] == 512, after=mark,
+                   what="a state with the right at quantum 512")
+            time.sleep(0.5)
+            for name in ("left", "right"):
+                sent = [e["op"] for e in pair.sd[name].events(direction="in")[seen[name]:]]
+                self.assertEqual([op for op in sent if op in ("apply", "param")], [],
+                                 f"{name}'s speakerd was sent {sent} after a status")
+            self.assertEqual(a.current_revision(), 4)
+            pair.sd["right"].set_control({})
+
+            # The shape: refused by the hub, no speaker gets it.
+            applies = {name: len(pair.sd[name].events("apply", "in")) for name in ("left", "right")}
+            for bad in (4096, 100, 48, 32, 0, -256, "256", True, 256.5, [256], {"q": 256}):
+                answer = a.propose(dict(with_node(DOCUMENT), quantum=bad))
+                self.assertEqual((answer["op"], answer.get("reason")),
+                                 ("rejected", f"quantum {json.dumps(bad)}: a power of two from 64 to 2048"), bad)
+            for name in ("left", "right"):
+                self.assertEqual(len(pair.sd[name].events("apply", "in")), applies[name], f"a refused size reached {name}")
+
+            # Within the shape, outside the right's PipeWire (64 to 1024): its speakerd fails it, the
+            # hub rejects it with that reason and rolls the left back.
+            mark = a.mark()
+            pair.sd["right"].set_control({"pipewire": {"quantum_range": [64, 1024]}})
+            a.wait(lambda m: m["op"] == "state" and speakers_of(m)["right"]["quantum_range"] == [64, 1024],
+                   after=mark, what="a state with the right's range 64 to 1024")
+            answer = a.propose(dict(with_node(DOCUMENT), quantum=2048))
+            self.assertEqual((answer["op"], answer.get("reason")),
+                             ("rejected", "right: quantum 2048: not a power of two from 64 to 1024 "
+                                          "(what this speaker's PipeWire allows)"))
+            pair.ampd["left"].wait_for("revision 5: rolling back to revision 4 on left")
+            pair.sd["left"].wait_event(lambda e: e.get("op") == "apply" and e["revision"] == 4
+                                       and e["document"].get("quantum") == 256
+                                       and len(pair.sd["left"].events("apply", "in")) == applies["left"] + 2,
+                                       what="revision 4 (quantum 256) back on the left")
+            self.assertEqual(a.current_revision(), 4)
+
+            # A speakerd that says no quantum_range (older) would ignore the field: refused before
+            # any apply; without the field the proposal goes through.
+            mark = a.mark()
+            pair.sd["right"].set_control({"older": True})
+            a.wait(lambda m: m["op"] == "state" and speakers_of(m)["right"]["quantum_range"] is None
+                   and speakers_of(m)["right"]["online"], after=mark, what="a state with the right's range unknown")
+            applies = {name: len(pair.sd[name].events("apply", "in")) for name in ("left", "right")}
+            answer = a.propose(dict(with_node(DOCUMENT), quantum=128))
+            self.assertEqual((answer["op"], answer.get("reason")),
+                             ("rejected", "right: its speakerd cannot set the buffer size (no quantum_range)"))
+            for name in ("left", "right"):
+                self.assertEqual(len(pair.sd[name].events("apply", "in")), applies[name], f"a refused size reached {name}")
+            answer = a.propose(dict(with_node(DOCUMENT), quantum=None))
+            self.assertEqual(answer["op"], "applied", answer)
+            mark = a.mark()
+            pair.sd["right"].set_control({})
+            a.wait(lambda m: m["op"] == "state" and speakers_of(m)["right"]["quantum_range"] == [64, 2048],
+                   after=mark, what="a state with the right's range known again")
+
+            # A speakerd that is down: its speaker's fields are unknown (null).
+            mark = a.mark()
+            pair.sd["right"].stop()
+            state = a.wait(lambda m: m["op"] == "state" and speakers_of(m)["right"]["speakerd"] is None,
+                           after=mark, what="a state with the right's speakerd down")
+            self.assertEqual(pipewire_of(speakers_of(state)["right"]), dict.fromkeys(STAND_IN_PIPEWIRE))
+            mark = a.mark()
+            pair.start_speakerd("right")
+            a.wait(lambda m: m["op"] == "state" and pipewire_of(speakers_of(m)["right"]) == STAND_IN_PIPEWIRE,
+                   after=mark, what="a state with the right's speakerd back")
+
+            # The size is the document's: a restarted hub has it from graph.json.
+            answer = a.propose(dict(with_node(DOCUMENT), quantum=256))
+            self.assertEqual(answer["op"], "applied", answer)
+            time.sleep(0.3)
+            pair.ampd["left"].stop()
+            hub = pair.start_ampd("left")
+            hub.wait_for(("agent right: plays revision", "agent right: revision"))
+            with Controller("ctl-b") as b:
+                self.assertEqual((b.state["revision"], b.state["document"].get("quantum")), (6, 256))
+                self.assertEqual({n: e["quantum"] for n, e in speakers_of(b.state).items()},
+                                 {"left": 256, "right": 256})
+
+    def test_a_malformed_quantum_on_disk_is_left_out(self):
+        bad = dict(revision_document(DOCUMENT, 3), quantum="fast")
+        with StandInPair(self.tmp, {"left": bad, "right": revision_document(DOCUMENT, 3)}) as pair, \
+                Controller("ctl-a") as a:
+            line = pair.ampd["left"].wait_for('graph.json: quantum "fast": a power of two from 64 to 2048: left out')
+            print(f"\n  {line}")
+            self.assertEqual(a.state["revision"], 3)
+            self.assertNotIn("quantum", a.state["document"])
+            self.assertEqual(speakers_of(a.state)["left"]["quantum"], STAND_IN_PIPEWIRE["quantum"])
+
 
     def test_bad_lines(self):
         with StandInPair(self.tmp, documents()):

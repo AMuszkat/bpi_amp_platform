@@ -103,7 +103,7 @@ SPEAKERD_MODULES="test_audio_path test_speakerd_same_sound test_speakerd_state_l
     test_speakerd_device_limits test_speakerd_import"
 AMPD_MODULES="test_ampd_protocol test_two_controllers"
 PAIR_MODULES="test_knob_latency test_graph_edit test_hub_down test_drag_during_revision test_ampd_restart
-    test_ampd_persistence test_meter_values test_monitor_fanout test_board_cpu"
+    test_ampd_persistence test_meter_values test_monitor_fanout test_board_cpu test_buffer_size"
 INSTALLER_MODULES="test_firmware_speakerd_install test_firmware_ampd_install test_speakerd_installed
     test_speakerd_crash_restart"
 CHAIN_MODULES="test_chain_cost test_plugin_identity"

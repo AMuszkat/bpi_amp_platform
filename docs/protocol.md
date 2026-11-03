@@ -102,7 +102,8 @@ node's current `params`), a number, a time and an origin:
 ```
 
 - **A controller proposes** revision `base + 1` over the control link. The hub refuses it
-  unless `base` is its current revision (`stale`), the document parses, and every plugin it
+  unless `base` is its current revision (`stale`), the document parses, its `quantum` is of the
+  valid shape and every speaker can set it ("The buffer size", below), and every plugin it
   names is one the hub has seen loaded somewhere (the full catalogue, with versions and source identities, is
   step 4).
 - **The hub applies it everywhere it can.** It sends
@@ -132,7 +133,7 @@ anything else (the handshake is in "Authentication" below; these show the other 
 {"op":"welcome","auth":"<server proof>"}
 ```
 
-- **A controller** then gets `{"op":"state","revision":8,"seq":1234,"document":{...},"speakers":[{"name":"left","role":"left","online":true,"layer":"current"},{"name":"right",...}],"gestures":[...]}`
+- **A controller** then gets `{"op":"state","revision":8,"seq":1234,"document":{...},"speakers":[{"name":"left","role":"left","online":true,"layer":"current","rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512},{"name":"right",...}],"gestures":[...]}`
   and builds its graph from it; it never pushes its own older copy (rule 3 of section 8). The hub
   sends OSC echoes, stamped with the controller's token, to its address and `osc_port`.
 - **An agent** whose revision is older than the hub's gets `apply` of the hub's revision and
@@ -141,9 +142,11 @@ anything else (the handshake is in "Authentication" below; these show the other 
   `{"op":"get"}`, answers `{"op":"graph",...}` with its revision, and the hub adopts it and
   applies it everywhere.
 - **`speakerd`** greets `ampd` on the local link with
-  `{"op":"hello","role":"speakerd","version":"0.3.0 (<commit>)","revision":8,"layer":"current","protocol":1}`
-  (`revision` 0 for passthrough or a document with none), and answers
-  `{"op":"status"}` with the same fields as `status`.
+  `{"op":"hello","role":"speakerd","version":"0.3.2 (<commit>)","revision":8,"layer":"current","protocol":1,"rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512}`
+  (`revision` 0 for passthrough or a document with none; the last four are "The buffer size",
+  below, from speakerd 0.3.2), and answers `{"op":"status"}` with the same fields as `status`.
+  It also sends that `status` unasked whenever the rate or the quantum its cycles run at changes
+  (clarification 20).
 
 ## Persistence and layers (ampd)
 
@@ -153,6 +156,60 @@ anything else (the handshake is in "Authentication" below; these show the other 
 - It promotes `graph.json` to `graph.lkg.json` once that revision has played for 60 s with no
   `speakerd` restart in between. It never writes `factory.json` or `device.json`.
 - `speakerd` never writes a file (unchanged).
+
+## The buffer size
+
+The controller chooses the PipeWire quantum the speakers run at (the buffer size, in samples per
+cycle) as part of the chain document, so it is applied on both speakers or neither, kept in
+`graph.json` and `graph.lkg.json` across restarts, and undone like any edit.
+
+- **The field.** A graph document version 1 may carry a top-level `"quantum"` beside `version`,
+  `revision`, `nodes` and the rest: `{"version":1,"revision":9,"quantum":256,"nodes":[...],...}`. Its
+  valid shape is a whole JSON number (not `true`/`false`, not text, not a number with a fraction)
+  that is a power of two from **64 to 2048**. Absent or `null` is no chosen size: PipeWire's own
+  default (`default.clock.quantum`; 512 in the repository's `pipewire.conf`). The hub and the
+  agents keep it as part of the document (the state, `graph` and `apply` messages, `graph.json`,
+  `graph.lkg.json`).
+- **What a speaker allows.** `speakerd` reads its PipeWire's `default.clock.quantum`,
+  `min-quantum`, `max-quantum` and `quantum-limit` (32, 2048 and 8192 when a key is not set, as
+  PipeWire 0.3.65) and accepts the powers of two `p` with max(64, min-quantum) <= `p` <=
+  min(2048, max-quantum, quantum-limit): `quantum_range`, `[lo, hi]`.
+- **The hub refuses a proposal**, `rejected`, with no `apply` sent to any speaker, when
+  - `quantum` is present, not `null`, and not of the valid shape:
+    `"reason":"quantum <v>: a power of two from 64 to 2048"` (`<v>` as JSON: `4096`, `"256"`);
+  - `quantum` is present (not `null`) and a speaker whose `speakerd` runs reports no
+    `quantum_range` (an older `speakerd`, which would ignore the field and run another size than
+    the document says): `"reason":"<speaker>: its speakerd cannot set the buffer size (no quantum_range)"`
+    (one such clause per speaker, joined by `; `).
+
+  Otherwise it is applied as any revision; a speaker whose PipeWire does not allow the size fails
+  it, and the hub rolls back (all or nothing).
+- **`speakerd` fails an apply** whose `quantum` is malformed or outside its `quantum_range`, before
+  it builds anything, the playing graph untouched:
+  `{"op":"failed","revision":N,"reason":"quantum <v>: not a power of two from <lo> to <hi> (what this speaker's PipeWire allows)"}`,
+  which the hub relays as `<speaker>: quantum <v>: ...`.
+- **`speakerd` forces it.** Whenever a document comes into force (the layer it loaded at start, an
+  apply that succeeded, the hub's roll back, a revision applied again), `speakerd` sets PipeWire's
+  `settings` metadata, subject 0, key `clock.force-quantum`, to the document's quantum, or to 0 for
+  a document with none; again when that metadata (re)appears, and so after a restart of PipeWire or
+  of `speakerd` (which loads `graph.json`); never at any other time (a quantum forced by hand stays
+  until the next document comes into force). A boot layer whose `quantum` is outside the range still
+  plays, unforced (0). The commands and log lines are `speakerd`'s README's.
+- **What every side reports.** `speakerd`'s `hello` and `status` carry `"rate"` (the rate the graph
+  runs at), `"quantum"` (the quantum the cycles run at now; `null` before the first cycle),
+  `"quantum_range"` and `"quantum_default"` (`default.clock.quantum`). `ampd` keeps them from each
+  `hello` and `status` (all `null` while `speakerd` is down, or for one that says none); an agent
+  carries them in its `hello` and its `status` to the hub, and reports again when they change; every
+  entry of the hub's `state.speakers` carries them (`null` when unknown or offline), and the hub sends
+  every controller the whole state again when any of them changes (clarification 2).
+- **A malformed `quantum` that did not come from a proposal.** `ampd` keeps a layer it reads from
+  the state directory whose `quantum` is malformed (unlike any other malformed content, which makes
+  the layer unreadable), without the field, and says so (`<file>: quantum <v>: a power of two from
+  64 to 2048: left out, the layer plays at PipeWire's own quantum`): `speakerd` plays such a layer
+  too, unforced, and a graph is not lost over a buffer size. A document from the network is checked
+  as a proposal is: the hub does not adopt an agent's revision with a malformed `quantum` (its own
+  revision goes to the agent instead), and an agent answers an `apply` with one
+  `{"op":"failed","revision":N,"reason":"quantum <v>: a power of two from 64 to 2048"}`.
 
 ## Monitoring (step 3: values)
 
@@ -288,8 +345,9 @@ These settle what version 1 left open; every implementation follows them.
    speaker's monitor link is reached at (the hub fills it from its configuration and from
    the agent's connection). A controller may override it with its own settings.
 2. **Speaker status.** The hub sends `state` again, whole, to every controller whenever a
-   speaker comes online, goes offline or changes layer, and after it adopts a revision. A
-   controller treats any `state` as a full refresh.
+   speaker comes online, goes offline or changes layer, `speakerd` version, revision, `rate`,
+   `quantum`, `quantum_range` or `quantum_default`, and after it adopts a revision. A controller
+   treats any `state` as a full refresh.
 3. **Gestures in `state`.** `"gestures":[{"node":16,"id":"s0_e0_gain","origin":"ctl-mac"}]`:
    the parameters being dragged now and by whom.
 4. **Outcome order.** The proposer gets `applied` (or `rejected`) first; then the hub sends
@@ -335,11 +393,16 @@ These settle what version 1 left open; every implementation follows them.
     `{"op":"error","about":"subscribe","stream":..,"reason":..}` (from `ampd`: `"a stream is
     output/level, speakerd/timing, board/cpu or node/<uid>/mon_<id> (uid 16 or more)"`); a well-formed `node/...`
     stream the graph lacks is kept and starts when a revision has it.
-20. **`status`** is answered with the `hello`'s fields and `"op":"status"`.
+20. **`status`** is answered with the `hello`'s fields and `"op":"status"`. `speakerd` also sends
+    it unasked, whenever the rate or the quantum its cycles run at changes (and once the first
+    cycle has run); `ampd` takes either as an update of those fields only: it applies nothing and
+    sends `speakerd` no value again for it, whatever its revision and layer say.
 21. **Files.** `speakerd` writes no state file; it creates and removes its socket.
-22. **The agent's `hello`** also carries `layer`, `speakerd` (its version), `device_role` and
+22. **The agent's `hello`** also carries `layer`, `speakerd` (its version), `device_role`, `rate`,
+    `quantum`, `quantum_range`, `quantum_default` ("The buffer size") and
     `osc_port` (unused since agents take no OSC; kept for compatibility); later changes of its speaker go to the hub as
-    `{"op":"status","speakerd":..,"layer":..,"revision":..}` on the control link.
+    `{"op":"status","speakerd":..,"layer":..,"revision":..,"rate":..,"quantum":..,"quantum_range":..,"quantum_default":..}`
+    on the control link.
 23. **`apply` carries `time` and `origin`** as well (and ampd writes them at the top of
     `graph.json`, which `speakerd` ignores), so an agent can compare revisions by time.
 24. **The local link's seq.** `ampd` sends `speakerd` seq 0 and orders values itself, so a hub

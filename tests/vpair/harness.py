@@ -350,6 +350,20 @@ class Speaker:
         power of two (clock.power-of-two-quantum, true by default, as on the boards)."""
         self.run("pw-metadata", "-n", "settings", "0", "clock.force-quantum", str(quantum))
 
+    def settings(self):
+        """This speaker's `settings` metadata, subject 0, as pw-metadata -n settings lists it:
+        {key: value as text}, e.g. {"clock.force-quantum": "256", "clock.quantum": "1024"}."""
+        out = {}
+        for line in self.run("pw-metadata", "-n", "settings").splitlines():
+            found = re.match(r"update: id:0 key:'([^']*)' value:'([^']*)'", line)
+            if found:
+                out[found.group(1)] = found.group(2)
+        return out
+
+    def forced_quantum(self):
+        """clock.force-quantum of this speaker's settings metadata (0: none forced)."""
+        return int(self.settings().get("clock.force-quantum", "0"))
+
 
 _names = itertools.count(1)
 

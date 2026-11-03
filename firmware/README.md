@@ -102,7 +102,7 @@ installs it into the board's module tree.
 
 | File | Purpose |
 |---|---|
-| [`pipewire/pipewire.conf`](pipewire/pipewire.conf) | The measured board's own PipeWire configuration with the quantum pinned at 512, at 48000 Hz, with the `speakerd` sink in it; `setup.sh --mode target-remote --only pipewire --base-conf` installs it |
+| [`pipewire/pipewire.conf`](pipewire/pipewire.conf) | The measured board's own PipeWire configuration with the quantum 512 by default and 64 to 2048 (the buffer sizes the controller may choose), at 48000 Hz, with the `speakerd` sink in it; `setup.sh --mode target-remote --only pipewire --base-conf` installs it |
 | [`pipewire/pipewire.conf.d/60-speakerd-sink.conf`](pipewire/pipewire.conf.d/60-speakerd-sink.conf) | The persistent `speakerd` sink, a drop-in the speakerd installer puts on a board that runs its own `pipewire.conf` (never beside the repository's) |
 | [`usb-serial-console-setup.sh`](usb-serial-console-setup.sh) | Login console over the USB-C port |
 | [`wifi-driver-setup.sh`](wifi-driver-setup.sh) | Pins the RTL8822CS WiFi to one driver and disables power saving |

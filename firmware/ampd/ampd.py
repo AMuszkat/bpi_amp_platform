@@ -31,7 +31,7 @@ import struct
 import sys
 import time
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PROTOCOL = 1
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
 LINE_LIMIT = 32 * 1024 * 1024          # a longer line closes the connection
@@ -57,6 +57,9 @@ STREAMS = (re.compile(r"output/level"), re.compile(r"speakerd/timing"), re.compi
            re.compile(r"board/cpu"))
 SECRET_FORMAT = re.compile(r"[\x21-\x7e]{16,256}")
 MAX_NODES, MAX_CONNECTIONS = 64, 512           # a document with more is refused
+QUANTUM_LOW, QUANTUM_HIGH = 64, 2048           # a document's "quantum": a power of two in this range
+# What speakerd says of its PipeWire (hello and status), kept per speaker and given in state.speakers.
+PIPEWIRE_FIELDS = ("rate", "quantum", "quantum_range", "quantum_default")
 MAX_CONTROL_PEERS = 32                         # controllers and agents on the hub's control link
 MAX_MONITOR_CLIENTS = 32
 MAX_SUBSCRIPTIONS = 32                         # per monitor client
@@ -373,6 +376,39 @@ def check_document(doc):
     return None
 
 
+def quantum_problem(doc):
+    """Why a document's "quantum" (the buffer size it chooses, docs/protocol.md) is not of the
+    valid shape; None when it is, or when there is none (absent or null: PipeWire's own default).
+    The shape only: whether a speaker's PipeWire allows it is for that speakerd to say."""
+    if not isinstance(doc, dict) or doc.get("quantum") is None:
+        return None
+    q = doc["quantum"]
+    if isinstance(q, float) and q.is_integer():
+        q = int(q)
+    if isinstance(q, int) and not isinstance(q, bool) and QUANTUM_LOW <= q <= QUANTUM_HIGH and not q & (q - 1):
+        return None
+    return f"quantum {json.dumps(doc['quantum'])[:40]}: a power of two from {QUANTUM_LOW} to {QUANTUM_HIGH}"
+
+
+def pipewire_fields(msg):
+    """speakerd's rate, quantum, quantum_range and quantum_default from a hello or status (its
+    own, or an agent's report of it), each None when missing or not what it should be (an older
+    speakerd says none of them)."""
+    msg = msg if isinstance(msg, dict) else {}
+    rate, quantum, low_high, default = (msg.get(k) for k in PIPEWIRE_FIELDS)
+    if not (isinstance(low_high, list) and len(low_high) == 2 and all(good_int(v, 1, 1 << 20) for v in low_high)
+            and low_high[0] <= low_high[1]):
+        low_high = None
+    return {"rate": rate if good_int(rate, 1, 10 ** 7) else None,
+            "quantum": quantum if good_int(quantum, 1, 1 << 20) else None,
+            "quantum_range": list(low_high) if low_high else None,
+            "quantum_default": default if good_int(default, 1, 1 << 20) else None}
+
+
+def no_pipewire_fields():
+    return dict.fromkeys(PIPEWIRE_FIELDS)
+
+
 def plugins_of(doc):
     return {node["plugin"]["identifier"] for node in doc.get("nodes", [])
             if isinstance(node, dict) and isinstance(node.get("plugin"), dict) and "identifier" in node["plugin"]}
@@ -566,6 +602,12 @@ class Core:
             return None
         if check_document(doc) is not None:
             return None
+        why = quantum_problem(doc)
+        if why is not None:
+            # speakerd plays such a layer, at PipeWire's own quantum (it forces none): ampd keeps
+            # the layer too, without the field, rather than lose a graph over a buffer size.
+            THROTTLED.say(("quantum", name), f"{name}: {why}: left out, the layer plays at PipeWire's own quantum")
+            del doc["quantum"]
         doc.setdefault("revision", 0)
         seq = doc.pop("seq", 0)
         if layer == "current" and good_int(seq, 0, SEQ_MASK):
@@ -714,7 +756,7 @@ class Core:
         out = {"ampd": VERSION, "pid": os.getpid(), "name": self.name, "role": "hub" if self.is_hub else "agent",
                "revision": self.revision, "time": self.rev_time, "origin": self.rev_origin,
                "speakerd": {"connected": sd.connected, "version": sd.version, "layer": sd.layer,
-                            "revision": sd.revision, "socket": self.socket_path},
+                            "revision": sd.revision, "socket": self.socket_path, **sd.pipewire},
                "updated": now_iso()}
         out.update(self.role.status())
         return out
@@ -750,6 +792,7 @@ class Speakerd:
         self.conn = None
         self.connected = False
         self.version = self.layer = self.revision = None
+        self.pipewire = no_pipewire_fields()   # rate, quantum, quantum_range, quantum_default
         self.pending = {}            # revision -> [futures] of apply answers
         self.ever_connected = False
         self.once = Once()
@@ -840,6 +883,7 @@ class Speakerd:
             finally:
                 conn.close()
                 self.conn, self.connected = None, False
+                self.pipewire = no_pipewire_fields()
                 self.core.monitor.on_speakerd_lost()
                 for futures in list(self.pending.values()):
                     for future in futures:
@@ -857,6 +901,7 @@ class Speakerd:
         self.layer = hello.get("layer")
         revision = hello.get("revision")
         self.revision = revision if good_int(revision, 0, BIG) else 0
+        self.pipewire = pipewire_fields(hello)
 
     def dispatch(self, obj, line):
         """One message from speakerd; `line` is it as it came (a monitor value is relayed so)."""
@@ -883,7 +928,12 @@ class Speakerd:
                           + (f" {obj.get('node')}/{obj.get('id')}" if "id" in obj else "")
                           + f": {obj.get('reason', '?')}")
         elif op in ("hello", "status"):
+            # An answer to a status, or speakerd's own notice that its quantum or rate changed:
+            # the fields are updated and told on, nothing is applied or sent to speakerd again.
+            before = (self.version, self.layer, self.revision, self.pipewire)
             self.hello(obj)
+            if (self.version, self.layer, self.revision, self.pipewire) != before:
+                self.core.role.on_speakerd_status()
             self.core.status_changed()
 
 
@@ -941,6 +991,9 @@ class Role:
     def on_applied_locally(self):
         pass
 
+    def on_speakerd_status(self):
+        """speakerd's status changed under a running link (its quantum, say): nothing to apply."""
+
     def on_speakerd_lost(self):
         pass
 
@@ -997,6 +1050,9 @@ class Hub(Role):
     def on_speakerd_lost(self):
         self.broadcast_state()
 
+    def on_speakerd_status(self):
+        self.broadcast_state()
+
     def on_applied_locally(self):
         self.broadcast_state()
 
@@ -1020,7 +1076,8 @@ class Hub(Role):
         sd, core = self.core.sd, self.core
         own_address = core.listen if core.listen not in ("0.0.0.0", "::", "") else (conn.local_address if conn else None)
         own = {"name": core.name, "role": core.device_role, "address": own_address, "online": True,
-               "speakerd": sd.version if sd.connected else None, "layer": sd.layer, "revision": sd.revision}
+               "speakerd": sd.version if sd.connected else None, "layer": sd.layer, "revision": sd.revision,
+               **sd.pipewire}
         return [own] + [dict(s) for _, s in sorted(self.speakers.items())]
 
     def gesture_list(self):
@@ -1040,8 +1097,9 @@ class Hub(Role):
             controller.conn.send(message, document=True)
 
     def broadcast_state(self):
-        """A speaker came online, went offline or changed layer, or the hub adopted a revision:
-        every controller gets the whole state again (docs/protocol.md, clarification 2)."""
+        """A speaker came online, went offline or changed layer, rate or quantum, or the hub
+        adopted a revision: every controller gets the whole state again (docs/protocol.md,
+        clarification 2)."""
         for controller in self.controllers:
             controller.conn.send(self.state(controller.conn), document=True)
         self.core.status_changed()
@@ -1205,9 +1263,20 @@ class Hub(Role):
                 return refuse(f"the document does not parse: {why}")
             if document.get("revision", revision) != revision:
                 return refuse(f"the document's revision ({document.get('revision')}) is not the proposal's ({revision})")
+            why = quantum_problem(document)
+            if why is not None:
+                return refuse(why)
             missing = sorted(plugins_of(document) - self.seen)
             if missing:
                 return refuse("no speaker has loaded " + ", ".join(missing))
+            if document.get("quantum") is not None:
+                # A speakerd that says no quantum_range is older and would ignore the field: the
+                # pair would play another buffer size than the document says.
+                older = [s["name"] for s in self.speaker_list()
+                         if s["online"] and s.get("speakerd") is not None and s.get("quantum_range") is None]
+                if older:
+                    return refuse("; ".join(f"{name}: its speakerd cannot set the buffer size (no quantum_range)"
+                                            for name in older))
             rev_time = valid_time(msg.get("time")) or now_iso()
             rev_origin = msg["origin"] if isinstance(msg.get("origin"), str) and msg["origin"] else controller.name
             doc = copy.deepcopy(document)
@@ -1312,7 +1381,7 @@ class Hub(Role):
         finally:
             peer.get_future = None
         document = graph.get("document")
-        why = check_document(document)
+        why = check_document(document) or quantum_problem(document)
         if why is None and plugins_of(document) - self.seen:
             why = "no speaker has loaded " + ", ".join(sorted(plugins_of(document) - self.seen))
         if why is not None:
@@ -1403,7 +1472,8 @@ class Hub(Role):
         self.agents[peer.name] = peer
         self.speakers[peer.name] = {"name": peer.name, "role": hello.get("device_role", "unknown"),
                                     "address": conn.address, "online": True, "speakerd": hello.get("speakerd"),
-                                    "layer": hello.get("layer"), "revision": hello.get("revision")}
+                                    "layer": hello.get("layer"), "revision": hello.get("revision"),
+                                    **pipewire_fields(hello)}
         log(f"agent {peer.name} connected from {conn.address}: revision {hello.get('revision')} "
             f"({hello.get('time') or 'no time'}, {hello.get('origin') or 'no origin'}), layer {hello.get('layer')}")
         background(self.sync_agent(peer, hello))
@@ -1426,6 +1496,7 @@ class Hub(Role):
             if self.agents.get(peer.name) is peer:
                 del self.agents[peer.name]
                 self.speakers[peer.name]["online"] = False
+                self.speakers[peer.name].update(no_pipewire_fields())
                 if not STOPPING:
                     log(f"agent {peer.name} disconnected: offline")
                     self.broadcast_state()
@@ -1446,6 +1517,7 @@ class Hub(Role):
                 peer.get_future.set_result(msg)
         elif op == "status":
             news = {k: msg.get(k) for k in ("speakerd", "layer", "revision")}
+            news.update(pipewire_fields(msg))
             if any(self.speakers[peer.name].get(k) != v for k, v in news.items()):
                 self.speakers[peer.name].update(news)
                 self.broadcast_state()
@@ -1511,13 +1583,16 @@ class Agent(Role):
         if self.conn is not None:
             sd = self.core.sd
             self.conn.send({"op": "status", "speakerd": sd.version if sd.connected else None, "layer": sd.layer,
-                            "revision": sd.revision})
+                            "revision": sd.revision, **sd.pipewire})
 
     def on_speakerd(self, hello, reconnect):
         super().on_speakerd(hello, reconnect)
         self.report()
 
     def on_speakerd_lost(self):
+        self.report()
+
+    def on_speakerd_status(self):
         self.report()
 
     def on_applied_locally(self):
@@ -1565,6 +1640,10 @@ class Agent(Role):
         why = check_document(document) if good_int(revision, 0, BIG) else "no revision"
         if why is not None:
             conn.send({"op": "failed", "revision": revision, "reason": f"the document does not parse: {why}"})
+            return
+        why = quantum_problem(document)
+        if why is not None:
+            conn.send({"op": "failed", "revision": revision, "reason": why})
             return
         doc = copy.deepcopy(document)
         doc["revision"] = revision
@@ -1619,7 +1698,7 @@ class Agent(Role):
                 mine = {"op": "hello", "role": "agent", "name": core.name, "revision": core.revision,
                         "time": core.rev_time, "origin": core.rev_origin, "protocol": PROTOCOL,
                         "layer": core.sd.layer, "speakerd": core.sd.version if core.sd.connected else None,
-                        "device_role": core.device_role, "nonce": nc}
+                        "device_role": core.device_role, "nonce": nc, **core.sd.pipewire}
                 if core.secret is not None:
                     if not isinstance(ns, str) or not NONCE.fullmatch(ns) or not isinstance(hub_name, str):
                         raise ProtocolError("the hub's hello has no nonce or name: not believing it")
