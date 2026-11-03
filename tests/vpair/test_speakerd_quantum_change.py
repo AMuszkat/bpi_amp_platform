@@ -39,8 +39,8 @@ The quantum is let go (0) when the test ends, whatever happened.
 A quantum above the one speakerd is prepared for (QuantumAboveMaxQuantum). speakerd prepares the
 plugins for the largest quantum PipeWire brings by itself, max (quantum, min (max-quantum,
 quantum-limit)); clock.force-quantum can still bring a larger one, up to quantum-limit. Here the
-left speaker's PipeWire runs with default.clock.quantum = max-quantum = 512, as the boards are
-pinned, and the same stream plays. Pass when:
+left speaker's PipeWire runs with default.clock.quantum = max-quantum = 512 (a board's own
+configuration may pin it so), and the same stream plays. Pass when:
 
 - speakerd says `pipewire: 48000 Hz, quantum 512, largest quantum <l>, max-quantum 512: the
   plugins are prepared for 512`, and the amplifier gets the tone with the render's gain;
@@ -253,7 +253,8 @@ class QuantumAboveMaxQuantum(Checks, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # speaker.conf with the quantum pinned as on the boards: quantum = max-quantum = 512.
+        # speaker.conf with the quantum pinned (quantum = max-quantum = 512), as the repository's
+        # pipewire.conf had it before the buffer size became the controller's.
         conf = speaker_conf_with(cls.tmp / "speaker-pinned.conf", default_clock_quantum=PINNED)
         text, n = re.subn(r"(?m)^(\s*)default\.clock\.quantum(\s*)=.*$",
                           rf"\g<0>\n\g<1>default.clock.max-quantum\g<2>= {PINNED}", conf.read_text())

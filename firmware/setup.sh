@@ -7,7 +7,8 @@
 #
 #   pipewire   the board's PipeWire configuration: the persistent speakerd sink
 #              (pipewire.conf.d/60-speakerd-sink.conf); or, with --base-conf, the
-#              repository's pipewire.conf (48000 Hz, quantum 512, the speakerd sink in it,
+#              repository's pipewire.conf (48000 Hz, quantum 512 by default and 64 to 2048 for
+#              the controller's buffer size, the speakerd sink in it,
 #              the drop-ins it contains removed), and with --rate another sample rate
 #   snapcast   snapclient, routed into the speakerd sink (snapcast-setup.sh --route speakerd)
 #   speakerd   the headless plugin host (speakerd-setup.sh install)
@@ -77,8 +78,9 @@ Options:
                               (the board's own is kept as .orig once). Off by default: a running board keeps
                               its own. The file is the measured board's own with the graph (default.clock.rate)
                               and the amplifier (its audio.rate) at 48000 Hz, the rate snapcast streams and
-                              the shipped crossover and firConv filters are designed for, the quantum pinned
-                              at 512, resample.quality 15 and the speakerd sink; the drop-ins it contains
+                              the shipped crossover and firConv filters are designed for, the quantum 512 by
+                              default and 64 to 2048 (min-quantum, max-quantum: the buffer sizes the controller
+                              may choose), resample.quality 15 and the speakerd sink; the drop-ins it contains
                               (pipewire.conf.d/20-resample.conf, 60-speakerd-sink.conf) are removed.
   --rate <44100|48000>        with --base-conf: the graph's default.clock.rate (and allowed-rates) and the
                               amplifier's audio.rate, changed together. Default: the

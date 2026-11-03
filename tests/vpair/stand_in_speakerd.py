@@ -7,7 +7,18 @@ speakerd that does exactly what it is told, including failing.
 
 - At start it "loads" the first layer of DIR that parses as JSON with nodes and connections
   (graph.json, graph.lkg.json, factory.json), else passthrough, and greets each client with
-  {"op":"hello","role":"speakerd","version":...,"revision":...,"layer":...,"protocol":1}.
+  {"op":"hello","role":"speakerd","version":...,"revision":...,"layer":...,"protocol":1,
+  "rate":48000,"quantum":...,"quantum_range":[64,2048],"quantum_default":1024}: what speakerd says of
+  its PipeWire (docs/protocol.md). The control file's "pipewire" ({"rate": .., "quantum_range": ..,
+  "quantum_default": ..}) changes them, a key given as null leaves it out, and "older": true leaves
+  out all four, as a speakerd older than the buffer size says.
+- The quantum it "runs" is the document's `quantum` when it has one within quantum_range, else
+  quantum_default (control "quantum" overrides it, as a quantum forced by hand). An apply whose
+  `quantum` is not a power of two within quantum_range is answered `failed` with speakerd's reason
+  (`quantum <v>: not a power of two from <lo> to <hi> (what this speaker's PipeWire allows)`),
+  unless "older". Whenever what its hello would say of the PipeWire changes (an apply, the control
+  file), it sends {"op":"status", ...the hello's fields...} unasked, as speakerd does when its
+  quantum or rate changes.
 - One client at a time: a second gets {"op":"error","reason":"busy"} and is closed.
 - Applies are queued and answered in order, as speakerd's are (docs/protocol.md, clarification
   18): `applied` after `delay` seconds, or `failed` with the reason in the control file's "fail"
@@ -46,6 +57,9 @@ TIMING = {"cycles": 47, "late": 0, "jumps": 0,
           "cycles_total": 0, "late_total": 0, "jumps_total": 1, "dropped_total": 0}
 
 
+QUANTUM_RANGE, QUANTUM_DEFAULT, RATE = [64, 2048], 1024, 48000
+
+
 def first_layer(state):
     for layer, name in (("current", "graph.json"), ("last-known-good", "graph.lkg.json"), ("factory", "factory.json")):
         try:
@@ -75,9 +89,31 @@ class StandIn:
     def record(self, direction, obj):
         self.events.write(json.dumps({"dir": direction, "t": time.monotonic(), **obj}) + "\n")
 
+    def pipewire(self):
+        """What the hello says of the PipeWire: {} for an "older" speakerd."""
+        control = self.control()
+        if control.get("older"):
+            return {}
+        out = {"rate": RATE, "quantum_range": QUANTUM_RANGE, "quantum_default": QUANTUM_DEFAULT}
+        out.update(control.get("pipewire", {}))
+        low_high = out.get("quantum_range")
+        chosen = self.doc.get("quantum")
+        if "quantum" in control:
+            out["quantum"] = control["quantum"]
+        elif self.in_range(chosen, low_high):
+            out["quantum"] = chosen
+        else:
+            out["quantum"] = out.get("quantum_default")
+        return {k: v for k, v in out.items() if v is not None}
+
+    @staticmethod
+    def in_range(q, low_high):
+        return (isinstance(q, int) and not isinstance(q, bool) and q > 0 and not q & (q - 1)
+                and isinstance(low_high, list) and len(low_high) == 2 and low_high[0] <= q <= low_high[1])
+
     def hello(self, op="hello"):
         return {"op": op, "role": "speakerd", "version": self.args.version, "revision": self.doc.get("revision", 0),
-                "layer": self.layer, "protocol": 1}
+                "layer": self.layer, "protocol": 1, **self.pipewire()}
 
     async def client(self, reader, writer):
         def send(obj):
@@ -122,6 +158,12 @@ class StandIn:
             if str(revision) in control.get("silent", []) or revision in control.get("silent", []):
                 return
             reason = control.get("fail", {}).get(str(revision))
+            quantum = (msg.get("document") or {}).get("quantum")
+            low_high = self.pipewire().get("quantum_range")
+            if not reason and quantum is not None and not control.get("older") and not self.in_range(quantum, low_high):
+                lo, hi = low_high or ["?", "?"]
+                reason = (f"quantum {json.dumps(quantum)}: not a power of two from {lo} to {hi} "
+                          "(what this speaker's PipeWire allows)")
             if reason:
                 out = {"op": "failed", "revision": revision, "reason": reason}
             else:
@@ -130,9 +172,22 @@ class StandIn:
             self.record("out", out)
             send(out)
 
-        send(self.hello())
-        self.record("out", self.hello())
+        async def notice_changes(said):
+            # speakerd tells its ampd, unasked, when the quantum (or rate) it runs changes.
+            while True:
+                await asyncio.sleep(0.05)
+                now = self.pipewire()
+                if now != said:
+                    said = now
+                    out = self.hello("status")
+                    self.record("out", out)
+                    send(out)
+
+        first = self.hello()
+        send(first)
+        self.record("out", first)
         in_order = asyncio.get_running_loop().create_task(apply_in_order())
+        notices = asyncio.get_running_loop().create_task(notice_changes(self.pipewire()))
         try:
             while True:
                 line = await reader.readline()
@@ -176,6 +231,7 @@ class StandIn:
         finally:
             subs.clear()
             in_order.cancel()
+            notices.cancel()
             for task in producers.values():
                 task.cancel()
             self.busy = False
