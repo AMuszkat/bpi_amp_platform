@@ -325,6 +325,15 @@ namespace bpi
                     return false;
                 };
 
+                hooks.windowEditor = [this] (juce::uint32 uid) -> juce::String
+                {
+                    for (auto* w : graph->getWindows())
+                        if (w->node->nodeID.uid == uid && w->type == PluginWindow::Type::normal)
+                            return w->getEditorKind();
+
+                    return {};
+                };
+
                 hooks.screenshot = [] (const juce::File& file) { return screenshot (file); };
             }
 

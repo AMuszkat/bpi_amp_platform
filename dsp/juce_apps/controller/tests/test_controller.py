@@ -2,7 +2,8 @@
 """The controller's bridge against the fake hub (fake_hub.py): connection and state, parameters
 and their echoes, gestures over OSC at 50 Hz, proposals applied and rejected (undone), revisions
 from other controllers, monitor subscriptions, each speaker's load (speakerd/timing, board/cpu),
-a plugin's own bypass parameter as the node's bypass. Each test runs the controller in its test mode
+a plugin's own bypass parameter as the node's bypass, a plugin window reopened with its own
+editor (--gui, on Xvfb + openbox). Each test runs the controller in its test mode
 (--script) and checks both what it printed and what the hub received. Standard library only.
 
     python3 -m unittest discover -s dsp/juce_apps/controller/tests -v
@@ -15,13 +16,14 @@ speaker's monitor link on 127.0.3.2 (any 127.x address is the loopback).
 import copy
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
 
-from fake_hub import FakeHub, LOUDNESS_URI, PROBE_BYPASS_URI, SECRET, client_proof, default_document, hmac_hex, osc_token, server_proof
+from fake_hub import CROSSOVER_URI, FIRCONV_URI, FakeHub, LOUDNESS_URI, PROBE_BYPASS_URI, SECRET, client_proof, default_document, hmac_hex, osc_token, server_proof
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
@@ -43,6 +45,58 @@ def secret_file(directory, secret):
         f.write(secret + "\n")
     os.chmod(path, 0o600)
     return path
+
+
+class VirtualDisplay:
+    """Xvfb on the first free display (-displayfd) with openbox, for a `with` block; `env` is
+    {"DISPLAY": ...}. Raises unittest.SkipTest when either is missing."""
+
+    def __init__(self, size="1720x1000x24"):
+        self.size, self.processes, self.env, self.tmp = size, [], {}, None
+
+    def __enter__(self):
+        for tool in ("Xvfb", "openbox"):
+            if not shutil.which(tool):
+                raise unittest.SkipTest("no %s: the GUI test needs Xvfb and openbox" % tool)
+        try:
+            self.tmp = tempfile.mkdtemp(prefix="controller-display-")
+            read, write = os.pipe()
+            with open(os.path.join(self.tmp, "xvfb.log"), "w") as log:
+                self.processes.append(subprocess.Popen(
+                    ["Xvfb", "-displayfd", str(write), "-screen", "0", self.size, "-nolisten", "tcp"],
+                    pass_fds=(write,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log))
+            os.close(write)
+            with os.fdopen(read) as pipe:
+                number = pipe.readline().strip()      # written once it takes connections
+            if not number.isdigit():
+                raise AssertionError("Xvfb did not start")
+            self.env = {"DISPLAY": ":" + number}
+            ready = os.path.join(self.tmp, "openbox-started")
+            self.processes.append(subprocess.Popen(["openbox", "--startup", "touch " + ready],
+                                                   env=dict(os.environ, **self.env), stdin=subprocess.DEVNULL,
+                                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            deadline = time.monotonic() + 10
+            while not os.path.exists(ready):
+                if self.processes[-1].poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError("openbox did not start within 10 s")
+                time.sleep(0.02)
+            return self
+        except BaseException:
+            self.__exit__()
+            raise
+
+    def __exit__(self, *exc):
+        for process in reversed(self.processes):
+            process.terminate()
+            try:
+                process.wait(5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        self.processes = []
+        if self.tmp:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            self.tmp = None
 
 
 class ControllerTest(unittest.TestCase):
@@ -72,7 +126,7 @@ class ControllerTest(unittest.TestCase):
         self.hub = FakeHub(LEFT, RIGHT, **kwargs).start()
         return self.hub
 
-    def run_script(self, script, extra=(), during=None, timeout=60, secret=True):
+    def run_script(self, script, extra=(), during=None, timeout=60, secret=True, env=None):
         """Runs the controller's test mode; returns (exit status, the steps it printed, stderr)."""
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             f.write(script)
@@ -82,7 +136,8 @@ class ControllerTest(unittest.TestCase):
             args += ["--secret-file", self.secret]
         elif secret:
             args += ["--secret-file", secret]
-        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                   env=None if env is None else dict(os.environ, **env))
         thread = None
         if during is not None:
             thread = threading.Thread(target=during, daemon=True)
@@ -735,6 +790,33 @@ class ControllerTest(unittest.TestCase):
         self.assertFalse(last["bypassed"], "canvas and document agree after the mirror and the ignored param")
         report("own bypass", proposals=[p["revision"] for p in proposals], params_sent=0, mirrored_revision=11,
                ignored_param_echo=True)
+
+    def test_23_a_reopened_window_shows_the_plugins_own_editor(self):
+        """--gui: the three builds a board runs, each opened, closed and opened again; both
+        times the window shows the processor's own editor, never the generic fallback."""
+        nodes = [(16, "firConv", FIRCONV_URI), (17, "crossover", CROSSOVER_URI), (18, "loudness", LOUDNESS_URI)]
+        doc = {"format": "speakerd-graph", "version": 1, "revision": 7, "connections": [],
+               "nodes": [{"uid": uid, "name": name, "plugin": {"format": "LV2", "identifier": uri},
+                          "params": {}, "ui": {"x": 0.2 + 0.3 * i, "y": 0.5}}
+                         for i, (uid, name, uri) in enumerate(nodes)]}
+        self.start_hub(document=doc)
+        script = "wait-synced\n" + "".join("open %d 900 40\nsleep 300\nclose %d\nsleep 300\nopen %d 900 40\nsleep 300\nclose %d\n"
+                                           % (uid, uid, uid, uid) for uid, _, _ in nodes)
+        home = tempfile.mkdtemp(prefix="controller-home-")   # its own settings file, never the user's
+        try:
+            with VirtualDisplay() as display:
+                code, steps, err = self.run_script(script, extra=["--gui"], env=dict(display.env, HOME=home), timeout=120)
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+        self.assertPassed(code, steps, err)
+
+        opens = [s for s in steps if s.get("cmd") == "open"]
+        self.assertEqual(len(opens), 6)
+        self.assertTrue(all(s["window"] for s in opens), opens)
+        editors = {uid: [s["editor"] for s in opens[2 * i:2 * i + 2]] for i, (uid, _, _) in enumerate(nodes)}
+        self.assertEqual(editors, {uid: ["plugin", "plugin"] for uid, _, _ in nodes},
+                         "a reopened window falls back to the generic editor")
+        report("reopen", nodes=[uid for uid, _, _ in nodes], editors=editors)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@
    (Raw Material Software Limited, JUCE 8; AGPLv3 or the JUCE licence).
 
    Changes for the controller: a window can carry a header above the editor (the bridge's
-   monitor speaker selector); closing a window says so (the bridge unsubscribes its monitors);
-   the program list, the audio I/O configuration and the ARA host windows are gone.
+   monitor speaker selector); closing a window says so (the bridge unsubscribes its monitors)
+   and tells the processor its editor is going (as a plugin wrapper does); the program list,
+   the audio I/O configuration and the ARA host windows are gone.
 
   ==============================================================================
 */
@@ -124,11 +125,11 @@ namespace bpi
                               juce::LookAndFeel::getDefaultLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId),
                               DocumentWindow::minimiseButton | DocumentWindow::closeButton),
               activeWindowList (windowList),
-              node (n), type (t)
+              node (n), type (t), shownType (t)
         {
             setSize (400, 300);
 
-            if (auto* ui = createProcessorEditor (*node->getProcessor(), type))
+            if (auto* ui = createProcessorEditor (*node->getProcessor(), shownType))
             {
                 const auto editorResizable = ui->isResizable();
                 auto* holder = new Holder (std::move (header), ui);
@@ -176,6 +177,16 @@ namespace bpi
             return nullptr;
         }
 
+        /** Which editor the window shows: "plugin" (the processor's own), "generic" (asked
+            for, or the fallback when the processor gave none), "debug"; empty without one. */
+        juce::String getEditorKind() const
+        {
+            if (getEditor() == nullptr)
+                return {};
+
+            return shownType == Type::normal ? "plugin" : getTypeName (shownType).toLowerCase();
+        }
+
         static juce::String getLastXProp (Type type)    { return "uiLastX_" + getTypeName (type); }
         static juce::String getLastYProp (Type type)    { return "uiLastY_" + getTypeName (type); }
         static juce::String getOpenProp  (Type type)    { return "uiopen_"  + getTypeName (type); }
@@ -186,6 +197,8 @@ namespace bpi
         std::function<void (PluginWindow&)> onClose;
 
     private:
+        Type shownType;   // the editor it got: generic when a normal window's processor gave none
+
         /** The header (when there is one) above the editor; follows the editor's size. */
         struct Holder final : public juce::Component,
                               private juce::ComponentListener
@@ -204,6 +217,11 @@ namespace bpi
             ~Holder() override
             {
                 editor->removeComponentListener (this);
+
+                // What a plugin wrapper does before it deletes an editor: without it the
+                // processor keeps a dangling active editor, and createEditorIfNeeded() gives
+                // nothing on the next open (the window fell back to the generic editor).
+                editor->processor.editorBeingDeleted (editor.get());
             }
 
             int headerHeight() const    { return header != nullptr ? 30 : 0; }
@@ -247,7 +265,7 @@ namespace bpi
 
         float getDesktopScaleFactor() const override     { return 1.0f; }
 
-        static juce::AudioProcessorEditor* createProcessorEditor (juce::AudioProcessor& processor, Type type)
+        static juce::AudioProcessorEditor* createProcessorEditor (juce::AudioProcessor& processor, Type& type)
         {
             if (type == Type::normal)
             {

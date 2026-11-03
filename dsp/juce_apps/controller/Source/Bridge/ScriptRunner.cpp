@@ -507,6 +507,9 @@ namespace bpi
             if (! window)
                 bridge.nodeMonitorsShown (uid, open);   // no GUI: what the window would do
 
+            if (open && window && hooks.windowEditor != nullptr)
+                return edit (true, {}, object ({ { "window", window }, { "editor", hooks.windowEditor (uid) } }));
+
             return edit (true, {}, object ({ { "window", window } }));
         }
 

@@ -16,6 +16,9 @@ namespace bpi
             /** Opens (at a screen position, when there is one) or closes a node's plugin window;
                 false without a GUI. */
             std::function<bool (juce::uint32 uid, bool open, std::optional<juce::Point<int>>)> showWindow;
+            /** Which editor a node's open window shows ("plugin", "generic", "debug"); empty
+                without one. */
+            std::function<juce::String (juce::uint32 uid)> windowEditor;
             /** Moves and sizes the main window; false without a GUI. */
             std::function<bool (juce::Rectangle<int>)> placeMainWindow;
             /** Writes a picture of every window to a PNG; false without a GUI. */

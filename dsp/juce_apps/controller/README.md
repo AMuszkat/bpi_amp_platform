@@ -199,7 +199,7 @@ timeout (in seconds, the last argument where shown; default 5) passes.
 | `expect-applied [s]` | the last edit's proposal was applied (default 20 s) |
 | `expect-rejected [TEXT]` | it was rejected, with TEXT in the reason; the canvas is back |
 | `expect-revision N [s]`, `expect-node UID [s]`, `expect-no-node UID [s]`, `expect-connection A:CH B:CH [s]`, `expect-no-connection ...` | |
-| `open UID [X Y]`, `close UID` | a node's plugin window (with `--gui`, at screen X, Y); without a GUI, the same subscriptions as a window |
+| `open UID [X Y]`, `close UID` | a node's plugin window (with `--gui`, at screen X, Y; `open` prints `editor`: `plugin`, the processor's own, or `generic`); without a GUI, the same subscriptions as a window |
 | `monitor-speaker UID SPEAKER` | the window's L / R choice |
 | `subscribe SPEAKER STREAM`, `unsubscribe SPEAKER STREAM` | a subscription by hand |
 | `output-levels on/off` | every speaker's `output/level`, as the speakers panel does |
@@ -310,7 +310,9 @@ only to a faster client), with a `speakerd` restart and a reconnect falling back
 own period; and a
 plugin's own bypass parameter (the bypass probe) as the node's bypass: *Toggle Bypass* and a
 knob on it proposed as revisions with `bypassed`, never a `param` and never in `params`, a
-mirrored revision applied without an echo, and another controller's `param` of it ignored.
+mirrored revision applied without an echo, and another controller's `param` of it ignored; and,
+with `--gui` on its own Xvfb + openbox (skipped without them), firConv, crossover and loudness
+each opened, closed and opened again with the plugin's own editor both times.
 Each test prints its numbers.
 
 The screenshot run opens the loudness control editor and the test probe beside the canvas (the

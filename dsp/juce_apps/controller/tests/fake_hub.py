@@ -29,6 +29,8 @@ import threading
 import time
 
 LOUDNESS_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/loudness_headless"
+FIRCONV_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/firConv_headless"
+CROSSOVER_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/crossover_headless"
 PROBE_URI = "urn:bpi-amp:controller:test-probe"
 PROBE_BYPASS_URI = "urn:bpi-amp:controller:test-probe-bypass"   # the probe whose switch is its own bypass
 SECRET = "test-pair-secret-0123456789"   # the tests' shared secret (docs/protocol.md, "Authentication")
@@ -165,7 +167,7 @@ class FakeHub:
             {"name": "left", "role": "left", "online": True, "layer": "current"},
             {"name": "right", "role": "right", "online": True, "layer": "current"},
         ]
-        self.known_plugins = {LOUDNESS_URI, PROBE_URI, PROBE_BYPASS_URI}
+        self.known_plugins = {LOUDNESS_URI, FIRCONV_URI, CROSSOVER_URI, PROBE_URI, PROBE_BYPASS_URI}
         self.reject_next = None           # a reason: the next proposal is rejected with it
         self.echo_delay = 0.0             # seconds before an OSC echo leaves (to test reordering)
         self.monitor_values = {           # per speaker: stream -> value
