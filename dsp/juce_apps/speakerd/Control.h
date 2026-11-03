@@ -6,6 +6,7 @@
 #include "StateLayers.h"
 
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 
@@ -26,7 +27,11 @@ namespace speakerd
           {"op":"failed","revision":N,"reason":...} with the old graph still playing. An apply
           that arrives while another is being built waits for it (at most maxWaitingApplies;
           beyond that it fails at once).
-        - `status`: answered with the hello's fields.
+        - `status`: answered with the hello's fields; also sent unasked (notifyStatus()) when the
+          rate or the quantum the cycles run at changes.
+        - the document's `quantum`: an apply whose quantum this speaker's PipeWire does not allow
+          fails before anything is built; once a document is in force (the boot layer, an
+          applied revision), its quantum is set as PipeWire's clock.force-quantum (0 for none).
         - `subscribe`, `unsubscribe`: handed to the Monitor.
 
         One lock guards the running graph's tables, the seq of every parameter, the revision and
@@ -44,6 +49,22 @@ namespace speakerd
 
         void setLink (LocalLink* l)        { link = l; }
         void setMonitor (Monitor* m)       { monitor = m; }
+
+        /** What this speaker's PipeWire allows for a document's `quantum`, and how to force it.
+            Set once, before installLayer() and before the link starts. */
+        struct QuantumSettings
+        {
+            int lo = 64, hi = 2048;          // the accepted powers of two (PipeWireNode::Clock::quantumRange)
+            int defaultQuantum = 0;          // default.clock.quantum
+            std::function<bool (int)> force; // PipeWireNode::setForceQuantum; empty: nothing is forced
+        };
+
+        void setQuantumSettings (QuantumSettings q)  { quantumSettings = std::move (q); }
+
+        /** Message thread: sends the connected client, if any, an unasked `status` with the
+            hello's fields. The live mode's timer calls it when the rate or the running quantum
+            changed. */
+        void notifyStatus();
 
         /** Message thread: installs the layer speakerd boots from, and makes it the running
             graph of the tables. */
@@ -113,6 +134,15 @@ namespace speakerd
                              juce::uint64 replayFrom);
 
         void apply (const Waiting&);
+
+        /** The document `revision` is in force: its quantum becomes clock.force-quantum, or 0
+            (none, or a boot layer's that is outside the range). Logs it. Message thread. */
+        void forceQuantumOf (juce::int64 revision, const juce::var& quantum);
+
+        /** "quantum <v>: not a power of two from <lo> to <hi> (...)" when an apply's quantum is
+            not one this speaker accepts; empty when it is, or when there is none. */
+        juce::String refuseQuantum (const juce::var& quantum) const;
+
         void finishApply();
         void answer (juce::uint64 connection, const juce::var&);
         void handleParam (juce::uint64, const juce::var&);
@@ -131,6 +161,7 @@ namespace speakerd
         const juce::String version;
         LocalLink* link = nullptr;
         Monitor* monitor = nullptr;
+        QuantumSettings quantumSettings;
 
         mutable std::mutex lock;
         Tables tables;

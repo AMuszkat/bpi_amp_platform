@@ -5,6 +5,7 @@
 #include <juce_core/juce_core.h>
 
 #include <memory>
+#include <utility>
 
 namespace speakerd
 {
@@ -50,6 +51,7 @@ namespace speakerd
             int quantum = 1024;
             int quantumLimit = 8192;   // the largest block a cycle can bring (clock.force-quantum included)
             int maxQuantum = 0;        // the largest quantum the graph picks by itself; 0: not in the properties
+            int minQuantum = 32;       // the smallest; PipeWire 0.3.65's default when not in the properties
 
             /** The block size the graph is prepared for at start: the largest quantum PipeWire
                 brings unforced, max (quantum, min (max-quantum, quantum-limit)), or the quantum
@@ -59,6 +61,24 @@ namespace speakerd
             {
                 return maxQuantum > 0 ? juce::jmax (quantum, juce::jmin (maxQuantum, quantumLimit))
                                       : juce::jmax (quantum, quantumLimit);
+            }
+
+            /** The buffer sizes a graph document may ask for here (its `quantum`): the powers of
+                two p with max (64, min-quantum) <= p <= min (2048, max-quantum, quantum-limit),
+                max-quantum being 2048 when it is not in the properties. All of them fit what
+                the graph is prepared for (preparedBlock()), so a change between them only
+                re-primes. Empty (lo > hi) only on a PipeWire that allows none of them. */
+            std::pair<int, int> quantumRange() const noexcept
+            {
+                const auto low  = juce::jmax (64, minQuantum);
+                const auto high = juce::jmin (2048, maxQuantum > 0 ? maxQuantum : 2048, quantumLimit);
+                auto lo = juce::nextPowerOfTwo (low);
+                auto hi = 1;
+
+                while (hi * 2 <= high)
+                    hi *= 2;
+
+                return { lo, hi };
             }
         };
 
@@ -79,6 +99,13 @@ namespace speakerd
 
         /** Unlinks, destroys the filter, and disconnects. A sink speakerd created stays. */
         void stop();
+
+        /** Sets PipeWire's `settings` metadata, subject 0, key clock.force-quantum, to `quantum`
+            (0: not forced, PipeWire's own default), and keeps it: it is written again whenever the
+            settings metadata (re)appears in the registry, and at no other time. Message thread,
+            never the audio thread (it takes the PipeWire loop's lock). Returns false when the
+            settings metadata is not there (yet): then it is written when it appears. */
+        bool setForceQuantum (int quantum);
 
         /** True once the connection to PipeWire is lost, or the filter or the input sink failed,
             or the filter node went away (destroyed by the server or by pw-cli). */

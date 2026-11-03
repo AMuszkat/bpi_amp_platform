@@ -439,6 +439,17 @@ namespace
             if (serviced.rate > 0.0 || serviced.primedBlock > 0 || serviced.maxBlock > 0)
                 seenQuantumChanges = engine.getQuantumChanges();
 
+            // The rate or the quantum the cycles run at moved (a forced size taking hold, say):
+            // the connected ampd hears it without asking. Never from the audio thread.
+            if (const auto rate = juce::roundToInt (engine.getSampleRate()),
+                           quantum = engine.getCycles() > 0 ? engine.getLastBlockSize() : 0;
+                rate != notifiedRate || quantum != notifiedQuantum)
+            {
+                notifiedRate = rate;
+                notifiedQuantum = quantum;
+                control.notifyStatus();
+            }
+
             if (const auto links = node.getLinkCount(); links != seenLinks)
             {
                 seenLinks = links;
@@ -459,6 +470,7 @@ namespace
         Control& control;
         juce::uint64 seenLinks = 0, cyclesAtLink = 0;
         int seenQuantumChanges = 0, refusedBlock = 0;
+        int notifiedRate = 0, notifiedQuantum = 0;
         bool announcedPlaying = false;
         int exitCode = exitOk;
     };
@@ -505,6 +517,12 @@ namespace
              + ": the plugins are prepared for " + juce::String (maxBlock));
         GraphBuilder builder (formats, &bundles);
         Control control (engine, builder, versionText());
+
+        // The buffer sizes a document may ask for here, and how its size is forced: from the
+        // layer speakerd boots from on (README.md, "Rate and block size").
+        const auto [quantumLo, quantumHi] = clock.quantumRange();
+        control.setQuantumSettings ({ quantumLo, quantumHi, clock.quantum,
+                                      [&node] (int quantum) { return node.setForceQuantum (quantum); } });
         control.installLayer (loadFirstWorkingLayer (options.stateDir, builder, device.role, clock.rate,
                                                      maxBlock, options.firstLayer),
                               clock.rate, maxBlock, clock.quantum);

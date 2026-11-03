@@ -10,7 +10,10 @@ cmake_minimum_required(VERSION 3.22)
 #        pin, and the monitor thread (output/level, plugins' mon_ parameters).
 # 0.3.1: logs the build of each plugin node it runs (`plugin node` lines, from the bundle's
 #        buildinfo.ttl; PluginBundles: which bundle each URI runs from, by lilv's rules).
-project(SPEAKERD VERSION 0.3.1)
+# 0.3.2: the graph document's buffer size (top-level "quantum"): checked on apply, set as PipeWire's
+#        clock.force-quantum; rate, quantum, quantum_range and quantum_default in hello and status,
+#        and an unasked status when the running quantum or rate changes.
+project(SPEAKERD VERSION 0.3.2)
 
 # A cross build (tools/build.sh speakerd aarch64) links the target's libpipewire, never this
 # machine's, and checks that it does (below) by the target's multiarch triplet.

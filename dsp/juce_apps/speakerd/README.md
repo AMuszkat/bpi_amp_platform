@@ -15,7 +15,10 @@ asks for the status, and subscribes to [monitor values](#monitoring): the output
 amplifier channel and the plugins' `mon_` parameters. The input node gained the role-aware
 [**Mine** channel](#the-mine-channel). Scope frames and records are step 4. A rate change does
 not swap the graph: it re-prepares the running one in place, behind silence. 0.3.1 logs the
-build each plugin node runs ([Which build it is](#command-line)).
+build each plugin node runs ([Which build it is](#command-line)). 0.3.2 knows the document's
+buffer size, its top-level `quantum` ([Rate and block size](#in-pipewire)): it refuses an apply
+whose size its PipeWire does not allow, forces the size of the document in force as PipeWire's
+`clock.force-quantum`, and reports the rate and the quantum it runs at to `ampd`.
 
 ## Command line
 
@@ -40,7 +43,7 @@ speakerd --version
 | `--device DEVICE_JSON` | with `--import-filtergraph`: the speaker's `device.json`, which says whether the session's output channel 0 (`playback_FL`) or 1 (`playback_FR`) is the woofer. Without it, `playback_FL` is |
 | `--prefer-headless` | with `--import-filtergraph`: a complete or control build's URI becomes its `_headless` sibling's, when that plugin is found (in the default paths or a `--lv2-bundle`) |
 | `--allow-unsafe-routing` | with `--import-filtergraph`: import a control build, with a warning, instead of failing |
-| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.1 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
+| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.2 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
 
 | Exit status | |
 |---|---|
@@ -299,6 +302,41 @@ re-prepares the graph at the new rate and primes it at the quantum the cycles br
 takes a fraction of a second. It logs that (no quantum line follows, whatever the quantum), and
 fades back in.
 
+**The document's buffer size.** A [graph document](#the-graph-document-version-1) may ask for
+the quantum the speaker runs at, its top-level `quantum` (from 0.3.2; an older speakerd ignores
+it). At start speakerd also reads `default.clock.min-quantum` (32 when it is not set, as in
+PipeWire 0.3.65; max-quantum is taken as 2048 when it is not set), and accepts the powers of two
+`p` with max (64, min-quantum) <= `p` <= min (2048, max-quantum, quantum-limit): 64 to 2048
+with the repository's `pipewire.conf` (min 64, max 2048) and with the virtual pair's
+`speaker.conf` (min 32, max 2048). Every size of that range fits what the plugins are prepared
+for, so a change between them only re-primes, as above (a fade-out, a prime, a fade-in), and
+never re-prepares.
+
+- An `apply` whose `quantum` is not a JSON number without a fraction (a bool or a string is
+  not), or not a power of two in that range, fails before anything is built:
+  `quantum <v>: not a power of two from <lo> to <hi> (what this speaker's PipeWire allows)`.
+  Absent or `null` is no size: PipeWire's own default (`default.clock.quantum`).
+- Once a document is in force (the layer speakerd boots from, passthrough included, and every
+  revision applied: a rollback of the hub's is one), speakerd sets PipeWire's `settings`
+  metadata, subject 0, key `clock.force-quantum`, to the document's size, or to 0 when it has
+  none, before it answers `applied`. A layer at boot whose size is outside the range (or not a
+  size) still plays, at PipeWire's default: a graph is not lost over a buffer size; speakerd
+  says so and writes 0. `clock.force-quantum`, not `clock.quantum`: PipeWire picks the quantum
+  from the nodes' latency requests within min-quantum and max-quantum, so another node's request
+  (snapclient asks for its own latency) would win over a default. A forced size wins over all of
+  them.
+- It writes it from the message thread under the PipeWire loop's lock, and again from the loop
+  thread whenever the `settings` metadata object (re)appears in the registry (a restarted
+  PipeWire makes speakerd exit 3, and the speakerd restarted on `graph.json` writes it at
+  load). Never at any other time: somebody who forces a size by hand (`pw-metadata -n settings
+  0 clock.force-quantum 256`, as the tests do) is not fought, until the next document comes into
+  force.
+- An apply that differs from the playing document only in `quantum` is built and swapped like
+  any other (a 30 ms fade-out and fade-in, then the re-prime the new size brings): telling
+  "only the size" apart would need the playing document's parameter values, which the local
+  link's `param`s have moved on since, and a swap costs only its fades.
+- The render mode ignores `quantum`: it runs at `--block`.
+
 ## The state directory
 
 | File | Layer | Written by |
@@ -399,6 +437,7 @@ on a left speaker and FR on a right one, so one document serves both speakers of
 | `format` | optional; `"speakerd-graph"` if present |
 | `version` | `1` |
 | `revision` | an integer, 0 or more; logged, reported in the hello and the status, and compared by the hub |
+| `quantum` | optional: the buffer size the speaker runs at, a power of two from 64 to 2048 (and within what its PipeWire allows), forced as PipeWire's `clock.force-quantum`; absent or `null`: PipeWire's default. See [Rate and block size](#in-pipewire) |
 | `nodes` | the plugin nodes (may be empty), at most 64 |
 | `connections` | per-channel connections (may be empty), at most 512 |
 
@@ -507,8 +546,9 @@ version 1; this is what speakerd does with it. A Unix stream socket, by default
 
 | Message | When |
 |---|---|
-| `{"op":"hello","role":"speakerd","version":"0.3.1 (<commit>)","revision":8,"layer":"current","protocol":1}` | first, on every connection, also after a reconnect |
+| `{"op":"hello","role":"speakerd","version":"0.3.2 (<commit>)","revision":8,"layer":"current","protocol":1,"rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512}` | first, on every connection, also after a reconnect |
 | the same fields with `"op":"status"`, and `"timing"` | the answer to `{"op":"status"}`; `timing` is the last minute's ([Timing](#timing)) |
+| the hello's fields with `"op":"status"`, no `timing` | unasked, whenever the rate or the quantum the cycles run at changes (from the message thread's 20 ms timer, never the audio thread); also once the first cycle has run, when `quantum` stops being `null` |
 | `{"op":"applied","revision":8}` | an `apply` built, swapped in, and the audio thread has run a cycle of it (or 200 ms went by with no cycle: nothing is linked) |
 | `{"op":"failed","revision":8,"reason":"..."}` | an `apply` that did not load; the graph that played plays on, untouched |
 | `{"op":"error","about":"param","node":16,"id":"gain","reason":"..."}` | a `param` that cannot be applied (below) |
@@ -516,7 +556,10 @@ version 1; this is what speakerd does with it. A Unix stream socket, by default
 | `{"op":"value","stream":"output/level","t":1234.567890,"v":[-12.10,-15.11,-120.00,-120.00]}` | a subscribed stream's value ([Monitoring](#monitoring)) |
 
 `revision` is the running graph's: the layer's document's, the last applied revision's, or 0
-for passthrough. `layer` is the state layer it came from at boot (`current`, `last-known-good`,
+for passthrough. `rate` is the rate the graph runs at, `quantum` the size of the cycles now
+(`null` before the first cycle), `quantum_range` the sizes a document's `quantum` may take here
+(`[lo, hi]`, powers of two, [Rate and block size](#in-pipewire)) and `quantum_default`
+PipeWire's `default.clock.quantum`, the size of a document without one (from 0.3.2). `layer` is the state layer it came from at boot (`current`, `last-known-good`,
 `factory`, `passthrough`), and `current` once a revision has been applied (`ampd` writes every
 applied revision as `graph.json`, the current layer). `version` is what `--version` prints after
 `speakerd `.
@@ -560,7 +603,7 @@ one being built included; a ninth fails at once (`8 revisions are waiting alread
 and settles it (the second of silence is computed, not waited for): with `loudness_headless`,
 `applied` comes about 100 ms after the `apply` on the virtual pair.
 
-**`{"op":"status"}`**: answered with the hello's fields, `"op":"status"`.
+**`{"op":"status"}`**: answered with the hello's fields, `"op":"status"`, and `timing`.
 
 **`{"op":"subscribe","stream":"output/level","rate_hz":30}`**, **`{"op":"unsubscribe","stream":"output/level"}`**:
 see [Monitoring](#monitoring).
@@ -777,7 +820,7 @@ stable.
 
 | Line | When |
 |---|---|
-| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf`; 0.3.0 has the local link, the Mine channel and the monitors; 0.3.1 logs the build of each plugin node it runs (`plugin node` lines) |
+| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf`; 0.3.0 has the local link, the Mine channel and the monitors; 0.3.1 logs the build of each plugin node it runs (`plugin node` lines); 0.3.2 is the first that knows the document's `quantum` (and reports `rate`, `quantum`, `quantum_range`, `quantum_default`) |
 | `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or invalid, its `limits` included; the defaults are limited (see device.json) |
 | `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
 | `device: limits: output at <gain> dB, tweeter <muted\|on>`, followed by ` (no limits in device.json: the fail-safe)` or ` (device.json not read: the fail-safe)` when they are the fail-safe | always, right after the line before. `<gain>` is printed as `%g` does: `-20`, `-6.5`, `0`. No limit at all reads `output at 0 dB, tweeter on` |
@@ -785,6 +828,11 @@ stable.
 | `--lv2-bundle <path>: not a directory`, `--lv2-bundle <path>: no LV2 plugin loaded from it: ...` | a `--lv2-bundle` that did not load; exit status 2 follows |
 | `cannot connect to PipeWire: <reason>: trying again every second`, `PipeWire did not answer: trying again every second`, `cannot start the PipeWire client loop: trying again every second` | PipeWire is not there (yet); said once, however long it takes |
 | `pipewire: <rate> Hz, quantum <n>, largest quantum <limit>, max-quantum <n\|not set>: the plugins are prepared for <n>` | connected to PipeWire: the quantum, `default.clock.quantum-limit`, `default.clock.max-quantum` and the block size the plugins are prepared for (Rate and block size) |
+| `quantum: revision <r> asks for <q>: clock.force-quantum <q>` | a document came into force (the boot layer, an applied revision: before its `applied` line) with a size; it is forced |
+| `quantum: revision <r> asks for none: clock.force-quantum 0 (PipeWire's default, <d>)` | the same, for a document without a size (passthrough is revision 0); `<d>` is `default.clock.quantum` |
+| `quantum: revision <r> asks for <q>, outside <lo> to <hi>: not forced` | a boot layer whose size this PipeWire does not allow (`<q>` as JSON: `4096`, `"256"`); it plays all the same, and 0 is written |
+| `quantum: PipeWire has no settings metadata (yet): clock.force-quantum <q> is written when it appears` | after one of the three lines before, when the `settings` metadata is not in the registry |
+| `quantum: the settings metadata appeared: clock.force-quantum <q>` | the `settings` metadata (re)appeared while a document is in force: its size is written again |
 | `starting at layer <name> (--from)` | `--from` names a layer after `current` |
 | `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>`, or `plugin node <uid>: <URI>, no build identity (an older build), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (buildinfo.ttl unreadable), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (bundle not found)` | once per plugin node each time a layer (live or in the render) or an `apply` builds a graph with it, as soon as its plugin is instantiated: before the layer's `loaded` line and the apply's `applied` line, and also for the nodes a layer or an apply instantiated before it failed (then before its `FAILED` line). `<uid>` is the node's uid in the document, `<URI>` the plugin URI it runs, `<bundle dir>` the bundle it runs from ([Which build it is](#command-line)). Never a failure or a warning: nothing else changes. None for passthrough (no plugin) or `--import-filtergraph` |
 | `layer <name> (<file>): FAILED: <reason>` | a layer that did not load; `<name>` is `current`, `last-known-good` or `factory` |
@@ -930,7 +978,7 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 |---|---|
 | `Main.cpp` | command line, signals, the live mode and its controller timer, the render mode |
 | `LocalLink.*` | the local link's socket and its thread: one client, JSON lines, a send buffer |
-| `Control.*` | what arrives over the local link: parameters (lookup, `seq`, the inbox), revisions (the queue, build, swap, answer), status |
+| `Control.*` | what arrives over the local link: parameters (lookup, `seq`, the inbox), revisions (the queue, build, swap, answer, the buffer size), status |
 | `Monitor.*` | the monitor thread: subscriptions, `output/level`, the plugins' `mon_` values, `speakerd/timing`, the timing's minute and its log lines |
 | `StateLayers.*` | the boot order: the first layer that loads, or passthrough |
 | `GraphDocument.*` | the graph document, version 1: parsing and checks |
@@ -941,7 +989,7 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `TimedNode.*` | a plugin node: the hosted instance, forwarded as the graph needs, with its processing time |
 | `Timing.*` | the timing statistics: means, maxima, late cycles, position jumps |
 | `Samples.h` | the absolute caps: NaN and infinity to 0, clamping |
-| `PipeWireNode.*` | the input sink, the `pw_filter` node, and the links |
+| `PipeWireNode.*` | the input sink, the `pw_filter` node, the links, and `clock.force-quantum` in the `settings` metadata |
 | `Render.*` | the offline render |
 | `DeviceConfig.*` | `device.json`, its `limits` included |
 | `BuildInfo.cmake` | writes `BuildInfo.h` at every build: the commit speakerd is built from |

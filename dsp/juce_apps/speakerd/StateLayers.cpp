@@ -79,6 +79,7 @@ namespace speakerd
             loaded.name = layer.name;
             loaded.fileName = layer.file;
             loaded.revision = doc.revision;
+            loaded.quantum = doc.quantum;
             log ("using layer " + loaded.describe());
             return loaded;
         }

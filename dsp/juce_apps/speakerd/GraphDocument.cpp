@@ -2,6 +2,7 @@
 
 #include "LV2State.h"
 
+#include <cmath>
 #include <limits>
 #include <set>
 #include <tuple>
@@ -200,6 +201,10 @@ namespace speakerd
         if (auto r = readInteger (json["revision"], "revision", 0, std::numeric_limits<juce::int64>::max(), out.revision); r.failed())
             return r;
 
+        // Kept as it is: checked against what this speaker's PipeWire allows where the document
+        // comes into force (Control), not here.
+        out.quantum = json["quantum"];
+
         const auto* nodes = json["nodes"].getArray();
         if (nodes == nullptr)
             return fail ("nodes", "missing: an array of plugin nodes (it may be empty)");
@@ -283,5 +288,36 @@ namespace speakerd
         }
 
         return Result::ok();
+    }
+
+    bool GraphDocument::quantumIn (const var& q, int lo, int hi, int& out)
+    {
+        double value = 0.0;
+
+        if (q.isInt() || q.isInt64())
+            value = (double) (juce::int64) q;
+        else if (q.isDouble())
+            value = (double) q;
+        else
+            return false;     // a bool, a string, an object, null
+
+        if (! (value >= (double) lo && value <= (double) hi))
+            return false;
+
+        const auto size = (int) value;
+
+        if (std::abs (value - (double) size) > 0.0)   // a fraction
+            return false;
+
+        if (! juce::isPowerOfTwo (size))
+            return false;
+
+        out = size;
+        return true;
+    }
+
+    String GraphDocument::quantumText (const var& q)
+    {
+        return juce::JSON::toString (q, true);
     }
 }
