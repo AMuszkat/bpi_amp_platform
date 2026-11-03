@@ -526,23 +526,28 @@ class FakeHub:
 
     @staticmethod
     def quantum_shape_ok(q):
-        """The hub's check of a document's `quantum`: an integer power of two from 64 to 2048."""
+        """The hub's check of a document's `quantum`: an integer power of two from 64 to 2048
+        (a whole number written as a float, 256.0, is that number, as ampd's quantum_problem says)."""
+        if isinstance(q, float) and q.is_integer():
+            q = int(q)
         return isinstance(q, int) and not isinstance(q, bool) and 64 <= q <= 2048 and q & (q - 1) == 0
 
     def _quantum_refusal(self, doc):
-        """Why the hub (or a speakerd, through its failed apply) refuses the document's quantum; None: it does not."""
+        """Why the hub refuses the document's quantum, or a speakerd does (relayed as the real hub
+        does, `<speaker>: <speakerd's reason>`); None: neither does."""
         if doc.get("quantum") is None:
             return None
         q = doc["quantum"]
         if not self.quantum_shape_ok(q):
             return "quantum %s: a power of two from 64 to 2048" % json.dumps(q)
+        q = int(q)
         for s in self.speakers:
             if s.get("online") and not s.get("quantum_range"):
                 return "%s: its speakerd cannot set the buffer size (no quantum_range)" % s["name"]
         for s in self.speakers:
             lo, hi = s.get("quantum_range") or (64, 2048)
             if s.get("online") and not lo <= q <= hi:
-                return ("%s: failed: quantum %d: not a power of two from %d to %d (what this speaker's PipeWire allows)"
+                return ("%s: quantum %d: not a power of two from %d to %d (what this speaker's PipeWire allows)"
                         % (s["name"], q, lo, hi))
         return None
 
@@ -556,7 +561,7 @@ class FakeHub:
                 for s in self.speakers:
                     if not s.get("online") or not s.get("quantum_range"):
                         continue
-                    want = doc.get("quantum") if doc.get("quantum") is not None else s.get("quantum_default")
+                    want = int(doc["quantum"]) if doc.get("quantum") is not None else s.get("quantum_default")
                     if want and s.get("quantum") != want:
                         s["quantum"] = want
                         changed = True
