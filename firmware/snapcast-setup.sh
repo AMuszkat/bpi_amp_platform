@@ -627,7 +627,8 @@ CLIENTRT
 
 # --route speakerd: every player plays into the speakerd sink (firmware/CLAUDE.md,
 # "speakerd on a board"). Like Ap.cap it exists from boot, defined by the board's
-# PipeWire config (pipewire.conf.d/60-speakerd-sink.conf), so snapclient links to it at
+# PipeWire config (pipewire.conf.d/60-speakerd-sink.conf, or the repository's
+# pipewire.conf itself), so snapclient links to it at
 # boot and between speakerd's restarts, never to the amplifier.
 target_client_rt_conf_speakerd() {
     cat <<'CLIENTRT'
@@ -693,7 +694,8 @@ CLIENTRT
 # --route speakerd is only safe when the speakerd sink is in the board's PipeWire
 # configuration: a target that does not exist sends snapclient to the default sink, the
 # amplifier, full range and at full level. A sink speakerd made itself is not enough: it
-# lingers only until PipeWire restarts.
+# lingers only until PipeWire restarts. The sink may be in a drop-in
+# (60-speakerd-sink.conf) or in pipewire.conf itself (the repository's has it).
 speakerd_sink_configured() {
     local f
     for f in "$CLIENT_HOME/.config/pipewire/pipewire.conf" "$CLIENT_HOME"/.config/pipewire/pipewire.conf.d/*.conf \

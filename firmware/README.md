@@ -102,8 +102,8 @@ installs it into the board's module tree.
 
 | File | Purpose |
 |---|---|
-| [`pipewire/pipewire.conf`](pipewire/pipewire.conf) | PipeWire configuration for the board, including the AirPlay loopback; `setup.sh --base-conf` installs it |
-| [`pipewire/pipewire.conf.d/60-speakerd-sink.conf`](pipewire/pipewire.conf.d/60-speakerd-sink.conf) | The persistent `speakerd` sink, a drop-in the speakerd installer puts on the board |
+| [`pipewire/pipewire.conf`](pipewire/pipewire.conf) | The measured board's own PipeWire configuration with the quantum pinned at 512, at 48000 Hz, with the `speakerd` sink in it; `setup.sh --mode target-remote --only pipewire --base-conf` installs it |
+| [`pipewire/pipewire.conf.d/60-speakerd-sink.conf`](pipewire/pipewire.conf.d/60-speakerd-sink.conf) | The persistent `speakerd` sink, a drop-in the speakerd installer puts on a board that runs its own `pipewire.conf` (never beside the repository's) |
 | [`usb-serial-console-setup.sh`](usb-serial-console-setup.sh) | Login console over the USB-C port |
 | [`wifi-driver-setup.sh`](wifi-driver-setup.sh) | Pins the RTL8822CS WiFi to one driver and disables power saving |
 | [`max98397-diag.py`](max98397-diag.py) | Reads and clears the amplifiers' fault registers over I²C (runs on the board) |

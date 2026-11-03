@@ -120,16 +120,24 @@ Pass when:
   missing, not with --dry-run) and is checked again, one that still does not is refused with
   nothing written or restarted, a name that is not .local and an address are not looked up, and
   a server a shell would split is refused;
+- with the repository's pipewire.conf as the user's (it defines the speakerd sink), never two
+  speakerd nodes: speakerd-setup.sh sink and install write no drop-in and remove one that is
+  there, saying so (the dry run removes nothing), and a second sink writes nothing;
+  snapcast-setup.sh --route speakerd finds the sink in pipewire.conf, setup.sh's snapcast
+  component alone accepts it, status names it, and uninstall says the sink stays (a null sink:
+  silent) and leaves pipewire.conf as it was, restoring the routing;
 - setup.sh checks before it changes: --dry-run changes nothing; --route speakerd without the
   pipewire component and without the sink, and --route plugin-host with the speakerd component,
   are refused before anything changes; and the components pipewire, snapcast (re-routing an
   installed snapclient) and speakerd install in that order;
 - setup.sh --only pipewire --base-conf installs the repository's pipewire.conf byte for byte,
-  whose graph (default.clock.rate) and amplifier (its audio.rate) are 48000 Hz and whose AirPlay
-  sink is 44100 Hz (the person's decision), and says those rates (with --dry-run too, which
-  writes nothing); --rate 44100 gives 44100 for the graph and the amplifier, leaves the AirPlay
-  sink at 44100, changes no other line, and warns that the shipped filters are designed for
-  48000 Hz; --rate 48000 gives the repository's file again, and the same run twice writes
+  whose graph (default.clock.rate, default.clock.allowed-rates) and amplifier
+  (bpi-alsa-playback-pcm, its audio.rate) are 48000 Hz, the only object with a rate, and says
+  those rates (with --dry-run too, which writes nothing); it removes the drop-ins the file
+  contains (pipewire.conf.d/20-resample.conf, 60-speakerd-sink.conf), saying so (the dry run
+  says it would and removes nothing), and writes no drop-in; --rate 44100 gives 44100 for the
+  graph, its allowed rates and the amplifier, changes no other line, and warns that the shipped
+  filters are designed for 48000 Hz; --rate 48000 gives the repository's file again, and the same run twice writes
   nothing; it says when the running PipeWire runs at another rate; with --no-restart nothing is
   restarted; the board's own pipewire.conf is kept as .orig once, and one the script installed
   never is; a pipewire.conf whose amplifier runs at another rate than its graph is refused,
@@ -1311,6 +1319,67 @@ class Install(Setup):
         self.assertIn('target.object = "speakerd"', (home / ".config/pipewire/client-rt.conf").read_text())
         self.assertTrue((home / ".local/lib/speakerd/current").is_symlink())
 
+    def test_the_repository_conf_holds_the_sink(self):
+        """With the repository's pipewire.conf (which defines the speakerd sink) as the user's,
+        never two speakerd nodes: sink and install write no drop-in and remove one that is
+        there, snapcast-setup.sh --route speakerd and setup.sh accept the sink in pipewire.conf,
+        and uninstall says the sink stays (a null sink) and leaves pipewire.conf alone."""
+        home = self.fresh_home("repository-conf")
+        conf = home / ".config/pipewire/pipewire.conf"
+        dropin = home / ".config/pipewire/pipewire.conf.d/60-speakerd-sink.conf"
+        dropin.parent.mkdir(parents=True)
+        shutil.copy(FIRMWARE / "pipewire/pipewire.conf", conf)
+        shutil.copy(FIRMWARE / "pipewire/pipewire.conf.d/60-speakerd-sink.conf", dropin)
+        sink = ("speakerd-setup.sh", "sink", "--home", home, "--no-systemd")
+
+        before = snapshot(home)
+        dry = firmware(*sink, "--dry-run", env=self.env).stdout
+        self.assertIn(f"(dry-run) would remove {dropin}: {conf}, the repository's, defines the speakerd sink", dry)
+        self.assertEqual(snapshot(home), before)
+        out = firmware(*sink, env=self.env).stdout
+        self.assertIn(f"Removed {dropin}: {conf}, the repository's, defines the speakerd sink", out)
+        self.assertFalse(dropin.exists())
+        before = snapshot(home)
+        out = firmware(*sink, env=self.env).stdout
+        self.assertIn(f"The speakerd sink is configured in {conf} (the repository's pipewire.conf): no drop-in", out)
+        self.assertEqual(snapshot(home), before)
+
+        # The route into speakerd finds the sink in pipewire.conf.
+        routed = firmware("snapcast-setup.sh", "--mode", "target", "--routing-only", "--route", "speakerd",
+                          "--client-home", home, env=self.env)
+        self.assertIn(f"The speakerd sink is defined in {conf}", routed.stdout)
+        crt = home / ".config/pipewire/client-rt.conf"
+        self.assertIn('target.object = "speakerd"', crt.read_text())
+        # setup.sh's snapcast component alone: the sink is configured (in pipewire.conf).
+        unit = home / ".config/systemd/user/snapclient.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=client-rt.conf\nExecStart=/usr/bin/snapclient\n")
+        accepted = firmware("setup.sh", "--home", home, "--no-systemd", "--only", "snapcast", "--dry-run",
+                            env=self.env, check=False)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout)
+        self.assertNotIn("needs the speakerd sink", accepted.stdout)
+
+        # install: no drop-in, and one put back is removed.
+        shutil.copy(FIRMWARE / "pipewire/pipewire.conf.d/60-speakerd-sink.conf", dropin)
+        result = self.install(home, "--role", "left")
+        self.assertIn(f"Removed {dropin}", result.stdout)
+        self.assertFalse(dropin.exists())
+        result = self.install(home, "--role", "left")
+        self.assertIn("(the repository's pipewire.conf): no drop-in", result.stdout)
+        self.assertFalse(dropin.exists())
+        status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
+        self.assertIn(f"sink: {conf} (the repository's pipewire.conf)", status)
+
+        # uninstall: the sink stays in pipewire.conf, said so; the routing from before goes back.
+        repo = (FIRMWARE / "pipewire/pipewire.conf").read_bytes()
+        result = firmware("speakerd-setup.sh", "uninstall", "--home", home, "--no-systemd", env=self.env)
+        self.assertIn(f"the speakerd sink stays: it is in {conf} (the repository's pipewire.conf), a null sink, "
+                      "so what plays into it is silent", result.stdout)
+        self.assertEqual(conf.read_bytes(), repo)
+        self.assertFalse(dropin.exists())
+        self.assertFalse((home / ".local/lib/speakerd").exists())
+        self.assertNotIn('target.object = "speakerd"', crt.read_text())
+
 
 def pipewire_conf_rates(text):
     """The rates a pipewire.conf sets, read here, not with setup.sh's reader: (default.clock.rate,
@@ -1746,20 +1815,22 @@ class Systemd(Setup):
                 self.assertTrue(all(line.endswith("runs: no") for line in restarts), calls)
 
     def test_setup_installs_the_base_conf_at_its_rate(self):
-        """setup.sh --only pipewire --base-conf: the repository's pipewire.conf, the graph and the
-        amplifier at 48000 Hz or at --rate's, the AirPlay sink at 44100 whatever --rate says;
+        """setup.sh --only pipewire --base-conf: the repository's pipewire.conf, the graph (its
+        rate and allowed rates) and the amplifier at 48000 Hz or at --rate's; the drop-ins it
+        contains (20-resample.conf, 60-speakerd-sink.conf) removed, and no drop-in written;
         nothing restarts with --no-restart (the stand-in systemctl records every call)."""
         repo = (FIRMWARE / "pipewire/pipewire.conf").read_text()
 
         def rates(text):
             graph, allowed, objects = pipewire_conf_rates(text)
             amplifier = [o["audio.rate"] for o in objects if o["factory.name"] == "api.alsa.pcm.sink"]
-            airplay = [o["audio.rate"] for o in objects if o["node.name"] == "AirPlay-sink"]
-            return graph, allowed, amplifier, airplay, len(objects)
+            return graph, allowed, amplifier, len(objects)
 
-        # The repository's file itself (the person's decisions, 2026-11-01): the graph and the
-        # amplifier at 48000, the AirPlay sink left at 44100; no other object sets a rate.
-        self.assertEqual(rates(repo), (48000, None, ["48000"], ["44100"], 2))
+        # The repository's file itself (the person's decisions): the graph and the amplifier
+        # (bpi-alsa-playback-pcm) at 48000; no other object sets a rate.
+        self.assertEqual(rates(repo), (48000, [48000], ["48000"], 1))
+        amp_line = r"the graph and bpi-alsa-playback-pcm at {} Hz$"
+        dropins = ("20-resample.conf", "60-speakerd-sink.conf")
 
         d, env = self.systemd("base-conf")
         # PipeWire says it runs at 44100 now (a stand-in pw-metadata).
@@ -1774,28 +1845,43 @@ class Systemd(Setup):
                 conf.parent.mkdir(parents=True)
                 if own:
                     conf.write_text(own)
+                # The drop-ins of the board measured, which the file now contains.
+                (conf.parent / "pipewire.conf.d").mkdir()
+                (conf.parent / "pipewire.conf.d/20-resample.conf").write_text(
+                    "context.properties = {\n    resample.quality = 15\n}\n")
+                shutil.copy(FIRMWARE / "pipewire/pipewire.conf.d/60-speakerd-sink.conf", conf.parent / "pipewire.conf.d")
                 args = ("setup.sh", "--home", home, "--only", "pipewire", "--base-conf", "--no-restart")
 
                 before = snapshot(home)
                 dry = firmware(*args, "--dry-run", env=env).stdout
-                self.assertRegex(dry, r"\(dry-run\) would install firmware/pipewire/pipewire\.conf as \S+: "
-                                      r"the graph and \S+ at 48000 Hz, AirPlay-sink at 44100 Hz")
+                self.assertRegex(dry, re.compile(r"\(dry-run\) would install firmware/pipewire/pipewire\.conf as \S+: "
+                                                 + amp_line.format(48000), re.M))
+                for name in dropins:
+                    self.assertIn(f"(dry-run) would remove {conf.parent}/pipewire.conf.d/{name}: the repository's "
+                                  "pipewire.conf has what it sets", dry)
                 self.assertEqual(snapshot(home), before)
 
                 for rate, expected in ((None, 48000), ("44100", 44100), ("48000", 48000)):
                     out = firmware(*args, *(("--rate", rate) if rate else ()), env=env).stdout
                     text = conf.read_text()
-                    self.assertEqual(rates(text), (expected, None, [str(expected)], ["44100"], 2), out)
-                    # Only the graph's rate and the amplifier's differ from the repository's file.
+                    self.assertEqual(rates(text), (expected, [expected], [str(expected)], 1), out)
+                    # Only the graph's rate, its allowed rates and the amplifier's differ from the
+                    # repository's file.
                     self.assertEqual(len(text.splitlines()), len(repo.splitlines()))
                     changed = [(a, b) for a, b in zip(repo.splitlines(), text.splitlines()) if a != b]
-                    self.assertEqual(len(changed), 0 if expected == 48000 else 2, changed)
+                    self.assertEqual(len(changed), 0 if expected == 48000 else 3, changed)
                     for a, b in changed:
                         self.assertEqual(a.replace("48000", str(expected)), b)
                     if expected == 48000:
                         self.assertEqual(text, repo)
-                    self.assertRegex(out, rf"Wrote \S+pipewire\.conf: the graph and \S+ at {expected} Hz, "
-                                          r"AirPlay-sink at 44100 Hz")
+                    self.assertRegex(out, re.compile(r"Wrote \S+pipewire\.conf: " + amp_line.format(expected), re.M))
+                    if rate is None:
+                        for name in dropins:
+                            self.assertIn(f"Removed {conf.parent}/pipewire.conf.d/{name}: the repository's "
+                                          "pipewire.conf has what it sets", out)
+                    # The sink is the file's: no drop-in, neither removed again nor written.
+                    self.assertEqual(sorted(p.name for p in (conf.parent / "pipewire.conf.d").iterdir()), [], out)
+                    self.assertIn("The speakerd sink is configured in", out)
                     if expected != 48000:
                         self.assertIn("filters, designed for 48000 Hz, run with every frequency scaled by", out)
                     if expected != 44100:

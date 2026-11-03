@@ -6,8 +6,9 @@
 # order the speaker boots them (docs/remote-plugin-host.md, section 8, rule 2):
 #
 #   pipewire   the board's PipeWire configuration: the persistent speakerd sink
-#              (pipewire.conf.d/60-speakerd-sink.conf); with --base-conf also the
-#              repository's pipewire.conf (48000 Hz), and with --rate another sample rate
+#              (pipewire.conf.d/60-speakerd-sink.conf); or, with --base-conf, the
+#              repository's pipewire.conf (48000 Hz, quantum 512, the speakerd sink in it,
+#              the drop-ins it contains removed), and with --rate another sample rate
 #   snapcast   snapclient, routed into the speakerd sink (snapcast-setup.sh --route speakerd)
 #   speakerd   the headless plugin host (speakerd-setup.sh install)
 #   ampd       the speaker's network agent, and the hub on the left speaker (ampd-setup.sh install):
@@ -74,12 +75,13 @@ Options:
   pipewire:
   --base-conf                 also install firmware/pipewire/pipewire.conf as ~/.config/pipewire/pipewire.conf
                               (the board's own is kept as .orig once). Off by default: a running board keeps
-                              its own, which may name the amplifier differently. The file runs the graph
-                              (default.clock.rate) and the amplifier (its audio.rate) at 48000 Hz, the rate
-                              snapcast streams and the shipped crossover and firConv filters are designed
-                              for; its AirPlay sink is at 44100 Hz.
-  --rate <44100|48000>        with --base-conf: the graph's default.clock.rate and the amplifier's
-                              audio.rate, changed together (the AirPlay sink stays at 44100). Default: the
+                              its own. The file is the measured board's own with the graph (default.clock.rate)
+                              and the amplifier (its audio.rate) at 48000 Hz, the rate snapcast streams and
+                              the shipped crossover and firConv filters are designed for, the quantum pinned
+                              at 512, resample.quality 15 and the speakerd sink; the drop-ins it contains
+                              (pipewire.conf.d/20-resample.conf, 60-speakerd-sink.conf) are removed.
+  --rate <44100|48000>        with --base-conf: the graph's default.clock.rate (and allowed-rates) and the
+                              amplifier's audio.rate, changed together. Default: the
                               file's, 48000. At 44100 PipeWire resamples snapcast's 48000 Hz stream and the
                               shipped filters run with every frequency scaled by 44100/48000.
 
@@ -247,6 +249,7 @@ snapcast_setup() {
     bash "$FIRMWARE_DIR/snapcast-setup.sh" "$@" "${extra[@]}" "${SNAPCAST_ARGS[@]}"
 }
 DROPIN="$H/.config/pipewire/pipewire.conf.d/60-speakerd-sink.conf"
+MAIN_CONF="$H/.config/pipewire/pipewire.conf"
 SNAPCLIENT_UNIT="$H/.config/systemd/user/snapclient.service"
 
 restart_pipewire() {
@@ -300,8 +303,7 @@ running_rate() {
 
 # Makes the file to install, BASE_FILE: the repository's pipewire.conf, with --rate in
 # default.clock.rate, in default.clock.allowed-rates when it is set, and in the amplifier's
-# (each api.alsa.pcm.sink object's) audio.rate; nothing else, so the AirPlay sink stays at
-# 44100 (the person's decision). Then checks that the graph and the amplifier run at one rate,
+# (each api.alsa.pcm.sink object's) audio.rate; nothing else. Then checks that the graph and the amplifier run at one rate,
 # BASE_RATE, and refuses otherwise: an amplifier at another rate than the graph resamples
 # everything it plays. Called with the checks, before anything changes. Sets BASE_FILE,
 # BASE_RATE and BASE_WHAT ("the graph and <amplifier> at <rate> Hz, <object> at <rate> Hz",
@@ -347,9 +349,8 @@ prepare_base_conf() {
     fi
 }
 
-# A pipewire.conf that this script installed (any --rate, any version that carries the line)
-# is never kept as the board's own.
-is_repository_conf() { grep -qF "The BPI AMP Platform's PipeWire configuration (firmware/pipewire/pipewire.conf)" "$1"; }
+# A pipewire.conf that this script installed (is_repository_conf, install-lib.sh) is never
+# kept as the board's own.
 
 # Installs BASE_FILE as ~/.config/pipewire/pipewire.conf, keeping the board's own as .orig
 # once. Sets BASE_CHANGED.
@@ -371,6 +372,21 @@ install_base_conf() {
         || { rm -f "$dst.tmp.$$"; die "cannot write $dst"; }
     BASE_CHANGED=1
     ok "Wrote $dst: $BASE_WHAT"
+}
+
+# The drop-ins whose settings the repository's pipewire.conf has itself (REPO_CONF_HAS,
+# install-lib.sh: the converter quality and the speakerd sink, which must not be there twice),
+# removed from the user's pipewire.conf.d before PipeWire restarts. Sets BASE_CHANGED.
+remove_contained_dropins() {
+    local f
+    for f in "${REPO_CONF_HAS[@]}"; do
+        f="$H/.config/pipewire/pipewire.conf.d/$f"
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        if [ "$DRY_RUN" -eq 1 ]; then info "(dry-run) would remove $f: the repository's pipewire.conf has what it sets"; continue; fi
+        rm -f "$f" || die "cannot remove $f"
+        ok "Removed $f: the repository's pipewire.conf has what it sets"
+        BASE_CHANGED=1
+    done
 }
 
 # ----------------------------------------------------------------------------
@@ -396,8 +412,8 @@ if selected ampd; then
     ampd_setup "${ampd_check[@]}" || die "ampd cannot be installed (see above): nothing was changed"
 fi
 if selected snapcast; then
-    if [ "$ROUTE" = speakerd ] && ! selected pipewire && [ ! -f "$DROPIN" ]; then
-        die "--route speakerd needs the speakerd sink, which is not configured ($DROPIN): include the pipewire component"
+    if [ "$ROUTE" = speakerd ] && ! selected pipewire && [ ! -f "$DROPIN" ] && ! is_repository_conf "$MAIN_CONF"; then
+        die "--route speakerd needs the speakerd sink, which is not configured ($DROPIN, or the repository's $MAIN_CONF): include the pipewire component"
     fi
     if [ -z "$SERVER" ] && [ ! -f "$SNAPCLIENT_UNIT" ]; then
         die "snapclient is not set up here ($SNAPCLIENT_UNIT): give --server for a full client setup, or --skip snapcast"
@@ -439,11 +455,15 @@ for c in "${CHOSEN[@]}"; do
             if [ "$BASE_CONF" -eq 1 ]; then
                 info "pipewire: the repository's pipewire.conf"
                 install_base_conf
+                remove_contained_dropins
                 [ "$BASE_CHANGED" -eq 0 ] || restart_pipewire
             fi
-            if [ "$ROUTE" = speakerd ] || selected speakerd || [ -f "$DROPIN" ]; then
-                # The drop-in, a PipeWire restart if it changed, and the RUNNING PipeWire's
-                # speakerd node checked: all fatal.
+            if [ "$BASE_CONF" -eq 1 ] && [ "$DRY_RUN" -eq 1 ] && ! is_repository_conf "$MAIN_CONF"; then
+                info "pipewire: (dry-run) the persistent speakerd sink would be the repository's pipewire.conf's: no drop-in"
+            elif [ "$ROUTE" = speakerd ] || selected speakerd || [ -f "$DROPIN" ]; then
+                # The drop-in (none with the repository's pipewire.conf, which has the sink),
+                # a PipeWire restart if it changed, and the RUNNING PipeWire's speakerd node
+                # checked: all fatal.
                 info "pipewire: the persistent speakerd sink"
                 speakerd_setup sink
             else

@@ -412,7 +412,8 @@ speaker in place of AudioPluginHost:
   `device.json`'s limits (none on a first install), refuses a `speakerd` older than 0.2.0 or a running
   AudioPluginHost, and turns the board's session into the factory layer with the import above.
   The unit's wrapper (`firmware/speakerd/speakerd-run`) keeps the crash history and picks the
-  layer (section 8). A PipeWire drop-in defines the persistent `speakerd` sink, with
+  layer (section 8). A PipeWire drop-in (or the repository's `pipewire.conf` itself, never
+  both) defines the persistent `speakerd` sink, with
   `priority.driver = 0` so the amplifier, not a timer, clocks the graph, and snapclient is routed
   into it. `firmware/setup.sh` installs the whole audio side in boot order (PipeWire
   configuration, snapclient, `speakerd`; `ampd` from step 3), and `tools/board.sh` is the gated
@@ -1030,7 +1031,7 @@ sequenceDiagram
     participant C as snapclient
     participant S as speakerd
     SD->>PW: start
-    PW->>PW: create the speakerd sink (the drop-in's null sink)
+    PW->>PW: create the speakerd sink (a null sink of its configuration)
     SD->>WP: start
     WP->>PW: give the sinks their ports, make speakerd the default sink
     par no order between snapclient and speakerd
@@ -1197,7 +1198,7 @@ flowchart TB
             sdm --> jucesd --> lv2
             sdm --> libpw
         end
-        pw[["«process» pipewire<br/>the speakerd null sink from the drop-in,<br/>the ALSA sink of the amplifier, the links"]]:::aud
+        pw[["«process» pipewire<br/>the speakerd null sink from its configuration,<br/>the ALSA sink of the amplifier, the links"]]:::aud
         wp[["«process» wireplumber<br/>links players to sinks"]]:::aud
         snap[["«process» snapclient<br/>plays the stream into the speakerd sink"]]:::aud
         kern["«kernel» ALSA, the MAX98397 codec driver,<br/>the device tree"]:::hw
@@ -1233,7 +1234,7 @@ inside it are calls.
 | `ampd` | one process on each speaker: `python3` running `ampd.py`, as a systemd user unit | Python 3.9, the standard library only (a board has no pip) | `speakerd`'s socket, `ampd.json`; the hub's address when it is an agent | touch audio; change `device.json` |
 | `speakerd` | one process on each speaker, a JUCE console application, as a systemd user unit started through `speakerd-run` | C++, JUCE 8 (`juce_audio_processors_headless` with its LV2 hosting, `juce_audio_formats`) and libpipewire-0.3 | PipeWire and the bundles named on its command line | touch the network; write a file |
 | headless builds | not a process: LV2 bundles (`loudness_headless.lv2`: `libloudness_headless.so` and its `.ttl`), loaded into `speakerd`'s process at run time by JUCE's LV2 hosting; complete builds the same way, without a window | a plugin's processor and DSP sources, JUCE's LV2 wrapper | the host's `patch:Set` for parameters | open an editor (`hasEditor()` is false) |
-| the audio server | two processes, the distribution's, as systemd user units: `pipewire` (0.3.65, the graph and the devices) and `wireplumber` (0.4.13, the session manager that links players to sinks) | C | the drop-in that declares the `speakerd` sink | know anything about plugins |
+| the audio server | two processes, the distribution's, as systemd user units: `pipewire` (0.3.65, the graph and the devices) and `wireplumber` (0.4.13, the session manager that links players to sinks) | C | the configuration that declares the `speakerd` sink (a drop-in, or the repository's `pipewire.conf`) | know anything about plugins |
 | the service manager | `systemd --user`, one process for the audio user's session, kept alive by linger | | linger for the audio user | keep a start limit |
 | kernel and hardware | ALSA, the MAX98397 codec driver, the device tree; the two amplifiers | `firmware/` | | |
 

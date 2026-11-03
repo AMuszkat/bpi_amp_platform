@@ -8,6 +8,8 @@
 #   the bundle         make_bundle: what the installers copy to a board, from the build tree;
 #                      installed_setup: an installer's installed copy, for the hints
 #   the remote mode    remote_run: copy one bundle to the board, run an installer there
+#   pipewire.conf      is_repository_conf: whether a pipewire.conf is the repository's, which
+#                      defines the speakerd sink itself
 #
 # The bundle is a folder:
 #
@@ -39,6 +41,13 @@ loud() {
 
 # A command line as it would be typed, for --dry-run and messages.
 shown() { printf '%q ' "$@"; }
+
+# A pipewire.conf that is the repository's, firmware/pipewire/pipewire.conf (any --rate, any
+# version that carries its header line). It defines the speakerd sink and resample.quality
+# itself, so the drop-ins that define them (REPO_CONF_HAS, in pipewire.conf.d) do not belong
+# beside it: two speakerd nodes otherwise.
+is_repository_conf() { [ -f "$1" ] && grep -qF "The BPI AMP Platform's PipeWire configuration (firmware/pipewire/pipewire.conf)" "$1"; }
+REPO_CONF_HAS=(20-resample.conf 60-speakerd-sink.conf)
 
 # ---------------------------------------------------------------------------------------------
 # The board: [user@]host, never written into a tracked file

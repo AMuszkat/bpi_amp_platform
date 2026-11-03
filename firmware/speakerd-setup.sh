@@ -19,7 +19,10 @@
 # Every factory.json installed or kept must name only plugins of the bundle being installed:
 # speakerd could not load one that does not, and the speaker would be silent.
 #   ~/.config/systemd/user/speakerd.service
-#   ~/.config/pipewire/pipewire.conf.d/60-speakerd-sink.conf    the persistent speakerd sink
+#   ~/.config/pipewire/pipewire.conf.d/60-speakerd-sink.conf    the persistent speakerd sink,
+#       unless ~/.config/pipewire/pipewire.conf is the repository's (setup.sh --base-conf),
+#       which has the sink itself: then no drop-in, one that is there is removed, and the
+#       sink stays after uninstall (a null sink: what plays into it is silent)
 #
 # A version also holds ampd (bin/ampd), which ampd-setup.sh runs as its own service; status,
 # smoke, rollback and uninstall include it when it is installed.
@@ -108,14 +111,17 @@ Actions:
   status      what is installed, what runs, from which layer, linked to what
   rollback    make the previous version current again (and the current one previous)
   uninstall   restore snapclient's routing from before speakerd and re-enable the AudioPluginHost
-              units install disabled, then remove the service, the sink and the versions;
+              units install disabled, then remove the service, the sink's drop-in and the
+              versions (the repository's pipewire.conf keeps its sink, silent without speakerd);
               device.json and the layers stay unless --purge
   smoke       check without making a sound that speakerd plays device.json's limits, through the drop-in's
               speakerd sink, linked to the amplifier, driven by it, with no restart or xrun for a
               while, and what its audio thread spends (per node, the graph: at most half the
               cycle; no late cycle while watched). Run it with a quiet stream playing: who drives
               is measured only when the graph runs
-  sink        install the persistent speakerd sink and check that the running PipeWire has it
+  sink        install the persistent speakerd sink (none when ~/.config/pipewire/pipewire.conf is
+              the repository's, which has it: a drop-in there is removed) and check that the
+              running PipeWire has it
   check       what install would refuse, without changing anything
   limits      change device.json's limits, then restart speakerd. No limit at all is
               --gain-db 0 --tweeter-limit on, what a first install writes (without limits
@@ -297,6 +303,7 @@ LIB="$H/.local/lib/speakerd"
 STATE="$H/.local/state/speakerd"
 UNIT="$H/.config/systemd/user/speakerd.service"
 DROPIN="$H/.config/pipewire/pipewire.conf.d/60-speakerd-sink.conf"
+MAIN_CONF="$H/.config/pipewire/pipewire.conf"
 CLIENT_RT="$H/.config/pipewire/client-rt.conf"
 RUNTIME="$XDG_RUNTIME_DIR/speakerd"
 PLUGIN_HOST_UNITS="$STATE/plugin-host-units"
@@ -738,7 +745,20 @@ note_rates() {
 # The persistent sink: the drop-in, and the running PipeWire's speakerd node
 # ----------------------------------------------------------------------------
 DROPIN_CHANGED=0
+# The repository's pipewire.conf (setup.sh --base-conf) defines the sink itself: then the
+# drop-in is not installed, and one that is there goes (two speakerd nodes otherwise).
+repository_conf() { is_repository_conf "$MAIN_CONF"; }
 ensure_sink() {
+    if repository_conf; then
+        if [ -e "$DROPIN" ] || [ -L "$DROPIN" ]; then
+            if dry; then info "(dry-run) would remove $DROPIN: $MAIN_CONF, the repository's, defines the speakerd sink"
+            else rm -f "$DROPIN" || die "cannot remove $DROPIN"; ok "Removed $DROPIN: $MAIN_CONF, the repository's, defines the speakerd sink"; fi
+            DROPIN_CHANGED=1
+        else
+            ok "The speakerd sink is configured in $MAIN_CONF (the repository's pipewire.conf): no drop-in"
+        fi
+        return 0
+    fi
     if install_file "$DROPIN_SOURCE" "$DROPIN"; then DROPIN_CHANGED=1; else ok "The speakerd sink is configured ($DROPIN)"; fi
 }
 
@@ -756,7 +776,7 @@ read_live_sink() {
             LIVE_SINK=yes; LIVE_SINK_WHY=""
         else
             LIVE_SINK=no
-            LIVE_SINK_WHY="the running PipeWire's speakerd sink is not the drop-in's ($differs): this PipeWire does not load $DROPIN (a config name other than pipewire.conf, or PIPEWIRE_CONFIG_DIR?), and the sink is one speakerd made itself or another config's"
+            LIVE_SINK_WHY="the running PipeWire's speakerd sink is not the drop-in's ($differs): this PipeWire does not load $(repository_conf && echo "$MAIN_CONF" || echo "$DROPIN") (a config name other than pipewire.conf, or PIPEWIRE_CONFIG_DIR?), and the sink is one speakerd made itself or another config's"
         fi
     fi
 }
@@ -1131,7 +1151,8 @@ do_status() {
         lacking=""; [ ! -d "$LIB/current/lv2" ] || lacking="$(lacking_plugins "$STATE/$id" "$LIB/current/lv2" | tr '\n' ' ')"
         echo "  $id: $out${lacking:+ *** names plugins the current version lacks: ${lacking% }: speakerd plays the next layer ***}"
     done
-    if [ -f "$DROPIN" ]; then echo "  sink: $DROPIN"; else echo "  sink: not configured ($DROPIN)"; fi
+    if repository_conf; then echo "  sink: $MAIN_CONF (the repository's pipewire.conf)$([ ! -f "$DROPIN" ] || echo "; *** and $DROPIN: two speakerd nodes (speakerd-setup.sh sink removes it) ***")"
+    elif [ -f "$DROPIN" ]; then echo "  sink: $DROPIN"; else echo "  sink: not configured ($DROPIN)"; fi
     read_live_sink
     case "$LIVE_SINK" in
         yes) echo "  live sink: the drop-in's (priority.session 1500, priority.driver 0); default sink ${DEFAULT_SINK:-?}" ;;
@@ -1256,9 +1277,16 @@ do_uninstall() {
     fi
     local other
     other="$(grep -rls 'target.object *= *"speakerd"' "$H/.config/pipewire" "$H/.config/wireplumber" 2> /dev/null | grep -vxF "$CLIENT_RT" || true)"
-    [ -z "$other" ] || warn "these still send something to the speakerd sink, which is going: $other"
+    # With the repository's pipewire.conf the sink stays: it is that file's, a null sink, so what
+    # plays into it with no speakerd is silent, never full range into the amplifier.
+    local stays=""
+    if repository_conf; then
+        stays="the speakerd sink stays: it is in $MAIN_CONF (the repository's pipewire.conf), a null sink, so what plays into it is silent"
+    fi
+    [ -z "$other" ] || warn "these still send something to the speakerd sink, $([ -n "$stays" ] && echo "which stays, silent" || echo "which is going"): $other"
     if dry; then
-        info "(dry-run) would stop and disable speakerd, remove $UNIT, $DROPIN and $LIB$([ "$PURGE" = 1 ] && echo " and $STATE")"
+        info "(dry-run) would stop and disable speakerd, remove $UNIT$([ -f "$DROPIN" ] && echo ", $DROPIN") and $LIB$([ "$PURGE" = 1 ] && echo " and $STATE")"
+        [ -z "$stays" ] || info "(dry-run) $stays"
         reenable_plugin_host
         return 0
     fi
@@ -1275,6 +1303,7 @@ do_uninstall() {
         DROPIN_CHANGED=1
         restart_pipewire
     fi
+    [ -z "$stays" ] || info "$stays"
     rm -rf "$LIB" && ok "Removed $LIB"
     reenable_plugin_host
     if [ "$PURGE" -eq 1 ]; then rm -rf "$STATE" && ok "Removed $STATE"

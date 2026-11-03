@@ -192,8 +192,8 @@ P1's tests check the FIRs bit for bit, and the plugins' outputs only where round
   filter and matters a little for the 61-tap one.
 - **The calibration.** The same simulation of the x86_64 build (Zen 4 model) predicted the
   measured times within 5 % for today's filter and for P1.
-- **At 44.1 kHz**, the rate the repository's `firmware/pipewire/pipewire.conf` sets (the board
-  measured runs its own configuration, at 48 kHz), every share is 8 % lower.
+- **At 44.1 kHz** (`firmware/setup.sh --base-conf --rate 44100`; the board measured and the
+  repository's `firmware/pipewire/pipewire.conf` run at 48 kHz), every share is 8 % lower.
 - **On the board.** After the first deploy (2026-11-01), `speakerd`'s own timing on the board,
   over two 60 s windows and the smoke check's, with the graph at 48 kHz and a quantum of
   1024, put firConv's mean share of the cycle at 4.4–4.7 % and the crossover's at 1.1–1.2 %:
