@@ -70,6 +70,13 @@ namespace speakerd
         };
 
         juce::int64 revision = 0;
+
+        /** The buffer size the document asks for, the optional top-level `quantum`, exactly as
+            it is in the document: void when it is absent or null (PipeWire's own default).
+            parse() does not check it: what this speaker accepts depends on its PipeWire
+            (quantumIn()), and a layer that asks for a size it cannot have still plays. */
+        juce::var quantum;
+
         std::vector<Node> nodes;
         std::vector<Connection> connections;
 
@@ -79,5 +86,17 @@ namespace speakerd
 
         /** The same, for a document that is already JSON (the `document` of an `apply`). */
         static juce::Result parse (const juce::var& json, GraphDocument& out);
+
+        /** The sizes a document's `quantum` may take at all: powers of two from 64 to 2048. A
+            speaker accepts those its PipeWire allows too (PipeWireNode::Clock::quantumRange). */
+        static constexpr int minQuantum = 64;
+        static constexpr int maxQuantum = 2048;
+
+        /** True, with the size in `out`, when `q` is a JSON integer (or a number without a
+            fraction; not a bool, not a string) that is a power of two from `lo` to `hi`. */
+        static bool quantumIn (const juce::var& q, int lo, int hi, int& out);
+
+        /** `q` as JSON text, for messages: 256, 100, "256", true, 256.5. */
+        static juce::String quantumText (const juce::var& q);
     };
 }

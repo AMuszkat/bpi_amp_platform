@@ -300,6 +300,14 @@ host forwards them all. A control build knows nothing about the network.
   speaker's `speakerd/timing` and `board/cpu` at 2 Hz and shows the audio cycle's mean and max,
   the late cycles and the board's CPU per speaker, and each node's share of the cycle on the
   canvas; a speaker without `board/cpu` shows n/a.
+- **The buffer size is an edit.** The speakers panel's *Buffer size* selector offers the powers
+  of two both online speakers accept (the intersection of their `quantum_range`, 64 to 2048 when
+  none reports one) and *Default* (no size: PipeWire's `default.clock.quantum`), and shows each
+  speaker's running size and its cycle in milliseconds at that speaker's rate. Choosing proposes
+  a revision, the accepted document with the new top-level `quantum` (or without it), through
+  the same path as any other edit; a rejected or timed-out proposal is undone, the selector going
+  back to the accepted document's size. It is disabled while an online speaker reports no
+  `quantum_range` (an older `speakerd`, which would ignore the size).
 - **A test mode** (`controller --hub HOST --script FILE`) runs commands and prints JSON lines, so
   level 2 can drive the controller without a display; a fake hub in its `tests/` checks the bridge
   without `ampd`.
@@ -350,7 +358,9 @@ parameters, so the DSP stays JUCE from end to end. It never touches the network.
   state as base64, and connections per channel between uids. Each node also carries its
   parameter values by parameter ID, in the plugin's own units. The input node has the
   reserved uid 1 (channels FL, FR) and the output node uid 2 (woofer, tweeter). Plugin nodes
-  start at 16. A document with parameter values and no state works.
+  start at 16. A document with parameter values and no state works. From `speakerd` 0.3.2 it
+  may also carry the speaker's buffer size, an optional top-level `quantum` (below, "What step 3
+  decided for `speakerd`").
 - **State crosses the URI boundary in the plugin's own format** (finding 1 of section 7).
   `speakerd` puts it under `<URI>:StateString` of whichever build it hosts, so the same
   document runs the headless build on a speaker and the complete build in the render mode.
@@ -455,6 +465,23 @@ details, [protocol.md](protocol.md) the messages):
   the gain, delayed as the filters delay it, and silence on the crossover's high band. Neither
   has a bypass parameter of its own, so no saved state carries a bypass: the document's
   `bypassed` is the only one.
+- **The buffer size is part of the document** (0.3.2). An optional top-level `"quantum": 256`,
+  a power of two from 64 to 2048, is the PipeWire quantum the speaker runs at; without it,
+  PipeWire's own default. It travels with the revision, so it is applied on both speakers or
+  neither, kept in `graph.json` and `graph.lkg.json` across restarts, and undone like any edit.
+  `speakerd` accepts the powers of two from max (64, min-quantum) to min (2048, max-quantum,
+  quantum-limit) of its PipeWire, all within the size the plugins are prepared for, so a change
+  only re-primes the graph (a fade-out, a prime, a fade-in); an apply whose size is outside that
+  range, or not a size, fails before anything is built (`quantum <v>: not a power of two from
+  <lo> to <hi> ...`). A layer at boot with such a size still plays, unforced: a graph is not lost
+  over a buffer size. Once a document is in force (the boot layer, an applied revision, a
+  rollback), `speakerd` sets PipeWire's `settings` metadata `clock.force-quantum` to its size, or
+  to 0 without one, and again when that metadata reappears; never at any other time, and never
+  on the audio thread. A forced quantum, not `clock.quantum`, because PipeWire otherwise picks
+  the quantum from the nodes' latency requests, and another node's (snapclient's) would win.
+  The hello and the status carry `rate`, `quantum` (the size the cycles run at now),
+  `quantum_range` and `quantum_default`, and `speakerd` sends `ampd` an unasked `status` when the
+  running quantum or rate changes ([protocol.md](protocol.md)).
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it receives parameter changes and graph revisions,
@@ -571,7 +598,9 @@ while it runs; carrying the unchanged nodes across (a diff against rev N, under 
 is the later refinement that keeps their state. In step 3 the revision arrives as an `apply` on
 the local link ([protocol.md](protocol.md)); `speakerd` answers `applied` once the new graph has
 run a cycle, or `failed` with the reason while rev N plays on untouched, and queues an `apply`
-that arrives while another is being built.
+that arrives while another is being built. The speakers' buffer size is part of the revision
+(its top-level `quantum`, section 2), so choosing one is all or nothing like any edit: both
+speakers run it, or neither does and the proposal is rejected.
 
 ## 5. Monitoring: data from the speakers to the controller
 
@@ -1390,7 +1419,11 @@ loop thread never touches the graph; it tells the engine whether every link is a
 output gate) and tells the main thread when the quantum or the rate changed, so the graph is
 primed anew before the audio thread sees the new block size. The plugins are prepared for the
 largest quantum PipeWire brings by itself (max-quantum, at most quantum-limit); a larger, forced
-one is faded out, never run past the buffer, and re-prepared for on the main thread. The
+one is faded out, never run past the buffer, and re-prepared for on the main thread. `speakerd`
+also sets the forced quantum itself, from the document in force (its `quantum`, section 2): the
+main thread writes `clock.force-quantum` into PipeWire's `settings` metadata under the loop
+thread's lock (the loop thread again when that metadata reappears), so a chosen size, being
+within max-quantum, only re-primes the graph. The
 limits of `device.json` are constants of the engine, read once at start; no message changes them.
 
 **Which build each node runs.** Each time a layer, an `apply` or the render builds a graph,
@@ -1445,7 +1478,14 @@ that the base is its revision, that the document parses, and that every plugin i
 catalogue; then it sends `apply` to its own `speakerd` and to every agent that is online, waits
 for their answers (10 s each), and answers `applied` when all of them did, or `rejected` with
 the first failure's reason, after sending the previous revision back to the speakers that had
-applied the new one. A speaker that was offline catches up when its agent reconnects: the hub
+applied the new one. The proposal's `quantum`, when it has one, is checked first: one that is
+not a power of two from 64 to 2048, or one while an online speaker's `speakerd` reports no
+`quantum_range` (an older one, which would ignore it), is rejected before any speaker gets an
+`apply`; a size within the hub's shape but outside one speaker's range fails on that speaker
+and is rolled back like any failed apply. Every entry of `state.speakers` carries the speaker's
+`rate`, `quantum`, `quantum_range` and `quantum_default`, from its `speakerd`'s hello and
+status, and the hub sends every controller the whole state again when any of them changes
+([protocol.md](protocol.md)). A speaker that was offline catches up when its agent reconnects: the hub
 sends it the current revision and its values.
 
 ### 10.5 The controller: UI, model, bridge
@@ -1467,7 +1507,7 @@ flowchart TB
         mw["«module» MainHostWindow<br/>menus, Connect to a Hub"]:::ctl
         gep["«module» GraphEditorPanel<br/>canvas, pins, connectors, each node's load, status bar"]:::ctl
         pwin["«module» PluginWindow<br/>a control build's editor,<br/>the L / R monitor selector"]:::ctl
-        sp["«module» SpeakersPanel<br/>role, online, layer, level bars, load (audio cycle, late cycles, board CPU)"]:::ctl
+        sp["«module» SpeakersPanel<br/>role, online, layer, level bars, load (audio cycle, late cycles, board CPU), buffer size"]:::ctl
     end
     subgraph MODEL["«modules» model layer"]
         pg["«module» PluginGraph<br/>AudioProcessorGraph as the canvas's model,<br/>node uids are the document's"]:::ctl
@@ -1517,12 +1557,12 @@ per step; the virtual pair's `test_controller_end_to_end` and the controller's o
 | controller to hub, **control** | TCP 7450, JSON lines, both ends prove the secret | the controller, every second | `hello`/`welcome`, `state`; `param` (`seq` 0, the controller's `origin`), `gesture` `begin`/`end`, `graph` proposals; back: `applied`/`rejected`, echoes of `param`, `graph` and `state` of other controllers | edits are undone at once; the next connection takes the hub's `state`, pushes nothing |
 | controller to hub, **knobs** | UDP 7451, OSC `/bpi/param` `,isfiss`, the session's token last | the controller's socket, bound to the control link's local address | one datagram per value while a slider is held, at most 50 a second per parameter; echoes back to the controller's `osc_port` | a lost datagram is nothing: the gesture's last value goes over TCP |
 | controller to each speaker, **monitor** | TCP 7452, JSON lines, the speaker proves its name | the controller, one link per speaker, every second | `subscribe`/`unsubscribe` by stream name and rate; `value` with `t` and `v` | the speakers panel says so; the plugin windows keep their last values |
-| hub to agent | TCP 7450, the same link as a controller's, `role` agent, no OSC | the agent, every second | `param` stamped with the hub's `seq`, `apply` of a revision; back: the speaker's `hello`, layer, revision, `applied`/`failed` | the hub marks the speaker offline; revisions apply among the speakers that are up; the agent catches up on reconnection |
-| `ampd` to `speakerd`, **the local link** | Unix socket `$XDG_RUNTIME_DIR/speakerd/control.sock`, mode 0600, JSON lines, one client | `ampd`, every second; `speakerd` listens | `hello`, `status`; `param`, `apply`, `subscribe`; back: `applied`, `failed`, `value`, `error` | `ampd` gone: `speakerd` plays on, unchanged. `speakerd` gone: `ampd` reconnects and, on the hello, follows the revision it plays or re-sends the values |
+| hub to agent | TCP 7450, the same link as a controller's, `role` agent, no OSC | the agent, every second | `param` stamped with the hub's `seq`, `apply` of a revision; back: the speaker's `hello`, layer, revision, rate and quantum (running, range, default), `applied`/`failed` | the hub marks the speaker offline; revisions apply among the speakers that are up; the agent catches up on reconnection |
+| `ampd` to `speakerd`, **the local link** | Unix socket `$XDG_RUNTIME_DIR/speakerd/control.sock`, mode 0600, JSON lines, one client | `ampd`, every second; `speakerd` listens | `hello`, `status` (also unasked when the running quantum or rate changes; both with `rate`, `quantum`, `quantum_range`, `quantum_default`); `param`, `apply`, `subscribe`; back: `applied`, `failed`, `value`, `error` | `ampd` gone: `speakerd` plays on, unchanged. `speakerd` gone: `ampd` reconnects and, on the hello, follows the revision it plays or re-sends the values |
 | `speakerd` to a plugin | in process: JUCE's LV2 hosting, `AudioProcessorGraph::processBlock` | `speakerd`, when a graph is built | audio buffers; parameters in as `patch:Set` inside `run()`; monitors out on the atom port | a bundle that does not load fails the layer or the `apply`; the old graph plays on |
-| `speakerd` to PipeWire | libpipewire: the `speakerd-dsp` `pw_filter` node, the registry, four links of its own; `client-rt.conf` for the real-time thread | `speakerd`, at start; relinks whenever the ports come back | the stream in from the `speakerd` sink's monitors, the two amplifier channels out; the quantum and rate | the amplifier away: the output gate holds 0 and the plugins run on; PipeWire away: exit 3, systemd restarts on the same layer |
+| `speakerd` to PipeWire | libpipewire: the `speakerd-dsp` `pw_filter` node, the registry, four links of its own; `client-rt.conf` for the real-time thread | `speakerd`, at start; relinks whenever the ports come back | the stream in from the `speakerd` sink's monitors, the two amplifier channels out; the quantum and rate; out, `clock.force-quantum` in the `settings` metadata (subject 0): the document's `quantum`, or 0, whenever a document comes into force and when that metadata reappears | the amplifier away: the output gate holds 0 and the plugins run on; PipeWire away: exit 3, systemd restarts on the same layer |
 | players to the `speakerd` sink | a PipeWire stream (snapclient, `client-rt.conf`'s target) | WirePlumber links it | the stereo stream | nothing plays; `speakerd` keeps its node and its links |
-| PipeWire to the amplifier | the ALSA sink of the MAX98397 driver (`bpi-alsa-playback-pcm` on the board measured): the hardware clock drives the graph, by its `priority.driver` (1000 in the repository's `pipewire.conf`) or, where it has none, because it is created before the `speakerd` sink | PipeWire | the graph's rate and quantum, from the board's own PipeWire configuration: 48000 Hz and 1024 on the board measured; the repository's `pipewire.conf`, which only `setup.sh --base-conf` installs, pins 48000 Hz and a quantum of 512 (`firmware/CLAUDE.md`, "Rates") | |
+| PipeWire to the amplifier | the ALSA sink of the MAX98397 driver (`bpi-alsa-playback-pcm` on the board measured): the hardware clock drives the graph, by its `priority.driver` (1000 in the repository's `pipewire.conf`) or, where it has none, because it is created before the `speakerd` sink | PipeWire | the graph's rate and quantum, from the board's own PipeWire configuration: 48000 Hz and 1024 on the board measured; the repository's `pipewire.conf`, which only `setup.sh --base-conf` installs, pins 48000 Hz and a quantum of 512, with min-quantum 64 and max-quantum 2048 (`firmware/CLAUDE.md`, "Rates"); the document's `quantum`, when it has one, is forced over either | |
 | systemd to `speakerd` | `speakerd.service`: `ExecStart` `speakerd-run`, `ExecStopPost` `speakerd-run --record-exit` | systemd, at boot with linger; `Restart=on-failure` in 1 s, no start limit | the layer to start from (`--from`), chosen from a history of starts and exits on tmpfs: a crash steps down a layer, exit 3 (PipeWire) stays, a clean stop goes back to `current` | |
 | `ampd` and `speakerd` to disk | `~/.local/state/speakerd/`: `graph.json`, `graph.lkg.json`, `factory.json`, `ampd.json`, `device.json`, written atomically | `ampd` writes the graph layers; the installer writes `device.json`, `factory.json` and `ampd.json`; `speakerd` only reads, at boot | the document, the role, the amplifier's ports, the limits, the secret | a layer that does not load is skipped for the next one |
 | the installer to a board | `ssh`/`scp` of a bundle; the installed `setup/` scripts run on the board | a person (`firmware/setup.sh --mode target-remote`), or `tools/board.sh` (refused while the lab is locked) | one version under `~/.local/lib/speakerd/<id>/` (`bin/`, `lv2/`, `setup/`, `extra/`), the `current` and `previous` symlinks, the units, the drop-in | `rollback` switches the symlink back, capped |

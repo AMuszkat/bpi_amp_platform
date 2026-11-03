@@ -3,6 +3,7 @@
 #include "Engine.h"
 #include "Log.h"
 
+#include <pipewire/extensions/metadata.h>
 #include <pipewire/filter.h>
 #include <pipewire/link.h>
 #include <pipewire/pipewire.h>
@@ -112,6 +113,31 @@ namespace speakerd
 
         juce::uint32 ownNode = SPA_ID_INVALID;
 
+        // PipeWire's `settings` metadata, where clock.force-quantum is set (the document's
+        // quantum, Control). PipeWire loop thread, or under the loop's lock.
+        pw_metadata* settings = nullptr;
+        juce::uint32 settingsId = SPA_ID_INVALID;
+        int forcedQuantum = -1;     // -1: nothing to write yet (no document in force)
+
+        void writeForceQuantum()
+        {
+            if (settings == nullptr || forcedQuantum < 0)
+                return;
+
+            // As `pw-metadata -n settings 0 clock.force-quantum <q>` writes it: no type.
+            const auto value = juce::String (forcedQuantum);
+            pw_metadata_set_property (settings, PW_ID_CORE, "clock.force-quantum", nullptr, value.toRawUTF8());
+        }
+
+        void dropSettings()
+        {
+            if (settings != nullptr)
+                pw_proxy_destroy (reinterpret_cast<pw_proxy*> (settings));
+
+            settings = nullptr;
+            settingsId = SPA_ID_INVALID;
+        }
+
         /** One side of the filter: two links, logged together. */
         struct Side
         {
@@ -142,6 +168,9 @@ namespace speakerd
 
             if (const auto largest = lookup (info->props, "default.clock.max-quantum").getIntValue(); largest > 0)
                 self.clock.maxQuantum = largest;
+
+            if (const auto smallest = lookup (info->props, "default.clock.min-quantum").getIntValue(); smallest > 0)
+                self.clock.minQuantum = smallest;
         }
 
         static void onCoreDone (void* data, uint32_t id, int seq)
@@ -223,6 +252,8 @@ namespace speakerd
                                    lookup (props, PW_KEY_PORT_NAME) };
             else if (std::strcmp (type, PW_TYPE_INTERFACE_Link) == 0)
                 self.links[id] = { lookupId (props, PW_KEY_LINK_OUTPUT_PORT), lookupId (props, PW_KEY_LINK_INPUT_PORT) };
+            else if (std::strcmp (type, PW_TYPE_INTERFACE_Metadata) == 0)
+                return self.settingsAppeared (id, props);
             else
                 return;
 
@@ -236,10 +267,36 @@ namespace speakerd
             if (id == self.ownNode && self.filter != nullptr)
                 self.filterGone ({});
 
+            if (id == self.settingsId)
+                self.dropSettings();
+
             self.nodes.erase (id);
             self.ports.erase (id);
             self.links.erase (id);
             self.requestLinkUpdate();
+        }
+
+        /** The `settings` metadata is in the registry: at connecting, or again after the session
+            or the daemon made it anew. A document in force has its quantum written again. */
+        void settingsAppeared (juce::uint32 id, const spa_dict* props)
+        {
+            if (lookup (props, PW_KEY_METADATA_NAME) != "settings" || registry == nullptr)
+                return;
+
+            dropSettings();
+            settings = static_cast<pw_metadata*> (pw_registry_bind (registry, id, PW_TYPE_INTERFACE_Metadata,
+                                                                    PW_VERSION_METADATA, 0));
+
+            if (settings == nullptr)
+                return;
+
+            settingsId = id;
+
+            if (forcedQuantum >= 0)
+            {
+                writeForceQuantum();
+                log ("quantum: the settings metadata appeared: clock.force-quantum " + juce::String (forcedQuantum));
+            }
         }
 
         static void onFilterState (void* data, pw_filter_state, pw_filter_state state, const char* error)
@@ -854,6 +911,8 @@ namespace speakerd
             d.ownSink = nullptr;
         }
 
+        d.dropSettings();
+
         if (d.registry != nullptr)
         {
             spa_hook_remove (&d.registryListener);
@@ -878,6 +937,21 @@ namespace speakerd
         d.context = nullptr;
         d.loop = nullptr;
         d.linked = false;
+    }
+
+    bool PipeWireNode::setForceQuantum (int quantum)
+    {
+        auto& d = *impl;
+
+        if (d.loop == nullptr)
+            return false;
+
+        pw_thread_loop_lock (d.loop);
+        d.forcedQuantum = juce::jmax (0, quantum);
+        d.writeForceQuantum();
+        const bool written = d.settings != nullptr;
+        pw_thread_loop_unlock (d.loop);
+        return written;
     }
 
     bool PipeWireNode::hasFailed() const noexcept            { return impl->failed.load(); }

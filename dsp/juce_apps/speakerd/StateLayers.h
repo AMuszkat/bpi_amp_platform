@@ -10,6 +10,7 @@ namespace speakerd
         juce::String name;          // "current", "last-known-good", "factory" or "passthrough"
         juce::String fileName;      // graph.json, graph.lkg.json, factory.json; empty for passthrough
         juce::int64 revision = -1;  // the document's revision; -1 for passthrough
+        juce::var quantum;          // the document's `quantum`, unchecked; void: none (and passthrough)
         BuiltGraph built;
 
         juce::String describe() const;   // "current (graph.json), revision 3" or "passthrough"

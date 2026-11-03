@@ -114,6 +114,70 @@ namespace speakerd
         auto old = swapIn (std::move (loaded.built), std::move (t), sampleRate, maxBlock, settleBlock,
                            rev, loaded.name, loaded.fileName, std::numeric_limits<juce::uint64>::max());
         old = {};
+
+        // Passthrough is in force too: it asks for no size, so a size an earlier speakerd forced
+        // does not stay.
+        forceQuantumOf (rev, loaded.quantum);
+    }
+
+    //==============================================================================
+    juce::String Control::refuseQuantum (const juce::var& quantum) const
+    {
+        int size = 0;
+
+        if (quantum.isVoid() || GraphDocument::quantumIn (quantum, quantumSettings.lo, quantumSettings.hi, size))
+            return {};
+
+        return "quantum " + GraphDocument::quantumText (quantum) + ": not a power of two from "
+             + juce::String (quantumSettings.lo) + " to " + juce::String (quantumSettings.hi)
+             + " (what this speaker's PipeWire allows)";
+    }
+
+    void Control::forceQuantumOf (juce::int64 rev, const juce::var& quantum)
+    {
+        const auto prefix = "quantum: revision " + juce::String (rev) + " asks for ";
+        int size = 0;
+
+        if (quantum.isVoid())
+        {
+            log (prefix + "none: clock.force-quantum 0 (PipeWire's default, "
+                 + juce::String (quantumSettings.defaultQuantum) + ")");
+        }
+        else if (GraphDocument::quantumIn (quantum, quantumSettings.lo, quantumSettings.hi, size))
+        {
+            log (prefix + juce::String (size) + ": clock.force-quantum " + juce::String (size));
+        }
+        else
+        {
+            // Only a boot layer gets here (an apply is refused first): it plays all the same, at
+            // PipeWire's own size. A graph is not lost over a buffer size.
+            log (prefix + GraphDocument::quantumText (quantum) + ", outside " + juce::String (quantumSettings.lo)
+                 + " to " + juce::String (quantumSettings.hi) + ": not forced");
+            size = 0;
+        }
+
+        if (quantumSettings.force && ! quantumSettings.force (size))
+            log ("quantum: PipeWire has no settings metadata (yet): clock.force-quantum " + juce::String (size)
+                 + " is written when it appears");
+    }
+
+    void Control::notifyStatus()
+    {
+        if (link == nullptr)
+            return;
+
+        const auto connection = link->currentConnection();
+
+        if (connection == 0)
+            return;
+
+        juce::var status;
+        {
+            const std::lock_guard<std::mutex> guard (lock);
+            status = helloObject ("status");
+        }
+
+        answer (connection, status);
     }
 
     juce::String Control::describe() const
@@ -131,12 +195,20 @@ namespace speakerd
 
     juce::var Control::helloObject (const juce::String& op) const
     {
+        // The quantum the cycles run at now: null until the first cycle (nothing is linked yet).
+        const auto running = engine.getCycles() > 0 ? juce::var (engine.getLastBlockSize()) : juce::var();
+        juce::Array<juce::var> range { quantumSettings.lo, quantumSettings.hi };
+
         return object ({ { "op", op },
                          { "role", "speakerd" },
                          { "version", version },
                          { "revision", revision },
                          { "layer", layer },
-                         { "protocol", protocolVersion } });
+                         { "protocol", protocolVersion },
+                         { "rate", juce::roundToInt (engine.getSampleRate()) },
+                         { "quantum", running },
+                         { "quantum_range", range },
+                         { "quantum_default", quantumSettings.defaultQuantum } });
     }
 
     bool Control::timedNodes (juce::uint32 serial, std::vector<std::pair<juce::uint32, juce::String>>& out) const
@@ -469,6 +541,10 @@ namespace speakerd
         if (auto r = GraphDocument::parse (documentJson, doc); r.failed())
             return failed (r.getErrorMessage());
 
+        // A size this speaker's PipeWire cannot run fails the revision before anything is built.
+        if (const auto refused = refuseQuantum (doc.quantum); refused.isNotEmpty())
+            return failed (refused);
+
         const auto rate = engine.getSampleRate();
         const auto maxBlock = engine.getMaxBlock();
         const auto settleBlock = engine.getPrimedBlockSize();
@@ -496,6 +572,9 @@ namespace speakerd
         auto old = swapIn (std::move (built), std::move (t), rate, maxBlock, settleBlock, doc.revision, "current", {},
                            job.replayFrom);
         const auto cyclesBefore = engine.getCycles();
+
+        // In force: its buffer size too, before it is answered.
+        forceQuantumOf (doc.revision, doc.quantum);
 
         // "applied" once the new graph plays: the audio thread has run a cycle of it (unless no
         // cycle runs at all: nothing is linked, and it plays as soon as something is).
