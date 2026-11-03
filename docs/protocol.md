@@ -407,7 +407,8 @@ These settle what version 1 left open; every implementation follows them.
     stream the graph lacks is kept and starts when a revision has it.
 20. **`status`** is answered with the `hello`'s fields and `"op":"status"`. `speakerd` also sends
     it unasked, whenever the rate or the quantum its cycles run at changes (and once the first
-    cycle has run); `ampd` takes either as an update of those fields only: it applies nothing and
+    cycle has run), and on a connection it never sends it before that connection's `hello`;
+    `ampd` takes either as an update of those fields only: it applies nothing and
     sends `speakerd` no value again for it, whatever its revision and layer say.
 21. **Files.** `speakerd` writes no state file; it creates and removes its socket.
 22. **The agent's `hello`** also carries `layer`, `speakerd` (its version), `device_role`, `rate`,
