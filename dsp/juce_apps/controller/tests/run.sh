@@ -22,8 +22,8 @@ python3 -m unittest discover -s "$HERE" -v
 
 [ "${1:-}" = "--screenshot" ] || exit 0
 
-# The GUI: the hub's graph on the canvas, the speakers panel, and the loudness control editor
-# open, on a virtual display (as plugin-check/run.sh does).
+# The GUI: the hub's graph on the canvas, the speakers panel (a buffer size of 256 chosen), and
+# the loudness control editor open, on a virtual display (as plugin-check/run.sh does).
 OUT="$ROOT/build/controller-check"
 mkdir -p "$OUT"
 pids=()
@@ -44,6 +44,9 @@ sleep 0.5
 cat > "$OUT/screenshot.script" <<EOF
 main-window 0 0 1040 720
 wait-synced
+buffer-size 256
+expect-applied
+expect-buffer-size left 256
 open 16 1060 30
 open 20 1060 560
 sleep 2500

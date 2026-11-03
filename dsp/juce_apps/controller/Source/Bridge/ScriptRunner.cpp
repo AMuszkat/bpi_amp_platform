@@ -9,6 +9,7 @@ namespace bpi
         using NodeID = juce::AudioProcessorGraph::NodeID;
         constexpr double defaultTimeoutSeconds = 5.0;
         constexpr double proposalTimeoutSeconds = 20.0;
+        constexpr double bufferSizeTimeoutSeconds = 10.0;   // the agents' reports reach the hub's state
 
         juce::var parseValue (const juce::String& word)
         {
@@ -438,6 +439,59 @@ namespace bpi
             outcomesBefore = bridge.getProposalOutcomes();
             graph.setBypassed (NodeID { uidArg (arg (1)) }, arg (2) == "on");
             return edit (true, {});
+        }
+
+        if (cmd == "buffer-size")
+        {
+            // buffer-size N|default: an edit, the document's `quantum` (the speakers panel's
+            // "Buffer size"). N goes as given, so a script can test the hub's check of it.
+            if (! need (1)) return true;
+            std::optional<int> quantum;
+
+            if (arg (1) != "default")
+            {
+                if (! arg (1).containsOnly ("-0123456789") || ! arg (1).containsAnyOf ("0123456789"))
+                    return edit (false, "the buffer size is a number of samples or default");
+
+                quantum = arg (1).getIntValue();
+            }
+
+            outcomesBefore = bridge.getProposalOutcomes();
+            juce::String why;
+
+            if (! bridge.proposeBufferSize (quantum, why))
+                return edit (false, why);
+
+            return edit (true, {}, object ({ { "quantum", quantum ? juce::var (*quantum) : juce::var() },
+                                             { "revision", bridge.getRevision() + 1 } }));
+        }
+
+        if (cmd == "expect-buffer-size")
+        {
+            // expect-buffer-size SPEAKER N|default [s]: until the hub's state says the speaker
+            // runs N samples (default: its quantum_default).
+            if (! need (2)) return true;
+            setTimeout (3, bufferSizeTimeoutSeconds);
+            waitDetail = object ({ { "speaker", arg (1) }, { "quantum", juce::var() } });
+
+            for (const auto& s : bridge.getSpeakers())
+            {
+                if (s.name != arg (1))
+                    continue;
+
+                const auto want = arg (2) == "default" ? s.quantumDefault : arg (2).getIntValue();
+                const auto found = object ({ { "speaker", s.name }, { "online", s.online },
+                                             { "quantum", s.quantum > 0 ? juce::var (s.quantum) : juce::var() },
+                                             { "rate", s.rate > 0 ? juce::var (s.rate) : juce::var() },
+                                             { "quantum_default", s.quantumDefault > 0 ? juce::var (s.quantumDefault) : juce::var() },
+                                             { "buffer", bridge.bufferText (s) } });
+                waitDetail = found;
+
+                if (want > 0 && s.quantum == want)
+                    return edit (true, {}, found);
+            }
+
+            return false;
         }
 
         if (cmd == "expect-applied" || cmd == "expect-rejected")

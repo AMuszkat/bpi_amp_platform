@@ -4,7 +4,10 @@
 It speaks the controller's side of three links, well enough for the controller's tests:
 
 - control (TCP, JSON lines): hello, state, param (stamped with seq and echoed), gesture
-  (relayed), graph proposals (applied or rejected), graph to every controller, error;
+  (relayed), graph proposals (applied or rejected), graph to every controller, error; each
+  speaker's buffer size in the state (rate, quantum, quantum_range, quantum_default), a
+  document's `quantum` checked as the hub and speakerd check it, and the state sent again once
+  the speakers run an applied one;
 - knobs (UDP, OSC): /bpi/param and /bpi/gesture in, echoes out to each controller's osc_port;
 - monitor (TCP, JSON lines), one listener per speaker: subscribe, unsubscribe, and value lines
   at the rate asked for, for output/level, speakerd/timing, board/cpu and node/<uid>/<mon_id>;
@@ -163,10 +166,17 @@ class FakeHub:
         self.document = copy.deepcopy(document or default_document())
         self.revision = self.document.get("revision", 0)
         self.seq = 1000
+        # Each speaker's buffer size, as the hub's state carries it (docs/protocol.md); a test
+        # sets a field to None (or deletes it) for an older speakerd.
         self.speakers = [
-            {"name": "left", "role": "left", "online": True, "layer": "current"},
-            {"name": "right", "role": "right", "online": True, "layer": "current"},
+            {"name": "left", "role": "left", "online": True, "layer": "current",
+             "rate": 48000, "quantum": 512, "quantum_range": [64, 2048], "quantum_default": 512},
+            {"name": "right", "role": "right", "online": True, "layer": "current",
+             "rate": 48000, "quantum": 512, "quantum_range": [64, 2048], "quantum_default": 512},
         ]
+        self.quantum_delay = 0.3          # seconds from an applied quantum to the state that shows it run
+        self.answer_delay = 0.0           # seconds before a proposal is answered
+        self.during_answer = None         # called while a proposal waits for its answer (answer_delay)
         self.known_plugins = {LOUDNESS_URI, FIRCONV_URI, CROSSOVER_URI, PROBE_URI, PROBE_BYPASS_URI}
         self.reject_next = None           # a reason: the next proposal is rejected with it
         self.echo_delay = 0.0             # seconds before an OSC echo leaves (to test reordering)
@@ -514,8 +524,60 @@ class FakeHub:
                 self.gestures.pop(key, None)
         self._to_controllers(message)
 
+    @staticmethod
+    def quantum_shape_ok(q):
+        """The hub's check of a document's `quantum`: an integer power of two from 64 to 2048."""
+        return isinstance(q, int) and not isinstance(q, bool) and 64 <= q <= 2048 and q & (q - 1) == 0
+
+    def _quantum_refusal(self, doc):
+        """Why the hub (or a speakerd, through its failed apply) refuses the document's quantum; None: it does not."""
+        if doc.get("quantum") is None:
+            return None
+        q = doc["quantum"]
+        if not self.quantum_shape_ok(q):
+            return "quantum %s: a power of two from 64 to 2048" % json.dumps(q)
+        for s in self.speakers:
+            if s.get("online") and not s.get("quantum_range"):
+                return "%s: its speakerd cannot set the buffer size (no quantum_range)" % s["name"]
+        for s in self.speakers:
+            lo, hi = s.get("quantum_range") or (64, 2048)
+            if s.get("online") and not lo <= q <= hi:
+                return ("%s: failed: quantum %d: not a power of two from %d to %d (what this speaker's PipeWire allows)"
+                        % (s["name"], q, lo, hi))
+        return None
+
+    def _speakers_run(self, doc):
+        """After an applied revision: each online speaker runs its quantum (or its default),
+        and the hub sends every controller its state again, as the agents' reports make it."""
+        def run():
+            time.sleep(self.quantum_delay)
+            with self.lock:
+                changed = False
+                for s in self.speakers:
+                    if not s.get("online") or not s.get("quantum_range"):
+                        continue
+                    want = doc.get("quantum") if doc.get("quantum") is not None else s.get("quantum_default")
+                    if want and s.get("quantum") != want:
+                        s["quantum"] = want
+                        changed = True
+            if changed:
+                self._to_controllers(self.state_message())
+        threading.Thread(target=run, daemon=True).start()
+
+    def set_speaker_fields(self, name, **fields):
+        """A speaker's fields changed (its buffer size, ...): the hub sends the whole state again."""
+        with self.lock:
+            for s in self.speakers:
+                if s["name"] == name:
+                    s.update(fields)
+        self._to_controllers(self.state_message())
+
     def _proposal(self, message, conn):
         rev, base, doc = message.get("revision"), message.get("base"), message.get("document")
+        if self.answer_delay:
+            if self.during_answer is not None:
+                self.during_answer()
+            time.sleep(self.answer_delay)
         with self.lock:
             reason = None
             if base != self.revision or rev != base + 1:
@@ -527,6 +589,8 @@ class FakeHub:
                     uri = n.get("plugin", {}).get("identifier")
                     if uri not in self.known_plugins:
                         reason = "right: no plugin %s" % uri
+                if reason is None:
+                    reason = self._quantum_refusal(doc)
             if reason is None and self.reject_next:
                 reason, self.reject_next = self.reject_next, None
             if reason is not None:
@@ -537,6 +601,7 @@ class FakeHub:
         self._send_line(conn, "control", {"op": "applied", "revision": rev})
         self._to_controllers({"op": "graph", "revision": rev, "base": base, "time": message.get("time"),
                               "origin": message.get("origin"), "document": doc})
+        self._speakers_run(doc)
 
     # -- knobs link -----------------------------------------------------------------------
     def _serve_knobs(self):

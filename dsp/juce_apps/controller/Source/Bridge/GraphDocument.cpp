@@ -1,6 +1,7 @@
 #include "GraphDocument.h"
 
 #include <ctime>
+#include <limits>
 
 namespace bpi::document
 {
@@ -245,6 +246,22 @@ namespace bpi::document
         root->setProperty ("nodes", nodes);
         root->setProperty ("connections", connections);
         return doc;
+    }
+
+    std::optional<int> quantumOf (const juce::var& doc)
+    {
+        const auto& q = doc["quantum"];
+
+        if ((q.isInt() || q.isInt64()) && (juce::int64) q >= std::numeric_limits<int>::min()
+                                       && (juce::int64) q <= std::numeric_limits<int>::max())
+            return (int) (juce::int64) q;
+
+        return std::nullopt;
+    }
+
+    bool isValidQuantum (int q)
+    {
+        return q >= minQuantum && q <= maxQuantum && juce::isPowerOfTwo (q);
     }
 
     juce::String toJson (const juce::var& v)

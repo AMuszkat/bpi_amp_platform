@@ -124,7 +124,19 @@ docs/protocol.md asks of a controller:
   document and the reason is shown (a message box and the status bar). One proposal at a time:
   an edit made while one is waiting is undone with a note. A `graph` message from the hub with
   a newer revision (another controller's edit) is applied to the canvas; nodes that stay keep
-  their open windows.
+  their open windows. The hub sends its whole `state` again whenever a speaker's fields change
+  (online, the buffer size it runs), also while a proposal is waiting: with the revision the
+  controller already has, the proposal keeps waiting and the canvas keeps showing it; with
+  another revision, the canvas takes the hub's and the proposal's answer only settles it.
+- **Buffer size.** The PipeWire quantum both speakers run is the document's own top-level
+  `"quantum": 256` (docs/protocol.md): no field is the PipeWire config's default. Choosing one
+  proposes the accepted document with `quantum` set (or removed for Default) as the next
+  revision, the same way as any edit (base, revision + 1, 15 s, undone when rejected or
+  unanswered), so both speakers change or neither, and the size is kept and undone like the
+  rest of the graph. A canvas edit carries the document's `quantum` on untouched. From the hub's
+  `state.speakers` the bridge keeps each speaker's `rate`, `quantum` (what its cycles run at
+  now), `quantum_range` (`[lo, hi]`, the sizes its `speakerd` can set) and `quantum_default`
+  (PipeWire's `default.clock.quantum`); null or missing (an older hub or `speakerd`) is unknown.
 - **Never waiting for a peer.** The control and monitor links do all their socket work on their
   own threads: `send()` only queues the line and wakes the link, so the message thread (the UI,
   the knobs) never blocks on a hub that is slow, stalled or stopped. The kernel's send buffer
@@ -161,7 +173,16 @@ docs/protocol.md asks of a controller:
   cycles do not miss the periods in between: they are the change in `late_total` out of the
   change in `cycles_total` since the panel's previous value. The first value after the monitor
   link came (or came back), and one whose totals went down (`speakerd` restarted), shows its own
-  period's `late` of `cycles` instead.
+  period's `late` of `cycles` instead. At the top of the panel, the **Buffer size** selector:
+  the powers of two in the intersection of the online speakers' `quantum_range` (64 to 2048
+  when none reports one), and *Default (512)* (each online speaker's `quantum_default`, `512 /
+  1024` when they differ), with the document's choice selected (the waiting proposal's while
+  one waits). It is disabled before the hub's state, while a proposal waits, and when an online
+  speaker reports no `quantum_range` (its `speakerd` would ignore the field); the reason is
+  under it in orange and in its tooltip (the status bar). A rejected choice puts the selector
+  back and shows the hub's reason as any rejected edit does. Each speaker's box ends with the
+  buffer it runs: `buffer: 256 samples, 5.3 ms at 48000 Hz` (`not running` before its first
+  cycle, `unknown` from an older `speakerd`).
 - **Each node's load on the canvas.** Under a plugin node's name, its share of each speaker's
   audio cycle, the mean as `L 1.2 % / R 1.1 %` (the speaker's role; `-` for a speaker that did
   not time that node, nothing before any speaker's timing arrived); its tooltip, in the status
@@ -198,6 +219,8 @@ timeout (in seconds, the last argument where shown; default 5) passes.
 | `bypass UID on/off` | |
 | `expect-applied [s]` | the last edit's proposal was applied (default 20 s) |
 | `expect-rejected [TEXT]` | it was rejected, with TEXT in the reason; the canvas is back |
+| `buffer-size N`, `buffer-size default` | an edit: proposes the document with `quantum` N (sent as given, so a script can test the hub's check), or without it; prints `quantum` (null for default) and the proposed `revision`. Follow it with `expect-applied` or `expect-rejected` |
+| `expect-buffer-size SPEAKER N [s]` | until the hub's state says SPEAKER runs quantum N (`default`: its `quantum_default`; default 10 s); prints `speaker`, `online`, `quantum`, `rate`, `quantum_default` and `buffer` (the panel's line) |
 | `expect-revision N [s]`, `expect-node UID [s]`, `expect-no-node UID [s]`, `expect-connection A:CH B:CH [s]`, `expect-no-connection ...` | |
 | `open UID [X Y]`, `close UID` | a node's plugin window (with `--gui`, at screen X, Y; `open` prints `editor`: `plugin`, the processor's own, or `generic`); without a GUI, the same subscriptions as a window |
 | `monitor-speaker UID SPEAKER` | the window's L / R choice |
@@ -226,13 +249,16 @@ well). Each command prints, for example:
 `state` prints `{"state": {...}}` with `connected`, `connections_made` (control link connections
 so far), `queued_bytes` (waiting to be written to the hub), `refused` (the hub's reason, if it
 refused this controller, or failed to prove itself, since the last state), `proven` (the hub's
-welcome checked), `insecure`, `osc_dropped`, `synced`, `hub`, `revision`, `seq`, `pending`
+welcome checked), `insecure`, `osc_dropped`, `synced`, `hub`, `revision`, `seq`, `quantum` (the
+accepted document's, or null), `buffer_size` (the panel's selector: `choices`, `default_label`,
+`selected` (null: Default), `enabled`, `why`), `pending`
 (the revision waiting for an answer, or null), `outcome` (`applied N` or `rejected N: reason`),
 `status`, `nodes` (uid, kind: `input`, `output`, `control` or `placeholder`; for plugins name,
 identifier, bypassed, `params` and `monitors` in the plugin's units, `monitor_speaker`),
 `connections` (`[src, channel, dst, channel]`), `speakers` (name, role, online, layer, address,
 monitor_connected, `level` as `[woofer peak, woofer rms, tweeter peak, tweeter rms]`,
-level_count, subscriptions, `load`) and `gestures` (other controllers' active gestures). A
+level_count, subscriptions, `load`, `rate`, `quantum`, `quantum_range`, `quantum_default` (null
+when unknown) and `buffer`, the panel's line) and `gestures` (other controllers' active gestures). A
 plugin node also has `load`, the text the canvas shows under it. A speaker's `load` is
 `{"timing": {...} | "n/a" | null, "timing_refusal", "cpu": {...} | "n/a" | null, "cpu_refusal",
 "text": [three lines]}`: `timing` has `cycle_mean_pct`, `cycle_max_pct`, `graph_mean_pct`,
@@ -253,6 +279,9 @@ add loudness
 expect-applied
 open $new
 wait-value left output/level
+buffer-size 256
+expect-applied
+expect-buffer-size left 256
 state
 ```
 
@@ -274,7 +303,11 @@ with a nonce, checks each client proof with Python's `hmac`, refuses a wrong one
 its `welcome` proof (a wrong one when a test sets `wrong_welcome`), takes OSC only with the token
 of an authenticated connection from its address, and stamps each controller's echoes with that
 controller's token. `forge_echo()` sends echoes without a token or with a wrong one. It stamps `seq`, echoes, relays gestures, applies or rejects proposals
-(stale base, an unknown plugin, or a reason a test sets), and produces monitor values at the
+(stale base, an unknown plugin, a `quantum` the hub or a speaker's range refuses, with their
+reasons, or a reason a test sets; `answer_delay` holds the answer back), gives each speaker
+`rate`, `quantum`, `quantum_range` and `quantum_default` in its state, and once a revision is
+applied makes the speakers run its `quantum` (or their default) and sends the state again
+(`quantum_delay`, 0.3 s, as the agents' reports would), and produces monitor values at the
 rate asked for: `output/level`, `speakerd/timing` and `board/cpu` per speaker, and a node's
 monitor; a stream in `refuse_streams` is refused as an `ampd` refuses one it does not know. Run alone (`python3 fake_hub.py --probe --trace`) it serves a document until
 interrupted.
@@ -312,11 +345,20 @@ plugin's own bypass parameter (the bypass probe) as the node's bypass: *Toggle B
 knob on it proposed as revisions with `bypassed`, never a `param` and never in `params`, a
 mirrored revision applied without an echo, and another controller's `param` of it ignored; and,
 with `--gui` on its own Xvfb + openbox (skipped without them), firConv, crossover and loudness
-each opened, closed and opened again with the plugin's own editor both times.
+each opened, closed and opened again with the plugin's own editor both times; and the buffer
+size: the speakers' four fields parsed and printed, the selector's choices for two ranges'
+intersection (128 to 1024), disabled by an online speaker without a range and not by an
+offline one; `buffer-size 256` proposing the accepted document with only `quantum` added,
+applied, `expect-buffer-size` waiting for the state that says both speakers run it, a canvas
+edit carrying it on and `buffer-size default` removing it; 2048 outside one speaker's range,
+100 and 4096 rejected with their reasons and undone (the document keeps 256); a state resent
+while a proposal waits leaving it waiting (and the canvas showing it) until its answer; and the
+selector on screen (`--gui`) through an applied and a rejected choice.
 Each test prints its numbers.
 
-The screenshot run opens the loudness control editor and the test probe beside the canvas (the
-speakers panel with the fake hub's levels and load, and node 16's share on the canvas) and
+The screenshot run chooses a buffer size of 256 and opens the loudness control editor and the
+test probe beside the canvas (the speakers panel with the selector, the fake hub's levels, load
+and buffer, and node 16's share on the canvas) and
 writes `build/controller-check/controller-screen.png` (the X screen) and `controller-juce.png`
 (JUCE's own rendering of the windows).
 

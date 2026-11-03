@@ -5,6 +5,9 @@ namespace bpi
     namespace
     {
         constexpr float floorDb = -60.0f;
+        constexpr int defaultItemId = 1;          // the selector's "Default"; a size's id is the size
+        constexpr int headerHeight = 22 + 18 + 6;
+        constexpr int speakerBoxHeight = 172;
 
         float toProportion (float db)
         {
@@ -14,7 +17,16 @@ namespace bpi
 
     SpeakersPanel::SpeakersPanel (Bridge& b) : bridge (b)
     {
+        bufferSizeLabel.setFont (juce::FontOptions (12.0f));
+        bufferSizeLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.85f));
+        addAndMakeVisible (bufferSizeLabel);
+
+        bufferSize.setTextWhenNothingSelected ("?");
+        bufferSize.onChange = [this] { bufferSizeChosen(); };
+        addAndMakeVisible (bufferSize);
+
         bridge.addListener (this);
+        updateBufferSize();
         startTimerHz (30);
     }
 
@@ -39,6 +51,67 @@ namespace bpi
             bridge.wantSpeakerLoad (showing);
             repaint();
         }
+    }
+
+    void SpeakersPanel::resized()
+    {
+        auto r = getLocalBounds().reduced (8).withTrimmedTop (headerHeight).removeFromTop (24);
+        bufferSizeLabel.setBounds (r.removeFromLeft (80));
+        bufferSize.setBounds (r);
+    }
+
+    void SpeakersPanel::updateBufferSize()
+    {
+        // From the bridge every time it says something changed: the hub's state (the speakers'
+        // ranges), a proposal sent, applied or undone.
+        const auto choices = bridge.getBufferSizeChoices();
+        const juce::ScopedValueSetter<bool> svs (updatingBufferSize, true);
+
+        auto sizes = choices.sizes;
+        if (choices.selected && *choices.selected > defaultItemId && ! sizes.contains (*choices.selected))
+            sizes.addUsingDefaultSort (*choices.selected);   // the document's, even outside the range: shown as it is
+
+        // Rebuilt only when the items change, so that an open list stays open.
+        if (sizes != shownSizes || choices.defaultLabel != shownDefaultLabel)
+        {
+            bufferSize.clear (juce::dontSendNotification);
+            bufferSize.addItem (choices.defaultLabel, defaultItemId);
+
+            for (auto q : sizes)
+                bufferSize.addItem (juce::String (q) + (choices.sizes.contains (q) ? "" : " (outside the speakers' range)"), q);
+
+            shownSizes = sizes;
+            shownDefaultLabel = choices.defaultLabel;
+        }
+
+        bufferSize.setSelectedId (choices.selected ? *choices.selected : defaultItemId, juce::dontSendNotification);
+        bufferSize.setEnabled (choices.enabled && ! bridge.hasPendingProposal());
+
+        const auto tip = ! choices.enabled ? "The buffer size cannot be chosen: " + choices.why
+                       : bridge.hasPendingProposal() ? juce::String ("A revision is waiting for the hub's answer")
+                       : juce::String ("The PipeWire buffer (quantum) both speakers run, in samples: a revision of the document. "
+                                       "Default: no size in the document, the PipeWire config's own");
+        bufferSize.setTooltip (tip);
+        bufferSizeLabel.setTooltip (tip);
+    }
+
+    void SpeakersPanel::bufferSizeChosen()
+    {
+        if (updatingBufferSize)
+            return;
+
+        const auto id = bufferSize.getSelectedId();
+        const auto choices = bridge.getBufferSizeChoices();
+        const std::optional<int> chosen = id == defaultItemId ? std::nullopt : std::optional<int> (id);
+
+        if (id == 0 || chosen == choices.selected)
+            return;
+
+        // Proposed like any edit; a rejection puts the selector back (updateBufferSize from the
+        // bridge's undo) and shows the reason (the main window's message box, the status bar).
+        juce::String why;
+        bridge.proposeBufferSize (chosen, why);
+        updateBufferSize();
     }
 
     void SpeakersPanel::timerCallback()
@@ -95,6 +168,18 @@ namespace bpi
                     r.removeFromTop (18), juce::Justification::centredLeft);
         r.removeFromTop (6);
 
+        // The buffer size selector is a child (resized()); under it, why it cannot be used, or
+        // what it is set to.
+        r.removeFromTop (24);
+        {
+            const auto choices = bridge.getBufferSizeChoices();
+            g.setFont (juce::FontOptions (11.0f));
+            g.setColour (choices.enabled ? juce::Colours::white.withAlpha (0.6f) : juce::Colours::orange);
+            g.drawFittedText (choices.enabled ? juce::String ("both speakers, as one revision") : choices.why,
+                              r.removeFromTop (18), juce::Justification::centredLeft, 1);
+            r.removeFromTop (8);
+        }
+
         if (bridge.getSpeakers().empty())
         {
             g.drawFittedText ("The hub's state lists the speakers.", r.removeFromTop (40), juce::Justification::topLeft, 3);
@@ -103,7 +188,7 @@ namespace bpi
 
         for (const auto& s : bridge.getSpeakers())
         {
-            auto box = r.removeFromTop (150);
+            auto box = r.removeFromTop (speakerBoxHeight);
             r.removeFromTop (8);
 
             g.setColour (juce::Colours::black.withAlpha (0.25f));
@@ -141,6 +226,7 @@ namespace bpi
             g.drawText (bridge.lateCyclesText (s), box.removeFromTop (17), juce::Justification::centredLeft);
             g.setColour (juce::Colours::white.withAlpha (0.75f));
             g.drawText (bridge.cpuText (s), box.removeFromTop (17), juce::Justification::centredLeft);
+            g.drawText (bridge.bufferText (s), box.removeFromTop (17), juce::Justification::centredLeft);
         }
     }
 }
