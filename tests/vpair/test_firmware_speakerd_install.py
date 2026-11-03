@@ -28,10 +28,8 @@ Pass when:
 - a factory.json kept by an install, or a --factory file, that names a plugin the bundle lacks is
   refused before anything changes (no version, no file of the home), naming each missing plugin
   and --factory (firmware/speakerd/factory.json) or the headless build; check says the same;
-  ampd's graph.json and graph.lkg.json are never rewritten: install goes on and says which
-  plugins the bundle lacks for them, with their revision, that speakerd falls back to the factory
-  layer, that ampd follows it and the revision's settings are gone, and how to carry them over;
-  status marks such a layer with *** and the installed version's plugins;
+  ampd's graph.json and graph.lkg.json are never rewritten, and install goes on without a word
+  about them; status marks such a layer with *** and the installed version's plugins;
 - a --factory file, or a factory.json kept by an install, that setup-helper.py graph refuses (a
   connection to node 99, which the document lacks) is refused before anything changes (every
   file of the home as it was, factory.json unchanged), by install and check, naming the helper's
@@ -769,7 +767,7 @@ class Install(Setup):
     def test_refuses_a_kept_layer_naming_a_plugin_the_bundle_lacks(self):
         """A factory.json an install keeps, or a --factory file, must name only plugins of the bundle
         being installed: speakerd could not load it and the speaker would be silent. ampd's layers
-        are never rewritten; install says what happens to them."""
+        are never rewritten."""
         home = self.fresh_home("kept")
         state = home / ".local/state/speakerd"
         self.install(home, "--role", "left", bundle=self.board_bundle)
@@ -794,16 +792,12 @@ class Install(Setup):
         self.assertEqual(json.loads((state / "factory.json").read_text()), CHAIN_DOCUMENT)
 
         # ampd's graph.json names the chain (revision 31): the install goes on with a factory the
-        # bundle can load, leaves graph.json alone and says what speakerd will do with it.
+        # bundle can load, leaves graph.json alone and says nothing of it.
         revision_31 = json.dumps(dict(CHAIN_DOCUMENT, revision=31), indent=1)
         (state / "graph.json").write_text(revision_31)
         (state / "graph.lkg.json").write_text(json.dumps(dict(CHAIN_DOCUMENT, revision=30)))
         result = self.install(home, "--factory", self.factory)
-        self.assertIn("graph.json (ampd's, revision 31) names plugins this bundle lacks:", result.stdout)
-        self.assertIn("graph.lkg.json (ampd's, revision 30) names plugins this bundle lacks:", result.stdout)
-        self.assertIn("falls back to the factory layer, ampd follows it, and revision 31's", result.stdout)
-        self.assertIn("settings are gone", result.stdout)
-        self.assertIn("To carry them over", result.stdout)
+        self.assertNotIn("graph.json", result.stdout)
         self.assertEqual((state / "graph.json").read_text(), revision_31)
         self.assertEqual(json.loads((state / "factory.json").read_text()), DOCUMENT)
         status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout

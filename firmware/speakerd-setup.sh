@@ -842,24 +842,6 @@ require_bundle_plugins() {   # $1 = the document, $2 = what it is, for the messa
     exit 1
 }
 
-# ampd's layers, graph.json and graph.lkg.json, which load before factory.json and which this
-# installer never rewrites: when one names a plugin the bundle lacks, say what will happen.
-note_ampd_layers() {
-    local f lacking revision
-    for f in graph.json graph.lkg.json; do
-        [ -f "$STATE/$f" ] || continue
-        mapfile -t lacking < <(lacking_plugins "$STATE/$f" "$BUNDLE/lv2")
-        [ ${#lacking[@]} -gt 0 ] || continue
-        revision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("revision", 0))' "$STATE/$f" 2> /dev/null || echo '?')"
-        loud "$f (ampd's, revision $revision) names plugins this bundle lacks:" "${lacking[@]/#/    }" \
-             "speakerd will not load it: it falls back to the factory layer, ampd follows it, and revision $revision's" \
-             "settings are gone (this installer never rewrites ampd's layers). To carry them over, before this" \
-             "install: stop ampd and speakerd on both speakers, rewrite the identifiers in graph.json and" \
-             "graph.lkg.json to the headless builds' (<base>/<plugin>_headless; the parameters are the same)," \
-             "and start them again; or keep the complete builds in the bundle too (--plugin <plugin>:complete)."
-    done
-}
-
 # The factory chain, converted and checked, in $WORK/factory.json (nothing written yet), or
 # none. speakerd converts a .filtergraph from the bundle, with the device.json to be. Without
 # --factory or --import-filtergraph, the factory.json there is stays; with none, a first install
@@ -1048,7 +1030,6 @@ do_install() {
     note_rates
     prepare_device
     prepare_factory
-    note_ampd_layers
     [ ! -e "$LIB/home/.lv2" ] || die "$LIB/home/.lv2 exists: it would shadow the bundles. Remove it."
 
     # Nothing has changed so far. From here on it changes things.
@@ -1330,7 +1311,7 @@ do_check() {
     choose_amplifier
     note_rates
     prepare_device
-    [ -z "$BUNDLE" ] || { prepare_factory; note_ampd_layers; }
+    [ -z "$BUNDLE" ] || prepare_factory
     read_live_sink
     case "$LIVE_SINK" in
         yes) ok "The running PipeWire has the drop-in's speakerd sink" ;;

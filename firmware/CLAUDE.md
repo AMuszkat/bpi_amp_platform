@@ -427,11 +427,14 @@ Once the first deploy is done on both speakers and has been listened to. It adds
 
 ### Moving a board to the headless builds (2026-11-02)
 
-The board measured runs speakerd 0.3.1 with `loudness_headless` and the **complete** builds of firConv and crossover (`tools/board.sh status`, 2026-11-02): `graph.json` and `graph.lkg.json` at revision 31 and `factory.json` at revision 1, each with the three plugin nodes firConv, crossover and loudness, all naming the complete URIs of firConv and crossover. From now on a speaker runs the headless builds only, and the repository's chain document, `firmware/speakerd/factory.json`, names them. A person moves the board with one command (the lab lock lifted):
-
-    tools/board.sh deploy --factory firmware/speakerd/factory.json
-
-It builds speakerd and the three headless plugins for aarch64 and runs `setup.sh --mode target-remote --only speakerd` with that factory file. `--factory` is required here: without it the install keeps the board's factory.json, which names the complete URIs the new bundle lacks, and refuses before changing anything. With it, the install replaces `factory.json` with the chain document (revision 1, firConv at -12 dB), leaves `graph.json` and `graph.lkg.json` as they are (revision 31, the complete URIs) and says what follows: at the restart speakerd fails `current` and `last-known-good` (their plugins are not in the installed version) and plays `factory`, revision 1, and ampd, where it is installed, follows it; **revision 31's settings are gone** from what plays, and the next revision from the controller starts from the chain document's values. To keep them instead, before the deploy: stop ampd and speakerd on both speakers, rewrite the identifiers in `graph.json` and `graph.lkg.json` from `.../firConv` and `.../crossover` to `.../firConv_headless` and `.../crossover_headless` (the parameters are the same), and start them again; or keep the complete builds in the bundle for one more deploy (`--plugin loudness:headless --plugin crossover:headless --plugin firConv:headless --plugin crossover:complete --plugin firConv:complete`), which is not what a speaker should run. Then `tools/board.sh smoke` with a quiet stream playing: `layer:` must name `factory (factory.json)` and `status` must show no `***` on the layers.
+A speaker runs the headless builds only; the repository's chain document,
+`firmware/speakerd/factory.json`, names them. A board that still runs the complete builds moves
+with `tools/board.sh deploy --factory firmware/speakerd/factory.json` (the lab lock lifted).
+`--factory` is required: without it the install keeps the board's factory.json, which names URIs
+the bundle lacks, and refuses before changing anything. `graph.json` and `graph.lkg.json` stay as
+they are; speakerd cannot load them, plays the factory layer, and ampd follows it, so their
+settings are gone. Then `tools/board.sh smoke` with a quiet stream playing. The board moved on
+2026-11-03.
 
 **Not supported yet:** mDNS discovery (the right finds the hub only at the `hub_address` written at install); a controller on Windows (or macOS: it is built and tested on Linux x86_64 only); adding a plugin that no speaker has loaded yet (the hub refuses it, "no speaker has loaded ...", until step 4's catalogue),  encryption: the links are authenticated (both ends prove the secret, every knob datagram carries a session token) but **not encrypted**, so someone on the same network can read the traffic and replay a session's knob values, or, in the path, relay a handshake (docs/protocol.md, "What this does not stop"). Keep the pair on a trusted home network.
 

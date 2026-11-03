@@ -30,7 +30,9 @@ container_or_native "$0" "$@"
 ensure_juce
 
 out="build/$what"
-configure=(cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR")
+# --log-level=NOTICE: no STATUS lines, among them JUCE's pkg-config search for libcurl, webkit2gtk
+# and gtk, which none of these builds uses.
+configure=(cmake -G Ninja --log-level=NOTICE -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR")
 run=()
 
 if [ $arch = aarch64 ]; then
