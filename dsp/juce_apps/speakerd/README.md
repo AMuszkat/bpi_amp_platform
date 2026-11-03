@@ -325,12 +325,20 @@ never re-prepares.
   from the nodes' latency requests within min-quantum and max-quantum, so another node's request
   (snapclient asks for its own latency) would win over a default. A forced size wins over all of
   them.
-- It writes it from the message thread under the PipeWire loop's lock, and again from the loop
-  thread whenever the `settings` metadata object (re)appears in the registry (a restarted
-  PipeWire makes speakerd exit 3, and the speakerd restarted on `graph.json` writes it at
-  load). Never at any other time: somebody who forces a size by hand (`pw-metadata -n settings
-  0 clock.force-quantum 256`, as the tests do) is not fought, until the next document comes into
-  force.
+- It writes it from the message thread under the PipeWire loop's lock. As a safeguard, the loop
+  thread writes it again if the `settings` metadata object appears in the registry only after
+  speakerd connected (`quantum: the settings metadata appeared ...`); in practice that happens
+  at most at connect, since a restarted PipeWire makes speakerd exit 3 and the speakerd
+  restarted on `graph.json` writes it at load, and no test exercises it. Never at any other
+  time: somebody who forces a size by hand (`pw-metadata -n settings 0 clock.force-quantum 256`,
+  as the tests do) is not fought, until the next document comes into force.
+- The forced size outlives speakerd. Nothing writes 0 when speakerd stops cleanly, when it is
+  uninstalled, or when it is rolled back to 0.3.1 (which knows nothing of `quantum`): PipeWire
+  keeps the last size forced until PipeWire restarts or another speakerd brings a document into
+  force. (A reset at a stop is left out on purpose: a systemd restart would change the quantum
+  twice.) The other way round, every start brings the boot layer into force, so speakerd
+  overwrites a size somebody forced by hand before it started. To undo a size left behind:
+  `pw-metadata -n settings 0 clock.force-quantum 0`, or restart PipeWire.
 - An apply that differs from the playing document only in `quantum` is built and swapped like
   any other (a 30 ms fade-out and fade-in, then the re-prime the new size brings): telling
   "only the size" apart would need the playing document's parameter values, which the local
@@ -548,7 +556,7 @@ version 1; this is what speakerd does with it. A Unix stream socket, by default
 |---|---|
 | `{"op":"hello","role":"speakerd","version":"0.3.2 (<commit>)","revision":8,"layer":"current","protocol":1,"rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512}` | first, on every connection, also after a reconnect |
 | the same fields with `"op":"status"`, and `"timing"` | the answer to `{"op":"status"}`; `timing` is the last minute's ([Timing](#timing)) |
-| the hello's fields with `"op":"status"`, no `timing` | unasked, whenever the rate or the quantum the cycles run at changes (from the message thread's 20 ms timer, never the audio thread); also once the first cycle has run, when `quantum` stops being `null` |
+| the hello's fields with `"op":"status"`, no `timing` | unasked, whenever the rate or the quantum the cycles run at changes (from the message thread's 20 ms timer, never the audio thread); also once the first cycle has run, when `quantum` stops being `null`; never before that connection's hello, which is queued first |
 | `{"op":"applied","revision":8}` | an `apply` built, swapped in, and the audio thread has run a cycle of it (or 200 ms went by with no cycle: nothing is linked) |
 | `{"op":"failed","revision":8,"reason":"..."}` | an `apply` that did not load; the graph that played plays on, untouched |
 | `{"op":"error","about":"param","node":16,"id":"gain","reason":"..."}` | a `param` that cannot be applied (below) |
@@ -832,7 +840,7 @@ stable.
 | `quantum: revision <r> asks for none: clock.force-quantum 0 (PipeWire's default, <d>)` | the same, for a document without a size (passthrough is revision 0); `<d>` is `default.clock.quantum` |
 | `quantum: revision <r> asks for <q>, outside <lo> to <hi>: not forced` | a boot layer whose size this PipeWire does not allow (`<q>` as JSON: `4096`, `"256"`); it plays all the same, and 0 is written |
 | `quantum: PipeWire has no settings metadata (yet): clock.force-quantum <q> is written when it appears` | after one of the three lines before, when the `settings` metadata is not in the registry |
-| `quantum: the settings metadata appeared: clock.force-quantum <q>` | the `settings` metadata (re)appeared while a document is in force: its size is written again |
+| `quantum: the settings metadata appeared: clock.force-quantum <q>` | a safeguard: the `settings` metadata object appeared after speakerd connected, while a document is in force, and its size is written again (in practice only at connect; no test exercises it) |
 | `starting at layer <name> (--from)` | `--from` names a layer after `current` |
 | `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>`, or `plugin node <uid>: <URI>, no build identity (an older build), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (buildinfo.ttl unreadable), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (bundle not found)` | once per plugin node each time a layer (live or in the render) or an `apply` builds a graph with it, as soon as its plugin is instantiated: before the layer's `loaded` line and the apply's `applied` line, and also for the nodes a layer or an apply instantiated before it failed (then before its `FAILED` line). `<uid>` is the node's uid in the document, `<URI>` the plugin URI it runs, `<bundle dir>` the bundle it runs from ([Which build it is](#command-line)). Never a failure or a warning: nothing else changes. None for passthrough (no plugin) or `--import-filtergraph` |
 | `layer <name> (<file>): FAILED: <reason>` | a layer that did not load; `<name>` is `current`, `last-known-good` or `factory` |

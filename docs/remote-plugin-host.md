@@ -476,12 +476,18 @@ details, [protocol.md](protocol.md) the messages):
   <lo> to <hi> ...`). A layer at boot with such a size still plays, unforced: a graph is not lost
   over a buffer size. Once a document is in force (the boot layer, an applied revision, a
   rollback), `speakerd` sets PipeWire's `settings` metadata `clock.force-quantum` to its size, or
-  to 0 without one, and again when that metadata reappears; never at any other time, and never
-  on the audio thread. A forced quantum, not `clock.quantum`, because PipeWire otherwise picks
+  to 0 without one (and, as a safeguard, again if that metadata object appears only after
+  `speakerd` connected; untested, and in practice only at connect, since a restarted PipeWire
+  makes `speakerd` exit 3); never at any other time, and never on the audio thread. The forced
+  size outlives `speakerd`: nothing writes 0 at a clean stop, an uninstall or a rollback to
+  0.3.1, so PipeWire keeps it until it restarts or another document comes into force
+  (`pw-metadata -n settings 0 clock.force-quantum 0` undoes it by hand), and every start
+  overwrites a size forced by hand before it. A forced quantum, not `clock.quantum`, because PipeWire otherwise picks
   the quantum from the nodes' latency requests, and another node's (snapclient's) would win.
   The hello and the status carry `rate`, `quantum` (the size the cycles run at now),
   `quantum_range` and `quantum_default`, and `speakerd` sends `ampd` an unasked `status` when the
-  running quantum or rate changes ([protocol.md](protocol.md)).
+  running quantum or rate changes, only ever after that connection's hello
+  ([protocol.md](protocol.md)).
 
 **ampd: the speaker's network agent.** `ampd` runs on every speaker next to `speakerd` and
 does everything that talks to the outside: it receives parameter changes and graph revisions,
@@ -1422,7 +1428,8 @@ largest quantum PipeWire brings by itself (max-quantum, at most quantum-limit); 
 one is faded out, never run past the buffer, and re-prepared for on the main thread. `speakerd`
 also sets the forced quantum itself, from the document in force (its `quantum`, section 2): the
 main thread writes `clock.force-quantum` into PipeWire's `settings` metadata under the loop
-thread's lock (the loop thread again when that metadata reappears), so a chosen size, being
+thread's lock (and, as an untested safeguard, the loop thread again if that metadata object
+appears only after `speakerd` connected), so a chosen size, being
 within max-quantum, only re-primes the graph. The
 limits of `device.json` are constants of the engine, read once at start; no message changes them.
 
@@ -1560,7 +1567,7 @@ per step; the virtual pair's `test_controller_end_to_end` and the controller's o
 | hub to agent | TCP 7450, the same link as a controller's, `role` agent, no OSC | the agent, every second | `param` stamped with the hub's `seq`, `apply` of a revision; back: the speaker's `hello`, layer, revision, rate and quantum (running, range, default), `applied`/`failed` | the hub marks the speaker offline; revisions apply among the speakers that are up; the agent catches up on reconnection |
 | `ampd` to `speakerd`, **the local link** | Unix socket `$XDG_RUNTIME_DIR/speakerd/control.sock`, mode 0600, JSON lines, one client | `ampd`, every second; `speakerd` listens | `hello`, `status` (also unasked when the running quantum or rate changes; both with `rate`, `quantum`, `quantum_range`, `quantum_default`); `param`, `apply`, `subscribe`; back: `applied`, `failed`, `value`, `error` | `ampd` gone: `speakerd` plays on, unchanged. `speakerd` gone: `ampd` reconnects and, on the hello, follows the revision it plays or re-sends the values |
 | `speakerd` to a plugin | in process: JUCE's LV2 hosting, `AudioProcessorGraph::processBlock` | `speakerd`, when a graph is built | audio buffers; parameters in as `patch:Set` inside `run()`; monitors out on the atom port | a bundle that does not load fails the layer or the `apply`; the old graph plays on |
-| `speakerd` to PipeWire | libpipewire: the `speakerd-dsp` `pw_filter` node, the registry, four links of its own; `client-rt.conf` for the real-time thread | `speakerd`, at start; relinks whenever the ports come back | the stream in from the `speakerd` sink's monitors, the two amplifier channels out; the quantum and rate; out, `clock.force-quantum` in the `settings` metadata (subject 0): the document's `quantum`, or 0, whenever a document comes into force and when that metadata reappears | the amplifier away: the output gate holds 0 and the plugins run on; PipeWire away: exit 3, systemd restarts on the same layer |
+| `speakerd` to PipeWire | libpipewire: the `speakerd-dsp` `pw_filter` node, the registry, four links of its own; `client-rt.conf` for the real-time thread | `speakerd`, at start; relinks whenever the ports come back | the stream in from the `speakerd` sink's monitors, the two amplifier channels out; the quantum and rate; out, `clock.force-quantum` in the `settings` metadata (subject 0): the document's `quantum`, or 0, whenever a document comes into force (and, a safeguard, if that metadata appears after connect) | the amplifier away: the output gate holds 0 and the plugins run on; PipeWire away: exit 3, systemd restarts on the same layer |
 | players to the `speakerd` sink | a PipeWire stream (snapclient, `client-rt.conf`'s target) | WirePlumber links it | the stereo stream | nothing plays; `speakerd` keeps its node and its links |
 | PipeWire to the amplifier | the ALSA sink of the MAX98397 driver (`bpi-alsa-playback-pcm` on the board measured): the hardware clock drives the graph, by its `priority.driver` (1000 in the repository's `pipewire.conf`) or, where it has none, because it is created before the `speakerd` sink | PipeWire | the graph's rate and quantum, from the board's own PipeWire configuration: 48000 Hz and 1024 on the board measured; the repository's `pipewire.conf`, which only `setup.sh --base-conf` installs, pins the rate at 48000 Hz and leaves the quantum at 512 by default, anywhere from 64 (min-quantum) to 2048 (max-quantum) allowed (`firmware/CLAUDE.md`, "Rates"); the document's `quantum`, when it has one, is forced over either | |
 | systemd to `speakerd` | `speakerd.service`: `ExecStart` `speakerd-run`, `ExecStopPost` `speakerd-run --record-exit` | systemd, at boot with linger; `Restart=on-failure` in 1 s, no start limit | the layer to start from (`--from`), chosen from a history of starts and exits on tmpfs: a crash steps down a layer, exit 3 (PipeWire) stays, a clean stop goes back to `current` | |
