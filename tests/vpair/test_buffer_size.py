@@ -33,7 +33,9 @@ Pass when:
 - 4096, 100 and 48 are rejected by the hub with `quantum <v>: a power of two from 64 to 2048`, and
   nothing changes on either speaker: the revision stays 4, force-quantum 0, quantum 1024 in the
   state, and no speakerd says a quantum line after them (1 s);
-- 256 again (revision 5), then each speakerd stopped, clock.force-quantum set back to 0 by hand and
+- 256 again (revision 5), proposed as `256.0` (a whole JSON number with no fraction, which the hub
+  and speakerd accept): applied, both speakers say `quantum: revision 5 asks for 256:
+  clock.force-quantum 256` and run 256 (force-quantum 256, the state); then each speakerd stopped, clock.force-quantum set back to 0 by hand and
   speakerd started again on graph.json: it forces 256 again (its log line, pw-metadata, the state),
   on both; then each speaker's PipeWire restarted (vpair down and up: speakerd exits with status 3,
   as it does when it loses PipeWire, and is started again on graph.json): the same on both, on a
@@ -212,8 +214,10 @@ class TheChosenSize(BufferSize, unittest.TestCase):
                 self.assertEqual({n: e["quantum"] for n, e in speakers_of(ctl.last_state()).items()},
                                  {n: SPEAKER_DEFAULT for n in NAMES})
 
-                # 256 again; then each speakerd restarted on graph.json, the metadata reset by hand.
-                _, marks, ctl_mark = self.propose(pair, ctl, 256)
+                # 256 again, written 256.0 (a whole JSON number, of the valid shape: the hub and
+                # speakerd take it as 256); then each speakerd restarted on graph.json, the metadata
+                # reset by hand.
+                _, marks, ctl_mark = self.propose(pair, ctl, 256.0)
                 self.check_runs(pair, ctl, 256, 256, marks, ctl_mark, revision=5)
                 for name in NAMES:
                     pair.speakerd[name].stop()

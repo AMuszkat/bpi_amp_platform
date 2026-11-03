@@ -176,14 +176,26 @@ cycle) as part of the chain document, so it is applied on both speakers or neith
   min(2048, max-quantum, quantum-limit): `quantum_range`, `[lo, hi]`.
 - **The hub refuses a proposal**, `rejected`, with no `apply` sent to any speaker, when
   - `quantum` is present, not `null`, and not of the valid shape:
-    `"reason":"quantum <v>: a power of two from 64 to 2048"` (`<v>` as JSON: `4096`, `"256"`);
+    `"reason":"quantum <v>: a power of two from 64 to 2048"` (`<v>` as JSON: `4096`, `"256"`, cut
+    to its first 40 characters);
   - `quantum` is present (not `null`) and a speaker whose `speakerd` runs reports no
     `quantum_range` (an older `speakerd`, which would ignore the field and run another size than
     the document says): `"reason":"<speaker>: its speakerd cannot set the buffer size (no quantum_range)"`
     (one such clause per speaker, joined by `; `).
 
   Otherwise it is applied as any revision; a speaker whose PipeWire does not allow the size fails
-  it, and the hub rolls back (all or nothing).
+  it, and the hub rolls back (all or nothing). A whole number written with a point, `256.0`, is of
+  the valid shape: the hub and `speakerd` take it as 256 (the document keeps it as it came).
+- **An older `speakerd` after the proposal.** The refusal above is made at proposal time only. A
+  speaker that was offline, or whose `speakerd` was down, when the revision was applied, and comes
+  back with a `speakerd` that says no `quantum_range`, is caught up all the same (the speaker must
+  get the graph), as is the hub's own `speakerd` coming back older: such a `speakerd` ignores the
+  field and runs whatever size its PipeWire runs, so the pair may run different sizes. The hub does
+  not refuse it; it logs `<speaker>: its speakerd <version> cannot set the buffer size (no
+  quantum_range): revision <n> asks for quantum <q>, which it ignores` (its own `speakerd`'s hello,
+  an agent's catch-up, an agent's `status` that changes its `speakerd` or range, an adopted
+  revision), and the state shows that speaker's `quantum_range` (and the other fields such a `speakerd`
+  does not say) as `null`. The next proposal with a `quantum` is refused as above.
 - **`speakerd` fails an apply** whose `quantum` is malformed or outside its `quantum_range`, before
   it builds anything, the playing graph untouched:
   `{"op":"failed","revision":N,"reason":"quantum <v>: not a power of two from <lo> to <hi> (what this speaker's PipeWire allows)"}`,

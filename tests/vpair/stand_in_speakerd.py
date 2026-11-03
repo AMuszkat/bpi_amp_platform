@@ -13,7 +13,8 @@ speakerd that does exactly what it is told, including failing.
   "quantum_default": ..}) changes them, a key given as null leaves it out, and "older": true leaves
   out all four, as a speakerd older than the buffer size says.
 - The quantum it "runs" is the document's `quantum` when it has one within quantum_range, else
-  quantum_default (control "quantum" overrides it, as a quantum forced by hand). An apply whose
+  quantum_default (control "quantum" overrides it, as a quantum forced by hand). A whole number
+  written with a point (256.0) is that number, as for speakerd. An apply whose
   `quantum` is not a power of two within quantum_range is answered `failed` with speakerd's reason
   (`quantum <v>: not a power of two from <lo> to <hi> (what this speaker's PipeWire allows)`),
   unless "older". Whenever what its hello would say of the PipeWire changes (an apply, the control
@@ -101,13 +102,16 @@ class StandIn:
         if "quantum" in control:
             out["quantum"] = control["quantum"]
         elif self.in_range(chosen, low_high):
-            out["quantum"] = chosen
+            out["quantum"] = int(chosen)
         else:
             out["quantum"] = out.get("quantum_default")
         return {k: v for k, v in out.items() if v is not None}
 
     @staticmethod
     def in_range(q, low_high):
+        # A whole JSON number is accepted as speakerd accepts it: 256.0 is 256.
+        if isinstance(q, float) and q.is_integer():
+            q = int(q)
         return (isinstance(q, int) and not isinstance(q, bool) and q > 0 and not q & (q - 1)
                 and isinstance(low_high, list) and len(low_high) == 2 and low_high[0] <= q <= low_high[1])
 
