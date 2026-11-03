@@ -224,8 +224,8 @@ namespace speakerd
             settle (*newGraph, sampleRate, settleBlock, scratch, scratchMidi);
         }
 
-        // Room for a cycle padded to whole blocks (process()): less than maxBlock + one block.
-        juce::AudioBuffer<float> newIo (graphChannels, 2 * newMaxBlock);
+        // Room for maxBlock samples: a cycle whose blocks need more is the guard's (processCycle).
+        juce::AudioBuffer<float> newIo (graphChannels, newMaxBlock);
         newIo.clear();
 
         park();    // a fade-out, if something is playing
@@ -250,12 +250,42 @@ namespace speakerd
         return old;
     }
 
+    void Engine::reprepare (double rate, int newMaxBlock, int settleBlock)
+    {
+        jassert (owner.load() == messageThread && graph != nullptr && settleBlock <= newMaxBlock);
+
+        if (newMaxBlock != maxBlock)
+        {
+            juce::AudioBuffer<float> newIo (graphChannels, newMaxBlock);
+            newIo.clear();
+            io = std::move (newIo);
+            maxBlock = newMaxBlock;
+            maxBlockForReaders.store (newMaxBlock);
+        }
+
+        // Hosted LV2 plugins are instantiated anew here (keeping their state), so their own
+        // smoothing starts over: the graph settles before it is heard, as a new graph does.
+        graph->prepareToPlay (rate, maxBlock);
+        setRate (rate);
+        settle (*graph, rate, settleBlock, io, midi);
+        setPrimedBlock (settleBlock);
+
+        // The cycles come at this size: not a change of quantum of its own (the line about the
+        // re-prepare says what happened).
+        lastCycleBlock = settleBlock;
+        lastBlockForReaders.store (settleBlock);
+    }
+
     Engine::Serviced Engine::service()
     {
         Serviced done;
 
         // preparedRate, maxBlock and primedBlock are only ever written on this thread, so they
-        // can be read here unowned.
+        // can be read here unowned. A block the graph is not prepared for grows maxBlock, up to
+        // the quantum limit.
+        const auto preparedFor = [this] (int block) { return block <= maxBlock ? maxBlock
+                                                           : block <= quantumLimit ? block : 0; };
+
         if (const auto rate = requestedRate.exchange (0, std::memory_order_acquire);
             rate > 0 && std::abs (rate - preparedRate) >= 0.5)
         {
@@ -264,16 +294,24 @@ namespace speakerd
             if (graph != nullptr)
             {
                 const auto block = requestedBlock.load();
-                const auto settleBlock = juce::jlimit (1, maxBlock, block > 0 ? block : primedBlock);
-                graph->prepareToPlay ((double) rate, maxBlock);
-                setRate (rate);
-                settle (*graph, rate, settleBlock, io, midi);
-                setPrimedBlock (settleBlock);
+                auto settleBlock = juce::jmax (1, block > 0 ? block : primedBlock);
+                auto newMaxBlock = preparedFor (settleBlock);
 
-                // The cycles at the new rate come at this size: not a change of quantum of its
-                // own (the rate line says what happened).
-                lastCycleBlock = settleBlock;
-                lastBlockForReaders.store (settleBlock);
+                if (newMaxBlock == 0)
+                {
+                    // Above the quantum limit: such cycles stay silent (the guard, processCycle).
+                    done.refusedBlock = settleBlock;
+                    newMaxBlock = maxBlock;
+                    settleBlock = maxBlock;
+                }
+
+                if (newMaxBlock != maxBlock)
+                {
+                    done.fromMaxBlock = maxBlock;
+                    done.maxBlock = newMaxBlock;
+                }
+
+                reprepare ((double) rate, newMaxBlock, settleBlock);
             }
 
             requestedPrime.store (0);
@@ -282,12 +320,43 @@ namespace speakerd
             return done;
         }
 
-        // A cycle that did not fit the primed size, or a lasting quantum of many primed blocks;
-        // unless the quantum has moved on since, or back to a size that fits as it is.
+        // A cycle that did not fit the primed size or the buffer, or a lasting quantum of many
+        // primed blocks; unless the quantum has moved on since, or back to a size that fits as
+        // it is.
         const auto wanted = requestedPrime.exchange (0, std::memory_order_acquire);
+
+        if (wanted <= 0 || wanted != lastBlockForReaders.load())
+            return done;
+
+        if (wanted > maxBlock)
+        {
+            // More than the graph is prepared for: the audio thread faded out and is silent.
+            // A cycle above the quantum limit cannot come from PipeWire (it never runs a quantum
+            // above clock.quantum-limit, forced or not); should one come, it stays silent.
+            const auto newMaxBlock = preparedFor (wanted);
+
+            if (newMaxBlock == 0)
+            {
+                done.refusedBlock = wanted;
+                return done;
+            }
+
+            park();
+
+            if (graph != nullptr)
+            {
+                done.fromMaxBlock = maxBlock;
+                reprepare (preparedRate, newMaxBlock, wanted);
+                done.maxBlock = newMaxBlock;
+            }
+
+            unpark (true);
+            return done;
+        }
+
         const auto fitsAsItIs = wanted % primedBlock == 0 && wanted / primedBlock < upwardPrimeRatio;
 
-        if (wanted <= 0 || wanted > maxBlock || fitsAsItIs || wanted != lastBlockForReaders.load())
+        if (fitsAsItIs)
             return done;
 
         // A size that does not fit: the audio thread has faded out already, and is silent. A
@@ -482,7 +551,7 @@ namespace speakerd
             silence();
         };
 
-        if (graph == nullptr || numSamples > maxBlock)
+        if (graph == nullptr)
             return silentAtZero();
 
         // Parameter values from the local link, before the graph runs: in force from this cycle.
@@ -508,11 +577,17 @@ namespace speakerd
             stableSamples = 0;
         }
 
-        // The graph only ever runs blocks of the size it is primed for (see Engine.h).
+        // The graph only ever runs blocks of the size it is primed for (see Engine.h), and only
+        // as many as fit in `io` (maxBlock samples): the guard. A cycle padded past its end, or
+        // longer than it, runs the whole blocks that fit, fades them out and is silent after
+        // them, until service() re-prepares (or primes) the graph for its size.
         const auto block = primedBlock;
+        const auto room = io.getNumSamples();
         const bool fits = numSamples % block == 0;
+        const auto padded = ((juce::int64) numSamples + block - 1) / block * block;
+        const bool hasRoom = padded <= room;
 
-        if (! fits)
+        if (! fits || ! hasRoom)
         {
             requestedPrime.store (numSamples, std::memory_order_release);
 
@@ -530,8 +605,11 @@ namespace speakerd
 
         juce::ScopedNoDenormals noDenormals;
 
-        const auto blocks = (numSamples + block - 1) / block;
-        const auto padded = blocks * block;     // < numSamples + block <= 2 * maxBlock
+        // `run`: the samples the graph runs, whole blocks, at most `room`; `heard`: the cycle's
+        // samples among them. Only a cycle without room has heard < numSamples.
+        const auto run = hasRoom ? (int) padded : room / block * block;
+        const auto blocks = run / block;
+        const auto heard = juce::jmin (numSamples, run);
 
         for (int c = 0; c < 2; ++c)
         {
@@ -539,12 +617,12 @@ namespace speakerd
 
             // No NaN or infinity reaches a plugin, where it could stick in a filter's state.
             if (in != nullptr && in[c] != nullptr)
-                samples::copyFinite (dst, in[c], numSamples);
+                samples::copyFinite (dst, in[c], heard);
             else
-                juce::FloatVectorOperations::clear (dst, numSamples);
+                juce::FloatVectorOperations::clear (dst, heard);
 
-            if (padded > numSamples)
-                juce::FloatVectorOperations::clear (dst + numSamples, padded - numSamples);
+            if (run > heard)
+                juce::FloatVectorOperations::clear (dst + heard, run - heard);
         }
 
         // The Mine channel: this speaker's own channel of the stream, by its role.
@@ -555,11 +633,11 @@ namespace speakerd
 
             switch (role)
             {
-                case Role::left:   juce::FloatVectorOperations::copy (mine, fl, padded); break;
-                case Role::right:  juce::FloatVectorOperations::copy (mine, fr, padded); break;
+                case Role::left:   juce::FloatVectorOperations::copy (mine, fl, run); break;
+                case Role::right:  juce::FloatVectorOperations::copy (mine, fr, run); break;
                 case Role::mono:
-                    juce::FloatVectorOperations::add (mine, fl, fr, padded);
-                    juce::FloatVectorOperations::multiply (mine, 0.5f, padded);
+                    juce::FloatVectorOperations::add (mine, fl, fr, run);
+                    juce::FloatVectorOperations::multiply (mine, 0.5f, run);
                     break;
             }
         }
@@ -589,19 +667,19 @@ namespace speakerd
         {
             // Nobody hears this cycle (or not all of it): silent, and the fade-in, when it comes,
             // starts from 0.
-            juce::FloatVectorOperations::clear (woofer, numSamples);
-            juce::FloatVectorOperations::clear (tweeter, numSamples);
+            juce::FloatVectorOperations::clear (woofer, heard);
+            juce::FloatVectorOperations::clear (tweeter, heard);
             fadePosition = 0;
         }
-        else if (! fits)
+        else if (! fits || ! hasRoom)
         {
-            // The real samples of a padded cycle fade out within it; then silence until the
-            // graph is primed at the new size.
+            // The real samples of a padded cycle (or those of a cycle without room that ran)
+            // fade out within it; then silence until the graph is primed at the new size.
             const auto from = (float) fadePosition / (float) fadeLength;
 
-            for (int i = 0; i < numSamples; ++i)
+            for (int i = 0; i < heard; ++i)
             {
-                const auto gain = from * (float) (numSamples - 1 - i) / (float) numSamples;
+                const auto gain = from * (float) (heard - 1 - i) / (float) heard;
                 woofer[i]  *= gain;
                 tweeter[i] *= gain;
             }
@@ -614,14 +692,14 @@ namespace speakerd
         }
         else if (! fadingIn && fadePosition <= 0)
         {
-            juce::FloatVectorOperations::clear (woofer, numSamples);
-            juce::FloatVectorOperations::clear (tweeter, numSamples);
+            juce::FloatVectorOperations::clear (woofer, heard);
+            juce::FloatVectorOperations::clear (tweeter, heard);
         }
         else
         {
             const auto step = 1.0f / (float) fadeLength;
 
-            for (int i = 0; i < numSamples; ++i)
+            for (int i = 0; i < heard; ++i)
             {
                 fadePosition = juce::jlimit (0, fadeLength, fadePosition + (fadingIn ? 1 : -1));
                 const auto gain = (float) fadePosition * step;
@@ -634,22 +712,22 @@ namespace speakerd
         // muted, then the cap at the ceiling (the gain), whatever the graph did.
         if (outputCeiling <= 0.0f)
         {
-            juce::FloatVectorOperations::clear (woofer, numSamples);
-            juce::FloatVectorOperations::clear (tweeter, numSamples);
+            juce::FloatVectorOperations::clear (woofer, heard);
+            juce::FloatVectorOperations::clear (tweeter, heard);
         }
         else if (outputGain < 1.0f)
         {
-            juce::FloatVectorOperations::multiply (woofer, outputGain, numSamples);
+            juce::FloatVectorOperations::multiply (woofer, outputGain, heard);
 
             if (! tweeterMuted)
-                juce::FloatVectorOperations::multiply (tweeter, outputGain, numSamples);
+                juce::FloatVectorOperations::multiply (tweeter, outputGain, heard);
         }
 
         if (tweeterMuted)
-            juce::FloatVectorOperations::clear (tweeter, numSamples);   // exact zeros
+            juce::FloatVectorOperations::clear (tweeter, heard);   // exact zeros
 
-        samples::cap (woofer, numSamples, outputCeiling);
-        samples::cap (tweeter, numSamples, outputCeiling);
+        samples::cap (woofer, heard, outputCeiling);
+        samples::cap (tweeter, heard, outputCeiling);
 
         if (! fadingIn && fadePosition == 0)
             fadedSerial.store (serial, std::memory_order_release);
@@ -658,11 +736,17 @@ namespace speakerd
 
         if (out != nullptr)
         {
-            if (out[0] != nullptr)
-                juce::FloatVectorOperations::copy (out[0], woofer, numSamples);
+            // A cycle without room: silent after what ran.
+            for (int c = 0; c < 2; ++c)
+            {
+                if (out[c] == nullptr)
+                    continue;
 
-            if (out[1] != nullptr)
-                juce::FloatVectorOperations::copy (out[1], tweeter, numSamples);
+                juce::FloatVectorOperations::copy (out[c], c == 0 ? woofer : tweeter, heard);
+
+                if (numSamples > heard)
+                    juce::FloatVectorOperations::clear (out[c] + heard, numSamples - heard);
+            }
         }
     }
 }

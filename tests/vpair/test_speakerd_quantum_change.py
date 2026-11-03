@@ -36,6 +36,24 @@ dropouts and jumps measured through speakerd are printed.
 
 The quantum is let go (0) when the test ends, whatever happened.
 
+A quantum above the one speakerd is prepared for (QuantumAboveMaxQuantum). speakerd prepares the
+plugins for the largest quantum PipeWire brings by itself, max (quantum, min (max-quantum,
+quantum-limit)); clock.force-quantum can still bring a larger one, up to quantum-limit. Here the
+left speaker's PipeWire runs with default.clock.quantum = max-quantum = 512, as the boards are
+pinned, and the same stream plays. Pass when:
+
+- speakerd says `pipewire: 48000 Hz, quantum 512, largest quantum <l>, max-quantum 512: the
+  plugins are prepared for 512`, and the amplifier gets the tone with the render's gain;
+- forced to 1024, speakerd says `pipewire: a cycle of 1024 samples does not fit the 512
+  prepared: re-prepared the plugins for 1024`, then plays the tone with the render's gain, and
+  PipeWire counts at most XRUNS_AT_MOST xruns in speakerd's node from the force to the end of the
+  recording after it (no xrun storm);
+- let go (back to 512), speakerd says `pipewire: the quantum changed to 512: faded out, primed the
+  graph for it and faded back in` and plays the tone with the render's gain;
+
+and the amplifier, recorded as floats throughout, holds no NaN, infinity or sample above full
+scale, and speakerd exits with status 0 at the end (no crash).
+
     python3 -m unittest -v tests.vpair.test_speakerd_quantum_change
 """
 
@@ -47,8 +65,8 @@ import time
 import unittest
 from pathlib import Path
 
-from harness import (RATE, Pair, Player, Recorder, Speakerd, active, built, graph_document,
-                     lv2_uri, render, rms_dbfs, state_dir, steady, tone, with_plugin)
+from harness import (RATE, Pair, Player, Profiler, Recorder, Speakerd, active, built, graph_document,
+                     lv2_uri, render, rms_dbfs, speaker_conf_with, state_dir, steady, tone, with_plugin)
 
 import numpy as np
 
@@ -109,7 +127,14 @@ def glitches(x, amplitude, block=RATE // 1000):
     return dropouts, jumps
 
 
-class QuantumChange(unittest.TestCase):
+# QuantumAboveMaxQuantum: the PipeWire quanta, and the xruns PipeWire may count in speakerd's node
+# from the force to the end of the recording after the re-prepare.
+PINNED, FORCED, XRUNS_AT_MOST = 512, 1024, 3
+
+
+class Checks:
+    """The render's gain (setUpClass) and the checks on a recording, for both scenarios."""
+
     @classmethod
     def setUpClass(cls):
         cls.headless = built("loudness", "headless")
@@ -124,9 +149,6 @@ class QuantumChange(unittest.TestCase):
             raise AssertionError(f"the render did not run the document:\n{log}")
         part = steady(active(output))
         cls.reference = rms_dbfs(part[:, 0]) - rms_dbfs(steady(TONE))
-
-        cls.pair = Pair().__enter__()
-        cls.addClassCleanup(cls.pair.__exit__, None, None, None)
 
     def window(self, speaker, when):
         """A recording of the amplifier, as floats, checked for samples that are not finite or
@@ -153,6 +175,14 @@ class QuantumChange(unittest.TestCase):
         peak = float(np.max(np.abs(capture), initial=0.0))
         self.assertLessEqual(peak, 1.0, f"{when}: a sample is above full scale ({peak})")
 
+
+class QuantumChange(Checks, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.pair = Pair().__enter__()
+        cls.addClassCleanup(cls.pair.__exit__, None, None, None)
+
     def test_the_gain_recovers_after_every_quantum_change(self):
         speaker = self.pair["left"]
         self.addCleanup(speaker.set_quantum, 0)   # whatever happens below
@@ -163,6 +193,7 @@ class QuantumChange(unittest.TestCase):
             stack.enter_context(Player(speaker, STREAM, target="speakerd"))
             throughout = stack.enter_context(Recorder(speaker, "amplifier", fmt="f32"))
             started = time.monotonic()
+            print("\n  " + sd.wait_for("pipewire: 48000 Hz, ", timeout=1))
             before = "quantum 1024, before any change"
             self.check_gain(self.window(speaker, before), before)
 
@@ -215,6 +246,70 @@ class QuantumChange(unittest.TestCase):
             steps = [f"{size:.2f} of the tone at {t:.2f} s" for t, size in jumps if start <= t < end]
             rows.append(f"{name}: dropouts {', '.join(gaps) or 'none'}; jumps {', '.join(steps) or 'none'}")
         print("\n  woofer, recorded throughout (gaps are not asserted):\n    " + "\n    ".join(rows))
+
+
+
+class QuantumAboveMaxQuantum(Checks, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # speaker.conf with the quantum pinned as on the boards: quantum = max-quantum = 512.
+        conf = speaker_conf_with(cls.tmp / "speaker-pinned.conf", default_clock_quantum=PINNED)
+        text, n = re.subn(r"(?m)^(\s*)default\.clock\.quantum(\s*)=.*$",
+                          rf"\g<0>\n\g<1>default.clock.max-quantum\g<2>= {PINNED}", conf.read_text())
+        if n != 1:
+            raise AssertionError("speaker.conf has no single default.clock.quantum")
+        conf.write_text(text)
+        cls.pair = Pair(setup={"left": {"speaker_conf": conf}}).__enter__()
+        cls.addClassCleanup(cls.pair.__exit__, None, None, None)
+
+    def test_a_forced_quantum_above_max_quantum_is_prepared_for(self):
+        speaker = self.pair["left"]
+        self.addCleanup(speaker.set_quantum, 0)   # whatever happens below
+
+        with contextlib.ExitStack() as stack:
+            sd = stack.enter_context(Speakerd(speaker, state_dir(self.tmp / "live", current=DOCUMENT),
+                                              bundles=[self.headless]))
+            stack.enter_context(Player(speaker, STREAM, target="speakerd"))
+            throughout = stack.enter_context(Recorder(speaker, "amplifier", fmt="f32"))
+
+            line = sd.wait_for("pipewire: 48000 Hz, ", timeout=1)
+            self.assertRegex(line, rf"^speakerd: pipewire: 48000 Hz, quantum {PINNED}, largest quantum \d+, "
+                                   rf"max-quantum {PINNED}: the plugins are prepared for {PINNED}$", sd.log())
+            before = f"quantum {PINNED}, prepared for {PINNED}"
+            self.check_gain(self.window(speaker, before), before)
+
+            # Forced above max-quantum: re-prepared for it, and PipeWire counts no xrun storm.
+            with Profiler(speaker) as profiler:
+                forced_at = time.monotonic()
+                mark = sd.mark()
+                speaker.set_quantum(FORCED)
+                line = sd.wait_for("pipewire: a cycle of ", timeout=10, after=mark)
+                self.assertEqual(line, f"speakerd: pipewire: a cycle of {FORCED} samples does not fit the "
+                                       f"{PINNED} prepared: re-prepared the plugins for {FORCED}", sd.log())
+                when = f"clock.force-quantum {FORCED}, re-prepared"
+                capture = self.window(speaker, when)
+                ended_at = time.monotonic()
+                xruns = [(t - forced_at, what) for t, what in profiler.events(["speakerd-dsp"])
+                         if what.startswith("xrun") and forced_at <= t <= ended_at]
+            self.check_gain(capture, when)
+            print(f"\n  xruns in speakerd-dsp from the force on: {len(xruns)} "
+                  + ", ".join(f"at {t:.2f} s" for t, _ in xruns))
+            self.assertLessEqual(len(xruns), XRUNS_AT_MOST, f"xruns after the force: {xruns}\n{sd.log()}")
+
+            # Let go: back to the pinned quantum, primed for it.
+            mark = sd.mark()
+            speaker.set_quantum(0)
+            line = sd.wait_for(f"pipewire: the quantum changed to {PINNED}: ", timeout=10, after=mark)
+            self.assertEqual(line, f"speakerd: pipewire: the quantum changed to {PINNED}: faded out, primed "
+                                   f"the graph for it and faded back in", sd.log())
+            when = f"clock.force-quantum 0, quantum {PINNED} again"
+            self.check_gain(self.window(speaker, when), when)
+
+            capture = throughout.stop()
+
+        # Speakerd's exit checked its status (0): no crash.
+        self.check_samples(capture, "from before the force to after the let-go")
 
 
 if __name__ == "__main__":

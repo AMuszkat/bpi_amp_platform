@@ -139,6 +139,9 @@ namespace speakerd
 
             if (const auto limit = lookup (info->props, "default.clock.quantum-limit").getIntValue(); limit > 0)
                 self.clock.quantumLimit = limit;
+
+            if (const auto largest = lookup (info->props, "default.clock.max-quantum").getIntValue(); largest > 0)
+                self.clock.maxQuantum = largest;
         }
 
         static void onCoreDone (void* data, uint32_t id, int seq)

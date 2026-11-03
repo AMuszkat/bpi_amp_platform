@@ -157,6 +157,16 @@ namespace speakerd
         fade-out, so that the graph does not stay at a small block (and its per-call cost) for
         good after a quantum came down and went back up.
 
+        The buffer the graph runs on, `io`, holds maxBlock samples per channel: the largest
+        quantum PipeWire is configured to bring (max-quantum, at most quantum-limit), as Main
+        reads it, and what every plugin is prepared for. A cycle whose blocks would not fit in it
+        (one longer than maxBlock, or one padded to whole primed blocks past its end) is the
+        guard's: the graph runs only the whole blocks that fit, those samples fade out, the rest
+        of the cycle is silent, and service() re-prepares the graph for the cycle's size (a new
+        `io`, prepareToPlay at the new maxBlock, settled and primed at the cycle's size) and fades
+        back in. clock.force-quantum can bring such a cycle, up to quantum-limit. Nothing beyond
+        setQuantumLimit is ever prepared for: such a cycle stays silent.
+
         The output gate. The input sink drives the filter on its own, so the graph keeps running
         while the amplifier is away, and PipeWire 0.3.65 keeps handing the filter output buffers
         that nobody reads. Without a gate, the fade would be long over when the amplifier came
@@ -225,6 +235,9 @@ namespace speakerd
         {
             double rate = 0.0;      // the graph was re-prepared at this new sample rate
             int primedBlock = 0;    // the graph was primed at this new quantum
+            int maxBlock = 0;       // the graph was re-prepared for blocks up to this, from...
+            int fromMaxBlock = 0;   // ...this: a cycle did not fit (with `rate`, at a new rate too)
+            int refusedBlock = 0;   // a cycle above the quantum limit: it stays silent
         };
 
         /** Handles what the audio thread asked for. A cycle at a sample rate the graph is not
@@ -232,8 +245,16 @@ namespace speakerd
             re-instantiated, keeping their state), settles it at the cycles' block size and fades
             back in. A cycle that does not fit the primed block size, or a lasting quantum of
             upwardPrimeRatio primed blocks or more: fades out if need be, primes the graph at the
-            new size with one silent block and fades back in. Call it often, from a timer. */
+            new size with one silent block and fades back in. A cycle larger than the graph is
+            prepared for (at most the quantum limit): re-prepares the graph for it, on a new
+            buffer, settles it at the cycle's size and fades back in. Call it often, from a timer. */
         Serviced service();
+
+        /** The largest block service() may re-prepare the graph for (PipeWire's quantum-limit);
+            0, the default: never more than the maxBlock of install. Message thread, before the
+            cycles start. */
+        void setQuantumLimit (int limit) noexcept   { quantumLimit = limit; }
+        int getQuantumLimit() const noexcept        { return quantumLimit; }   // message thread
 
         /** Closes or opens the output gate (see above). Any thread; lock-free. Open by default,
             for the render; the live node closes it until its links are active. */
@@ -315,6 +336,7 @@ namespace speakerd
         void unpark (bool fadeIn);
         void setRate (double);
         void setPrimedBlock (int);
+        void reprepare (double rate, int newMaxBlock, int settleBlock);   // owned, message thread
 
         /** Runs `graph` on settleSeconds of silence in blocks of `blockSize`, using `scratch`
             (graphChannels channels of at least `blockSize` samples). The last block primes the graph's output buffer at
@@ -336,10 +358,11 @@ namespace speakerd
         std::unique_ptr<ParameterInbox> inbox;
         std::vector<TimedNode*> timedNodes;
         juce::uint32 graphSerial = 0;
-        juce::AudioBuffer<float> io;            // graphChannels x (2 * maxBlock): room for a padded cycle
+        juce::AudioBuffer<float> io;            // graphChannels x maxBlock (the guard in processCycle)
         juce::MidiBuffer midi;
         double preparedRate = 0.0;
         int maxBlock = 0, primedBlock = 1, lastCycleBlock = 0;
+        int quantumLimit = 0;                   // the message thread's alone (setQuantumLimit)
         int fadeLength = 1, fadePosition = 0;    // gain = fadePosition / fadeLength
         juce::int64 stableSamples = 0, upwardPrimeAfter = 0;   // samples at a quantum of upwardPrimeRatio blocks or more
 

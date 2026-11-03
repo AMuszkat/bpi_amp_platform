@@ -398,8 +398,8 @@ namespace
                 const auto primed = engine.getPrimedBlockSize();
 
                 // A quantum that is not a whole number of primed blocks is re-primed by service(),
-                // which says so.
-                if (primed > 0 && quantum % primed == 0)
+                // and one larger than the graph is prepared for re-prepared, which say so.
+                if (primed > 0 && quantum % primed == 0 && quantum <= engine.getMaxBlock())
                     log ("pipewire: the quantum changed to " + juce::String (quantum) + ": the graph runs it as "
                          + juce::String (quantum / primed) + " block(s) of " + juce::String (primed));
             }
@@ -415,7 +415,20 @@ namespace
 
             if (serviced.rate > 0.0)
                 log ("pipewire: the graph now runs at " + juce::String (juce::roundToInt (serviced.rate))
-                     + " Hz: re-prepared the plugins");
+                     + " Hz: re-prepared the plugins"
+                     + (serviced.maxBlock > 0 ? " for " + juce::String (serviced.maxBlock) : juce::String()));
+            else if (serviced.maxBlock > 0)
+                log ("pipewire: a cycle of " + juce::String (serviced.maxBlock) + " samples does not fit the "
+                     + juce::String (serviced.fromMaxBlock) + " prepared: re-prepared the plugins for "
+                     + juce::String (serviced.maxBlock));
+
+            // Cannot come from PipeWire (Engine::service); said once per size.
+            if (serviced.refusedBlock > 0 && serviced.refusedBlock != refusedBlock)
+            {
+                refusedBlock = serviced.refusedBlock;
+                log ("pipewire: a cycle of " + juce::String (refusedBlock) + " samples is above the quantum limit "
+                     + juce::String (engine.getQuantumLimit()) + ": silent");
+            }
 
             if (serviced.primedBlock > 0)
                 log ("pipewire: the quantum changed to " + juce::String (serviced.primedBlock)
@@ -423,7 +436,7 @@ namespace
 
             // That line says it all: a change the audio thread counted after the check above is
             // not logged again as "runs it as 1 block(s)".
-            if (serviced.rate > 0.0 || serviced.primedBlock > 0)
+            if (serviced.rate > 0.0 || serviced.primedBlock > 0 || serviced.maxBlock > 0)
                 seenQuantumChanges = engine.getQuantumChanges();
 
             if (const auto links = node.getLinkCount(); links != seenLinks)
@@ -445,7 +458,7 @@ namespace
         PipeWireNode& node;
         Control& control;
         juce::uint64 seenLinks = 0, cyclesAtLink = 0;
-        int seenQuantumChanges = 0;
+        int seenQuantumChanges = 0, refusedBlock = 0;
         bool announcedPlaying = false;
         int exitCode = exitOk;
     };
@@ -481,11 +494,15 @@ namespace
                 juce::Thread::sleep (100);
         }
 
-        log ("pipewire: " + juce::String (juce::roundToInt (clock.rate)) + " Hz, quantum " + juce::String (clock.quantum)
-             + ", largest quantum " + juce::String (clock.quantumLimit));
+        // Prepared for the largest quantum PipeWire brings by itself (a forced larger one is
+        // re-prepared for, up to the quantum limit); settled at the quantum it will bring.
+        const auto maxBlock = clock.preparedBlock();
+        engine.setQuantumLimit (juce::jmax (clock.quantumLimit, maxBlock));
 
-        // Prepared for the largest block a cycle can bring; settled at the quantum it will bring.
-        const auto maxBlock = juce::jmax (clock.quantumLimit, clock.quantum);
+        log ("pipewire: " + juce::String (juce::roundToInt (clock.rate)) + " Hz, quantum " + juce::String (clock.quantum)
+             + ", largest quantum " + juce::String (clock.quantumLimit) + ", max-quantum "
+             + (clock.maxQuantum > 0 ? juce::String (clock.maxQuantum) : juce::String ("not set"))
+             + ": the plugins are prepared for " + juce::String (maxBlock));
         GraphBuilder builder (formats, &bundles);
         Control control (engine, builder, versionText());
         control.installLayer (loadFirstWorkingLayer (options.stateDir, builder, device.role, clock.rate,

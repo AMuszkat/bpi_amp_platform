@@ -48,7 +48,18 @@ namespace speakerd
         {
             double rate = 48000.0;
             int quantum = 1024;
-            int quantumLimit = 8192;   // the largest block a cycle can bring
+            int quantumLimit = 8192;   // the largest block a cycle can bring (clock.force-quantum included)
+            int maxQuantum = 0;        // the largest quantum the graph picks by itself; 0: not in the properties
+
+            /** The block size the graph is prepared for at start: the largest quantum PipeWire
+                brings unforced, max (quantum, min (max-quantum, quantum-limit)), or the quantum
+                limit when max-quantum is not known. A larger cycle (a forced quantum) makes
+                speakerd re-prepare (Engine::service). */
+            int preparedBlock() const noexcept
+            {
+                return maxQuantum > 0 ? juce::jmax (quantum, juce::jmin (maxQuantum, quantumLimit))
+                                      : juce::jmax (quantum, quantumLimit);
+            }
         };
 
         PipeWireNode (Engine&, const juce::String& name, const DeviceConfig&);

@@ -266,10 +266,12 @@ On the virtual pair the data thread runs `SCHED_FIFO` at priority 88, and with
 `~/.config/pipewire/client-rt.conf` replaces PipeWire's (snapcast's routing file has no
 `module-rt`), which is why the board's unit gives speakerd an empty `HOME`.
 
-**Rate and block size.** At start speakerd reads `default.clock.rate`, `default.clock.quantum`
-and `default.clock.quantum-limit` from the PipeWire core. It prepares the graph for blocks up
-to the quantum limit, and primes it at the quantum: from then on the graph is only ever called
-with that block size, so it never reallocates on the audio thread (see Real time). The filter
+**Rate and block size.** At start speakerd reads `default.clock.rate`, `default.clock.quantum`,
+`default.clock.max-quantum` and `default.clock.quantum-limit` from the PipeWire core. It
+prepares the plugins (and sizes its buffer) for the largest quantum PipeWire brings by itself,
+max (quantum, min (max-quantum, quantum-limit)), or for the quantum limit when max-quantum is not
+set, and primes the graph at the quantum: from then on the graph is only ever called with that
+block size, so it never reallocates on the audio thread (see Real time). The filter
 asks for `node.latency = <quantum>/<rate>`, so a player asking for more latency (pw-play asks
 for 100 ms) does not raise the quantum. If the quantum changes while speakerd runs:
 
@@ -285,6 +287,12 @@ for 100 ms) does not raise the quantum. If the quantum changes while speakerd ru
   cost of a small block for good after the quantum came down and went back up (1024 -> 32 ->
   1024 would otherwise run 32 blocks of 32 per cycle from then on). Both quantum lines are
   logged then, the second 2 s after the first. Two or three blocks per cycle stay as they are.
+
+A cycle larger than the plugins are prepared for (`clock.force-quantum` above max-quantum, up to
+the quantum limit), or one that padded to whole primed blocks would not fit the buffer, never
+overruns it: the blocks that fit run and fade out, the rest of the cycle is silent, and speakerd
+re-prepares the plugins for the cycle's size on a new buffer, settles them for 1 s and fades back
+in. It logs that. A cycle above the quantum limit stays silent (PipeWire never brings one).
 
 If a cycle comes at a rate the graph is not prepared for, the output is silent until speakerd
 re-prepares the graph at the new rate and primes it at the quantum the cycles bring, which
@@ -758,7 +766,9 @@ mode does, the `plugin node` lines of the builds it ran included, before its `re
   differs from the previous call's (`AudioBuffer::setSize`, in `RenderSequence::perform`). So the
   graph is only ever called with the block size it was primed at, on the message thread:
   settling primes it at the quantum, and a quantum that is not a whole number of primed blocks
-  is primed anew (see Rate and block size). The audio thread never reallocates.
+  is primed anew (see Rate and block size). The audio thread never reallocates, and never runs
+  more samples than its buffer holds (the largest block the plugins are prepared for): a cycle
+  that would is faded out and re-prepared for on the main thread.
 
 ## Log lines
 
@@ -774,7 +784,7 @@ stable.
 | `lv2 bundle <path>: <URI>` | a `--lv2-bundle` loaded |
 | `--lv2-bundle <path>: not a directory`, `--lv2-bundle <path>: no LV2 plugin loaded from it: ...` | a `--lv2-bundle` that did not load; exit status 2 follows |
 | `cannot connect to PipeWire: <reason>: trying again every second`, `PipeWire did not answer: trying again every second`, `cannot start the PipeWire client loop: trying again every second` | PipeWire is not there (yet); said once, however long it takes |
-| `pipewire: <rate> Hz, quantum <n>, largest quantum <n>` | connected to PipeWire |
+| `pipewire: <rate> Hz, quantum <n>, largest quantum <limit>, max-quantum <n\|not set>: the plugins are prepared for <n>` | connected to PipeWire: the quantum, `default.clock.quantum-limit`, `default.clock.max-quantum` and the block size the plugins are prepared for (Rate and block size) |
 | `starting at layer <name> (--from)` | `--from` names a layer after `current` |
 | `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <bundle dir>`, or `plugin node <uid>: <URI>, no build identity (an older build), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (buildinfo.ttl unreadable), bundle <bundle dir>`, `plugin node <uid>: <URI>, no build identity (bundle not found)` | once per plugin node each time a layer (live or in the render) or an `apply` builds a graph with it, as soon as its plugin is instantiated: before the layer's `loaded` line and the apply's `applied` line, and also for the nodes a layer or an apply instantiated before it failed (then before its `FAILED` line). `<uid>` is the node's uid in the document, `<URI>` the plugin URI it runs, `<bundle dir>` the bundle it runs from ([Which build it is](#command-line)). Never a failure or a warning: nothing else changes. None for passthrough (no plugin) or `--import-filtergraph` |
 | `layer <name> (<file>): FAILED: <reason>` | a layer that did not load; `<name>` is `current`, `last-known-good` or `factory` |
@@ -792,7 +802,9 @@ stable.
 | `linked to input sink '<name>' (monitor_FL -> input_FL, monitor_FR -> input_FR)` | the inputs are linked |
 | `unlinked from amplifier '<node>': linking again as soon as it is back`, `unlinked from input sink '<name>': ...` | a peer went away; speakerd keeps running and links again when it is back |
 | `playing: layer <layer>, <rate> Hz, quantum <n>` | both sides linked, every link active and the fade-in under way: from here a player is heard. Once per linking (not when the peer goes away again before two cycles have run) |
-| `pipewire: the graph now runs at <rate> Hz: re-prepared the plugins` | after a rate change; no quantum line follows it |
+| `pipewire: the graph now runs at <rate> Hz: re-prepared the plugins`, with ` for <n>` when the cycles at the new rate are larger than the plugins were prepared for | after a rate change; no quantum line follows it |
+| `pipewire: a cycle of <n> samples does not fit the <m> prepared: re-prepared the plugins for <n>` | a quantum larger than the plugins were prepared for (a forced one), after the gap; no quantum line follows it |
+| `pipewire: a cycle of <n> samples is above the quantum limit <limit>: silent` | cannot come from PipeWire; once per size |
 | `pipewire: the quantum changed to <n>: the graph runs it as <k> block(s) of <p>` | the quantum (at the same rate) became a whole multiple of the size the graph is primed for (`<p>`): no dropout. With `<k>` of 4 or more, the next line follows if the quantum stays for 2 s |
 | `pipewire: the quantum changed to <n>: faded out, primed the graph for it and faded back in` | any other quantum, after the gap; or a quantum of 4 or more primed blocks that stayed for 2 s, after a 30 ms fade-out and fade-in |
 | `pipewire: a link failed: <reason> (<error>): <node>:<port> -> <node>:<port>` | a link speakerd made failed; at most once per 10 s per pair of ports. Not fatal |

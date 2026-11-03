@@ -1387,8 +1387,10 @@ main thread beside the running graph: a new revision is built, primed at the qua
 on a second of computed silence, and only then swapped in under two 30 ms fades. The PipeWire
 loop thread never touches the graph; it tells the engine whether every link is active (the
 output gate) and tells the main thread when the quantum or the rate changed, so the graph is
-primed anew before the audio thread sees the new block size. The limits of `device.json` are
-constants of the engine, read once at start; no message changes them.
+primed anew before the audio thread sees the new block size. The plugins are prepared for the
+largest quantum PipeWire brings by itself (max-quantum, at most quantum-limit); a larger, forced
+one is faded out, never run past the buffer, and re-prepared for on the main thread. The
+limits of `device.json` are constants of the engine, read once at start; no message changes them.
 
 **Which build each node runs.** Each time a layer, an `apply` or the render builds a graph,
 `speakerd` (from 0.3.1, the first version that logs them) logs, on the main thread and never on
