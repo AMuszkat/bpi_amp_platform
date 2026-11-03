@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <tuple>
 
@@ -61,6 +62,12 @@ namespace bpi
             position. */
         juce::var applyEdit (const juce::var& accepted, const Structure& before, const Structure& after,
                              juce::int64 newRevision, const std::function<void (juce::uint32, juce::DynamicObject&)>& fill);
+
+        /** The document's buffer size (top-level `quantum`, docs/protocol.md): an integer, or
+            none when absent or null. Not checked against the range: the hub does that. */
+        constexpr int minQuantum = 64, maxQuantum = 2048;
+        std::optional<int> quantumOf (const juce::var& doc);
+        bool isValidQuantum (int q);              // a power of two from minQuantum to maxQuantum
 
         juce::String toJson (const juce::var&);   // one line
         juce::String nowIso8601();                // 2026-10-28T09:15:02Z

@@ -3,7 +3,9 @@
 and their echoes, gestures over OSC at 50 Hz, proposals applied and rejected (undone), revisions
 from other controllers, monitor subscriptions, each speaker's load (speakerd/timing, board/cpu),
 a plugin's own bypass parameter as the node's bypass, a plugin window reopened with its own
-editor (--gui, on Xvfb + openbox). Each test runs the controller in its test mode
+editor (--gui, on Xvfb + openbox), the speakers' buffer size (the document's `quantum`):
+parsed, offered, proposed, applied, rejected and undone, and a state resent while a proposal
+waits. Each test runs the controller in its test mode
 (--script) and checks both what it printed and what the hub received. Standard library only.
 
     python3 -m unittest discover -s dsp/juce_apps/controller/tests -v
@@ -817,6 +819,180 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(editors, {uid: ["plugin", "plugin"] for uid, _, _ in nodes},
                          "a reopened window falls back to the generic editor")
         report("reopen", nodes=[uid for uid, _, _ in nodes], editors=editors)
+
+    # -- the buffer size (the document's `quantum`, docs/protocol.md) ---------------------------
+    @staticmethod
+    def speakers_of(state):
+        return {s["name"]: s for s in state["speakers"]}
+
+    def test_24_buffer_size_fields_and_choices(self):
+        """The speakers' rate, quantum, quantum_range and quantum_default parsed and printed;
+        the selector offers the powers of two both online speakers' ranges allow; an online
+        speaker without a range (an older speakerd) disables it, an offline one does not count."""
+        hub = self.start_hub()
+        hub.speakers[1].update({"quantum": 1024, "quantum_range": [128, 1024], "quantum_default": 1024})
+        code, steps, err = self.run_script("wait-synced\nstate\n")
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        speakers = self.speakers_of(state)
+        self.assertEqual({k: speakers["left"][k] for k in ("rate", "quantum", "quantum_range", "quantum_default")},
+                         {"rate": 48000, "quantum": 512, "quantum_range": [64, 2048], "quantum_default": 512})
+        self.assertEqual(speakers["right"]["quantum_range"], [128, 1024])
+        self.assertEqual(speakers["left"]["buffer"], "buffer: 512 samples, 10.7 ms at 48000 Hz")
+        self.assertEqual(speakers["right"]["buffer"], "buffer: 1024 samples, 21.3 ms at 48000 Hz")
+        self.assertIsNone(state["quantum"], "the document has no quantum")
+        choices = state["buffer_size"]
+        self.assertEqual(choices["choices"], [128, 256, 512, 1024], "the intersection of 64..2048 and 128..1024")
+        self.assertEqual(choices["default_label"], "Default (512 / 1024)")
+        self.assertIsNone(choices["selected"])
+        self.assertTrue(choices["enabled"], choices)
+
+        # An older hub or speakerd: no fields, or null ones.
+        hub.stop()
+        hub = self.start_hub()
+        for k in ("rate", "quantum", "quantum_range", "quantum_default"):
+            del hub.speakers[1][k]
+        hub.speakers[0]["quantum"] = None   # no cycle yet
+        code, steps, err = self.run_script("wait-synced\nstate\n")
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        speakers = self.speakers_of(state)
+        self.assertEqual([speakers["right"][k] for k in ("rate", "quantum", "quantum_range", "quantum_default")],
+                         [None, None, None, None])
+        self.assertEqual((speakers["right"]["buffer"], speakers["left"]["buffer"]), ("buffer: unknown", "buffer: not running"))
+        self.assertFalse(state["buffer_size"]["enabled"])
+        self.assertEqual(state["buffer_size"]["why"], "right: its speakerd cannot set the buffer size (no quantum_range)")
+
+        # The same speaker offline does not count: the left one's range alone.
+        hub.speakers[1]["online"] = False
+        code, steps, err = self.run_script("wait-synced\nstate\n")
+        self.assertPassed(code, steps, err)
+        choices = self.step(steps, "state")["state"]["buffer_size"]
+        self.assertTrue(choices["enabled"], choices)
+        self.assertEqual(choices["choices"], [64, 128, 256, 512, 1024, 2048])
+        self.assertEqual(choices["default_label"], "Default (512)")
+        report("buffer-fields", intersection="128..1024", older_speakerd="disabled", offline="not counted")
+
+    def test_25_buffer_size_proposed_applied_and_default(self):
+        """`buffer-size 256` proposes the accepted document with quantum 256 (the nodes and their
+        values untouched), applied keeps it, `expect-buffer-size` waits for the state that says
+        the speakers run it; `buffer-size default` removes the field."""
+        hub = self.start_hub()
+        code, steps, err = self.run_script(
+            "wait-synced\nbuffer-size 256\nexpect-applied\nexpect-revision 8\n"
+            "expect-buffer-size left 256\nexpect-buffer-size right 256\nstate\n"
+            "add loudness\nexpect-applied\n"   # another edit keeps the field
+            "buffer-size default\nexpect-applied\nexpect-revision 10\nexpect-buffer-size left default\nstate\n")
+        self.assertPassed(code, steps, err)
+
+        proposals = [m for m, _ in hub.received_ops("control", "graph")]
+        self.assertEqual([(p["revision"], p["base"]) for p in proposals], [(8, 7), (9, 8), (10, 9)])
+        first, add, default = (p["document"] for p in proposals)
+        self.assertEqual(first["quantum"], 256)
+        expected = default_document()
+        self.assertEqual([n["uid"] for n in first["nodes"]], [16])
+        self.assertEqual(first["connections"], expected["connections"])
+        self.assertEqual(first["nodes"][0]["params"]["s0_e0_gain"], 12.0)
+        self.assertEqual(add["quantum"], 256, "a canvas edit carries the document's quantum on")
+        self.assertNotIn("quantum", default)
+        self.assertEqual(sorted(n["uid"] for n in default["nodes"]), [16, 17])
+
+        bs = self.step(steps, "buffer-size")
+        self.assertEqual((bs["quantum"], bs["revision"]), (256, 8))
+        self.assertIsNone(self.step(steps, "buffer-size", 1)["quantum"])
+        waited = self.step(steps, "expect-buffer-size")
+        self.assertEqual((waited["quantum"], waited["rate"], waited["buffer"]), (256, 48000, "buffer: 256 samples, 5.3 ms at 48000 Hz"))
+        self.assertGreater(waited["ms"], 100, "it waited for the state, sent %.1f s after applied" % hub.quantum_delay)
+
+        state = self.step(steps, "state", 0)["state"]
+        self.assertEqual((state["quantum"], state["buffer_size"]["selected"]), (256, 256))
+        self.assertEqual(self.speakers_of(state)["right"]["quantum"], 256)
+        state = self.step(steps, "state", 1)["state"]
+        self.assertEqual((state["quantum"], state["buffer_size"]["selected"], state["revision"]), (None, None, 10))
+        self.assertEqual(self.speakers_of(state)["left"]["quantum"], 512)
+        report("buffer-applied", proposed=[256, 256, None], waited_ms=waited["ms"], revision=state["revision"])
+
+    def test_26_buffer_size_rejected_is_undone(self):
+        """A size outside one speaker's range is rejected with that speaker's reason, one of the
+        wrong shape with the hub's; each time the document keeps its quantum (256), and the
+        selector shows it."""
+        doc = default_document()
+        doc["quantum"] = 256
+        hub = self.start_hub(document=doc)
+        for s in hub.speakers:
+            s["quantum"] = 256
+        hub.speakers[1]["quantum_range"] = [64, 1024]
+        code, steps, err = self.run_script(
+            "wait-synced\nbuffer-size 2048\nexpect-rejected not a power of two from 64 to 1024\nexpect-revision 7\nstate\n"
+            "buffer-size 100\nexpect-rejected a power of two from 64 to 2048\n"
+            "buffer-size 4096\nexpect-rejected a power of two from 64 to 2048\nstate\n"
+            "buffer-size 128\nexpect-applied\nexpect-buffer-size right 128\n")
+        self.assertPassed(code, steps, err)
+        rejected = self.step(steps, "expect-rejected")
+        self.assertIn("rejected 8: right: failed: quantum 2048", rejected["outcome"])
+        self.assertIn("undone", rejected["status"])
+        for i in (0, 1):
+            state = self.step(steps, "state", i)["state"]
+            self.assertEqual((state["quantum"], state["buffer_size"]["selected"], state["revision"], state["pending"]),
+                             (256, 256, 7, None))
+            self.assertEqual(state["buffer_size"]["choices"], [64, 128, 256, 512, 1024])
+        self.assertEqual([m["document"]["quantum"] for m, _ in hub.received_ops("control", "graph")], [2048, 100, 4096, 128])
+        self.assertEqual(hub.document["quantum"], 128)
+        report("buffer-rejected", rejected=[2048, 100, 4096], kept=256, then_applied=128)
+
+    def test_27_state_resent_while_a_proposal_waits(self):
+        """The hub sends its whole state again when a speaker's buffer size changes, also while
+        a proposal waits for its answer: the proposal stays waiting, the canvas keeps the edit,
+        and the answer still settles it."""
+        hub = self.start_hub()
+        hub.answer_delay = 1.0
+        resent = []
+
+        def resend_soon():
+            def resend():
+                time.sleep(0.3)
+                with hub.lock:
+                    q = 1024 if hub.speakers[0]["quantum"] != 1024 else 512
+                hub.set_speaker_fields("left", quantum=q)
+                resent.append(q)
+            threading.Thread(target=resend, daemon=True).start()
+
+        hub.during_answer = resend_soon
+        code, steps, err = self.run_script(
+            "wait-synced\nadd loudness\nsleep 600\nstate\nexpect-applied\nexpect-revision 8\nexpect-node $new\n"
+            "buffer-size 256\nexpect-applied\nexpect-revision 9\nexpect-buffer-size left 256\nstate\n")
+        self.assertPassed(code, steps, err)
+        self.assertEqual(len(resent), 2)
+        during = self.step(steps, "state", 0)["state"]
+        self.assertEqual((during["pending"], during["revision"]), (8, 7), "the proposal still waits after the state")
+        self.assertIn(17, [n["uid"] for n in during["nodes"]], "the canvas keeps the waiting edit")
+        self.assertEqual(self.speakers_of(during)["left"]["quantum"], 1024, "the resent state's speakers are taken")
+        after = self.step(steps, "state", 1)["state"]
+        self.assertEqual((after["quantum"], after["pending"], after["revision"]), (256, None, 9))
+        report("state-resent", resent=resent, outcomes=[s["outcome"] for s in steps if s.get("cmd") == "expect-applied"])
+
+    def test_28_buffer_size_selector_on_screen(self):
+        """--gui on Xvfb + openbox: the speakers panel's selector follows a proposal applied and
+        one rejected (put back), and the window is painted with it."""
+        hub = self.start_hub()
+        hub.speakers[1]["quantum_range"] = [64, 1024]
+        out = tempfile.mkdtemp(prefix="controller-buffer-")
+        picture = os.path.join(out, "buffer-size.png")
+        home = tempfile.mkdtemp(prefix="controller-home-")
+        try:
+            with VirtualDisplay() as display:
+                code, steps, err = self.run_script(
+                    "main-window 0 0 1040 720\nwait-synced\nbuffer-size 256\nexpect-applied\nexpect-buffer-size left 256\n"
+                    "buffer-size 2048\nexpect-rejected right: failed\nsleep 300\nstate\nscreenshot %s\n" % picture,
+                    extra=["--gui"], env=dict(display.env, HOME=home), timeout=120)
+            self.assertPassed(code, steps, err)
+            self.assertGreater(os.path.getsize(picture), 10000)
+            state = self.step(steps, "state")["state"]
+            self.assertEqual((state["quantum"], state["buffer_size"]["selected"]), (256, 256))
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(out, ignore_errors=True)
+        report("buffer-gui", selected=256, rejected=2048)
 
 
 if __name__ == "__main__":

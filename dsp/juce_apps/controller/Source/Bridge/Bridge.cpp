@@ -24,6 +24,8 @@ namespace bpi
 
         bool isInteger (const juce::var& v)   { return v.isInt() || v.isInt64(); }
 
+        juce::var orNull (int v)   { return v > 0 ? juce::var (v) : juce::var(); }
+
         /** Serial number arithmetic: is `a` newer than `b`, for a 32-bit counter that wraps. */
         bool seqNewer (juce::uint32 a, juce::uint32 b)   { return (juce::int32) (a - b) > 0; }
 
@@ -718,10 +720,26 @@ namespace bpi
     void Bridge::handleState (const juce::var& m)
     {
         const auto& doc = m["document"];
-        acceptedDoc = doc.isObject() ? document::copy (doc) : document::empty();
-        revision = isInteger (m["revision"]) ? (juce::int64) m["revision"] : document::revisionOf (acceptedDoc);
+        auto stateDoc = doc.isObject() ? document::copy (doc) : document::empty();
+        const auto stateRevision = isInteger (m["revision"]) ? (juce::int64) m["revision"] : document::revisionOf (stateDoc);
         lastSeq = isInteger (m["seq"]) ? (juce::uint32) (juce::int64) m["seq"] : 0u;
-        pending.reset();
+
+        // The hub sends its whole state again whenever a speaker's fields change (online, the
+        // buffer size it runs: docs/protocol.md), also while a proposal of ours is waiting; an
+        // apply that changes the buffer size makes one at once. The proposal stays waiting for
+        // its answer: with the same revision as before, the canvas keeps showing it; with
+        // another, the canvas shows the hub's and the proposal is superseded. A new connection
+        // has no proposal (onDisconnected dropped it).
+        const auto keepCanvas = synced && pending.has_value() && ! pending->superseded && stateRevision == revision;
+
+        if (pending.has_value() && ! keepCanvas)
+            pending->superseded = true;
+
+        if (! keepCanvas)
+        {
+            acceptedDoc = std::move (stateDoc);
+            revision = stateRevision;
+        }
 
         // A new state is a new start for the per-parameter sequence numbers (the hub may have
         // restarted, and its counter with it).
@@ -729,7 +747,10 @@ namespace bpi
             st.haveSeq = false;
 
         lastRefusal.clear();
-        applyDocumentToCanvas (acceptedDoc);
+
+        if (! keepCanvas)
+            applyDocumentToCanvas (acceptedDoc);
+
         updateSpeakers (m["speakers"]);
 
         remoteGestures.clear();
@@ -740,7 +761,11 @@ namespace bpi
                     remoteGestures[{ (juce::uint32) (juce::int64) gesture["node"], gesture["id"].toString() }] = gesture["origin"].toString();
 
         synced = true;
-        setStatus ("revision " + juce::String (revision) + " from hub " + hubName);
+
+        if (! keepCanvas)
+            setStatus ("revision " + juce::String (revision) + " from hub " + hubName);
+        else
+            notifyStatus();
     }
 
     void Bridge::handleGraph (const juce::var& m)
@@ -904,10 +929,10 @@ namespace bpi
             propose (local);
     }
 
-    void Bridge::propose (const document::Structure& local)
+    bool Bridge::propose (const document::Structure& local, std::optional<std::optional<int>> quantum)
     {
         const auto newRevision = revision + 1;
-        const auto change = acceptedCanvas.describeChangeTo (local);
+        auto change = acceptedCanvas.describeChangeTo (local);
 
         auto doc = document::applyEdit (acceptedDoc, acceptedCanvas, local, newRevision,
                                         [this] (juce::uint32 uid, juce::DynamicObject& node)
@@ -922,6 +947,21 @@ namespace bpi
             }
         });
 
+        // The buffer size: the document's own field, so it goes to both speakers or neither.
+        if (quantum.has_value())
+        {
+            if (auto* root = doc.getDynamicObject())
+            {
+                if (quantum->has_value())
+                    root->setProperty ("quantum", **quantum);
+                else
+                    root->removeProperty ("quantum");
+            }
+
+            const auto what = "buffer size " + (quantum->has_value() ? juce::String (**quantum) : juce::String ("default"));
+            change = change.isEmpty() ? what : change + ", " + what;
+        }
+
         Pending p;
         p.revision = newRevision;
         p.doc = doc;
@@ -935,12 +975,87 @@ namespace bpi
         if (control == nullptr || ! control->send (message))
         {
             undoTo (acceptedDoc, "Could not send the edit to the hub: undone.");
-            return;
+            return false;
         }
 
         trace (">", "control", message);
         pending = std::move (p);
         setStatus ("proposed revision " + juce::String (newRevision) + ": " + change);
+        return true;
+    }
+
+    const juce::var& Bridge::shownDocument() const
+    {
+        return pending.has_value() && ! pending->superseded ? pending->doc : acceptedDoc;
+    }
+
+    bool Bridge::proposeBufferSize (std::optional<int> quantum, juce::String& why)
+    {
+        if (! synced || ! isConnected())
+            why = "not synced with the hub";
+        else if (pending.has_value())
+            why = "revision " + juce::String (pending->revision) + " is waiting for the hub's answer";
+        else if (applying > 0)
+            why = "the canvas is being changed";
+
+        if (why.isNotEmpty())
+        {
+            setStatus ("Buffer size not changed: " + why + ".");
+            return false;
+        }
+
+        if (! propose (graph.structure(), quantum))
+        {
+            why = "could not send the edit to the hub";
+            return false;
+        }
+
+        return true;
+    }
+
+    Bridge::BufferSizeChoices Bridge::getBufferSizeChoices() const
+    {
+        BufferSizeChoices c;
+        auto lo = document::minQuantum, hi = document::maxQuantum;
+        juce::Array<int> defaults;
+
+        for (const auto& s : speakers)
+        {
+            if (! s.online)
+                continue;
+
+            if (! s.hasQuantumRange())
+            {
+                if (c.why.isEmpty())
+                    c.why = s.name + ": its speakerd cannot set the buffer size (no quantum_range)";
+                continue;
+            }
+
+            lo = juce::jmax (lo, s.quantumLo);
+            hi = juce::jmin (hi, s.quantumHi);
+
+            if (s.quantumDefault > 0)
+                defaults.addIfNotAlreadyThere (s.quantumDefault);
+        }
+
+        for (auto q = document::minQuantum; q <= document::maxQuantum; q *= 2)
+            if (q >= lo && q <= hi)
+                c.sizes.add (q);
+
+        juce::StringArray defaultText;
+        for (auto d : defaults)
+            defaultText.add (juce::String (d));
+
+        c.defaultLabel = "Default" + (defaultText.isEmpty() ? juce::String() : " (" + defaultText.joinIntoString (" / ") + ")");
+        c.selected = document::quantumOf (shownDocument());
+
+        if (! synced)
+            c.why = "no state from the hub yet";
+        else if (c.why.isEmpty() && c.sizes.isEmpty())
+            c.why = "the speakers have no buffer size in common (" + juce::String (lo) + " to " + juce::String (hi) + ")";
+
+        c.enabled = c.why.isEmpty();
+        return c;
     }
 
     //==============================================================================
@@ -1218,6 +1333,20 @@ namespace bpi
                 s.role = entry["role"].toString();
                 s.layer = entry["layer"].toString();
                 s.online = entry["online"].isBool() ? (bool) entry["online"] : false;
+
+                // The buffer size (null or missing: unknown, an older hub or speakerd).
+                const auto positive = [] (const juce::var& v)
+                {
+                    return isInteger (v) && (juce::int64) v > 0 && (juce::int64) v <= 1 << 24 ? (int) (juce::int64) v : 0;
+                };
+
+                s.rate = positive (entry["rate"]);
+                s.quantum = positive (entry["quantum"]);
+                s.quantumDefault = positive (entry["quantum_default"]);
+
+                if (auto* range = entry["quantum_range"].getArray(); range != nullptr && range->size() == 2)
+                    if (const auto a = positive ((*range)[0]), b = positive ((*range)[1]); a > 0 && b >= a)
+                        std::tie (s.quantumLo, s.quantumHi) = std::make_pair (a, b);
 
                 for (const auto& old : speakers)
                     if (old.name == s.name)
@@ -1651,6 +1780,18 @@ namespace bpi
         return text + (isFresh (cpu.receivedMs) ? "" : " (stale)");
     }
 
+    juce::String Bridge::bufferText (const Speaker& s) const
+    {
+        if (s.quantum <= 0)
+            return s.hasQuantumRange() || s.rate > 0 ? "buffer: not running" : "buffer: unknown";
+
+        if (s.rate <= 0)
+            return "buffer: " + juce::String (s.quantum) + " samples";
+
+        return "buffer: " + juce::String (s.quantum) + " samples, " + juce::String (s.quantum * 1000.0 / s.rate, 1)
+             + " ms at " + juce::String (s.rate) + " Hz";
+    }
+
     juce::String Bridge::nodeLoadText (juce::uint32 uid) const
     {
         juce::StringArray parts;
@@ -1804,8 +1945,21 @@ namespace bpi
                                        { "address", s.address }, { "monitor_connected", s.monitorConnected },
                                        { "monitor_refusal", s.monitorRefusal },
                                        { "level", level }, { "level_count", s.levelCount }, { "subscriptions", subs },
-                                       { "load", describeLoad (s) } }));
+                                       { "load", describeLoad (s) },
+                                       { "rate", orNull (s.rate) }, { "quantum", orNull (s.quantum) },
+                                       { "quantum_range", s.hasQuantumRange() ? juce::var (juce::Array<juce::var> { s.quantumLo, s.quantumHi }) : juce::var() },
+                                       { "quantum_default", orNull (s.quantumDefault) },
+                                       { "buffer", bufferText (s) } }));
         }
+
+        const auto choices = getBufferSizeChoices();
+        juce::Array<juce::var> sizes;
+        for (auto q : choices.sizes)
+            sizes.add (q);
+
+        const auto bufferSize = object ({ { "choices", sizes }, { "default_label", choices.defaultLabel },
+                                          { "selected", choices.selected ? juce::var (*choices.selected) : juce::var() },
+                                          { "enabled", choices.enabled }, { "why", choices.why } });
 
         for (const auto& [key, origin] : remoteGestures)
             gestures.add (object ({ { "node", (int) key.uid }, { "id", key.id }, { "origin", origin } }));
@@ -1816,6 +1970,8 @@ namespace bpi
                          { "queued_bytes", control != nullptr ? (juce::int64) control->getQueuedBytes() : (juce::int64) 0 },
                          { "synced", synced }, { "hub", hubName },
                          { "revision", revision }, { "seq", (juce::int64) lastSeq },
+                         { "quantum", acceptedDoc.isObject() && acceptedDoc.getDynamicObject()->hasProperty ("quantum") ? acceptedDoc["quantum"] : juce::var() },
+                         { "buffer_size", bufferSize },
                          { "pending", pending.has_value() ? juce::var (pending->revision) : juce::var() },
                          { "outcome", lastOutcome }, { "status", status },
                          { "nodes", nodes }, { "connections", connections }, { "speakers", speakerList },

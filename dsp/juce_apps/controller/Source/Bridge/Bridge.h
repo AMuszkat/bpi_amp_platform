@@ -35,7 +35,10 @@ namespace bpi
           parameters;
         - treats a node's bypass only as the document's `bypassed`: a control build's own bypass
           parameter (getBypassParameter()) is never sent as a parameter, never kept in `params`,
-          and a change of it is a bypass edit, proposed as a revision.
+          and a change of it is a bypass edit, proposed as a revision;
+        - keeps each speaker's buffer size from the hub's state (`rate`, `quantum`,
+          `quantum_range`, `quantum_default`) and proposes the document's `quantum` (the
+          speakers panel's "Buffer size") as a revision, like any edit.
 
         Everything runs on the message thread. */
     class Bridge final : private juce::Timer,
@@ -120,6 +123,15 @@ namespace bpi
 
             Timing timing;
             Cpu cpu;
+
+            /** The buffer size it runs, from the hub's state (docs/protocol.md); 0: unknown (an
+                older hub or speakerd, an offline speaker, or no cycle yet for `quantum`). */
+            int rate = 0;                   // the graph's sample rate, Hz
+            int quantum = 0;                // the quantum its cycles run at now, samples
+            int quantumLo = 0, quantumHi = 0;   // quantum_range: the sizes its speakerd can set; 0: none reported
+            int quantumDefault = 0;         // PipeWire's default.clock.quantum: what "Default" runs
+
+            bool hasQuantumRange() const noexcept   { return quantumLo > 0 && quantumHi >= quantumLo; }
         };
 
         const std::vector<Speaker>& getSpeakers() const noexcept   { return speakers; }
@@ -144,6 +156,29 @@ namespace bpi
         juce::String audioLoadText (const Speaker&) const;
         juce::String lateCyclesText (const Speaker&) const;
         juce::String cpuText (const Speaker&) const;
+
+        /** The buffer size line of the speakers panel: "buffer: 256 samples, 5.3 ms at 48000 Hz". */
+        juce::String bufferText (const Speaker&) const;
+
+        /** What the speakers panel's "Buffer size" selector offers (docs/protocol.md): the powers
+            of two in the intersection of the online speakers' quantum_range (64 to 2048 when none
+            reports), and "Default" (the document without `quantum`). Disabled, with why, before
+            the hub's state, or when an online speaker reports no quantum_range. */
+        struct BufferSizeChoices
+        {
+            juce::Array<int> sizes;          // samples, ascending
+            juce::String defaultLabel;       // "Default (512)"
+            std::optional<int> selected;     // the shown document's quantum; none: Default
+            bool enabled = false;
+            juce::String why;                // when disabled
+        };
+
+        BufferSizeChoices getBufferSizeChoices() const;
+
+        /** Proposes the accepted document with `quantum` set (none: removed), through the same
+            path as every edit. The value is sent as given: the hub checks it. False, with why,
+            when it cannot be sent (no state, a proposal waiting, no link). */
+        bool proposeBufferSize (std::optional<int> quantum, juce::String& why);
 
         /** A node's share of each speaker's cycle, as the canvas shows it under the node's name:
             "L 3.1 % / R 3.0 %" (the mean), empty when no speaker has timed it. The tooltip has
@@ -253,7 +288,10 @@ namespace bpi
 
         void applyDocumentToCanvas (const juce::var& doc);
         void canvasMayHaveChanged();
-        void propose (const document::Structure& local);
+        /** A proposal of the canvas `local`; with `quantum`, the document's `quantum` set to
+            its value (an empty inner optional: removed). */
+        bool propose (const document::Structure& local, std::optional<std::optional<int>> quantum = std::nullopt);
+        const juce::var& shownDocument() const;   // the pending proposal's, or the accepted one
         void undoTo (const juce::var& doc, const juce::String& why);
         void setStatus (const juce::String&);
         void notifyStatus();
