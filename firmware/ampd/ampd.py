@@ -1045,7 +1045,22 @@ class Hub(Role):
         super().on_speakerd(hello, reconnect)
         if self.core.sd.layer != "passthrough":
             self.seen |= plugins_of(self.core.doc)
+        self.warn_no_quantum_range(self.core.name)
         self.broadcast_state()
+
+    def warn_no_quantum_range(self, only=None):
+        """The refusal of a proposal (no quantum_range) cannot cover a speakerd that comes back
+        older after the revision was applied, or an agent caught up with one: the revision goes
+        to it all the same (the speaker must get the graph), it ignores the quantum, and the pair
+        may run different sizes. ampd says so (docs/protocol.md, "The buffer size")."""
+        quantum = self.core.doc.get("quantum")
+        if quantum is None:
+            return
+        for s in self.speaker_list():
+            if (only is None or s["name"] == only) and s["online"] and s.get("speakerd") is not None \
+                    and s.get("quantum_range") is None:
+                log(f"{s['name']}: its speakerd {s['speakerd']} cannot set the buffer size (no quantum_range): "
+                    f"revision {self.core.revision} asks for quantum {json.dumps(quantum)[:40]}, which it ignores")
 
     def on_speakerd_lost(self):
         self.broadcast_state()
@@ -1363,6 +1378,7 @@ class Hub(Role):
                 self.speakers.get(peer.name, {}).update(layer="current", revision=core.revision)
             else:
                 log(f"agent {peer.name}: plays revision {core.revision}: sending {len(core.params)} parameter(s)")
+            self.warn_no_quantum_range(peer.name)
             self.all_params(peer)
             self.broadcast_state()
 
@@ -1407,6 +1423,7 @@ class Hub(Role):
         core.playing()
         self.seen |= plugins_of(doc)
         self.speakers.get(peer.name, {}).update(layer="current", revision=revision)
+        self.warn_no_quantum_range()
         log(f"revision {revision} of {peer.name} adopted: current")
         self.broadcast_graph()
         self.broadcast_state()
@@ -1518,8 +1535,12 @@ class Hub(Role):
         elif op == "status":
             news = {k: msg.get(k) for k in ("speakerd", "layer", "revision")}
             news.update(pipewire_fields(msg))
-            if any(self.speakers[peer.name].get(k) != v for k, v in news.items()):
-                self.speakers[peer.name].update(news)
+            entry = self.speakers[peer.name]
+            if any(entry.get(k) != v for k, v in news.items()):
+                newly = (entry.get("speakerd"), entry.get("quantum_range")) != (news["speakerd"], news["quantum_range"])
+                entry.update(news)
+                if newly:
+                    self.warn_no_quantum_range(peer.name)
                 self.broadcast_state()
         elif op == "error":
             self.bad.say(("agent-error", peer.name),

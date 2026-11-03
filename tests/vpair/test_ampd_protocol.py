@@ -103,11 +103,15 @@ Pass when:
   controller a state with quantum 256; such a status (a quantum forced by hand) changes the state and
   sends that speakerd nothing (no apply, no value); 4096, 100, 48, 32, 0, -256, "256", true, 256.5,
   [256] and {"q": 256} are rejected with "quantum <v>: a power of two from 64 to 2048" and reach no
-  speakerd; 2048 against a right whose range is 64 to 1024 is rejected with the right's reason and
+  speakerd, while 256.0 (a whole JSON number) is applied on both; 2048 against a right whose range is 64 to 1024 is rejected with the right's reason and
   the left gets the previous revision (its quantum 256) back; with a right that says no
   quantum_range (an older speakerd), quantum 128 is rejected with "right: its speakerd cannot set
   the buffer size (no quantum_range)" and reaches no speakerd, while a document whose quantum is null
-  is applied; a restarted hub has the document's quantum from graph.json; a graph.json whose
+  is applied; a restarted hub has the document's quantum from graph.json; a speakerd that comes back
+  older after that (no quantum_range: the right's status, the right's ampd caught up again, the
+  hub's own speakerd's hello) is not refused the revision, and the hub logs "<speaker>: its speakerd
+  <version> cannot set the buffer size (no quantum_range): revision 6 asks for quantum 256.0, which
+  it ignores" each time; a graph.json whose
   quantum is malformed ("fast") still loads, without it, and ampd says it left it out;
 - before a peer proved the pair's secret, and on the monitor link, a line is at most 64 KiB: a
   100 KiB hello closes the connection on the control and the monitor link, and an agent hangs up
@@ -1182,9 +1186,12 @@ class Protocol(unittest.TestCase):
             a.wait(lambda m: m["op"] == "state" and pipewire_of(speakers_of(m)["right"]) == STAND_IN_PIPEWIRE,
                    after=mark, what="a state with the right's speakerd back")
 
+            # A whole JSON number, 256.0, is of the valid shape: applied, both speakerds get it.
             # The size is the document's: a restarted hub has it from graph.json.
-            answer = a.propose(dict(with_node(DOCUMENT), quantum=256))
+            answer = a.propose(dict(with_node(DOCUMENT), quantum=256.0))
             self.assertEqual(answer["op"], "applied", answer)
+            for name in ("left", "right"):
+                self.assertEqual(pair.sd[name].events("apply", "in")[-1]["document"]["quantum"], 256, name)
             time.sleep(0.3)
             pair.ampd["left"].stop()
             hub = pair.start_ampd("left")
@@ -1193,6 +1200,34 @@ class Protocol(unittest.TestCase):
                 self.assertEqual((b.state["revision"], b.state["document"].get("quantum")), (6, 256))
                 self.assertEqual({n: e["quantum"] for n, e in speakers_of(b.state).items()},
                                  {"left": 256, "right": 256})
+
+            # A speakerd that comes back older once the size is applied (no quantum_range): the hub
+            # does not refuse it the graph, and says it ignores the size. The right's (its status),
+            # the right caught up again (its ampd restarted), the hub's own (its hello).
+            def warnings(name):
+                head, tail = (f"{name}: its speakerd ", " cannot set the buffer size (no quantum_range): "
+                              "revision 6 asks for quantum 256.0, which it ignores")
+                lines = (l.removeprefix("ampd: ") for l in hub.log().split("\n"))
+                return [l for l in lines if l.startswith(head) and l.endswith(tail)]
+
+            def warned(name, before):
+                deadline = time.monotonic() + 10
+                while len(warnings(name)) <= before:
+                    if time.monotonic() > deadline:
+                        raise AssertionError(f"the hub did not warn of {name}'s older speakerd:\n{hub.log()}")
+                    time.sleep(0.1)
+                print(f"\n  {warnings(name)[-1]}", end="")
+                return len(warnings(name))
+
+            self.assertEqual((warnings("left"), warnings("right")), ([], []))
+            pair.sd["right"].set_control({"older": True})
+            seen = warned("right", 0)
+            pair.ampd["right"].stop()
+            pair.start_ampd("right")
+            warned("right", seen)
+            pair.sd["left"].stop()
+            pair.start_speakerd("left", control={"older": True})
+            warned("left", 0)
 
     def test_a_malformed_quantum_on_disk_is_left_out(self):
         bad = dict(revision_document(DOCUMENT, 3), quantum="fast")
