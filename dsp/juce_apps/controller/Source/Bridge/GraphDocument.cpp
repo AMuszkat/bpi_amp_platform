@@ -1,5 +1,6 @@
 #include "GraphDocument.h"
 
+#include <cmath>
 #include <ctime>
 #include <limits>
 
@@ -255,6 +256,17 @@ namespace bpi::document
         if ((q.isInt() || q.isInt64()) && (juce::int64) q >= std::numeric_limits<int>::min()
                                        && (juce::int64) q <= std::numeric_limits<int>::max())
             return (int) (juce::int64) q;
+
+        // A whole number written as a float (256.0) is that number, as ampd and speakerd read it;
+        // a fraction, NaN or infinity is no quantum.
+        if (q.isDouble())
+        {
+            const auto d = (double) q;
+
+            if (std::isfinite (d) && d == std::floor (d)
+                && d >= (double) std::numeric_limits<int>::min() && d <= (double) std::numeric_limits<int>::max())
+                return (int) d;
+        }
 
         return std::nullopt;
     }

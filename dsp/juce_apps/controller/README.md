@@ -129,7 +129,9 @@ docs/protocol.md asks of a controller:
   controller already has, the proposal keeps waiting and the canvas keeps showing it; with
   another revision, the canvas takes the hub's and the proposal's answer only settles it.
 - **Buffer size.** The PipeWire quantum both speakers run is the document's own top-level
-  `"quantum": 256` (docs/protocol.md): no field is the PipeWire config's default. Choosing one
+  `"quantum": 256` (docs/protocol.md): no field is the PipeWire config's default. A whole number
+  written as a float (`256.0`) is that number, as `ampd` and `speakerd` read it; a fraction, NaN
+  or infinity is no quantum (the selector shows Default). Choosing one
   proposes the accepted document with `quantum` set (or removed for Default) as the next
   revision, the same way as any edit (base, revision + 1, 15 s, undone when rejected or
   unanswered), so both speakers change or neither, and the size is kept and undone like the
@@ -250,7 +252,7 @@ well). Each command prints, for example:
 so far), `queued_bytes` (waiting to be written to the hub), `refused` (the hub's reason, if it
 refused this controller, or failed to prove itself, since the last state), `proven` (the hub's
 welcome checked), `insecure`, `osc_dropped`, `synced`, `hub`, `revision`, `seq`, `quantum` (the
-accepted document's, or null), `buffer_size` (the panel's selector: `choices`, `default_label`,
+accepted document's, `256.0` read as 256, or null), `buffer_size` (the panel's selector: `choices`, `default_label`,
 `selected` (null: Default), `enabled`, `why`), `pending`
 (the revision waiting for an answer, or null), `outcome` (`applied N` or `rejected N: reason`),
 `status`, `nodes` (uid, kind: `input`, `output`, `control` or `placeholder`; for plugins name,
@@ -304,7 +306,7 @@ its `welcome` proof (a wrong one when a test sets `wrong_welcome`), takes OSC on
 of an authenticated connection from its address, and stamps each controller's echoes with that
 controller's token. `forge_echo()` sends echoes without a token or with a wrong one. It stamps `seq`, echoes, relays gestures, applies or rejects proposals
 (stale base, an unknown plugin, a `quantum` the hub or a speaker's range refuses, with their
-reasons, or a reason a test sets; `answer_delay` holds the answer back), gives each speaker
+reasons, a speaker's in the real hub's form `<speaker>: <speakerd's reason>`, or a reason a test sets; `answer_delay` holds the answer back), gives each speaker
 `rate`, `quantum`, `quantum_range` and `quantum_default` in its state, and once a revision is
 applied makes the speakers run its `quantum` (or their default) and sends the state again
 (`quantum_delay`, 0.3 s, as the agents' reports would), and produces monitor values at the
@@ -351,7 +353,8 @@ intersection (128 to 1024), disabled by an online speaker without a range and no
 offline one; `buffer-size 256` proposing the accepted document with only `quantum` added,
 applied, `expect-buffer-size` waiting for the state that says both speakers run it, a canvas
 edit carrying it on and `buffer-size default` removing it; 2048 outside one speaker's range,
-100 and 4096 rejected with their reasons and undone (the document keeps 256); a state resent
+100 and 4096 rejected with their reasons and undone (the document keeps 256); a document's
+`"quantum": 256.0` shown as 256 (and 256.5 as Default); a state resent
 while a proposal waits leaving it waiting (and the canvas showing it) until its answer; and the
 selector on screen (`--gui`) through an applied and a rejected choice.
 Each test prints its numbers.

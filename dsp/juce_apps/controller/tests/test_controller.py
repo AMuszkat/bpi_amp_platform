@@ -929,7 +929,7 @@ class ControllerTest(unittest.TestCase):
             "buffer-size 128\nexpect-applied\nexpect-buffer-size right 128\n")
         self.assertPassed(code, steps, err)
         rejected = self.step(steps, "expect-rejected")
-        self.assertIn("rejected 8: right: failed: quantum 2048", rejected["outcome"])
+        self.assertIn("rejected 8: right: quantum 2048: not a power of two from 64 to 1024", rejected["outcome"])
         self.assertIn("undone", rejected["status"])
         for i in (0, 1):
             state = self.step(steps, "state", i)["state"]
@@ -939,6 +939,32 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual([m["document"]["quantum"] for m, _ in hub.received_ops("control", "graph")], [2048, 100, 4096, 128])
         self.assertEqual(hub.document["quantum"], 128)
         report("buffer-rejected", rejected=[2048, 100, 4096], kept=256, then_applied=128)
+
+    def test_26b_a_whole_quantum_written_as_a_float(self):
+        """The hub keeps a document's `quantum` as it was written: 256.0 is 256, as ampd and
+        speakerd read it (docs/protocol.md "The buffer size"), so the selector, `state`'s
+        `quantum` and `buffer_size.selected` say 256; a fraction is no quantum (Default)."""
+        doc = default_document()
+        doc["quantum"] = 256.0
+        hub = self.start_hub(document=doc)
+        for s in hub.speakers:
+            s["quantum"] = 256
+        code, steps, err = self.run_script("wait-synced\nstate\n")
+        self.assertPassed(code, steps, err)
+        self.assertIn('"quantum": 256.0', json.dumps(hub.document), "the hub sends it as a float")
+        state = self.step(steps, "state")["state"]
+        self.assertEqual((state["quantum"], state["buffer_size"]["selected"]), (256, 256))
+        self.assertIsInstance(state["quantum"], int)
+        self.assertIsInstance(state["buffer_size"]["selected"], int)
+
+        hub.stop()
+        doc["quantum"] = 256.5
+        hub = self.start_hub(document=doc)
+        code, steps, err = self.run_script("wait-synced\nstate\n")
+        self.assertPassed(code, steps, err)
+        state = self.step(steps, "state")["state"]
+        self.assertIsNone(state["buffer_size"]["selected"], "a fraction is no quantum: the selector shows Default")
+        report("buffer-float", whole=256.0, selected=256, fraction=256.5)
 
     def test_27_state_resent_while_a_proposal_waits(self):
         """The hub sends its whole state again when a speaker's buffer size changes, also while
@@ -983,7 +1009,7 @@ class ControllerTest(unittest.TestCase):
             with VirtualDisplay() as display:
                 code, steps, err = self.run_script(
                     "main-window 0 0 1040 720\nwait-synced\nbuffer-size 256\nexpect-applied\nexpect-buffer-size left 256\n"
-                    "buffer-size 2048\nexpect-rejected right: failed\nsleep 300\nstate\nscreenshot %s\n" % picture,
+                    "buffer-size 2048\nexpect-rejected right: quantum 2048: not a power of two\nsleep 300\nstate\nscreenshot %s\n" % picture,
                     extra=["--gui"], env=dict(display.env, HOME=home), timeout=120)
             self.assertPassed(code, steps, err)
             self.assertGreater(os.path.getsize(picture), 10000)

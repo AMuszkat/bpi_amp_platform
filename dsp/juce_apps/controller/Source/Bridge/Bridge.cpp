@@ -1964,13 +1964,20 @@ namespace bpi
         for (const auto& [key, origin] : remoteGestures)
             gestures.add (object ({ { "node", (int) key.uid }, { "id", key.id }, { "origin", origin } }));
 
+        // The document's quantum as the hub and the speakers read it (256.0 is 256); a value
+        // that is no whole number is shown as it is.
+        const auto docQuantum = document::quantumOf (acceptedDoc);
+        const auto documentQuantum = docQuantum ? juce::var (*docQuantum)
+                                   : acceptedDoc.isObject() && acceptedDoc.getDynamicObject()->hasProperty ("quantum") ? acceptedDoc["quantum"]
+                                                                                                                       : juce::var();
+
         return object ({ { "connected", isConnected() }, { "connections_made", getConnectionCount() },
                          { "refused", lastRefusal }, { "insecure", controlHandshake.insecure },
                          { "proven", controlHandshake.phase == Handshake::Phase::proven }, { "osc_dropped", oscDropped },
                          { "queued_bytes", control != nullptr ? (juce::int64) control->getQueuedBytes() : (juce::int64) 0 },
                          { "synced", synced }, { "hub", hubName },
                          { "revision", revision }, { "seq", (juce::int64) lastSeq },
-                         { "quantum", acceptedDoc.isObject() && acceptedDoc.getDynamicObject()->hasProperty ("quantum") ? acceptedDoc["quantum"] : juce::var() },
+                         { "quantum", documentQuantum },
                          { "buffer_size", bufferSize },
                          { "pending", pending.has_value() ? juce::var (pending->revision) : juce::var() },
                          { "outcome", lastOutcome }, { "status", status },
