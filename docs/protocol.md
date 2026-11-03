@@ -419,6 +419,16 @@ These settle what version 1 left open; every implementation follows them.
     that is down.
 29. **The hub's own address** in `state.speakers`, when it listens on every address, is the
     one the controller connected to.
+30. **A `state` while a proposal waits.** The hub may send the whole `state` again while a
+    controller's proposal waits for its outcome (clarification 2: a speaker's `rate`, `quantum`
+    or layer changed, as the quantum does while the speakers apply a revision that changes it).
+    That `state` does not end the proposal: only `applied`, `rejected`, the `graph` message or
+    the controller's 15 s (clarification 11) do. A `state` with the proposal's `base` revision
+    leaves it waiting; one with another revision means the proposal was superseded, and its
+    answer, when it comes, still settles it. The hub sends the `state` of a revision it applied
+    only after `applied` and the `graph` message (clarification 4); its revision changes while a
+    proposal waits only when its own `speakerd` reconnects playing an older layer, which the hub
+    follows (the `graph` message, then `state`).
 
 ## Authentication
 
