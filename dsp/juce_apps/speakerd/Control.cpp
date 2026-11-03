@@ -166,18 +166,15 @@ namespace speakerd
         if (link == nullptr)
             return;
 
-        const auto connection = link->currentConnection();
+        // Only to a client that has its hello: ampd takes a first line that is not a hello for
+        // a broken peer. Sent under the lock, as the hello is, so it cannot overtake it
+        // (Control::lock, then the link's output lock, never the other way).
+        const std::lock_guard<std::mutex> guard (lock);
 
-        if (connection == 0)
+        if (greeted == 0)
             return;
 
-        juce::var status;
-        {
-            const std::lock_guard<std::mutex> guard (lock);
-            status = helloObject ("status");
-        }
-
-        answer (connection, status);
+        answer (greeted, helloObject ("status"));
     }
 
     juce::String Control::describe() const
@@ -249,21 +246,29 @@ namespace speakerd
 
     void Control::connected (juce::uint64 connection)
     {
-        juce::var hello;
         {
             const std::lock_guard<std::mutex> guard (lock);
 
             // A new client is a new ampd, whose hub may count seq from anywhere: what the last
             // one sent says nothing about it.
             lastSeq.clear();
-            hello = helloObject ("hello");
-        }
 
-        answer (connection, hello);
+            // Queued under the lock with `greeted` set, so an unasked status (notifyStatus())
+            // can only follow it.
+            greeted = connection;
+            answer (connection, helloObject ("hello"));
+        }
     }
 
     void Control::disconnected (juce::uint64 connection)
     {
+        {
+            const std::lock_guard<std::mutex> guard (lock);
+
+            if (greeted == connection)
+                greeted = 0;
+        }
+
         if (monitor != nullptr)
             monitor->clear (connection);
     }

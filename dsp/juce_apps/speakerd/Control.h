@@ -61,8 +61,8 @@ namespace speakerd
 
         void setQuantumSettings (QuantumSettings q)  { quantumSettings = std::move (q); }
 
-        /** Message thread: sends the connected client, if any, an unasked `status` with the
-            hello's fields. The live mode's timer calls it when the rate or the running quantum
+        /** Message thread: sends the connected client, if it has been sent its hello, an unasked
+            `status` with the hello's fields. The live mode's timer calls it when the rate or the running quantum
             changed. */
         void notifyStatus();
 
@@ -169,6 +169,7 @@ namespace speakerd
         juce::int64 revision = 0;
         juce::String layer, layerFile;
         std::map<Key, juce::uint32> lastSeq;             // per parameter, since the client connected
+        juce::uint64 greeted = 0;                        // the connection that was sent its hello, or 0
         std::deque<Waiting> waiting;
         bool building = false;
         // The parameters that arrived since the oldest waiting apply, newest value per parameter:
