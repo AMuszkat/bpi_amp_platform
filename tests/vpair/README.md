@@ -136,6 +136,21 @@ is every module of this folder, as `unittest discover` finds them. What it does:
      POOL_QUIET = True                                              # test_knob_latency
      POOL_QUIET = ("Protocol.test_monitoring", "Protocol.test_monitor_relay")   # test_ampd_protocol
      ```
+
+     The quiet units, each for its criterion (the marker's comment in its module): `knob_latency`
+     (heard within 60 ms, the captures within 5 ms), `monitor_fanout` (the age's p99 under 5 ms,
+     rates within 30 %), `controller_end_to_end` ((b): heard within 60 ms, graph.json within 2 s),
+     `board_cpu` (20 values in 3 s, `seconds` near 0.1 s, a stop within 2 s),
+     `speakerd_quantum_change` (an xrun count; its gains after a change broke under load),
+     `ampd_restart` (values within 2 s of a kill, no block off), `ampd_persistence` (graph.json at
+     most once a second, graph.lkg.json 3.9 to 6.5 s on), `hub_down` (no block of the right's
+     capture 1 dB under or zeros), `graph_edit` (no gap past the 30 ms fade, no click),
+     `speakerd_installed.Installed` (no xrun or late cycle in 3 s), `buffer_size`'s `TheChosenSize`
+     and `TheRealController` (the quantum within 10 s), `ampd_protocol`'s `Protocol.test_monitoring`
+     and `test_monitor_relay` (rates within 30 %, first values within 0.1 s), `test_revisions` (a
+     silent right rejected 9.9 to 11 s on), `test_gestures` (ended 4.5 to 6 s on), `test_board_cpu`
+     (`seconds` 0.05 to 0.3 s) and `test_persistence` (at most 4 writes in 3 s), and `chain_cost`
+     (a CPU share).
    - **alone**: a module that measures CPU says `POOL_ALONE = True` and runs last, alone
      (`test_chain_cost`, quiet too).
 
@@ -155,12 +170,8 @@ is every module of this folder, as `unittest discover` finds them. What it does:
    (the left speaker's ampd on `.1`, the right's on `.2`, another on `.3`, with the protocol's
    ports), `VPAIR_PLUGIN_HOST=vpairPlugHost<k>` (the stand-in plugin host the installers and
    `speakerd-run` look for by name, in `TEST_ENV`), an X display, `VPAIR_DISPLAY=<100 + k>`
-   (`:100` to `:199`) with `DISPLAY` pointing at it (where `VirtualDisplay` runs its Xvfb: a JUCE
-   program without `DISPLAY` opens `:0.0`, so every speakerd in the container would otherwise use
-   the first worker's display, which `-displayfd` alone puts on the first free number, `:0`, or
-   the controller's own tests' (`test_controller.py`'s Xvfb takes the first free number too), and
-   exit when it stops; plugin-check's Xvfb takes `:200` to `:299` and the controller's screenshot
-   run `:96`, never `:0`), and
+   (`:100` to `:199`) with `DISPLAY` pointing at it, where `VirtualDisplay` runs its Xvfb and the
+   controller opens its windows (speakerd opens none; "Worth knowing"), and
    `VPAIR_PREBUILT=<checkout>/build`. A worker takes its slot `k`, one of 100, with a lock
    (`/tmp/vpool<k>.lock`: `pool_selftest.py`'s pools beside a real one, or native pools of two
    checkouts, take different ones), and first brings down a pair an interrupted run left in its
@@ -226,7 +237,8 @@ With none of the pool's variables set (`VPAIR_ADDRESS_BASE`, `VPAIR_PLUGIN_HOST`
 `VPAIR_POOL_*`) every module behaves as before: that is how `--jobs 1` and CI run them.
 
 Measured here (24 threads, 12 workers, before the phases): every module, 98 units, in about 90 s,
-the pool 64 s (the length of `test_monitor_fanout`, its longest unit then) and then
+the pool as long as its longest unit (`test_monitor_fanout`, 64 s then; both speakers at once
+since, about 33 s) and then
 `test_chain_cost` alone 26 s, or 11 s with `VPAIR_CHAIN_COST_QUICK=1` (on one worker: 591 s). The
 checks' modules alone: `speakerd` 16 s, `ampd` 26 s, `pair` 65 s, `installers` 22 s, `chain` 29 s
 (13 s quick). Every module on one pool of 16, 20 and 24 workers took 64, 63 and 62 s and passed 2,
@@ -269,7 +281,7 @@ warns past 80 % of `pids.max`.
 | `test_hub_down.py` | the right speaker plays on, unchanged, when the left stops |
 | `test_meter_values.py` | `output/level` and loudness's `mon_levelDb` track a stepped tone on each speaker; the Mine pin |
 | `test_ampd_restart.py` | killing ampd leaves the audio alone, and a subscriber gets values again within 2 s |
-| `test_monitor_fanout.py` | eight monitor clients of one speaker, subscribed at different phases, get each value as it arrives (under 5 ms at the 99th percentile), each at its own rate, on the hub and on an agent |
+| `test_monitor_fanout.py` | eight monitor clients of each speaker, the hub and an agent at once, subscribed at different phases, get each value as it arrives (under 5 ms at the 99th percentile), each at its own rate |
 | `test_board_cpu.py` | `board/cpu` (ampd's own, from /proc/stat) and `speakerd/timing` from both speakers; no sampling without a subscriber, none after the unsubscribe |
 | `test_drag_during_revision.py` | a value set while a revision applies is kept, everywhere, and after a speakerd restart |
 | `test_ampd_persistence.py` | `graph.json` follows the values, speakerd boots on it, `graph.lkg.json` follows a revision that played long enough |
@@ -338,14 +350,14 @@ the complete build of the plugin, which is what the plugin outside speakerd outp
 | `test_hub_down` | with the whole left speaker stopped, the right's level stays within 0.05 dB, no 10 ms block drops 1 dB or is zeros, its ampd says it lost the hub and runs on, its speakerd plays on, and it stays on revision 2; the L+R mix is skipped (not in device.json yet) |
 | `test_meter_values` | with the Mine pin, a stepped stereo 1 kHz tone (right 12 dB under left): each speaker's `output/level` woofer peak is its own side's level and its RMS 3.01 dB under, within 1 dB; with the right speaker mono, (FL + FR) / 2, 4.08 dB under the left; the muted tweeter reads under -100 dBFS; `node/16/mon_levelDb` is that side's level as loudness's detector measures it (JUCE's BallisticsFilter, computed in the test: about 1.3 dB over the RMS of a steady sine), not the raw input level, within 1 dB |
 | `test_ampd_restart` | each ampd (hub, then agent) killed and started again 1 s later: the subscriber has values again within 2 s of the kill, the agent is back on the hub, and no 10 ms block of either capture moves 0.5 dB or is zeros |
-| `test_monitor_fanout` | on the real pair, a 200 Hz tone at -20 dBFS playing on both speakers (it lasts both windows and 20 s more, and both must still play at each window's end), eight harness monitor clients of one speaker's `output/level` at 20 Hz, the k-th subscribing 1.5 k / 8 periods after the first (all phases different, over 1.3 periods), first on the hub's speaker, then on the agent's: over a 30 s window from 1 s after every client's first value (30 s: a stall makes all eight late at once, and 600 periods tolerate six stalled ones), the age of the values (each one's arrival at the client, `time.monotonic()`, minus its `t`, speakerd's monotonic clock) is under 5 ms at the 99th percentile over all eight clients, and each client's rate is within 30 % of 20 Hz. Each client's rate and age (median, p90, p99, max) and ampd's CPU over the window are printed |
+| `test_monitor_fanout` | on the real pair, a 200 Hz tone at -20 dBFS playing on both speakers (it lasts the window and 20 s more, and both must still play at the window's end), on both speakers at once eight harness monitor clients of that speaker's `output/level` at 20 Hz, the k-th subscribing 1.5 k / 8 periods after the first (all phases different, over 1.3 periods): over one 30 s window from 1 s after every client's first value (30 s: a stall makes all eight late at once, and 600 periods tolerate six stalled ones), the age of the values (each one's arrival at the client, `time.monotonic()`, minus its `t`, speakerd's monotonic clock) is under 5 ms at the 99th percentile over each speaker's eight clients, and each client's rate is within 30 % of 20 Hz. Both at once measure what one after the other did: each monitor link is its own ampd's, fed by its own speakerd, and what the two share (the machine, the harness process) can only make an age longer. Each client's rate and age (median, p90, p99, max) and ampd's CPU over the window are printed |
 | `test_board_cpu` | on the real pair, a 200 Hz tone on both speakers: no ampd says `board/cpu: sampling` before a subscription; one client of each speaker subscribed to `board/cpu` at 10 Hz and `speakerd/timing` at 5 Hz has the first of each within 5 s; over 3 s, at least 20 `board/cpu` values, each `busy` and `cores` within 0 to 1, as many `cores` as the `cpuN` lines of /proc/stat present both before the subscription and after the window, `seconds` 0.05 to 0.5 (median within 10 % of 0.1 s), `t` within 1 s of the client's monotonic clock; every `speakerd/timing` value of protocol.md's shape with node 16; after the unsubscribe ampd says `board/cpu: stopped sampling` within 2 s, and from 0.3 s on no `board/cpu` value comes for 1.5 s while `speakerd/timing` does |
 | `test_drag_during_revision` | while controller B's revision 2 applies (the right's ampd held 1.5 s), controller A drags node 16's gain and ends at +6 dB: the graph sent, both graph.json, A, B and a later controller have +6 dB, and after the left's speakerd restarts its 200 Hz gain is its graph.json's render within 0.05 dB, 3 dB or more from B's document's |
 | `test_controller_end_to_end` | the real controller (`tools/build.sh controller`, its script test mode, `--trace`) against the real pair (the Mine pin through loudness, a stereo 200 Hz tone, left -20 and right -32 dBFS, the tweeter muted): (a) synced and proven on revision 1 with the hub's document on its canvas, both speakers online on layer current, both monitor links connected; no `error` reaches it, ampd ignores, drops or refuses nothing, one control connection, no OSC echo dropped; (b) nine `set`s (+12 / 0 dB, 1.2 s apart) echoed, each heard on both captures within 60 ms of its line (knob_latency's onset() and set-asides, at least 5 measured), both graph.json at the last value within 2 s; a 1 s `drag` to 3.5 dB heard on both through at least 10 intermediate 20 ms blocks, then at the render's 200 Hz level within 0.1 dB, its value echoed, in both graph.json, the hub's state and the controller; (c) `add loudness` applied (both graph.json have the node, its headless URI, 35 parameters), a `set` of its mode echoed, `disconnect 16:0 2:0` applied and heard (no woofer sample above -100 dBFS), two `connect-pins` putting the new node in the woofer's path applied and heard (the render's level within 0.1 dB), revision 5 in both graph.json, its state the hub's; (d) `open 16`: 8 `mon_levelDb` values from the left, then (`monitor-speaker 16 right`) from the right, each side's level as loudness's detector reads it (BallisticsFilter, computed here for 200 Hz) within 1 dB, the subscription moved; `output/level` woofer peak each side's level and RMS 3.01 dB under within 1 dB, 12 dB apart within 1 dB, tweeters under -100 dBFS; (e) another secret: not proven, not synced, the refusal in `refused`, revision 0, no plugin node, `refused <address>: its hello does not prove the pair's secret` in the hub's log, neither secret printed; (f) `--gui` under Xvfb and openbox (`harness.VirtualDisplay`), the tone stepping -30 / -12 dBFS: synced, both monitor links feeding levels above -60 dBFS, the window's `mon_levelDb` spanning more than 6 dB, `build/e2e-controller/controller-juce.png` and `controller-screen.png` written, neither one flat colour |
 | `test_chain_cost` | speakerd on the left speaker plays the board's chain from graph.json (the Mine pin -> `loudness_headless` 16 -> `firConv_headless` 17 -> `crossover_headless` 18, the headless builds a speaker runs, its low band to the woofer and its high band to the tweeter; the tweeter on) at 48 kHz and quantum 1024, stereo noise at -26 dBFS RMS playing; a client of its local link (`harness.SpeakerdLink`) subscribes to `speakerd/timing` and `output/level` at 2 Hz and, after 5 s, adds up a 20 s window (5 s with `VPAIR_CHAIN_COST_QUICK=1`, the module's docstring says why), each value weighted by its cycles: firConv's mean share of the cycle is under 5 % and the crossover's under 1.5 % (juce::dsp::FIR::Filter: 15.1 % and 3.8 % here, x86_64; the block FIR about 1.0 % and 0.27 %); the window holds at least 80 % of 937.5 cycles (234.4 in 5 s), each node measured in 80 % of them, no quantum change, the woofer's median RMS above -60 dBFS. Each node's mean and max, the graph's, the cycle's, the cycles, late cycles, position jumps and dropped records are printed, and in the failure; late cycles are not asserted (they measure a runner's scheduler, not the chain) |
 | `test_plugin_identity` | `dsp/juce_plugins/tools/plugin-versions.sh list` exits 0 with one `<plugin> <version> <source-id>` line per plugin folder that calls `speaker_add_plugin()` and nothing else, each version its CMakeLists.txt's `project(... VERSION)`; `loudness_headless`, `loudness`, `firConv_headless` and `crossover_headless` each have `buildinfo.ttl` exactly as the module's docstring shows it (its `bpi:version` and `bpi:sourceId`, a final newline or not) with the listed version and source id, and a `manifest.ttl` that does not name it (as JUCE writes it: no LV2 host reads `buildinfo.ttl`); live on both speakers, speakerd says `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` exactly once for each of 16, 17 and 18 at start (the bundle the one given, a trailing `/` allowed) and once each again at an apply of revision 2 on the left's local link, and its render once each; a copy of firConv_headless's bundle without buildinfo.ttl, and one with buildinfo.ttl cut off inside its version, each given alone, render Mine -> firConv -> woofer from layer current, sample for sample as the original bundle (whose woofer peaks above -60 dBFS), and say `plugin node 17: <URI>, no build identity (an older build), bundle <the copy>` and `... (buildinfo.ttl unreadable), bundle <the copy>` |
 | `test_ampd_persistence` | during a 2 s drag graph.json is replaced at most 3 times, and holds the last value on both speakers 1.2 s later; speakerd restarted with ampd stopped boots on graph.json and gives its render's gain within 0.05 dB, 3 dB or more from revision 1's original; graph.lkg.json follows after --lkg-after (4 s), and a speakerd restart starts that time again |
-| `test_buffer_size` | at start every speaker of the state says rate 48000, quantum 1024, quantum_range [64, 2048], quantum_default 1024; quantum 256 proposed is applied, both speakerds say `quantum: revision 2 asks for 256: clock.force-quantum 256` and `pipewire: the quantum changed to 256`, `pw-metadata -n settings` shows clock.force-quantum 256 and the state quantum 256 on both, and both amplifiers get the tone with the render's gain within 0.05 dB on both channels (no limit, the tweeter on); 2048 then no quantum: both run 2048, then 1024 with force-quantum 0 (`asks for none ... (PipeWire's default, 1024)`); 4096, 100 and 48 are rejected by the hub with `quantum <v>: a power of two from 64 to 2048` and nothing changes on either speaker (revision, force-quantum 0, quantum 1024, no quantum line for 1 s); 256 again, proposed as `256.0` (a whole JSON number: applied, `asks for 256` on both), comes back from graph.json on both after a speakerd restart (force-quantum reset to 0 by hand before) and after a PipeWire restart (speakerd exits 3 and starts again); with the right's max-quantum 1024 (state range [64, 1024]) 2048 is rejected with `right: quantum 2048: not a power of two from 64 to 1024 (what this speaker's PipeWire allows)`, rolled back on the left, and both end on revision 1, force-quantum 0, quantum 1024, graph.json without a quantum, the right never changing its quantum; the real controller's `buffer-size 256`, `expect-applied`, `expect-buffer-size left 256` and `... right 256` pass with force-quantum and graph.json 256 on both, and `buffer-size default` brings both back (skipped when the controller does not build) |
+| `test_buffer_size` | at start every speaker of the state says rate 48000, quantum 1024, quantum_range [64, 2048], quantum_default 1024; quantum 256 proposed is applied, both speakerds say `quantum: revision 2 asks for 256: clock.force-quantum 256` and `pipewire: the quantum changed to 256`, `pw-metadata -n settings` shows clock.force-quantum 256 and the state quantum 256 on both, and both amplifiers get the tone with the render's gain within 0.05 dB on both channels (no limit, the tweeter on); 2048 then no quantum: both run 2048, then 1024 with force-quantum 0 (`asks for none ... (PipeWire's default, 1024)`); 4096, 100 and 48 are rejected by the hub with `quantum <v>: a power of two from 64 to 2048` and nothing changes on either speaker (revision, force-quantum 0, quantum 1024, no quantum line for 1 s); 256 again, proposed as `256.0` (a whole JSON number: applied, `asks for 256` on both), comes back from graph.json on both after a speakerd restart (force-quantum reset to 0 by hand before) and after a PipeWire restart (speakerd exits 3 and starts again); with the right's max-quantum 1024 (state range [64, 1024]) 2048 is rejected with `right: quantum 2048: not a power of two from 64 to 1024 (what this speaker's PipeWire allows)`, rolled back on the left, and both end on revision 1, force-quantum 0, quantum 1024, graph.json without a quantum, the right never changing its quantum; the real controller's `buffer-size 256`, `expect-applied`, `expect-buffer-size left 256` and `... right 256` pass with force-quantum and graph.json 256 on both, read while its script waits (`wait-param`) for a harness controller to set node 16's `s0_e0_gain` to 11 dB, and then `buffer-size default` brings both back (skipped when the controller does not build) |
 
 ## speakerd in a test
 
@@ -527,8 +539,8 @@ with ScriptedController(script, name="ctl-test", args=["--trace"]) as ctl:
   `step(n)` waits for step n's line and fails, with everything the controller printed, when a step
   failed or it exited first; `stderr_path` is its stderr (`--trace` writes every message there).
   Leaving the block kills it if it still runs.
-- `VirtualDisplay()` is an Xvfb display (the first free number, `-displayfd`, or `VPAIR_DISPLAY`'s
-  under the pool) with openbox, for `--gui`: pass `env=display.env` to the controller;
+- `VirtualDisplay()` is an Xvfb display (`VPAIR_DISPLAY`'s under the pool; without it the first
+  free one of `:100` to `:199`, tried one at a time, never `:0`) with openbox, for `--gui`: pass `env=display.env` to the controller;
   `display.screenshot(path)` captures the X screen with ImageMagick's `import`.
 
 ## Before and after step 3's speakerd
@@ -582,14 +594,15 @@ real-controller part the controller's `buffer-size` commands. Against older ones
   names it: the installer and speakerd-run skip processes in state Z.
 - **A recording often starts with a quantum or two of zeros**, before the first buffer reaches
   the recorder. The recorder is linked before anything is played, so a capture misses nothing.
-- **A JUCE program without `DISPLAY` opens `:0.0`**, speakerd included: it connects to whatever
-  X server has that number in the container, and exits with status 1 ("X connection to :0.0
-  broken") when that server stops. In a serial run (`--jobs 1`, CI) `:0` can be `VirtualDisplay`'s
-  Xvfb (without `VPAIR_DISPLAY` it takes the first free number, `-displayfd`) or, with the
-  controller's own tests running in the same container, theirs (`test_controller.py`'s, the same
-  way). plugin-check's Xvfb never is: it takes `:200` to `:299`; nor the controller's screenshot
-  run's (`dsp/juce_apps/controller/tests/run.sh --screenshot`, a fixed `:96`). The pool gives each
-  worker a display of its own (`DISPLAY`, `VPAIR_DISPLAY`, `:100` to `:199`) for that reason.
+- **A JUCE program without `DISPLAY` opens `:0.0`**: the controller, plugin-check's editor host
+  and a build's `juce_lv2_helper` connect to whatever X server has that number in the container,
+  and exit with status 1 ("X connection to :0.0 broken") when that server stops. speakerd does
+  not since 0.3.3, nor do the plugins it hosts (its README, "No X display"). So no Xvfb of the
+  checks takes `:0`: `VirtualDisplay` without `VPAIR_DISPLAY` (the serial runner) tries `:100` to
+  `:199` one at a time (`-displayfd` per number), the pool gives each worker one of those
+  (`DISPLAY`, `VPAIR_DISPLAY`) for the controller and `VirtualDisplay`, plugin-check's Xvfb takes
+  `:200` to `:299`, the controller's own tests `:300` up and its screenshot run
+  (`dsp/juce_apps/controller/tests/run.sh --screenshot`) a fixed `:96`.
 
 ## Next
 

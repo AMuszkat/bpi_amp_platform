@@ -517,12 +517,12 @@ class Slot:
         self.display = str(100 + k)
 
     def env(self):
-        # The X display a JUCE program of its own opens (speakerd, the controller), and where its
-        # harness.VirtualDisplay runs (:100 to :199): without DISPLAY, JUCE opens :0.0, which would
-        # be the first worker's Xvfb (VirtualDisplay without VPAIR_DISPLAY takes the first free
-        # number, -displayfd) or the controller's own tests' (test_controller.py's, the same way),
-        # and dies when that one stops. plugin-check's Xvfb is never :0 (it takes :200 to :299),
-        # nor the controller's screenshot run's (tests/run.sh --screenshot, a fixed :96).
+        # The worker's X display (:100 to :199): where its harness.VirtualDisplay runs, and the one
+        # the controller opens (a JUCE program without DISPLAY opens :0.0, and dies when that server
+        # stops; speakerd opens none since 0.3.3, nor do its plugins). No Xvfb of the checks is :0:
+        # VirtualDisplay without VPAIR_DISPLAY (the serial runner) takes the first free one of :100
+        # to :199, plugin-check's :200 to :299, the controller's own tests' :300 up and its
+        # screenshot run's (tests/run.sh --screenshot) a fixed :96.
         return {"VPAIR_DIR": self.dir, "VPAIR_ADDRESS_BASE": self.base, "VPAIR_PLUGIN_HOST": self.host,
                 "VPAIR_DISPLAY": self.display, "DISPLAY": f":{self.display}"}
 
@@ -1007,7 +1007,7 @@ def main():
     # 64 at most. Nothing of a worker's own runs out there: the slots' names allow 100 in one /tmp
     # (SLOTS), and 64 leaves the rest to another pool there (pool_selftest.py's beside a real one);
     # the address blocks (127.77.<k>) allow 256, the displays (:<100 + k>) 100, :100 to :199
-    # (plugin-check's Xvfb takes :200 up). tools/test.sh's default stops at 16, where the pool stops
+    # (plugin-check's Xvfb takes :200 to :299, the controller's own tests' :300 up). tools/test.sh's default stops at 16, where the pool stops
     # gaining (measured: 20 and 24 workers were no faster, and made timing tests fail), far below
     # what the container's tasks allow (README.md, "The pool").
     if not 1 <= args.jobs <= 64:

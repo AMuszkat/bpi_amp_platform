@@ -18,7 +18,7 @@ flowchart LR
 ```
 
 **Level 1** (`tools/test.sh unit`) runs in the development container, the builder image of
-`dsp/juce_plugins/tools/Containerfile`: `plugin-check` builds each plugin's complete, control and
+`dsp/juce_plugins/tools/Containerfile` (tagged with that file's hash): `plugin-check` builds each plugin's complete, control and
 headless targets and checks that they fit together; the block FIR test, the build identity check,
 the version tool's test and the controller's bridge test run beside it (section 4).
 
@@ -132,7 +132,10 @@ flowchart LR
     unit --> sys --> hw
 ```
 
-**Level 1** runs `plugin-check` on every plugin that declares its three targets, and:
+**Level 1** runs `plugin-check` on every plugin that declares its three targets (its build under
+`tools/jobserver.sh`, so that the LTO links share the processors; its copies in
+`<BUILD_DIR>/<plugin>-builds/copied/`, as nothing writes `~/.lv2`; a version bump recompiles only
+the format wrappers), and:
 
 - **the block FIR test** (`dsp/juce_plugins/tests/blockfir`): the block FIR firConv and the
   crossover share is bit for bit a reference FIR, on x86_64 and on aarch64 under qemu;
@@ -140,7 +143,9 @@ flowchart LR
   `buildinfo.ttl` of this tree, with its plugin's version and source identity;
 - **the version tool's test** (`dsp/juce_plugins/tests/plugin-versions`): a changed plugin
   whose version was not raised fails;
-- **the controller's bridge test** against a fake hub, and **the `tools` check**: the test
+- **the controller's bridge test** against a fake hub, six tests at a time, each with its own
+  Xvfb from `:300` up, the timing ones alone after (one at a time where `CI` is set), and
+  **the `tools` check**: the test
   tools' own tests in `tools/tests` (what green is and the hook's lab lock, the impact map,
   `tools/test.sh`'s arguments) and the self-tests of the virtual pair's tools,
   `tests/vpair/*_selftest.py` (the pool's), which are not `test_*` so that level 2 never runs them.
@@ -181,7 +186,9 @@ the checks are made to take a minute or two after an edit:
   builds nothing: the pool builds them before any test, and a test's build the module does not
   name is refused), `POOL_QUIET` when a pass criterion is a time, a rate, a CPU share or an xrun
   count (`True`, or the classes and tests it names: they run after every other unit, on
-  min(N, 12) workers), `POOL_ALONE = True` when it measures CPU (`chain_cost`, run last, alone),
+  min(N, 12) workers; `knob_latency`, `monitor_fanout`, `controller_end_to_end`, `board_cpu`,
+  `speakerd_quantum_change`, `ampd_restart`, `ampd_persistence`, `hub_down`, `graph_edit`,
+  `chain_cost` and parts of `speakerd_installed`, `buffer_size` and `ampd_protocol`), `POOL_ALONE = True` when it measures CPU (`chain_cost`, run last, alone),
   and `POOL_SPLIT` or `POOL_WHOLE` to run its tests as a unit each, or the module as one, instead
   of a unit per test class; the README of [`tests/vpair/`](../tests/vpair/README.md) ("The
   pool") has the details. `--jobs 1` is the serial runner, one module after another in one

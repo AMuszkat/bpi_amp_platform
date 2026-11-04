@@ -169,11 +169,11 @@ plugins_with_targets() {
 }
 
 # plugin-check of plugin $1, then the version and source identity in the bundles it built
-# (dsp/juce_plugins/tests/buildinfo). Not in the copies JUCE made of them in ~/.lv2: any other
-# build in the same HOME may have written those since. $2: lto, as the plugins ship (the levels,
-# `plugins`, CI), in build-check; or nolto, in build-check-nolto, for the focused check, where a
-# one-line edit then relinks in seconds instead of most of a minute (six LTO links). An explicit
-# BUILD_DIR is used for either.
+# (dsp/juce_plugins/tests/buildinfo), read in the build tree itself, not in the copies JUCE makes
+# of them (in $dir/$name-builds/copied/{lv2,vst3}; no build writes ~/.lv2). $2: lto, as the
+# plugins ship (the levels, `plugins`, CI), in build-check; or nolto, in build-check-nolto, for the
+# focused check, where a one-line edit then relinks in seconds instead of most of a minute (six LTO
+# links). An explicit BUILD_DIR is used for either.
 check_plugin() {
     local name="$1" lto=1 dir="${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}"
     [ "$2" = lto ] || { lto=0; dir="${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check-nolto}"; }
