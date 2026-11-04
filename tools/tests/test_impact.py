@@ -189,7 +189,7 @@ class TheMap(unittest.TestCase):
         expected = {
             ("speakerd",): ["Engine.cpp", "Engine.h", "Render.cpp", "Render.h", "Log.h", "FilterGraph.cpp",
                             "FilterGraph.h", "LV2State.cpp", "LV2State.h", "Samples.h", "examples/loudness.filtergraph",
-                            "examples/MakeFiltergraph.cpp"],
+                            "examples/MakeFiltergraph.cpp", "NoDisplay.h"],
             ("speakerd", "installers"): ["BuildInfo.cmake", "DeviceConfig.cpp", "DeviceConfig.h", "StateLayers.cpp",
                                          "StateLayers.h"],
             ("speakerd", "installers", "pair"): ["PipeWireNode.cpp", "PipeWireNode.h", "LocalLink.cpp", "LocalLink.h"],
@@ -216,7 +216,7 @@ class TheMap(unittest.TestCase):
         advice = impact.rule_for(RULES, engine)["by_hand"]
         self.assertEqual(impact.by_hand_for(RULES, [engine, f"{SPEAKERD}/Render.cpp", header, "README.md"]),
                          [(advice, [engine, header])])
-        self.assertEqual(impact.by_hand_for(RULES, [f"{SPEAKERD}/Render.cpp", f"{SPEAKERD}/Monitor.cpp", "tools/build.sh"]), [])
+        self.assertEqual(impact.by_hand_for(RULES, [f"{SPEAKERD}/Render.cpp", f"{SPEAKERD}/Monitor.cpp", "firmware/Makefile"]), [])
 
         # What impact.py prints: the checks on stdout, the advice on stderr (where `tools/test.sh
         # changed` shows it), once, beside the files no rule names.
@@ -243,9 +243,9 @@ class TheMap(unittest.TestCase):
             self.assertIn(picked.returncode, (0, 1), picked.stderr)
             return picked.stdout.splitlines()
 
-        out, err = said(engine, header, "tools/build.sh")
+        out, err = said(engine, header, "firmware/Makefile")
         self.assertEqual(out, ["speakerd"])
-        self.assertEqual(err, ["no check covers tools/build.sh: the levels do (tools/test.sh all)",
+        self.assertEqual(err, ["no check covers firmware/Makefile: the levels do (tools/test.sh all)",
                                f"by hand, for {engine}, {header}: {advice}",
                                "3 file(s) changed since HEAD"])
         self.assertEqual(repeated(err), [err[1]])   # the advice, as impact.py printed it
@@ -286,9 +286,54 @@ class TheMap(unittest.TestCase):
         self.assertEqual(checks("tests/vpair/pool_selftest.py", "tools/test.sh"), (["tools"], []))
 
     def test_what_no_rule_names(self):
-        got, uncovered = checks("firmware/install-lib.sh", ".github/workflows/ci.yml", "tools/build.sh")
+        got, uncovered = checks("firmware/install-lib.sh", ".github/workflows/ci.yml", "firmware/Makefile")
         self.assertEqual(got, ["installers"])
-        self.assertEqual(uncovered, [".github/workflows/ci.yml", "tools/build.sh"])
+        self.assertEqual(uncovered, [".github/workflows/ci.yml", "firmware/Makefile"])
+
+    def test_no_display_runs_speakerd_and_says_what_no_scenario_reads(self):
+        # NoDisplay.h: every speakerd scenario starts after it, none reads that speakerd stays off X.
+        rule = impact.rule_for(RULES, f"{SPEAKERD}/NoDisplay.h")
+        self.assertEqual(rule["paths"], [f"{SPEAKERD}/NoDisplay.h"])
+        self.assertIn("speakerd still running", rule["by_hand"])
+        self.assertIn("--target speakerd-make-filtergraph", rule["by_hand"])
+
+    def test_the_build_and_test_tools(self):
+        # The schedule runs every multi-check and level, yet the tools check alone proves it: its own
+        # tests, test.sh's through it with stand-in steps, the pool's side of its gate.
+        for path in ("tools/schedule.py", "tools/tests/test_schedule.py", "tools/test.sh"):
+            self.assertEqual(checks(path), (["tools"], []), path)
+            self.assertEqual(impact.by_hand_for(RULES, [path]), [], path)
+        # Every build's `cmake --build` runs under the jobserver: plugin-check's LTO builds (plugins)
+        # and tools/build.sh's (the chain's prebuild); an edit relinks nothing, so by_hand says how.
+        self.assertEqual(checks("tools/jobserver.sh"), (["plugins", "chain"], []))
+        advice = impact.rule_for(RULES, "tools/jobserver.sh")["by_hand"]
+        for said in ("touch dsp/juce_plugins/loudness/LoudnessDsp.cpp", "`BPI_TEST_LTO=1 tools/test.sh plugin loudness chain`",
+                     "`tools/build.sh loudness aarch64 headless`"):
+            self.assertIn(said, advice)
+        self.assertTrue((ROOT / "dsp/juce_plugins/loudness/LoudnessDsp.cpp").is_file())
+        # tools/build.sh: the chain's prebuild and plugin_identity, and pool_selftest's waiting line.
+        self.assertEqual(checks("tools/build.sh"), (["chain", "tools"], []))
+        self.assertIn("dsp/juce_plugins/tests/buildinfo/check.sh --arch aarch64 loudness",
+                      impact.rule_for(RULES, "tools/build.sh")["by_hand"])
+        # The container: the tools check runs in it; --status and --prune by hand.
+        self.assertEqual(checks("tools/container.sh"), (["tools"], []))
+        self.assertIn("`tools/container.sh --prune --dry-run`", impact.rule_for(RULES, "tools/container.sh")["by_hand"])
+        self.assertEqual(checks("dsp/juce_apps/controller/tests/runner.py", "dsp/juce_apps/controller/tests/display.py"),
+                         (["controller"], []))
+
+    def test_the_by_hand_build_identity_check_is_the_unit_levels(self):
+        # tools/build.sh's by_hand runs what check_build_info_aarch64 runs: the same build, the same
+        # two bundles. Read out of tools/test.sh, so that either side's drift fails here.
+        body = re.search(r"^check_build_info_aarch64\(\) \{\n(.*?)^\}$", (ROOT / "tools" / "test.sh").read_text(), re.S | re.M)
+        self.assertIsNotNone(body, "tools/test.sh has no check_build_info_aarch64")
+        text = body.group(1)
+        out = re.search(r'local out="([^"]+)" name="([^"]+)"', text)
+        self.assertIsNotNone(out, text)
+        tree, name = out.groups()
+        self.assertIn("tools/build.sh loudness aarch64 headless", text)
+        advice = impact.rule_for(RULES, "tools/build.sh")["by_hand"]
+        self.assertIn("`tools/build.sh loudness aarch64 headless && ", advice)
+        self.assertIn(f" {tree}/{name}_artefacts/Release/LV2/{name}.lv2 {tree}/copied/lv2/{name}.lv2`", advice)
 
     def test_every_module_the_checks_name_exists(self):
         text = (ROOT / "tools" / "test.sh").read_text()

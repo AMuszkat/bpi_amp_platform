@@ -20,6 +20,10 @@
     "rule says which); the levels run those before a push, and its \"by_hand\" says what to run",
     "after touching those parts. A rule's optional \"by_hand\" is such advice: tools/impact.py, and",
     "so `tools/test.sh changed`, says it on stderr, once, when files the rule decides changed.",
+    "The build tools run the checks that build through them: tools/build.sh chain (and tools, whose",
+    "pool self-test reads its waiting line), tools/jobserver.sh plugins and chain, whose links an edit of",
+    "it does not redo (its by_hand does); tools/container.sh and tools/schedule.py run tools, which runs",
+    "in the one and as a schedule of the other, and whose tests prove the schedule with stand-in steps.",
     "tools/tests/test_impact.py keeps the map honest: every speakerd file is named by a rule of its",
     "own, every path a plugin rule without chain names is editor-only, and every plugin has a rule",
     "of its own: one that runs `plugin` when it lists TARGETS (plugin-check needs its three builds),",
@@ -154,6 +158,12 @@
       "checks": ["speakerd"]
     },
     {
+      "why": "speakerd's DISPLAY, one no X server has, set first in main (Main.cpp) and in speakerd-make-filtergraph (examples/MakeFiltergraph.cpp): every speakerd scenario starts speakerd, and its plugins' message threads, after it. No scenario reads what it is for, that neither connects to an X server (README.md, \"No X display\"): controller_end_to_end's Xvfb starts after its speakerds made their plugins, and nothing is asserted once it stops. Its by_hand says how to see it",
+      "paths": ["dsp/juce_apps/speakerd/NoDisplay.h"],
+      "checks": ["speakerd"],
+      "by_hand": "no scenario asserts that speakerd and its plugins stay off X (README.md, \"No X display\"): start an Xvfb, run speakerd with DISPLAY naming it and a plugin in its graph, stop the Xvfb, and see speakerd still running; speakerd-make-filtergraph, which sets it too, builds only on request: `tools/container.sh cmake --build build/speakerd --target speakerd-make-filtergraph`"
+    },
+    {
       "why": "speakerd alone: the import of an AudioPluginHost session (speakerd_import, with the examples), the plugins' LV2 state, the sample helpers",
       "paths": ["dsp/juce_apps/speakerd/FilterGraph.*", "dsp/juce_apps/speakerd/LV2State.*", "dsp/juce_apps/speakerd/Samples.h",
                 "dsp/juce_apps/speakerd/examples/*"],
@@ -195,8 +205,26 @@
       "checks": ["speakerd", "ampd", "pair", "controller", "installers", "chain", "tools"]
     },
     {
-      "why": "the test tools",
-      "paths": ["tools/test.sh", "tools/status.py", "tools/impact.py", "tools/tests/*", "tests/impact.json"],
+      "why": "the make jobserver every build's `cmake --build` runs under: tools/build.sh's (the pool's prebuild, which builds chain's speakerd and its headless plugins with LTO) and plugin-check's (its run.sh: each plugin's six targets with LTO, which `plugins` builds). `plugin <name>` builds without LTO, where the jobserver has nothing to share. An edit of it changes no build's inputs, so on trees that are up to date these checks run it around links with nothing to do: its by_hand says how to make them link",
+      "paths": ["tools/jobserver.sh"],
+      "checks": ["plugins", "chain"],
+      "by_hand": "an edit of tools/jobserver.sh relinks nothing: make a link of each path draw its tokens, `touch dsp/juce_plugins/loudness/LoudnessDsp.cpp`, then `BPI_TEST_LTO=1 tools/test.sh plugin loudness chain` (plugin-check's six LTO links, the prebuild's loudness_headless) and `tools/build.sh loudness aarch64 headless` (the cross-compiler's, which only the unit level builds)"
+    },
+    {
+      "why": "how every application and plugin builds, its tree's lock and its copy into <tree>/copied/{lv2,vst3}: chain's prebuild builds both kinds of what it builds (speakerd, an application; loudness complete and the three headless plugins, with LTO) and plugin_identity reads their build identity; tools runs pool_selftest.py, which checks the line tools/build.sh says while it waits for its tree's lock against the one the pool passes through. The aarch64 build and its copy only the unit level checks (buildinfo-aarch64): its by_hand",
+      "paths": ["tools/build.sh"],
+      "checks": ["chain", "tools"],
+      "by_hand": "only the unit level builds for aarch64 and checks the copy (buildinfo-aarch64): run what it runs, `tools/build.sh loudness aarch64 headless && tools/container.sh dsp/juce_plugins/tests/buildinfo/check.sh --arch aarch64 loudness build/aarch64/loudness/loudness_headless_artefacts/Release/LV2/loudness_headless.lv2 build/aarch64/loudness/copied/lv2/loudness_headless.lv2`"
+    },
+    {
+      "why": "the development container every script moves into (container_or_native), and ccache_env: `tools/test.sh tools`, the cheapest check, runs in it, so it finds the image by its Containerfile's hash (or builds it), starts this checkout's container and runs a script there. CI runs natively (BPI_CONTAINER=0). Its --status, --stop and --prune no check runs: its by_hand",
+      "paths": ["tools/container.sh"],
+      "checks": ["tools"],
+      "by_hand": "no check runs tools/container.sh's --status or --prune: run `tools/container.sh --status` and `tools/container.sh --prune --dry-run`, and read what they list"
+    },
+    {
+      "why": "the test tools. tools/schedule.py runs every check and level of more than one job, and still runs tools alone, as tools/test.sh does: test_schedule.py proves its phases, slots, niceness, dependents, gate, output, lock and signals; test_test_sh.py runs tools/test.sh through it with stand-in steps (the plan test.sh writes, the results it reads back, what each level records); pool_selftest.py the pool's side of its gate; and `tools/test.sh tools` itself runs as a schedule of one step. What real steps add, the levels run before a push",
+      "paths": ["tools/test.sh", "tools/schedule.py", "tools/status.py", "tools/impact.py", "tools/tests/*", "tests/impact.json"],
       "checks": ["tools"]
     }
   ]
