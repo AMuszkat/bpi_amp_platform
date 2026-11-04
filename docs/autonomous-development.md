@@ -198,7 +198,11 @@ the checks are made to take a minute or two after an edit:
   levels run those before the push, and after touching those parts one runs
   `tools/test.sh speakerd pair chain installers` by hand. `changed` says so before and after
   its checks: a rule's optional `by_hand` is such advice, which `tools/impact.py` prints on
-  stderr, once, for the files changed that the rule decides. `tools/tests/test_impact.py` keeps
+  stderr, once, for the files changed that the rule decides. The build and test tools run the
+  checks that go through them: `tools/build.sh` runs `chain` and `tools`, `tools/jobserver.sh`
+  `plugins` and `chain` (an edit of it relinks nothing, so its advice says what to touch first),
+  `tools/container.sh` and `tools/schedule.py` `tools` alone (the schedule's own tests, and
+  `tools/test.sh`'s through it with stand-in steps). `tools/tests/test_impact.py` keeps
   the map honest (every `speakerd` file is named by a rule, every path that skips `chain` is
   editor-only), and what the map leaves out, the levels catch before the push.
 - **One build at a time per build tree.** `tools/build.sh` holds the tree's `.build.lock`
