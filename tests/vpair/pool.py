@@ -32,9 +32,17 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
 4. FILE gets tools/test.sh's note: "N tests[, K failed: id, id], M skipped[: id (reason); ...]",
    ids as unittest's test.id(). A unit whose process ends without its result (it died, or ran past
    its timeout: 4 times its learned duration, at least 300 s; 900 s unknown) is failed under its
-   unit name, with what it said before.
+   unit name, with what it said before; so is one the pool could not run, clean up after or read
+   the log of, with what went wrong, its block printed all the same.
 5. Exit status 0 when every test passed (skips allowed), 1 otherwise. SIGINT or SIGTERM stops the
    workers, brings their pairs down, writes the note so far, and ends the pool by that signal.
+
+One pool at a time per checkout: build/vpair-pool/ and the prebuild's build trees are this
+checkout's, so a second pool waits for the first (build/vpair-pool.lock), saying which one it is.
+tests/vpair/pool_selftest.py tests all this in seconds, on synthetic modules: VPAIR_POOL_TESTS is
+the folder of the modules (default tests/vpair) and VPAIR_POOL_FILES the folder of the logs, the
+lock and the learned durations (default this checkout's build/, the main checkout's for the
+durations).
 """
 
 import argparse
@@ -48,13 +56,19 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 VPAIR = HERE / "vpair.sh"
-LOGS = ROOT / "build" / "vpair-pool"
+# The modules and the pool's own files: tests/vpair and this checkout's build/, or what
+# pool_selftest.py gives (README.md, "The pool").
+TESTS = Path(os.environ.get("VPAIR_POOL_TESTS") or HERE).resolve()
+FILES = Path(os.environ["VPAIR_POOL_FILES"]).resolve() if os.environ.get("VPAIR_POOL_FILES") else None
+LOGS = (FILES or ROOT / "build") / "vpair-pool"
+LOCK = (FILES or ROOT / "build") / "vpair-pool.lock"
 
 # Seconds per unit, for units the pool never timed: measured by the pool on the machine it was written
 # on (24 threads, 12 workers; the first runs were seeded with the investigation's timings of each class).
@@ -161,6 +175,10 @@ def one_line(text):
     return " ".join(str(text).split())
 
 
+def describe(error):
+    return f"{type(error).__name__}: {one_line(error)}"
+
+
 # ---------------------------------------------------------------------------------------------
 # A unit, in its own process: python3 tests/vpair/pool.py --unit NAME --events FILE
 
@@ -169,6 +187,8 @@ def run_child(name, events_path):
     `events_path` as it happens, one JSON line each, so that the pool knows what a unit that dies
     did before; the last line is the result."""
     sys.path.insert(0, str(HERE))
+    if TESTS != HERE:
+        sys.path.insert(0, str(TESTS))
     sys.stdout.reconfigure(line_buffering=True)      # its prints in order with unittest's lines
     events = open(events_path, "a")
 
@@ -215,6 +235,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "--unit":
 # development container when it is used (BPI_CONTAINER), and the modules import it anyway.
 sys.path.insert(0, str(HERE))
 import harness  # noqa: E402,F401  (its import is the move into the container)
+if TESTS != HERE:
+    sys.path.insert(0, str(TESTS))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -234,7 +256,7 @@ class Unit:
         if self.successful:
             return f"passed ({tests}" + (f", {len(self.skipped)} skipped)" if self.skipped else ")")
         if not self.complete:
-            return f"FAILED: {self.why}"
+            return f"FAILED: {self.why or 'no result'}"
         if not self.run:
             return "FAILED before any test ran"
         return f"FAILED ({len(self.failures) + len(self.errors)} of {tests})"
@@ -245,7 +267,7 @@ def module_names(names):
     name, in its order)."""
     if names:
         return list(names)
-    return sorted(p.stem for p in HERE.iterdir()
+    return sorted(p.stem for p in TESTS.iterdir()
                   if p.is_file() and re.fullmatch(r"test\w*\.py", p.name, re.IGNORECASE))
 
 
@@ -349,7 +371,8 @@ def prebuild(units, out):
 
 class Slot:
     """A worker's place: /tmp/vpool<k> for its pair, its addresses and its stand-in plugin host's
-    name, held with a lock (another pool in this container takes other slots)."""
+    name, held with a lock (/tmp/vpool<k>.lock: another pool in the same /tmp takes other slots,
+    pool_selftest.py's beside a real one, or native pools of two checkouts)."""
 
     def __init__(self, k, lock):
         self.k, self.lock = k, lock
@@ -367,14 +390,24 @@ class Slot:
 
     def clean(self):
         """Brings down a pair left in its VPAIR_DIR (an interrupted run, a killed unit) and stops a
-        stand-in plugin host left under its name; says what it found."""
+        stand-in plugin host left under its name; says what it found. Only in this pool's PID
+        namespace: outside the container /proc shows every container's processes too, and another
+        checkout's pool has a slot of the same number there. Raises what goes wrong (vpair.sh down
+        not done within 60 s), for the unit it cleans up after."""
         found = []
+        try:
+            own = os.readlink("/proc/self/ns/pid")
+        except OSError:
+            own = None
         for pid in os.listdir("/proc"):
             if pid.isdigit():
                 try:
-                    if Path(f"/proc/{pid}/comm").read_text().strip() == self.host:
-                        os.kill(int(pid), signal.SIGKILL)
-                        found.append(f"{self.host} (pid {pid}) killed")
+                    if Path(f"/proc/{pid}/comm").read_text().strip() != self.host:
+                        continue
+                    if own is not None and os.readlink(f"/proc/{pid}/ns/pid") != own:
+                        continue                 # a container's, seen from outside it
+                    os.kill(int(pid), signal.SIGKILL)
+                    found.append(f"{self.host} (pid {pid}) killed")
                 except (OSError, ValueError):
                     pass
         left = [name for name in ("left", "right") if (Path(self.dir) / name).exists()]
@@ -385,9 +418,13 @@ class Slot:
         return found
 
 
+SLOTS = 100                                  # vpairPlugHost<k> is 15 characters at most: k <= 99
+
+
 def take_slots(n):
+    """n free slots, or as many as there are."""
     slots = []
-    for k in range(100):                     # vpairPlugHost<k> is 15 characters at most
+    for k in range(SLOTS):
         lock = open(f"/tmp/vpool{k}.lock", "w")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -396,8 +433,8 @@ def take_slots(n):
             continue
         slots.append(Slot(k, lock))
         if len(slots) == n:
-            return slots
-    raise SystemExit(f"pool: only {len(slots)} free worker slots of the 100 (/tmp/vpool<k>.lock): other pools run")
+            break
+    return slots
 
 
 class Watch(threading.Thread):
@@ -464,38 +501,60 @@ class Pool:
         return max(TIMEOUT_MIN, TIMEOUT_FACTOR * known) if known else TIMEOUT_UNKNOWN
 
     def run_unit(self, unit, slot):
-        """Runs one unit in its own session on `slot`, and prints its whole output when it ends."""
+        """Runs one unit in its own session on `slot`, and prints its whole output when it ends.
+        What goes wrong on the pool's side (the unit not started, its session not stopped, its
+        pair not brought down, its log unreadable) is that unit's failure, with what went wrong."""
         log, events = LOGS / f"{unit.name}.log", LOGS / f"{unit.name}.events"
-        events.unlink(missing_ok=True)
-        own = [entry.rstrip("?") for entry in unit.builds]
-        env = dict(os.environ, **slot.env(), VPAIR_PREBUILT=str(ROOT / "build"), VPAIR_POOL_MODULE=unit.module,
-                   VPAIR_POOL_BUILDS=" ".join(n for n in own if n in self.built),
-                   VPAIR_POOL_UNBUILT=" ".join(n for n in own if n in self.unbuilt))
         unit.worker, unit.state = slot.k, "ran"
-        timeout = self.timeout(unit)
+        trouble = []                            # the pool's side, in the unit's result
+        process, ended, timeout = None, None, self.timeout(unit)
         t0 = time.monotonic()
-        with open(log, "wb") as output:
-            process = subprocess.Popen([sys.executable, str(HERE / "pool.py"), "--unit", unit.name, "--events",
-                                        str(events)], cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=output,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
-            with self.lock:
-                self.running[process.pid] = unit
-            try:
-                process.wait(timeout=timeout)
-                ended = None
-            except subprocess.TimeoutExpired:
-                ended = f"no result within its timeout of {timeout:.0f} s"
-                stop_group(process)
-            with self.lock:
-                self.running.pop(process.pid, None)
-        unit.seconds = time.monotonic() - t0
-        # Whatever it left: its processes (its own session), its pair, a stand-in plugin host.
-        kill_group(process.pid)
-        slot.clean()
-        if ended is None and self.stopping.is_set() and process.returncode < 0:
-            ended = "interrupted"
-        self.read_events(unit, events, process.returncode, ended)
-        text = log.read_text(errors="replace")
+        try:
+            events.unlink(missing_ok=True)
+            own = [entry.rstrip("?") for entry in unit.builds]
+            env = dict(os.environ, **slot.env(), VPAIR_PREBUILT=str(ROOT / "build"), VPAIR_POOL_MODULE=unit.module,
+                       VPAIR_POOL_BUILDS=" ".join(n for n in own if n in self.built),
+                       VPAIR_POOL_UNBUILT=" ".join(n for n in own if n in self.unbuilt))
+            with open(log, "wb") as output:
+                process = subprocess.Popen([sys.executable, str(HERE / "pool.py"), "--unit", unit.name, "--events",
+                                            str(events)], cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=output,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
+                with self.lock:
+                    self.running[process.pid] = unit
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    ended = f"no result within its timeout of {timeout:.0f} s"
+                    stop_group(process)
+        except Exception as error:              # noqa: BLE001  (the unit's failure, said)
+            trouble.append(f"the pool could not run it to its end: {describe(error)}")
+        finally:
+            unit.seconds = time.monotonic() - t0
+            if process is not None:
+                with self.lock:
+                    self.running.pop(process.pid, None)
+                # Whatever it left: its processes (its own session), then below its pair and a
+                # stand-in plugin host.
+                kill_group(process.pid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=10)
+        try:
+            slot.clean()
+        except Exception as error:              # noqa: BLE001
+            trouble.append(f"its worker's pair could not be brought down after it: {describe(error)}")
+        if process is not None:                 # else it never started: the trouble says why
+            status = process.returncode
+            if ended is None and self.stopping.is_set() and status is not None and status < 0:
+                ended = "interrupted"
+            self.read_events(unit, events, status, ended)
+        try:
+            text = log.read_text(errors="replace")
+        except OSError as error:
+            text = ""
+            trouble.append(f"its log could not be read: {describe(error)}")
+        if trouble:
+            unit.successful = unit.complete = False
+            unit.why = "; ".join(([unit.why] if unit.why else []) + trouble)
         header = (f"===== {unit.name} (worker {slot.k}, {unit.seconds:.1f} s): {unit.result_text()} =====")
         self.out(f"{header}\n{text.rstrip()}\n===== end of {unit.name}" if text.strip() else header)
 
@@ -508,20 +567,27 @@ class Pool:
                     lines.append(json.loads(line))
         except OSError:
             pass
+        lines = [e for e in lines if isinstance(e, dict)]
         end = next((e["end"] for e in lines if "end" in e), None)
         if end is not None and ended is None:
-            unit.complete = True
-            unit.run, unit.failures, unit.errors = end["run"], end["failures"], end["errors"]
-            unit.skipped = [tuple(s) for s in end["skipped"]]
-            unit.successful = bool(end["successful"]) and status == 0
-            if not unit.successful and not (unit.failures or unit.errors):
-                unit.complete, unit.why = False, f"its process exited with status {status}"
-            return
+            try:
+                run, failures, errors = int(end["run"]), list(end["failures"]), list(end["errors"])
+                skipped = [(str(s[0]), str(s[1])) for s in end["skipped"]]
+                successful = bool(end["successful"])
+            except (KeyError, TypeError, ValueError, IndexError):
+                end = None                      # not the pool's own: as if there were none
+            else:
+                unit.complete = True
+                unit.run, unit.failures, unit.errors, unit.skipped = run, failures, errors, skipped
+                unit.successful = successful and status == 0
+                if not unit.successful and not (unit.failures or unit.errors):
+                    unit.complete, unit.why = False, f"its process exited with status {status}"
+                return
         # It ended without its result: what it said before, and failed under its own name.
         unit.run = sum(1 for e in lines if "start" in e)
-        unit.failures = [e["failure"] for e in lines if "failure" in e]
-        unit.errors = [e["error"] for e in lines if "error" in e]
-        unit.skipped = [(e["skip"], e["reason"]) for e in lines if "skip" in e]
+        unit.failures = [str(e["failure"]) for e in lines if "failure" in e]
+        unit.errors = [str(e["error"]) for e in lines if "error" in e]
+        unit.skipped = [(str(e["skip"]), str(e.get("reason", ""))) for e in lines if "skip" in e]
         unit.why = ended or (f"its process was killed by signal {-status}" if status is not None and status < 0
                              else f"its process exited with status {status} without its result")
 
@@ -531,7 +597,14 @@ class Pool:
                 if not queue:
                     return
                 unit = queue.pop(0)
-            self.run_unit(unit, slot)
+            try:
+                self.run_unit(unit, slot)
+            except Exception as error:          # noqa: BLE001  (a fault of the pool's: the unit's failure, said)
+                unit.state, unit.complete, unit.successful = "ran", False, False
+                unit.worker = slot.k if unit.worker is None else unit.worker
+                unit.why = f"the pool failed while handling it: {describe(error)}"
+                self.out(f"===== {unit.name} (worker {slot.k}): {unit.result_text()} =====\n"
+                         f"{traceback.format_exc().rstrip()}\n===== end of {unit.name}")
 
     def run(self, units, jobs):
         queue = list(units)
@@ -572,7 +645,7 @@ def kill_group(pgid):
 # Durations
 
 def durations_file():
-    return main_checkout() / "build" / "vpair-pool-durations.json"
+    return (FILES or main_checkout() / "build") / "vpair-pool-durations.json"
 
 
 def load_durations():
@@ -596,6 +669,59 @@ def save_durations(measured):
         tmp = path.with_name(f".{path.name}.{os.getpid()}")
         tmp.write_text(json.dumps(dict(sorted(learned.items())), indent=1) + "\n")
         os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------------------------
+# One pool at a time per checkout
+
+def hold_checkout(out, interrupted, who):
+    """Takes the checkout's lock (build/vpair-pool.lock) for the whole run: the logs in
+    build/vpair-pool/, which a pool clears as it starts, and the build trees its prebuild runs ninja
+    in are this checkout's (a worktree has its own build/, so worktrees' pools run at once). Waits
+    while another pool holds it, naming that one; returns the open lock, held until this process
+    exits (no unit or build inherits it), or None when `interrupted()` while waiting."""
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    lock = os.fdopen(os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o644), "r+")   # not truncated: it names the holder
+    waited = said = None
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            pass
+        now = time.monotonic()
+        if waited is None or now - said >= 60:
+            try:
+                holder = one_line(LOCK.read_text()) or "a pool that has not said which yet"
+            except OSError:
+                holder = "a pool"
+            if waited is None:
+                waited = now
+                out(f"pool: another pool runs in this checkout: {holder}; waiting for it to end (one pool at a time "
+                    f"per checkout, {LOCK}: the logs and the prebuild's build trees are the checkout's)")
+            else:
+                out(f"pool: still waiting for {holder} ({now - waited:.0f} s)")
+            said = now
+        if interrupted():
+            lock.close()
+            return None
+        time.sleep(0.2)
+    if waited is not None:
+        out(f"pool: the other pool ended; this one starts after waiting {time.monotonic() - waited:.1f} s")
+    lock.seek(0)
+    lock.truncate()
+    lock.write(who + "\n")
+    lock.flush()
+    return lock
+
+
+def holder_text(jobs, modules):
+    """What a waiting pool says of this one."""
+    where = "in the container" if os.environ.get("BPI_IN_CONTAINER") else "outside the container"
+    what = " ".join(modules) if modules else "every module"
+    if len(what) > 160:
+        what = what[:157] + "..."
+    return f"pool.py pid {os.getpid()} ({where}), since {time.strftime('%H:%M:%S %Z').strip()}, --jobs {jobs} {what}"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -635,6 +761,10 @@ def main():
                         help="seconds per unit instead of 4 times its learned duration (at least 300 s; 900 s unknown)")
     parser.add_argument("modules", nargs="*", help="test_<name> (none: every module of tests/vpair)")
     args = parser.parse_args()
+    # 64 at most. Nothing of a worker's own runs out there: the slots' names allow 100 in one /tmp
+    # (SLOTS), and 64 leaves the rest to another pool there (pool_selftest.py's beside a real one);
+    # the address blocks (127.77.<k>) allow 256, the displays (:<100 + k>) more. What runs out first
+    # is the container's: 65 to 75 tasks a busy worker against its pids.max of 2048 (README.md).
     if not 1 <= args.jobs <= 64:
         parser.error("--jobs: 1 to 64")
     os.chdir(ROOT)
@@ -660,6 +790,23 @@ def main():
     if not units:
         out("pool: no test found")
         return finish(units, status=1)
+
+    # One pool at a time per checkout; SIGINT or SIGTERM while waiting ends this one, no unit run.
+    waiting_signal = []
+    previous = {s: signal.signal(s, lambda signum, _frame: waiting_signal.append(signum))
+                for s in (signal.SIGINT, signal.SIGTERM)}
+    checkout = hold_checkout(out, lambda: bool(waiting_signal), holder_text(args.jobs, args.modules))
+    for s, handler in previous.items():
+        signal.signal(s, handler)
+    if checkout is None or waiting_signal:
+        for unit in units:
+            unit.state = "not run: interrupted while waiting for the other pool"
+        out(f"pool: {signal.Signals(waiting_signal[0]).name} while waiting: none of the {len(units)} unit(s) ran")
+        finish(units)
+        signal.signal(waiting_signal[0], signal.SIG_DFL)
+        os.kill(os.getpid(), waiting_signal[0])
+        return 1
+
     if LOGS.exists():
         for old in list(LOGS.glob("*.log")) + list(LOGS.glob("*.events")):
             old.unlink(missing_ok=True)
@@ -678,10 +825,19 @@ def main():
     alone_units = [u for u in units if u.alone]
     jobs = max(1, min(args.jobs, len(pooled))) if pooled else 1
     slots = take_slots(jobs)
+    if len(slots) < jobs:
+        for unit in units:
+            unit.state = "not run: no free worker slot"
+        out(f"pool: only {len(slots)} of the {SLOTS} worker slots are free (/tmp/vpool<k>.lock), {jobs} needed: "
+            f"other pools run in this /tmp")
+        return finish(units)
     pool = Pool(slots, out, built, unbuilt, known, args.unit_timeout)
     for slot in slots:
-        for what in slot.clean():
-            out(f"pool: worker {slot.k}: left by an earlier run: {what}")
+        try:
+            for what in slot.clean():
+                out(f"pool: worker {slot.k}: left by an earlier run: {what}")
+        except Exception as error:              # noqa: BLE001  (its units find out; said here)
+            out(f"pool: worker {slot.k}: what an earlier run left could not be cleaned up: {describe(error)}")
     watch = Watch()
     watch.start()
 
@@ -707,10 +863,16 @@ def main():
         if unit.state is None:
             unit.state = "not run: interrupted"
     for slot in slots:
-        slot.clean()
+        try:
+            slot.clean()
+        except Exception as error:              # noqa: BLE001
+            out(f"pool: worker {slot.k}: its pair could not be brought down at the end: {describe(error)}")
     watch.done.set()
 
-    save_durations({u.name: u.seconds for u in units if u.state == "ran" and u.complete})
+    try:
+        save_durations({u.name: u.seconds for u in units if u.state == "ran" and u.complete})
+    except OSError as error:
+        out(f"pool: the durations could not be saved in {durations_file()}: {describe(error)}")
     failed_units = [u.name for u in units if not (u.state == "ran" and u.successful)]
     summary = (f"{table(units)}\n"
                f"pool: {len(units)} unit(s), {jobs} worker(s), {time.monotonic() - started:.1f} s "
@@ -718,7 +880,10 @@ def main():
                + (f"pool: failed: {', '.join(failed_units)}\n" if failed_units else "")
                + watch.summary())
     out(summary)
-    (LOGS / "summary.txt").write_text(summary + "\n")
+    try:
+        (LOGS / "summary.txt").write_text(summary + "\n")
+    except OSError as error:
+        out(f"pool: {LOGS / 'summary.txt'} could not be written: {describe(error)}")
     status = finish(units)
     if caught:
         for s, handler in previous.items():
