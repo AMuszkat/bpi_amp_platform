@@ -158,10 +158,10 @@
       "checks": ["speakerd"]
     },
     {
-      "why": "speakerd's DISPLAY, one no X server has, set first in main (Main.cpp) and in speakerd-make-filtergraph (examples/MakeFiltergraph.cpp): every speakerd scenario starts speakerd, and its plugins' message threads, after it. No scenario reads what it is for, that neither connects to an X server (README.md, \"No X display\"): controller_end_to_end's Xvfb starts after its speakerds made their plugins, and nothing is asserted once it stops. Its by_hand says how to see it",
+      "why": "speakerd's DISPLAY, one no X server has, set first in main (Main.cpp) and in speakerd-make-filtergraph (examples/MakeFiltergraph.cpp): every speakerd scenario starts speakerd, and its plugins' message threads, after it, and speakerd_no_display (in the speakerd check) reads what it is for (README.md, \"No X display\"): neither connects to an Xvfb, DISPLAY naming it or unset, and speakerd plays on once it is killed. speakerd-make-filtergraph no check builds: its by_hand says how",
       "paths": ["dsp/juce_apps/speakerd/NoDisplay.h"],
       "checks": ["speakerd"],
-      "by_hand": "no scenario asserts that speakerd and its plugins stay off X (README.md, \"No X display\"): start an Xvfb, run speakerd with DISPLAY naming it and a plugin in its graph, stop the Xvfb, and see speakerd still running; speakerd-make-filtergraph, which sets it too, builds only on request: `tools/container.sh cmake --build build/speakerd --target speakerd-make-filtergraph`"
+      "by_hand": "speakerd-make-filtergraph, which sets it too, builds only on request, and no check builds it: `tools/container.sh cmake --build build/speakerd --target speakerd-make-filtergraph`"
     },
     {
       "why": "speakerd alone: the import of an AudioPluginHost session (speakerd_import, with the examples), the plugins' LV2 state, the sample helpers",
