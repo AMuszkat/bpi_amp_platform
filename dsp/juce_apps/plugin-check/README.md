@@ -52,8 +52,8 @@ exercises the DSP rather than a flat setting.
 
 ## Build trees: with and without LTO, ccache
 
-`run.sh` reads these from the environment (and hands `PLUGIN_CHECK_LTO` on to the container
-itself, which is not given it otherwise):
+`run.sh` reads these from the environment (`tools/container.sh` gives each of them to the
+development container):
 
 | Variable | | Default |
 |---|---|---|
@@ -89,14 +89,23 @@ rebuilds the tree.
 
 ## The display and the editor check
 
-The editor check needs an X display. Without `DISPLAY` the script starts `Xvfb` and `openbox`
-if they are installed (a window manager is needed: without one, opening an LV2 editor fails
-with an X `BadAtom` error) and skips the check otherwise. Xvfb takes the first free display
-number and writes it once it accepts connections (`-displayfd`), so checks running at once
-each get their own display; openbox runs its `--startup` command once it manages the screen,
-and the script waits for both (at most 10 s each; it fails if either does not start, their logs
-are `<plugin>-xvfb.log` and `<plugin>-openbox.log` in `BUILD_DIR`) rather than sleep a fixed
-1.5 s.
+The editor check needs an X display. Without `DISPLAY` the script starts `Xvfb` and `openbox` if
+they are installed (a window manager is needed: without one, opening an LV2 editor fails with an
+X `BadAtom` error) and skips the check otherwise. Xvfb runs on the first free display number
+from `:200` up (to `:299`), never on `:0` and the low numbers: a JUCE program with no `DISPLAY`
+opens `:0.0`, the plugins `speakerd` hosts included, and exits when that X server stops
+([`tests/vpair/README.md`](../../../tests/vpair/README.md)), and an Xvfb given `-displayfd`
+alone takes the first free number from `:0`. The numbers between are others' in the same
+container: `:96` the controller's screenshot run's, `:100` to `:199` the vpair pool's workers'.
+Given a number with `-displayfd`, Xvfb writes it once it accepts connections, and exits at once
+(in a few milliseconds) when an X server already listens there; it keeps no lock file then, so
+its socket alone decides
+([`x11-plugin-windows.md`](../../docs/juce-knowledge/gui/x11-plugin-windows.md), 4). `run.sh`
+then tries the next number, so checks running at once each get their own display. openbox runs
+its `--startup` command once it manages the screen. The script waits for both, at most 10 s each
+(Xvfb's 10 s for all its tries), rather than sleep a fixed 1.5 s, and fails if either does not
+start; their logs are `<plugin>-xvfb.log` (a `--- Xvfb :<n>` line before each try's output) and
+`<plugin>-openbox.log` in `BUILD_DIR`.
 
 The editor stays up until `run.sh` has a screenshot of it painted (at most 40 s of trying),
 because under load an editor can take seconds to paint for the first time. Under load the

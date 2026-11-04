@@ -181,3 +181,24 @@ trips added for window tracking (section 2) cost 0.04-0.07 ms each, and the 60 H
 0.1-0.2 ms a tick. Both are noise next to one repaint.
 
 (Driving a UI with synthetic X events, and what does not work that way: see the end of §2.)
+
+## 4. With no `DISPLAY`, a JUCE program opens `:0.0`, so a headless check's Xvfb must not take it
+
+`XWindowSystem::initialiseXDisplay()` (`juce_gui_basics/native/juce_XWindowSystem_linux.cpp`)
+falls back to `":0.0"` when `DISPLAY` is empty. So a JUCE program started without `DISPLAY`
+(speakerd and the plugins it hosts, in the development container) connects to whatever X server
+holds `:0` at that moment, and exits with status 1 ("X connection to :0.0 broken") when that
+server stops ([`tests/vpair/README.md`](../../../../tests/vpair/README.md)). An Xvfb that a check
+starts for an editor must therefore stay off `:0`, and `Xvfb -displayfd <fd>` alone takes the
+first free number counting from `:0`.
+
+Xvfb 21.1.7 (Debian bookworm, the development container), checked 2026-11-04:
+- it has no option to start that search at another number. Given a number, `Xvfb :<n>
+  -displayfd <fd>` uses that one and still writes it to the fd once it accepts connections, so a
+  script can try numbers itself and keep `-displayfd` as its readiness signal (no fixed sleep);
+- with `-displayfd` it writes no lock file (`/tmp/.X<n>-lock`): the listening socket alone
+  decides. On a number another X server listens on (with or without a lock file), it exits with
+  status 1 in about 5 ms, writes nothing to the fd, and logs `server already running` and
+  `Cannot establish any listening sockets`. That is what lets two scripts that start at the same
+  time each take the next free number. `plugin-check/run.sh` tries `:200` upward this way
+  ([its README](../../../juce_apps/plugin-check/README.md), "The display and the editor check").
