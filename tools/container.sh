@@ -14,9 +14,9 @@
 #     auto   (default) in the container when Podman is installed, natively otherwise
 #     1      always in the container
 #     0      always natively: the packages of the root CLAUDE.md must be installed
-# The container is given TERM, CI, JUCE_INSTALL_DIR, BUILD_DIR and every BPI_* and VPAIR_*
-# variable, nothing else. The build scripts then call ccache_env (below): BPI_CCACHE=0 builds
-# without ccache, BPI_CCACHE=1 with it even where CI is set.
+# The container is given TERM, CI, JUCE_INSTALL_DIR, BUILD_DIR, PLUGIN_CHECK_LTO and every
+# BPI_* and VPAIR_* variable, nothing else. The build scripts then call ccache_env (below):
+# BPI_CCACHE=0 builds without ccache, BPI_CCACHE=1 with it even where CI is set.
 #
 # Each checkout, and each git worktree, has its own long-running container named after its
 # path. What runs in it, such as the virtual pair, survives between commands and cannot
@@ -92,7 +92,7 @@ container_exec() {
     local flags=(-i) var dir="$PWD" main
     [ -t 0 ] && [ -t 1 ] && flags+=(-t)
     # CI too, so that what CI decides (ccache_env, the test defaults) is decided alike inside.
-    for var in TERM CI JUCE_INSTALL_DIR BUILD_DIR $(compgen -e | grep -E '^(BPI|VPAIR)_' || true); do
+    for var in TERM CI JUCE_INSTALL_DIR BUILD_DIR PLUGIN_CHECK_LTO $(compgen -e | grep -E '^(BPI|VPAIR)_' || true); do
         [ -n "${!var:-}" ] && flags+=(-e "$var=${!var}")
     done
     main="$(main_checkout)"

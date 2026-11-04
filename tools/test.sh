@@ -1,28 +1,60 @@
 #!/bin/bash
 # The tests. See .claude/skills/test.
 #
-#   Checks, minutes each, run while working (several at once: tools/test.sh speakerd installers):
-#     tools/test.sh plugin <name>      plugin-check of one plugin, and its build identity
+#   Checks, minutes each, run while working:
+#     tools/test.sh plugin <name>      plugin-check of one plugin, without LTO, and its build identity
 #     tools/test.sh plugins            every plugin's plugin-check, the block FIR, plugin-versions
 #     tools/test.sh speakerd           speakerd alone on the virtual pair: sound, layers, restarts
 #     tools/test.sh ampd               ampd against a stand-in speakerd: the protocol, no audio
 #     tools/test.sh pair               speakerd and ampd together: knobs, edits, meters, failover
 #     tools/test.sh controller         the controller's own tests, and end to end on the pair
 #     tools/test.sh installers         the installers and the board script, on a virtual speaker
-#     tools/test.sh chain              the board's chain: its cost and the builds' identity
+#     tools/test.sh chain              the board's chain: its cost (quickly) and the builds' identity
 #     tools/test.sh tools              this script's tools: status.py, impact.py, the lab lock
 #     tools/test.sh module <name>...   named modules of tests/vpair
 #     tools/test.sh changed [REF]      the checks that cover the files changed (tools/impact.py)
+#   Several in one command (tools/test.sh plugin loudness speakerd installers; module last, as it
+#   takes every name after it) run what runs outside the virtual pair first, then all their
+#   modules of tests/vpair in one run; changed does the same with the checks it finds.
 #
 #   Levels, end to end, run when asked and before a push (recorded by tools/status.py):
 #     tools/test.sh unit | vpair | all [--no-record]
+#
+#   --jobs N, anywhere (or BPI_TEST_JOBS=N): the modules of tests/vpair run N at a time, each on
+#   its own virtual pair (tests/vpair/pool.py); 1 runs them one after another, in one process.
+#   Default: 1 where CI is set, otherwise half the processors. Where CI is set, the checks are
+#   also CI's: `plugin <name>` with LTO (BPI_TEST_LTO=1 too), chain_cost's full window (the
+#   checks otherwise set VPAIR_CHAIN_COST_QUICK=1 unless it is set; the levels never do), and no
+#   ccache (ccache_env in tools/container.sh; the cache is otherwise shared by every worktree).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 . tools/container.sh
 container_or_native "$0" "$@"
+ccache_env
 record=1
 rc=0
+
+usage() { awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "$0" >&2; exit 2; }
+
+# The options, wherever they are; the other words keep their order.
+JOBS="${BPI_TEST_JOBS:-}"
+words=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-record) record=0 ;;
+        --jobs)      [ $# -ge 2 ] || { echo "--jobs takes a number" >&2; exit 2; }
+                     JOBS="$2"; shift ;;
+        --jobs=*)    JOBS="${1#--jobs=}" ;;
+        *)           words+=("$1") ;;
+    esac
+    shift
+done
+set -- ${words[@]+"${words[@]}"}
+if [ -z "$JOBS" ]; then
+    if [ -n "${CI:-}" ]; then JOBS=1; else JOBS=$(( $(nproc) / 2 )); [ "$JOBS" -ge 1 ] || JOBS=1; fi
+fi
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "--jobs (or BPI_TEST_JOBS) takes a whole number from 1, not '$JOBS'" >&2; exit 2; }
 
 record() { [ $record = 0 ] || tools/status.py set "$@"; }
 
@@ -53,15 +85,24 @@ have_pipewire() {
     return 1
 }
 
-# Runs the named modules of tests/vpair (none: all of them); prints the note; the note's text in
-# $NOTE.
+# Runs the named modules of tests/vpair (none: all of them): with JOBS 1 one after another, in
+# one process (VPAIR_RUNNER, what CI runs); otherwise JOBS at a time, each on its own virtual
+# pair, after one build of what they all need (tests/vpair/pool.py, which writes the same note).
+# Prints the note; the note's text in $NOTE.
 modules() {
-    local what="$1" file
+    local what="$1" file rc
     shift
     have_pipewire "$what" || { NOTE="skipped: no pipewire"; return 1; }
     file="$(mktemp)"
-    python3 -c "$VPAIR_RUNNER" "$file" "$@"
-    local rc=$?
+    if [ "$JOBS" -gt 1 ]; then
+        local count="every module"
+        [ $# = 0 ] || count="$# module(s)"
+        echo "$what: $count, $JOBS at a time (tests/vpair/pool.py; --jobs 1: one after another)"
+        python3 tests/vpair/pool.py --jobs "$JOBS" --note "$file" "$@"
+    else
+        python3 -c "$VPAIR_RUNNER" "$file" "$@"
+    fi
+    rc=$?
     NOTE="$(cat "$file")"
     [ -n "$NOTE" ] || NOTE="the test run wrote no note"
     rm -f "$file"
@@ -78,12 +119,39 @@ plugins_with_targets() {
 
 # plugin-check of plugin $1, then the version and source identity in the bundles it built
 # (dsp/juce_plugins/tests/buildinfo). Not in the copies JUCE made of them in ~/.lv2: any other
-# build in the same HOME may have written those since.
+# build in the same HOME may have written those since. $2: lto, as the plugins ship (the levels,
+# `plugins`, CI), in build-check; or nolto, in build-check-nolto, for the focused check, where a
+# one-line edit then relinks in seconds instead of most of a minute (six LTO links). An explicit
+# BUILD_DIR is used for either.
 check_plugin() {
-    ensure_juce || { echo "plugin $1: no JUCE install (see CLAUDE.md)"; return 1; }
-    dsp/juce_apps/plugin-check/run.sh "$1" || return 1
-    local bundles=("${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}/$1-builds/plugin/"*_artefacts/Release/LV2/*.lv2)
-    dsp/juce_plugins/tests/buildinfo/check.sh --arch x86_64 "$1" "${bundles[@]}"
+    local name="$1" lto=1 dir="${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}"
+    [ "$2" = lto ] || { lto=0; dir="${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check-nolto}"; }
+    ensure_juce || { echo "plugin $name: no JUCE install (see CLAUDE.md)"; return 1; }
+    PLUGIN_CHECK_LTO=$lto BUILD_DIR="$dir" dsp/juce_apps/plugin-check/run.sh "$name" || return 1
+    local bundles=("$dir/$name-builds/plugin/"*_artefacts/Release/LV2/*.lv2)
+    dsp/juce_plugins/tests/buildinfo/check.sh --arch x86_64 "$name" "${bundles[@]}"
+}
+
+# The focused `plugin <name>`: without LTO, unless CI is set or BPI_TEST_LTO=1.
+check_plugin_focused() {
+    local why=""
+    if [ -n "${CI:-}" ]; then why="CI is set"; elif [ "${BPI_TEST_LTO:-}" = 1 ]; then why="BPI_TEST_LTO=1"; fi
+    if [ -n "$why" ]; then
+        echo "plugin $1: with LTO ($why), in ${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check}"
+        check_plugin "$1" lto
+    else
+        echo "plugin $1: without LTO, in ${BUILD_DIR:-dsp/juce_apps/plugin-check/build-check-nolto}" \
+             "(BPI_TEST_LTO=1: with it, as \`plugins\`, the levels and CI build)"
+        check_plugin "$1" nolto
+    fi
+}
+
+check_plugins() {
+    local p ok=0
+    for p in $(plugins_with_targets); do check_plugin "$p" lto || ok=1; done
+    dsp/juce_plugins/tests/blockfir/run.sh || ok=1
+    dsp/juce_plugins/tests/plugin-versions/run.sh || ok=1
+    return $ok
 }
 
 # One aarch64 bundle and its copy: loudness_headless, the cheapest target to cross-build.
@@ -108,42 +176,88 @@ INSTALLER_MODULES="test_firmware_speakerd_install test_firmware_ampd_install tes
     test_speakerd_crash_restart"
 CHAIN_MODULES="test_chain_cost test_plugin_identity"
 
-# shellcheck disable=SC2086 # the module lists, one word each
-check() {
-    local what="$1"
-    shift
-    echo "=== /test $what${*:+ $*}"
-    case "$what" in
-        plugin)     check_plugin "$1" ;;
-        plugins)    local p ok=0
-                    for p in $(plugins_with_targets); do check_plugin "$p" || ok=1; done
-                    dsp/juce_plugins/tests/blockfir/run.sh || ok=1
-                    dsp/juce_plugins/tests/plugin-versions/run.sh || ok=1
-                    return $ok ;;
-        speakerd)   modules speakerd $SPEAKERD_MODULES ;;
-        ampd)       modules ampd $AMPD_MODULES ;;
-        pair)       modules pair $PAIR_MODULES ;;
-        controller) tools/build.sh controller && dsp/juce_apps/controller/tests/run.sh \
-                        && modules controller test_controller_end_to_end ;;
-        installers) modules installers $INSTALLER_MODULES ;;
-        chain)      modules chain $CHAIN_MODULES ;;
-        tools)      python3 tools/tests/test_status_gate.py && python3 tools/tests/test_impact.py ;;
-        module)     local m names=()
-                    for m in "$@"; do names+=("test_${m#test_}"); done
-                    modules module "${names[@]}" ;;
-        *) echo "no check named $what" >&2; return 2 ;;
-    esac
+LEVEL=0          # 1 while a level runs
+LAST_HEADER=""
+header() { [ "$*" = "$LAST_HEADER" ] || echo "=== /test $*"; LAST_HEADER="$*"; }
+
+# Appends the checks named to CHECK_LIST, one element per check with its arguments ("plugin
+# loudness", "speakerd", "module test_a b"). `module` takes every word after it.
+add_checks() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            plugin) [ $# -ge 2 ] || { echo "plugin: which plugin? (tools/test.sh plugin <name>)" >&2; return 2; }
+                    CHECK_LIST+=("plugin $2"); shift 2 ;;
+            plugins | speakerd | ampd | pair | controller | installers | chain | tools)
+                    CHECK_LIST+=("$1"); shift ;;
+            module) [ $# -ge 2 ] || { echo "module: which module? (tools/test.sh module <name>...)" >&2; return 2; }
+                    shift; CHECK_LIST+=("module $*"); return 0 ;;
+            *)      echo "no check named $1" >&2; return 2 ;;
+        esac
+    done
 }
 
+# chain_cost's quick window (VPAIR_CHAIN_COST_QUICK=1, tests/vpair/test_chain_cost.py) for a
+# check that runs it, unless CI is set or the variable is; never in a level.
+quick_chain_cost() {
+    [ $LEVEL = 0 ] && [ -z "${CI:-}" ] && [ -z "${VPAIR_CHAIN_COST_QUICK+set}" ] || return 0
+    case " $* " in *" test_chain_cost "*) ;; *) return 0 ;; esac
+    export VPAIR_CHAIN_COST_QUICK=1
+    echo "chain_cost: its quick window (VPAIR_CHAIN_COST_QUICK=1); the levels and CI measure the full one"
+}
+
+# Runs CHECK_LIST: what runs outside the virtual pair first (plugin, plugins, tools, the
+# controller's build and its own tests), in order; then every module of tests/vpair the checks
+# name, each once, in one run (one build, one schedule). The controller's module runs only once
+# its build and its own tests have passed.
+# shellcheck disable=SC2086 # a check and its arguments; the module lists, one word each
+run_checks() {
+    local entry what m ok=0 names=() shown=() said=()
+    for entry in "${CHECK_LIST[@]}"; do
+        set -- $entry
+        what="$1"
+        shift
+        case "$what" in
+            plugin)     header plugin "$1"; check_plugin_focused "$1" || ok=1 ;;
+            plugins)    header plugins; check_plugins || ok=1 ;;
+            tools)      header tools
+                        python3 tools/tests/test_status_gate.py && python3 tools/tests/test_impact.py || ok=1 ;;
+            controller) header controller
+                        if tools/build.sh controller && dsp/juce_apps/controller/tests/run.sh; then
+                            shown+=(controller); said+=(controller); names+=(test_controller_end_to_end)
+                        else
+                            echo "controller: its build or its own tests failed: test_controller_end_to_end not run"; ok=1
+                        fi ;;
+            speakerd)   shown+=(speakerd); said+=(speakerd); names+=($SPEAKERD_MODULES) ;;
+            ampd)       shown+=(ampd); said+=(ampd); names+=($AMPD_MODULES) ;;
+            pair)       shown+=(pair); said+=(pair); names+=($PAIR_MODULES) ;;
+            installers) shown+=(installers); said+=(installers); names+=($INSTALLER_MODULES) ;;
+            chain)      shown+=(chain); said+=(chain); names+=($CHAIN_MODULES) ;;
+            module)     shown+=("module $*"); said+=(module); for m in "$@"; do names+=("test_${m#test_}"); done ;;
+        esac
+    done
+    [ ${#names[@]} -gt 0 ] || return $ok
+
+    local -A seen=()
+    local unique=()
+    for m in "${names[@]}"; do [ -n "${seen[$m]:-}" ] || { seen[$m]=1; unique+=("$m"); }; done
+    header "${shown[*]}"
+    quick_chain_cost "${unique[@]}"
+    modules "${said[*]}" "${unique[@]}" || ok=1
+    return $ok
+}
+
+run_named() { CHECK_LIST=(); add_checks "$@" && run_checks; }
+
 run_changed() {
-    local checks line ok=0
+    local checks line
     checks="$(tools/impact.py "$@")" || return 1
     [ -n "$checks" ] || { echo "changed: nothing to run"; return 0; }
+    CHECK_LIST=()
     while read -r line; do
         # shellcheck disable=SC2086 # a check and its arguments
-        check $line || ok=1
+        add_checks $line || return 1
     done <<< "$checks"
-    return $ok
+    run_checks
 }
 
 # --- The levels -----------------------------------------------------------------------------------
@@ -151,13 +265,14 @@ run_changed() {
 run_unit() {
     local p failed=0 checked=""
     for p in $(plugins_with_targets); do
-        if check plugin "$p"; then echo "unit: $p passed"; else echo "unit: $p FAILED"; failed=1; fi
+        header plugin "$p"
+        if check_plugin "$p" lto; then echo "unit: $p passed"; else echo "unit: $p FAILED"; failed=1; fi
         checked+="$p "
     done
     local step
     for step in buildinfo-aarch64:check_build_info_aarch64 blockfir:dsp/juce_plugins/tests/blockfir/run.sh \
                 plugin-versions:dsp/juce_plugins/tests/plugin-versions/run.sh \
-                controller:"check controller" tools:"check tools"; do
+                controller:"run_named controller" tools:"run_named tools"; do
         echo "=== /test unit: ${step%%:*}"
         if ${step#*:}; then echo "unit: ${step%%:*} passed"; else echo "unit: ${step%%:*} FAILED"; failed=1; fi
         checked+="${step%%:*} "
@@ -177,15 +292,23 @@ run_vpair() {
 
 what="${1:-}"
 shift || true
-[ "${*: -1}" = "--no-record" ] 2> /dev/null && { record=0; set -- "${@:1:$#-1}"; }
+case "$what" in
+    unit | vpair | all)
+        [ $# = 0 ] || { echo "$what takes no arguments but --no-record and --jobs N" >&2; exit 2; }
+        LEVEL=1
+        unset VPAIR_CHAIN_COST_QUICK ;;
+esac
 case "$what" in
     unit)  run_unit || rc=1 ;;
     vpair) run_vpair || rc=1 ;;
     all)   run_unit || rc=1; run_vpair || rc=1 ;;
     changed) run_changed "$@" || rc=1 ;;
     plugin|plugins|speakerd|ampd|pair|controller|installers|chain|tools|module)
-        check "$what" "$@" || rc=1; exit $rc ;;
-    *) sed -n '2,19p' "$0" >&2; exit 2 ;;
+        CHECK_LIST=()
+        add_checks "$what" "$@" || exit 2
+        run_checks || rc=1
+        exit $rc ;;
+    *) usage ;;
 esac
 case "$what" in unit|vpair|all) [ $record = 0 ] || { echo "=== status"; tools/status.py show; } ;; esac
 exit $rc
