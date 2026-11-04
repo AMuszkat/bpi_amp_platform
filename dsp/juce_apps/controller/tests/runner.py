@@ -8,14 +8,16 @@ fake hub addresses (worker k: 127.0.3.<2k+1> for the hub, 127.0.3.<2k+2> for the
 the same ports), and each test its own HOME (the controller's settings file). Each test runs in
 a process of its own (`python3 -m unittest -v <test>`), so a test sees exactly what it sees when
 run alone. The tests marked @alone in test_controller.py (a bound on a time or a rate) run after
-the others, one at a time, on the first worker whose display started. The output is unittest's
+the others, one at a time, on the first worker whose display started (alone among these tests,
+not on the machine: in a schedule, beside the other phase-2 steps; README.md). The output is unittest's
 -v output, one test after the other as they end, and its summary; the exit status is 0 when
 every test passed.
 
 A test that outlives TEST_TIMEOUT_S is killed and is an error; its worker goes on with the next.
 A worker whose display does not start is an error and runs nothing (the others take its tests).
 A test that did not run (no display started, the run stopped) is an error named in the summary,
-with why.
+with why. SIGTERM, SIGHUP and Ctrl-C stop the run: every test's session killed, every display
+stopped, the summary printed; exit 143, 129, 130.
 
 N: --jobs, or $BPI_CONTROLLER_JOBS, or 1 where $CI is set, or DEFAULT_JOBS. Standard library only.
 """
@@ -241,8 +243,10 @@ def main():
             text += "\n    (%.1f s, %s)" % (result.seconds, result.worker.where())
             print(text, file=sys.stderr, flush=True)
 
-    # Stopped (SIGTERM, as for Ctrl-C): the finally below stops every test and display.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    # Stopped (SIGTERM, or SIGHUP: a closed terminal, or tools/schedule.py passing either on to
+    # every step's session; as for Ctrl-C): the finally below stops every test and display.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
+    signal.signal(signal.SIGHUP, lambda *_: sys.exit(128 + signal.SIGHUP))
     t0 = time.monotonic()
     tmp = tempfile.mkdtemp(prefix="controller-tests-")
     workers = [Worker(k, tmp) for k in range(jobs)]
@@ -318,9 +322,12 @@ def main():
                     run_one(w, test)
     except KeyboardInterrupt:
         stopped, code = "the run was interrupted", 130
-    except SystemExit as e:    # SIGTERM
+    except SystemExit as e:    # SIGTERM (143) or SIGHUP (129)
         stopped, code = "the run was stopped", e.code
     finally:
+        # A second SIGTERM or SIGHUP (schedule.py passes on each it gets) does not cut the cleanup short.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, signal.SIG_IGN)
         for w in workers:
             w.kill()
         for t in threads:      # each ends its test's communicate() and starts no other
