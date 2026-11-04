@@ -141,14 +141,14 @@ class TheMap(unittest.TestCase):
             ("speakerd",): ["Engine.cpp", "Engine.h", "Render.cpp", "Render.h", "Log.h", "FilterGraph.cpp",
                             "FilterGraph.h", "LV2State.cpp", "LV2State.h", "Samples.h", "examples/loudness.filtergraph",
                             "examples/MakeFiltergraph.cpp"],
-            ("speakerd", "installers"): ["Main.cpp", "CMakeLists.txt", "BuildInfo.cmake", "DeviceConfig.cpp",
-                                         "DeviceConfig.h", "StateLayers.cpp", "StateLayers.h"],
-            ("speakerd", "installers", "pair"): ["PipeWireNode.cpp", "PipeWireNode.h", "LocalLink.cpp", "LocalLink.h",
-                                                 "Control.cpp", "Control.h"],
-            ("speakerd", "installers", "pair", "chain"): ["Monitor.cpp", "Monitor.h"],
-            ("speakerd", "installers", "chain"): ["Timing.cpp", "Timing.h"],
-            ("speakerd", "chain"): ["TimedNode.cpp", "TimedNode.h", "PluginBundles.cpp", "PluginBundles.h",
-                                    "GraphBuilder.cpp", "GraphBuilder.h"],
+            ("speakerd", "installers"): ["BuildInfo.cmake", "DeviceConfig.cpp", "DeviceConfig.h", "StateLayers.cpp",
+                                         "StateLayers.h"],
+            ("speakerd", "installers", "pair"): ["PipeWireNode.cpp", "PipeWireNode.h", "LocalLink.cpp", "LocalLink.h"],
+            ("speakerd", "installers", "pair", "chain"): ["Main.cpp", "CMakeLists.txt", "Control.cpp", "Control.h",
+                                                          "Monitor.cpp", "Monitor.h", "Timing.cpp", "Timing.h",
+                                                          "TimedNode.cpp", "TimedNode.h"],
+            ("speakerd", "installers", "chain"): ["PluginBundles.cpp", "PluginBundles.h"],
+            ("speakerd", "chain"): ["GraphBuilder.cpp", "GraphBuilder.h"],
             ("speakerd", "pair"): ["GraphDocument.cpp", "GraphDocument.h"],
         }
         for want, files in expected.items():
@@ -156,12 +156,16 @@ class TheMap(unittest.TestCase):
                 self.assertEqual(checks(f"{SPEAKERD}/{name}"), (list(want), []), name)
 
     def test_an_edit_of_the_engine_runs_speakerd_alone(self):
+        # The person's decision: the Engine's parts that only pair, chain and installers prove are
+        # left to the levels, and to that command by hand, which its rule says.
         self.assertEqual(checks(f"{SPEAKERD}/Engine.cpp"), (["speakerd"], []))
+        rule = impact.rule_for(RULES, f"{SPEAKERD}/Engine.cpp")
+        self.assertIn("`tools/test.sh speakerd pair chain installers` by hand", rule["why"])
 
     def test_several_speakerd_files_run_what_each_needs_once(self):
-        self.assertEqual(checks(f"{SPEAKERD}/Engine.cpp", f"{SPEAKERD}/Timing.cpp", f"{SPEAKERD}/GraphDocument.cpp",
-                                f"{SPEAKERD}/TimedNode.cpp"),
-                         (["speakerd", "installers", "chain", "pair"], []))
+        self.assertEqual(checks(f"{SPEAKERD}/Engine.cpp", f"{SPEAKERD}/GraphBuilder.cpp", f"{SPEAKERD}/GraphDocument.cpp",
+                                f"{SPEAKERD}/DeviceConfig.cpp", f"{SPEAKERD}/Render.cpp"),
+                         (["speakerd", "chain", "pair", "installers"], []))
 
     def test_a_speakerd_file_no_rule_names_runs_everything_on_speakerd(self):
         self.assertEqual(checks(f"{SPEAKERD}/Something.cpp"), (["speakerd", "installers", "pair", "chain"], []))
@@ -180,8 +184,15 @@ class TheMap(unittest.TestCase):
         self.assertIn("test_hub_down", modules)
 
     def test_the_harness_runs_everything_on_the_pair(self):
-        self.assertEqual(checks("tests/vpair/harness.py")[0], ["speakerd", "ampd", "pair", "controller", "installers", "chain"])
-        self.assertEqual(checks("tests/vpair/pool.py")[0], ["speakerd", "ampd", "pair", "controller", "installers", "chain"])
+        everything = ["speakerd", "ampd", "pair", "controller", "installers", "chain", "tools"]
+        self.assertEqual(checks("tests/vpair/harness.py"), (everything, []))
+        self.assertEqual(checks("tests/vpair/pool.py"), (everything, []))
+
+    def test_a_self_test_of_the_pairs_tools_runs_the_tools_check(self):
+        # tests/vpair/*_selftest.py: not test_*, so the vpair level never discovers them; the tools
+        # check runs them (tools/test.sh tools).
+        self.assertEqual(checks("tests/vpair/pool_selftest.py"), (["tools"], []))
+        self.assertEqual(checks("tests/vpair/pool_selftest.py", "tools/test.sh"), (["tools"], []))
 
     def test_what_no_rule_names(self):
         got, uncovered = checks("firmware/install-lib.sh", ".github/workflows/ci.yml", "tools/build.sh")

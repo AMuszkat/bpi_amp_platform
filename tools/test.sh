@@ -10,7 +10,8 @@
 #     tools/test.sh controller         the controller's own tests, and end to end on the pair
 #     tools/test.sh installers         the installers and the board script, on a virtual speaker
 #     tools/test.sh chain              the board's chain: its cost (quickly) and the builds' identity
-#     tools/test.sh tools              this script's tools: status.py, impact.py, the lab lock
+#     tools/test.sh tools              the test tools: status.py, impact.py, the lab lock, this script's
+#                                      arguments, and the self-tests of tests/vpair's tools (pool.py's)
 #     tools/test.sh module <name>...   named modules of tests/vpair
 #     tools/test.sh changed [REF]      the checks that cover the files changed (tools/impact.py)
 #   Several in one command (tools/test.sh plugin loudness speakerd installers; module last, as it
@@ -22,10 +23,11 @@
 #
 #   --jobs N, anywhere (or BPI_TEST_JOBS=N): the modules of tests/vpair run N at a time, each on
 #   its own virtual pair (tests/vpair/pool.py); 1 runs them one after another, in one process.
-#   Default: 1 where CI is set, otherwise half the processors. Where CI is set, the checks are
-#   also CI's: `plugin <name>` with LTO (BPI_TEST_LTO=1 too), chain_cost's full window (the
-#   checks otherwise set VPAIR_CHAIN_COST_QUICK=1 unless it is set; the levels never do), and no
-#   ccache (ccache_env in tools/container.sh; the cache is otherwise shared by every worktree).
+#   N is 1 to 64, the pool's limit. Default: 1 where CI is set, otherwise half the processors, at
+#   most 64. Where CI is set, the checks are also CI's: `plugin <name>` with LTO (BPI_TEST_LTO=1
+#   too), chain_cost's full window (the checks otherwise set VPAIR_CHAIN_COST_QUICK=1 unless it
+#   is set; the levels never do), and no ccache (ccache_env in tools/container.sh; the cache is
+#   otherwise shared by every worktree).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -34,27 +36,42 @@ container_or_native "$0" "$@"
 ccache_env
 record=1
 rc=0
+MAX_JOBS=64      # tests/vpair/pool.py's limit (its --jobs: 1 to 64)
 
 usage() { awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "$0" >&2; exit 2; }
 
 # The options, wherever they are; the other words keep their order.
 JOBS="${BPI_TEST_JOBS:-}"
+jobs_from="BPI_TEST_JOBS"
 words=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-record) record=0 ;;
         --jobs)      [ $# -ge 2 ] || { echo "--jobs takes a number" >&2; exit 2; }
-                     JOBS="$2"; shift ;;
-        --jobs=*)    JOBS="${1#--jobs=}" ;;
+                     JOBS="$2"; jobs_from="--jobs"; shift ;;
+        --jobs=*)    JOBS="${1#--jobs=}"; jobs_from="--jobs" ;;
         *)           words+=("$1") ;;
     esac
     shift
 done
 set -- ${words[@]+"${words[@]}"}
 if [ -z "$JOBS" ]; then
-    if [ -n "${CI:-}" ]; then JOBS=1; else JOBS=$(( $(nproc) / 2 )); [ "$JOBS" -ge 1 ] || JOBS=1; fi
+    [ "$jobs_from" = BPI_TEST_JOBS ] || { echo "--jobs takes a number" >&2; exit 2; }
+    if [ -n "${CI:-}" ]; then
+        JOBS=1
+    else
+        JOBS=$(( $(nproc) / 2 ))
+        [ "$JOBS" -ge 1 ] || JOBS=1
+        [ "$JOBS" -le $MAX_JOBS ] || JOBS=$MAX_JOBS
+    fi
 fi
-[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "--jobs (or BPI_TEST_JOBS) takes a whole number from 1, not '$JOBS'" >&2; exit 2; }
+[[ "$JOBS" =~ ^[1-9][0-9]?$ ]] && [ "$JOBS" -le $MAX_JOBS ] \
+    || { echo "$jobs_from takes a whole number from 1 to $MAX_JOBS (tests/vpair/pool.py's limit), not '$JOBS'" >&2; exit 2; }
+
+# The note's temporary file (modules) goes however the script ends, by a signal too, which then
+# still ends it (bash runs the EXIT trap, then dies of the signal).
+NOTE_FILE=""
+trap '[ -z "$NOTE_FILE" ] || rm -f "$NOTE_FILE"' EXIT
 
 record() { [ $record = 0 ] || tools/status.py set "$@"; }
 
@@ -90,22 +107,23 @@ have_pipewire() {
 # pair, after one build of what they all need (tests/vpair/pool.py, which writes the same note).
 # Prints the note; the note's text in $NOTE.
 modules() {
-    local what="$1" file rc
+    local what="$1" rc
     shift
     have_pipewire "$what" || { NOTE="skipped: no pipewire"; return 1; }
-    file="$(mktemp)"
+    NOTE_FILE="$(mktemp)"
     if [ "$JOBS" -gt 1 ]; then
         local count="every module"
         [ $# = 0 ] || count="$# module(s)"
         echo "$what: $count, $JOBS at a time (tests/vpair/pool.py; --jobs 1: one after another)"
-        python3 tests/vpair/pool.py --jobs "$JOBS" --note "$file" "$@"
+        python3 tests/vpair/pool.py --jobs "$JOBS" --note "$NOTE_FILE" "$@"
     else
-        python3 -c "$VPAIR_RUNNER" "$file" "$@"
+        python3 -c "$VPAIR_RUNNER" "$NOTE_FILE" "$@"
     fi
     rc=$?
-    NOTE="$(cat "$file")"
+    NOTE="$(cat "$NOTE_FILE")"
     [ -n "$NOTE" ] || NOTE="the test run wrote no note"
-    rm -f "$file"
+    rm -f "$NOTE_FILE"
+    NOTE_FILE=""
     echo "$what: $NOTE"
     return $rc
 }
@@ -164,6 +182,18 @@ check_build_info_aarch64() {
                "$out/${name}_artefacts/Release/LV2/$name.lv2" "$out/copied/lv2/$name.lv2"
 }
 
+# The test tools' own tests (tools/tests/test_*.py), and the self-tests of tests/vpair's tools
+# (tests/vpair/*_selftest.py, pool.py's: not test_*, so that the vpair level never runs them).
+check_tools() {
+    local t ok=0
+    for t in tools/tests/test_*.py tests/vpair/*_selftest.py; do
+        [ -e "$t" ] || continue
+        echo "tools: $t"
+        python3 "$t" || { echo "tools: $t FAILED"; ok=1; }
+    done
+    return $ok
+}
+
 # --- The checks -----------------------------------------------------------------------------------
 
 SPEAKERD_MODULES="test_audio_path test_speakerd_same_sound test_speakerd_state_layers test_speakerd_start_order
@@ -219,8 +249,7 @@ run_checks() {
         case "$what" in
             plugin)     header plugin "$1"; check_plugin_focused "$1" || ok=1 ;;
             plugins)    header plugins; check_plugins || ok=1 ;;
-            tools)      header tools
-                        python3 tools/tests/test_status_gate.py && python3 tools/tests/test_impact.py || ok=1 ;;
+            tools)      header tools; check_tools || ok=1 ;;
             controller) header controller
                         if tools/build.sh controller && dsp/juce_apps/controller/tests/run.sh; then
                             shown+=(controller); said+=(controller); names+=(test_controller_end_to_end)
@@ -292,23 +321,30 @@ run_vpair() {
 
 what="${1:-}"
 shift || true
+CHECK_LIST=()
 case "$what" in
     unit | vpair | all)
         [ $# = 0 ] || { echo "$what takes no arguments but --no-record and --jobs N" >&2; exit 2; }
         LEVEL=1
         unset VPAIR_CHAIN_COST_QUICK ;;
+    changed) ;;
+    plugin|plugins|speakerd|ampd|pair|controller|installers|chain|tools|module)
+        add_checks "$what" "$@" || exit 2 ;;
+    *) usage ;;
 esac
+# For tools/tests/test_test_sh.py: what the arguments decided, and nothing run.
+if [ "${BPI_TEST_DRY_RUN:-}" = 1 ]; then
+    echo "jobs $JOBS"; echo "record $record"; echo "run $what${*:+ $*}"
+    for entry in ${CHECK_LIST[@]+"${CHECK_LIST[@]}"}; do echo "check $entry"; done
+    exit 0
+fi
 case "$what" in
     unit)  run_unit || rc=1 ;;
     vpair) run_vpair || rc=1 ;;
     all)   run_unit || rc=1; run_vpair || rc=1 ;;
     changed) run_changed "$@" || rc=1 ;;
-    plugin|plugins|speakerd|ampd|pair|controller|installers|chain|tools|module)
-        CHECK_LIST=()
-        add_checks "$what" "$@" || exit 2
-        run_checks || rc=1
-        exit $rc ;;
-    *) usage ;;
+    *)     run_checks || rc=1
+           exit $rc ;;
 esac
 case "$what" in unit|vpair|all) [ $record = 0 ] || { echo "=== status"; tools/status.py show; } ;; esac
 exit $rc
