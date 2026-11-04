@@ -177,6 +177,7 @@ class FakeHub:
         self.quantum_delay = 0.3          # seconds from an applied quantum to the state that shows it run
         self.answer_delay = 0.0           # seconds before a proposal is answered
         self.during_answer = None         # called while a proposal waits for its answer (answer_delay)
+        self.after_state = None           # called (under the lock) once a controller's first state is sent, before its next line is read
         self.known_plugins = {LOUDNESS_URI, FIRCONV_URI, CROSSOVER_URI, PROBE_URI, PROBE_BYPASS_URI}
         self.reject_next = None           # a reason: the next proposal is rejected with it
         self.echo_delay = 0.0             # seconds before an OSC echo leaves (to test reordering)
@@ -226,6 +227,9 @@ class FakeHub:
         class Tracked(socketserver.StreamRequestHandler):
             def setup(self):
                 super().setup()
+                # One line at a time on a connection: the handler's thread and a test's (an echo,
+                # a revision) never interleave their writes, and each goes in the order logged.
+                self.write_lock = threading.Lock()
                 with hub.lock:
                     hub._connections.add(self.connection)
 
@@ -253,13 +257,15 @@ class FakeHub:
                 server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.control_rcvbuf)
             server.server_bind()
             server.server_activate()
-            threading.Thread(target=server.serve_forever, daemon=True).start()
+            # shutdown() waits for the loop to look: every 50 ms, not socketserver's 0.5 s.
+            threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
             self._servers.append(server)
 
         self.knobs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.knobs.bind((self.left, self.knobs_port))
-        self.knobs.settimeout(0.2)
-        threading.Thread(target=self._serve_knobs, daemon=True).start()
+        self.knobs.settimeout(0.05)
+        self._knobs_thread = threading.Thread(target=self._serve_knobs, daemon=True)
+        self._knobs_thread.start()
         return self
 
     def stop(self):
@@ -276,6 +282,9 @@ class FakeHub:
                 c.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+        # The port is free once its thread is out of recvfrom (a closed socket stays bound until
+        # then): a hub started at once on the same address can bind it.
+        self._knobs_thread.join(2)
         self.knobs.close()
 
     # -- helpers --------------------------------------------------------------------------
@@ -284,13 +293,14 @@ class FakeHub:
             self.received.append((link, message, time.monotonic()))
 
     def _send_line(self, conn, link, message):
-        with self.lock:
-            self.sent.append((link, message, time.monotonic()))
-        try:
-            conn.wfile.write((json.dumps(message) + "\n").encode())
-            conn.wfile.flush()
-        except OSError:
-            pass
+        with conn.write_lock:
+            with self.lock:
+                self.sent.append((link, message, time.monotonic()))
+            try:
+                conn.wfile.write((json.dumps(message) + "\n").encode())
+                conn.wfile.flush()
+            except OSError:
+                pass
 
     def _osc_out(self, address, *args):
         """An echo to every controller, stamped with that controller's own token."""
@@ -485,6 +495,9 @@ class FakeHub:
                                                   "osc": (conn.client_address[0], int(message.get("osc_port", 0)))}
                     self._welcome(conn, "control", nonce, nc, "hub", self.name)
                     self._send_line(conn, "control", self.state_message())
+                    if self.after_state is not None:
+                        with self.lock:
+                            self.after_state()
                 elif op == "param":
                     self._param(message, "control", conn)
                 elif op == "gesture":

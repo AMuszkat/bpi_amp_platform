@@ -3,7 +3,11 @@
 #
 #     dsp/juce_apps/controller/tests/run.sh               # the bridge tests (test_controller.py)
 #     dsp/juce_apps/controller/tests/run.sh --screenshot  # and the GUI under Xvfb, with screenshots
+#     dsp/juce_apps/controller/tests/run.sh --jobs N      # N tests at a time (runner.py)
 #
+# The tests run several at a time, each worker on its own display from :300 up and its own
+# fake hub addresses (runner.py); those marked @alone after the others, one at a time. Where CI
+# is set, one at a time; $BPI_CONTROLLER_JOBS sets the width too.
 # Runs in the development container when Podman is installed (tools/container.sh at the
 # repository root; BPI_CONTAINER=0 runs it natively). Builds the controller first when it is
 # missing. Screenshots go to build/controller-check/.
@@ -18,9 +22,20 @@ CONTROLLER="${CONTROLLER:-$ROOT/build/controller/controller_artefacts/Release/co
 [ -x "$CONTROLLER" ] || tools/build.sh controller
 export CONTROLLER
 
-python3 -m unittest discover -s "$HERE" -v
+screenshot=0 jobs=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --screenshot) screenshot=1 ;;
+        --jobs) jobs=(--jobs "${2:?--jobs N}"); shift ;;
+        --jobs=*) jobs=(--jobs "${1#--jobs=}") ;;
+        *) echo "usage: $0 [--jobs N] [--screenshot]" >&2; exit 2 ;;
+    esac
+    shift
+done
 
-[ "${1:-}" = "--screenshot" ] || exit 0
+python3 "$HERE/runner.py" "${jobs[@]}"
+
+[ "$screenshot" = 1 ] || exit 0
 
 # The GUI: the hub's graph on the canvas, the speakers panel (a buffer size of 256 chosen), and
 # the loudness control editor open, on a virtual display (as plugin-check/run.sh does).
@@ -30,16 +45,34 @@ pids=()
 cleanup() { [ ${#pids[@]} -gt 0 ] && kill "${pids[@]}" 2> /dev/null || true; }
 trap cleanup EXIT
 
+# wait_for SECONDS COMMAND...: until COMMAND succeeds, at most SECONDS.
+wait_for() {
+    local deadline=$((SECONDS + $1)); shift
+    until "$@"; do
+        [ $SECONDS -lt $deadline ] || return 1
+        sleep 0.05
+    done
+}
+
 if [ -z "${DISPLAY:-}" ]; then
-    Xvfb :96 -screen 0 1720x1000x24 > "$OUT/xvfb.log" 2>&1 & pids+=($!)
-    sleep 1
+    # :96, never :0 (a JUCE program with no DISPLAY opens :0.0). Xvfb writes the number to fd 3
+    # once it takes connections, and openbox runs its --startup command once it manages the screen.
+    Xvfb :96 -displayfd 3 -screen 0 1720x1000x24 -nolisten tcp 3> "$OUT/xvfb.display" > "$OUT/xvfb.log" 2>&1 & pids+=($!)
+    if ! wait_for 10 grep -qx 96 "$OUT/xvfb.display"; then
+        echo "Xvfb did not start on :96 within 10 s ($OUT/xvfb.log):" >&2; tail -20 "$OUT/xvfb.log" >&2; exit 1
+    fi
     export DISPLAY=:96
-    openbox > "$OUT/openbox.log" 2>&1 & pids+=($!)
-    sleep 0.5
+    rm -f "$OUT/openbox.started"
+    openbox --startup "touch $(printf %q "$OUT/openbox.started")" > "$OUT/openbox.log" 2>&1 & pids+=($!)
+    if ! wait_for 10 test -e "$OUT/openbox.started"; then
+        echo "openbox did not start within 10 s ($OUT/openbox.log)" >&2; exit 1
+    fi
 fi
 
-python3 "$HERE/fake_hub.py" --probe > "$OUT/hub.log" 2>&1 & pids+=($!)
-sleep 0.5
+python3 -u "$HERE/fake_hub.py" --probe > "$OUT/hub.log" 2>&1 & pids+=($!)
+if ! wait_for 10 grep -q '^fake hub on' "$OUT/hub.log"; then
+    echo "the fake hub did not start within 10 s ($OUT/hub.log):" >&2; tail -20 "$OUT/hub.log" >&2; exit 1
+fi
 
 cat > "$OUT/screenshot.script" <<EOF
 main-window 0 0 1040 720
@@ -65,7 +98,7 @@ chmod 600 "$OUT/secret"
     --secret-file "$OUT/secret" \
     --script "$OUT/screenshot.script" > "$OUT/screenshot.jsonl" &
 ctl=$!
-for _ in $(seq 1 100); do grep -q '"text":"capture"' "$OUT/screenshot.jsonl" 2> /dev/null && break; sleep 0.1; done
+wait_for 30 grep -q '"text":"capture"' "$OUT/screenshot.jsonl" || echo "(no capture step within 30 s: the screen shot is of whatever is there)" >&2
 import -window root "$OUT/controller-screen.png"
 wait $ctl
 tail -1 "$OUT/screenshot.jsonl"
