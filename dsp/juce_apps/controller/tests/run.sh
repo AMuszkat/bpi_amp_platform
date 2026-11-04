@@ -33,7 +33,12 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# A SIGTERM or SIGHUP to the session (tools/schedule.py passes them on) reaches the runner too,
+# which stops its tests and displays and exits 143 or 129; this script waits for it (a trap
+# runs once the runner has ended) and exits with its status, rather than dying first.
+trap : TERM HUP
 python3 "$HERE/runner.py" "${jobs[@]}"
+trap - TERM HUP
 
 [ "$screenshot" = 1 ] || exit 0
 

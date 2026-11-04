@@ -338,14 +338,30 @@ one at a time, a display from :300 up for each GUI test). The longest start firs
 (`build/controller-check/durations.json`, the last run's times). The tests marked `@alone` in
 `test_controller.py`, whose pass criterion is a time or a rate, run after the others, one at a
 time, on worker 0 (or the first other worker whose display starts): `test_03` (at least 40 datagrams in 1.2 s, at most 51 in a second), `test_09` (more than 8
-level values in 0.5 s), `test_12` and `test_13` (the message thread's ticks under 250 ms). The
+level values in 0.5 s), `test_12` and `test_13` (the message thread's ticks under 250 ms). Alone
+among the controller's tests, not on the machine: in a schedule (`tools/test.sh` with more than
+one job) the controller's own tests run in phase 2, beside the `tools` check and, in a level, the
+vpair pool's main phase (16 workers on 24 threads), so these four run beside those. Their margins
+hold there: 10 full runs of the levels on test-speed-3 (6 on 609f62e) and 4 `tools/test.sh
+controller` runs, 2026-11-04, all 29 tests passing each time; `test_03` sees about 60 datagrams
+in its 1.2 s (at least 40 asked, at 50 a second at most 51 in any second), `test_09` about 15
+values in 0.5 s (more than 8 asked), `test_12` and `test_13` ticks of 12 to 122 ms (under 250
+asked). The
 output is unittest's `-v`, one test after the other as they end (each with its time and worker),
 and its summary; the exit status is 0 when every test passed. A test still running after 600 s
 is killed and is an error (`killed after 600 s`), and its worker goes on with the next; a worker
 whose display does not start is an error (`ERROR: the display of worker K`) and runs nothing, the
 others taking its tests; every test that did not run is an error named in the summary with why
 (`ERROR: <test> (not run: no worker's display started)`, or `the run was stopped` after a
-SIGTERM or Ctrl-C, which still prints the summary). The tests wait on conditions (the
+SIGTERM or a SIGHUP, or `the run was interrupted` after Ctrl-C). Stopped, the runner kills every
+running test's session (its `unittest` process and controller), stops every worker's Xvfb and
+openbox, prints the summary and exits 143 (SIGTERM), 129 (SIGHUP) or 130 (Ctrl-C); a SIGHUP is
+what a closed terminal sends, and `tools/schedule.py` passes SIGINT, SIGTERM and SIGHUP on to
+every step's session, so `run.sh`, the runner, its tests and its displays all get it; `run.sh`
+waits for the runner and exits with its status. A second SIGTERM or SIGHUP during that cleanup is
+ignored. A SIGHUP or SIGTERM to a running `run.sh`'s session (6 workers, each with a test and its
+controller running) leaves no Xvfb, openbox, controller or `unittest` process, in a tenth of a
+second (2026-11-04). The tests wait on conditions (the
 hub's state sent, a refusal, a file the test writes), not on fixed sleeps, except where the time
 is what a test checks (a 7 s window of retries, a negative check that nothing more came: an
 undone edit still undone 300 ms on, no hello in the second after a wrong name's refusal).
