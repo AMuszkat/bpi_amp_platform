@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """tools/impact.py: which checks of tools/test.sh cover a changed file, by tests/impact.json; and
-that the map stays honest: every speakerd file is named by a rule of its own, and every path a
+that the map stays honest: every speakerd file is named by a rule of its own, every path a
 plugin rule without `chain` names is editor-only (never compiled into the plugin's headless
-build, which is what the chain runs). Part of the `tools` check (tools/test.sh tools).
+build, which is what the chain runs), and every plugin has a rule of its own, which runs
+`plugin <name>` only for a plugin that lists TARGETS (plugin-check builds and checks its three
+builds) and otherwise says, in its by_hand, to build it. Part of the `tools` check
+(tools/test.sh tools).
 
     python3 tools/tests/test_impact.py
 """
@@ -44,6 +47,32 @@ def repository_files(folder):
     out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--cached", "--others", "--exclude-standard", "-z",
                           "--", folder], capture_output=True, text=True, check=True).stdout
     return sorted(f for f in set(out.split("\0")) - {""} if (ROOT / f).is_file())
+
+
+# --- Which plugins list TARGETS ------------------------------------------------------------------
+
+# How tools/build.sh and tools/test.sh (plugins_with_targets) tell them: a line of the plugin's
+# CMakeLists.txt that begins with TARGETS. Only those have the control and headless builds, so
+# only those run plugin-check (`plugin <name>`, `plugins`) and the chain's headless builds.
+TARGETS_LINE = re.compile(r"^[ \t]*TARGETS", re.M)
+
+
+def plugins():
+    """{name: lists TARGETS}: every folder of dsp/juce_plugins whose CMakeLists.txt adds a plugin."""
+    found = {}
+    for cmake in sorted(PLUGINS.glob("*/CMakeLists.txt")):
+        text = cmake.read_text()
+        if "speaker_add_plugin" in text:
+            found[cmake.parent.name] = bool(TARGETS_LINE.search(text))
+    return found
+
+
+def named_plugin(pattern):
+    """The plugin whose folder a rule's pattern names (dsp/juce_plugins/<name>/...), or None."""
+    parts = pattern.split("/")
+    if len(parts) > 3 and parts[:2] == ["dsp", "juce_plugins"] and "*" not in parts[2]:
+        return parts[2]
+    return None
 
 
 # --- What a plugin's headless build compiles ------------------------------------------------------
@@ -128,6 +157,23 @@ class TheMap(unittest.TestCase):
         self.assertEqual(checks("dsp/juce_plugins/loudness/plugin-check.monitors.h", "dsp/juce_plugins/loudness/Monitors.h"),
                          (["plugin loudness", "chain"], []))
         self.assertEqual(checks("dsp/juce_plugins/shared/blockfir/BlockFir.h"), (["plugins", "chain"], []))
+
+    def test_ampscope_runs_no_check_and_says_to_build_it(self):
+        # ampScope lists no TARGETS: `plugin ampScope` cannot run plugin-check, no headless build
+        # of it exists for the chain, and nothing else builds it; its rule's by_hand does.
+        for path in ("ampScope/PluginProcessor.cpp", "ampScope/AmpTelemetry.h", "ampScope/CMakeLists.txt"):
+            self.assertEqual(checks(f"dsp/juce_plugins/{path}"), ([], []), path)
+        advice = impact.rule_for(RULES, "dsp/juce_plugins/ampScope/ScopeView.cpp")["by_hand"]
+        self.assertIn("`tools/build.sh ampScope`", advice)
+        self.assertEqual(impact.by_hand_for(RULES, ["dsp/juce_plugins/ampScope/ScopeView.cpp", "README.md"]),
+                         [(advice, ["dsp/juce_plugins/ampScope/ScopeView.cpp"])])
+        # How every plugin builds: the plugins with TARGETS checked, ampScope built by hand.
+        for path in ("dsp/juce_plugins/cmake/SpeakerPlugin.cmake", "dsp/juce_plugins/JUCE"):
+            self.assertEqual(checks(path), (["plugins", "chain"], []), path)
+            self.assertIn("`tools/build.sh ampScope`", impact.rule_for(RULES, path)["by_hand"], path)
+        # What ampScope does not build with says nothing of it.
+        for path in ("dsp/juce_plugins/shared/blockfir/BlockFir.h", "dsp/juce_apps/plugin-check/run.sh"):
+            self.assertEqual(impact.by_hand_for(RULES, [path]), [], path)
 
     def test_a_plugins_editor_runs_its_own_check_alone(self):
         for path in ("loudness/PluginEditor.cpp", "loudness/PluginEditor.h", "loudness/MorphPad.cpp", "loudness/Theme.h",
@@ -277,6 +323,43 @@ class TheMapIsHonest(unittest.TestCase):
         for rule in RULES:
             if any(p.startswith(f"{SPEAKERD}/") for p in rule["paths"]) and rule["checks"]:
                 self.assertIn("speakerd", rule["checks"], rule["why"])
+
+    def test_every_plugin_has_a_rule_of_its_own(self):
+        found = plugins()
+        self.assertEqual(set(found), {"crossover", "firConv", "loudness", "ampScope"})
+        self.assertFalse(found["ampScope"], "ampScope lists TARGETS now: give it the one-plugin rule")
+        for name, has_targets in found.items():
+            rule = impact.rule_for(RULES, f"dsp/juce_plugins/{name}/CMakeLists.txt")
+            self.assertIsNotNone(rule, name)
+            self.assertIn(name, [named_plugin(p) for p in rule["paths"]],
+                          f"{name}: no rule of tests/impact.json names its folder; the shared rule decides it")
+            if has_targets:
+                self.assertIn("plugin", rule["checks"], f"{name} lists TARGETS: its rule runs `plugin {name}`")
+            else:
+                self.assertEqual(set(rule["checks"]) & {"plugin", "chain"}, set(),
+                                 f"{name} lists no TARGETS: `plugin {name}` cannot run plugin-check, and the chain "
+                                 f"has no headless build of it")
+                self.assertIn(f"`tools/build.sh {name}`", rule.get("by_hand", ""),
+                              f"{name}: no check builds it, so its rule's by_hand must say to build it")
+
+    def test_a_plugin_or_chain_rule_names_only_plugins_with_targets(self):
+        # `plugin <name>` runs plugin-check, which builds the control and headless builds, and the
+        # chain runs headless builds: a plugin without TARGETS has neither.
+        found, named = plugins(), 0
+        for rule in RULES:
+            if not {"plugin", "chain"} & set(rule["checks"]):
+                continue
+            for pattern in rule["paths"]:
+                name = named_plugin(pattern)
+                if name is None:
+                    continue
+                self.assertTrue((PLUGINS / name).is_dir(), f"{pattern}: no folder {name} in dsp/juce_plugins")
+                if name not in found:
+                    continue   # cmake/, shared/, tests/: no plugin of their own
+                named += 1
+                self.assertTrue(found[name], f"{pattern} runs {rule['checks']}, but {name} lists no TARGETS: "
+                                             f"`plugin {name}` cannot run plugin-check (give it a rule with by_hand)")
+        self.assertGreater(named, 0, "no rule names a plugin: the test would prove nothing")
 
     def test_a_plugin_path_that_skips_the_chain_is_editor_only(self):
         named = 0

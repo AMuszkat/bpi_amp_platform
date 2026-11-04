@@ -21,7 +21,9 @@
     "after touching those parts. A rule's optional \"by_hand\" is such advice: tools/impact.py, and",
     "so `tools/test.sh changed`, says it on stderr, once, when files the rule decides changed.",
     "tools/tests/test_impact.py keeps the map honest: every speakerd file is named by a rule of its",
-    "own, and every path a plugin rule without chain names is editor-only."
+    "own, every path a plugin rule without chain names is editor-only, and every plugin has a rule",
+    "of its own: one that runs `plugin` when it lists TARGETS (plugin-check needs its three builds),",
+    "and otherwise one whose by_hand builds it (ampScope: no check builds it, `plugin <name>` cannot)."
   ],
   "rules": [
     {
@@ -45,8 +47,20 @@
     },
     {
       "why": "one plugin: its SOURCES, DSP, CMakeLists.txt and probes, which its headless build compiles",
-      "paths": ["dsp/juce_plugins/crossover/*", "dsp/juce_plugins/firConv/*", "dsp/juce_plugins/loudness/*", "dsp/juce_plugins/ampScope/*"],
+      "paths": ["dsp/juce_plugins/crossover/*", "dsp/juce_plugins/firConv/*", "dsp/juce_plugins/loudness/*"],
       "checks": ["plugin", "chain"]
+    },
+    {
+      "why": "ampScope: it lists no TARGETS, so it builds only its complete target; plugin-check builds and checks the three builds of a plugin with TARGETS, the chain runs headless builds, the controller compiles control builds, and a speaker's bundle carries none of it. No check, and no level, builds it: its by_hand says what does",
+      "paths": ["dsp/juce_plugins/ampScope/*"],
+      "checks": [],
+      "by_hand": "no check builds ampScope (it lists no TARGETS, so `plugin ampScope` cannot run plugin-check): build it, `tools/build.sh ampScope`"
+    },
+    {
+      "why": "how every plugin builds, ampScope included: SpeakerPlugin.cmake and SourceId.cmake, and the JUCE submodule. `plugins` and chain build only the plugins with TARGETS, so its by_hand builds ampScope",
+      "paths": ["dsp/juce_plugins/cmake/*", "dsp/juce_plugins/JUCE"],
+      "checks": ["plugins", "chain"],
+      "by_hand": "ampScope builds with this too and no check builds it: build it, `tools/build.sh ampScope`"
     },
     {
       "why": "what every plugin shares",
