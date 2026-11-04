@@ -18,17 +18,23 @@ checkout is not disturbed), all at once, and checked for:
   64; SIGTERM ends the pool by that signal, with its note;
 - the built() guard (harness._check_pool_build): under the pool a build the module's POOL_BUILDS
   does not name is refused, saying so, and one whose prebuild failed fails as the build would;
+- tools/build.sh's line that it waits for another build in its tree, passed through as it comes,
+  once, by the prebuild and by built() (harness.run_build), while the rest of a build's output shows
+  only when it fails: a stand-in tools/build.sh says the line and waits until the test saw it;
 - the checkout's lock: a second pool on the same files waits for the first, naming it, and starts
   when it ends; the first keeps every result; a third and a fourth, sent SIGTERM and SIGINT while
   they wait, end by that signal there and then, their notes failing their unit, which never started;
 - the pool's last resorts: fewer free worker slots than it needs, and a fault of its own while it
   handles a unit (work()'s "the pool failed while handling it"): each failed under the unit's name,
-  saying why, the pool going on with the next unit. These two run pool.py's main() in a process that
-  imports it and replaces one function first (take_slots, Pool.read_events): pool.py has no seam for
-  them, and needs none.
+  saying why, the pool going on with the next unit. These two, and the prebuild's waiting line, run
+  pool.py's main() in a process that imports it and replaces one of its functions first
+  (take_slots, Pool.read_events, build_command): pool.py needs no other seam for them.
 
-No result depends on how fast anything runs: a unit that must still be running when something
-happens blocks on a release file the test writes once it has (ST_RELEASE; 60 s at most, then it
+No result depends on how fast anything runs, within generous bounds (the unit past its 2 s timeout
+must print its line within those 2 s; what waits to be released, the lock test's first pool's unit
+or a stand-in build, gives up after 60 s; the test's own waits, there for a pool that hangs, after
+60 or 120 s): a unit or a build that must still be running when something happens blocks on a
+release file the test writes once it has (ST_RELEASE, ST_BUILD_RELEASE; 60 s at most, then it
 writes its end stamp and fails), and the only short timeout is the one under test (2 s), of a unit
 that prints its line at once and sleeps.
 
@@ -189,6 +195,16 @@ MODULES = {
             def test_removes_its_log(self):
                 os.unlink(os.readlink("/proc/self/fd/1"))      # its stdout is the pool's log of it
     ''',
+    "test_st_builds.py": '''
+        import unittest
+
+        POOL_BUILDS = ("st_app",)
+
+
+        class Builds(unittest.TestCase):
+            def test_runs_after_its_build(self):
+                print("<<Builds>> ran")
+    ''',
     "test_st_slow.py": '''
         import os
         import time
@@ -241,10 +257,11 @@ import pool
 exec(patch)
 sys.exit(pool.main())
 """
-# One free worker slot fewer than it needs, as when other pools in this /tmp hold the rest.
+# One free worker slot fewer than it needs, as when other pools in this /tmp hold the rest: none for
+# one (take_slots(0) would take every free slot).
 FEWER_SLOTS = """
 real = pool.take_slots
-pool.take_slots = lambda n: real(n - 1)
+pool.take_slots = lambda n: real(n - 1) if n > 1 else []
 """
 # A fault of the pool's own while it handles test_st_slow.Slow, after the unit ran (outside run_unit's
 # own try blocks): work()'s last resort.
@@ -257,11 +274,41 @@ def read_events(unit, *args):
 pool.Pool.read_events = staticmethod(read_events)
 """
 
+# The prebuild with a stand-in for tools/build.sh (STAND_IN, run by python3: /tmp may be noexec).
+STAND_IN_BUILD = """
+import os
+pool.build_command = lambda what, kinds: [sys.executable, os.environ["ST_STAND_IN"], what, *kinds]
+"""
+# The stand-in: a line of the build's own (kept to itself unless the build fails), tools/build.sh's
+# line when another build holds the tree, then, until ST_BUILD_RELEASE exists (60 s at most), nothing;
+# then its end stamp, ST_BUILD_END. With ST_BUILD_FAIL it fails at once instead.
+STAND_IN = '''
+import os
+import sys
+import time
+from pathlib import Path
+
+what = sys.argv[1]
+print(f"<<build>> {what}: the build's own output", flush=True)
+print(f"tools/build.sh: waiting for build/{what}: another build runs in it (build/{what}/.build.lock)",
+      file=sys.stderr, flush=True)
+if os.environ.get("ST_BUILD_FAIL"):
+    print(f"<<build>> {what}: an error of the build's own", flush=True)
+    sys.exit(2)
+release, deadline = Path(os.environ["ST_BUILD_RELEASE"]), time.monotonic() + 60
+while not release.exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+Path(os.environ["ST_BUILD_END"]).write_text(repr(time.time()))
+sys.exit(0 if release.exists() else 1)
+'''
+WAITING_LINE = "tools/build.sh: waiting for build/st_app: another build runs in it (build/st_app/.build.lock)"
+
 TMP = Path(tempfile.mkdtemp(prefix="pool-selftest-"))
 TESTS = TMP / "tests" / "vpair"             # as VPAIR_RUNNER finds them from TMP
 RUNS = {}
 SETUP_ERRORS = {}
 FIRST_RAN_ON = {}                           # pool name -> whether the first still ran when it ended
+SEEN_WHILE_BUILDING = {}                    # "prebuild" -> whether its stand-in still ran when the line came
 
 
 class Run:
@@ -338,6 +385,7 @@ def setUpModule():
     TESTS.mkdir(parents=True)
     for name, source in MODULES.items():
         (TESTS / name).write_text(textwrap.dedent(source).lstrip())
+    (TMP / "stand-in-build.py").write_text(STAND_IN.lstrip())
     RUNS["results"] = Run("results", ["--jobs", "4", "test_st_results", "test_st_blocks"])
     RUNS["guard"] = Run("guard", ["--jobs", "64", "test_st_guard"])
     # The short timeout for the unit under test alone: a slow start of the others is no failure.
@@ -347,6 +395,8 @@ def setUpModule():
                          ST_SLEEP="0")
     RUNS["fault"] = Run("fault", ["--jobs", "1", "test_st_slow.Slow", "test_st_slow.AlsoSlow"], patch=A_FAULT,
                         ST_SLEEP="0")
+    RUNS["buildfails"] = Run("buildfails", ["--jobs", "1", "test_st_builds"], patch=STAND_IN_BUILD,
+                             ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_FAIL="1")
     RUNS["jobs0"] = Run("jobs0", ["--jobs", "0", "test_st_guard"])
     RUNS["jobs65"] = Run("jobs65", ["--jobs", "65", "test_st_guard"])
     # The serial runner on the same modules, from TMP (it reads tests/vpair from where it runs).
@@ -385,6 +435,18 @@ def setUpModule():
         time.sleep(0.3)
         run.process.send_signal(signal.SIGTERM)
 
+    # The prebuild's waiting line: its stand-in build waits until the line is in the pool's output.
+    def waiting():
+        release, end = TMP / "release-build", TMP / "build-end-prebuild"
+        try:
+            run = RUNS["prebuild"] = Run("prebuild", ["--jobs", "1", "test_st_builds"], patch=STAND_IN_BUILD,
+                                         ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_RELEASE=str(release),
+                                         ST_BUILD_END=str(end))
+            run.wait_for_output(WAITING_LINE)
+            SEEN_WHILE_BUILDING["prebuild"] = not end.exists()
+        finally:
+            release.touch()
+
     def keeping(name, f):
         def run():
             try:
@@ -393,7 +455,8 @@ def setUpModule():
                 SETUP_ERRORS[name] = error
         return run
 
-    threads = [threading.Thread(target=keeping(name, f)) for name, f in (("lock", lock), ("term", term))]
+    threads = [threading.Thread(target=keeping(name, f))
+               for name, f in (("lock", lock), ("term", term), ("prebuild", waiting))]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -558,6 +621,70 @@ class TheGuard(unittest.TestCase):
         with mock.patch.dict(os.environ, dict(clean, VPAIR_POOL_BUILDS=""), clear=True):
             with self.assertRaisesRegex(RuntimeError, r"the module\.POOL_BUILDS does not name 'speakerd'"):
                 check("speakerd", None)
+
+
+class TheBuildsWaitingLine(unittest.TestCase):
+    """tools/build.sh's line that it waits for another build in its tree, passed through as it comes
+    and once, by the prebuild (a stand-in tools/build.sh in its place, which waits until the test saw
+    the line) and by built() (harness.run_build); the rest of a build's output shows only when it
+    fails, as before."""
+
+    def test_through_the_prebuild(self):
+        if "prebuild" in SETUP_ERRORS:
+            raise SETUP_ERRORS["prebuild"]
+        run = RUNS["prebuild"]
+        self.assertEqual(run.wait(), 0, run.output)
+        self.assertTrue(SEEN_WHILE_BUILDING["prebuild"], "the line came only once the build ended:\n" + run.output)
+        lines = run.output.splitlines()
+        self.assertEqual(lines.count(WAITING_LINE), 1, run.output)
+        built_line = next((i for i, line in enumerate(lines)
+                           if re.fullmatch(r"prebuild: tools/build\.sh st_app: built in [\d.]+ s", line)), None)
+        self.assertIsNotNone(built_line, run.output)
+        self.assertLess(lines.index(WAITING_LINE), built_line, run.output)
+        self.assertNotIn("<<build>>", run.output)             # the rest of its output: not on success
+        self.assertEqual(run.note, "1 tests, 0 skipped", run.output)
+
+    def test_a_failed_prebuild_shows_the_rest(self):
+        run = RUNS["buildfails"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertIn("prebuild: tools/build.sh st_app FAILED (exit 2)", run.output)
+        failed = run.output[run.output.index("prebuild: tools/build.sh st_app FAILED"):]
+        for line in ("<<build>> st_app: the build's own output", WAITING_LINE, "<<build>> st_app: an error of the "
+                     "build's own"):
+            self.assertIn(line, failed, run.output)
+        self.assertEqual(run.note, "0 tests, 1 failed: test_st_builds.Builds, 0 skipped", run.output)
+        self.assertNotIn("<<Builds>>", run.output)
+
+    def test_through_built(self):
+        release, end = TMP / "release-built", TMP / "build-end-built"
+        said, came, result = [], threading.Event(), []
+
+        class Stderr:
+            def write(self, text):
+                said.append(text)
+                if WAITING_LINE in "".join(said):
+                    came.set()
+
+            def flush(self):
+                pass
+
+        env = dict(ST_BUILD_RELEASE=str(release), ST_BUILD_END=str(end))
+        command = [sys.executable, str(TMP / "stand-in-build.py"), "st_app"]
+        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "stderr", Stderr()):
+            builder = threading.Thread(target=lambda: result.append(harness.run_build(command)), daemon=True)
+            builder.start()
+            try:
+                self.assertTrue(came.wait(60), f"no waiting line on stderr within 60 s: {''.join(said)!r}")
+                self.assertFalse(end.exists(), "the line came only once the build ended")
+            finally:
+                release.touch()
+                builder.join(60)
+        self.assertEqual(len(result), 1, "harness.run_build did not return within 60 s of the release")
+        status, output = result[0]
+        self.assertEqual(status, 0, output)
+        self.assertEqual("".join(said), WAITING_LINE + "\n")   # that line alone, once
+        self.assertIn("<<build>> st_app: the build's own output", output)
+        self.assertIn(WAITING_LINE, output)                   # kept too, for a failure's tail
 
 
 class TheCheckoutsLock(unittest.TestCase):

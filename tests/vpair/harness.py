@@ -600,6 +600,25 @@ def _check_pool_build(what, kind):
                            f"stale one: add {name!r} to {module}.POOL_BUILDS (README.md, \"The pool\")")
 
 
+# How tools/build.sh begins the line it says once, on stderr, when another build holds its tree's
+# lock (a pool's prebuild, a build by hand): built() passes it through as it comes.
+BUILD_WAITING = "tools/build.sh: waiting for"
+
+
+def run_build(command):
+    """tools/build.sh (`command`), its output (stdout and stderr) kept and returned with its exit
+    status, to be shown if it fails; its waiting line also goes to stderr at once."""
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                               errors="replace")
+    lines = []
+    with process.stdout:
+        for line in process.stdout:
+            lines.append(line)
+            if line.startswith(BUILD_WAITING):
+                print(line.rstrip("\n"), file=sys.stderr, flush=True)
+    return process.wait(), "".join(lines)
+
+
 def built(what, kind=None):
     """Builds an application (`built("speakerd")`) or one build of a plugin
     (`built("loudness", "headless")`, `"complete"`) with tools/build.sh, once per test process,
@@ -623,12 +642,11 @@ def built(what, kind=None):
     if key not in _built:
         command = [str(ROOT / "tools" / "build.sh"), what] + ([kind] if kind else [])
         started = time.monotonic()
-        result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
-        if result.returncode != 0:
-            tail = "\n".join(result.stdout.splitlines()[-40:])
+        returncode, output = run_build(command)
+        if returncode != 0:
+            tail = "\n".join(output.splitlines()[-40:])
             raise RuntimeError(f"tools/build.sh {what} {kind or ''} failed "
-                               f"(exit {result.returncode}):\n{tail}")
+                               f"(exit {returncode}):\n{tail}")
         if kind is None:
             path = BUILD / what / f"{what}_artefacts" / "Release" / what
         else:

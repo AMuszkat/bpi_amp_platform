@@ -100,10 +100,12 @@ as `unittest discover` finds them. What it does:
    an application by its name, a plugin build as `plugin:kind`, and `?` after one a test skips
    without (its failed build fails only the `built()` that asks for it, as without the pool).
    The pool builds them all first, once: one `tools/build.sh` call per build tree with every kind
-   it needs (`tools/build.sh loudness headless complete`), the trees at once. A failed build
-   prints its output and fails the run before any test runs. In the units `built()` builds
-   nothing (`VPAIR_PREBUILT`) and refuses a build the module's `POOL_BUILDS` does not name,
-   saying so: `build/` may hold a stale one.
+   it needs (`tools/build.sh loudness headless complete`), the trees at once. A build's output
+   is printed only if it fails, which fails the run before any test runs; `tools/build.sh`'s line
+   that it waits for another build in its tree (`tools/build.sh: waiting for build/speakerd:
+   another build runs in it (...)`, a build by hand there, say) is printed as it comes. In the
+   units `built()` builds nothing (`VPAIR_PREBUILT`) and refuses a build the module's
+   `POOL_BUILDS` does not name, saying so: `build/` may hold a stale one.
 2. **The units** are the test classes the unittest loader finds (a base class without tests
    yields none), each run in a process of its own: a module with `setUpModule` runs it once per
    unit. A module that must stay whole says `POOL_WHOLE = True`; one whose tests are independent
@@ -160,16 +162,20 @@ seconds, no PipeWire, nothing built; `tools/test.sh tools` runs it), runs the po
 modules in a temporary folder and checks the note (failures, errors, a failed subtest, a skipped
 test, a skipped class, a skip in `setUpClass`, reasons of several lines; the same note as the
 serial runner's for the same modules), units killed, past their timeout or whose log vanished,
-each unit's output as one block, the exit status, SIGTERM, the `built()` guard, the checkout's
-lock (SIGTERM and SIGINT while a pool waits for it too), and the pool's last resorts: fewer free
-worker slots than it needs, and a fault of its own while it handles a unit (these two through a
-process that imports `pool.py` and replaces one function before its `main()`). No result in it
-depends on how fast anything runs: a unit that must still be running blocks on a file the test
-writes, and the only short timeout is the one under test, so a loaded machine does not fail it. Two
-variables point the pool there: `VPAIR_POOL_TESTS`, the folder of the modules (default this one),
-and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default the checkout's
-`build/`, the main checkout's for the durations). Its name does not match `test*.py`, so the level
-does not run it.
+each unit's output as one block, the exit status, SIGTERM, the `built()` guard, `tools/build.sh`'s
+waiting line passed through as it comes by the prebuild and by `built()` (a stand-in build that
+says it and waits until the test saw it), the checkout's lock (SIGTERM and SIGINT while a pool
+waits for it too), and the pool's last resorts: fewer free worker slots than it needs, and a fault
+of its own while it handles a unit (these two and the prebuild's waiting line through a process
+that imports `pool.py` and replaces one function before its `main()`). No result in it depends on
+how fast anything runs, within generous bounds (the unit past its 2 s timeout must print its line
+within those 2 s; a unit or a stand-in build waiting to be released, as the lock test's first
+pool's unit does, gives up after 60 s): a unit or a build that must still be running blocks on a
+file the test writes, and the only short timeout is the one under test, so a loaded machine does
+not fail it. Two variables point the pool there: `VPAIR_POOL_TESTS`, the folder of the modules
+(default this one), and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default
+the checkout's `build/`, the main checkout's for the durations). Its name does not match
+`test*.py`, so the level does not run it.
 
 With none of the pool's variables set (`VPAIR_ADDRESS_BASE`, `VPAIR_PLUGIN_HOST`, `VPAIR_DISPLAY`,
 `VPAIR_POOL_*`) every module behaves as before: that is how `--jobs 1` and CI run them.
@@ -308,8 +314,10 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
 ```
 
 - `built(what, kind)` builds with `tools/build.sh` once per test process and returns the
-  program or the LV2 bundle. Under the pool it builds nothing: the pool built what the module's
-  `POOL_BUILDS` names, and it refuses anything else.
+  program or the LV2 bundle. The build's output is shown only if it fails (its last 40 lines);
+  `tools/build.sh`'s line that it waits for another build in its tree goes to stderr as it comes.
+  Under the pool it builds nothing: the pool built what the module's `POOL_BUILDS` names, and it
+  refuses anything else.
 - `state_dir()` writes `device.json` and the layers. A layer is a document, a string (written
   as it is, for a broken file), or `None` for no file.
 - `Speakerd` starts speakerd with the speaker's environment and an empty `HOME`, and waits for
