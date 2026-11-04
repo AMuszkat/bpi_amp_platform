@@ -29,6 +29,11 @@ or late cycle recorded there, is a FAILURE; its message also names what pw-profi
 the other nodes in that window (the players, the sinks), which does not set it aside. Up to 30
 changes are sent (10 at least), and at least 5 must be measured.
 
+The quantum-128 test runs alone in the pool (POOL_ALONE): beside the quiet phase's other units it
+failed 5 of 12 runs, a change "not at its new level 3 ms after it began" with no xrun recorded.
+The cause of those failures is open, not shown to be the harness's; running alone avoids the
+condition, it does not explain it.
+
 Pass when at least 5 changes are measured, and for every measured change:
 
 - at quantum 128: each capture changes within 60 ms of the send (and not before it), and the two
@@ -59,6 +64,9 @@ POOL_SPLIT = True
 POOL_QUIET = True   # a time: each change heard within 60 ms of the send, the two captures within 5 ms
 # Alone: beside the quiet phase's other units (18 on 12 workers) quantum 128 failed 5 of 12 runs, "not at
 # its new level 3 ms after it began" with no xrun recorded; alone and in the mixed main phase it passed.
+# Why it failed is open: it is not shown to be the harness's (a time shift of a cycle, perhaps the
+# pw-play player's, which pw-profiler's filter here does not watch, is a guess, not a finding). Running
+# it alone avoids the condition; it does not explain it, and the criterion is unchanged.
 POOL_ALONE = ("KnobLatency.test_at_quantum_128",)
 
 FREQ, LEVEL = 200.0, -20.0
