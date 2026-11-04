@@ -189,7 +189,8 @@ trips added for window tracking (section 2) cost 0.04-0.07 ms each, and the 60 H
 falls back to `":0.0"` when `DISPLAY` is empty. So a JUCE program started without `DISPLAY`
 (speakerd and the plugins it hosts, in the development container) connects to whatever X server
 holds `:0` at that moment, and exits with status 1 ("X connection to :0.0 broken") when that
-server stops ([`tests/vpair/README.md`](../../../../tests/vpair/README.md)). An Xvfb that a check
+server stops ([`tests/vpair/README.md`](../../../../tests/vpair/README.md)). Checked against the
+pinned submodule, JUCE 8.0.12 (`8.0.12-4-g501c07674e`), lines 3227-3228. An Xvfb that a check
 starts for an editor must therefore stay off `:0`, and `Xvfb -displayfd <fd>` alone takes the
 first free number counting from `:0`.
 
