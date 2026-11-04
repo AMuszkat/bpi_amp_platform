@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "about": [
     "Which checks of tools/test.sh cover a file: what `tools/test.sh changed` runs for the files",
     "changed. The first rule whose pattern matches a path decides (fnmatch on the path from the",
@@ -17,10 +17,11 @@
     "PipeWire objects it makes. The map is keyed by the file edited: an edit runs its own rule's",
     "checks and no other's. One rule is narrower than that, by the person's decision: Engine.* runs",
     "`speakerd` alone, though parts of the Engine are proven only by pair, chain and installers (its",
-    "rule says which); the levels run those before a push, and after touching those parts one runs",
-    "`tools/test.sh speakerd pair chain installers` by hand. tools/tests/test_impact.py keeps the",
-    "map honest: every speakerd file is named by a rule of its own, and every path a plugin rule",
-    "without chain names is editor-only."
+    "rule says which); the levels run those before a push, and its \"by_hand\" says what to run",
+    "after touching those parts. A rule's optional \"by_hand\" is such advice: tools/impact.py, and",
+    "so `tools/test.sh changed`, says it on stderr, once, when files the rule decides changed.",
+    "tools/tests/test_impact.py keeps the map honest: every speakerd file is named by a rule of its",
+    "own, and every path a plugin rule without chain names is editor-only."
   ],
   "rules": [
     {
@@ -53,9 +54,10 @@
       "checks": ["plugins", "chain"]
     },
     {
-      "why": "speakerd's audio cycle, which every speakerd scenario plays through. speakerd alone by the person's decision, although parts of the Engine are proven only by other checks: its parameter inbox (knob_latency, graph_edit, drag_during_revision, ampd_persistence: pair), its live graph swap in Engine::install (graph_edit, buffer_size: pair; plugin_identity: chain), its level ring (meter_values, monitor_fanout: pair; chain_cost's output/level: chain) and its timing ring (chain_cost: chain; board_cpu: pair; smoke's timing line in test_speakerd_installed: installers). The levels run those before a push; after touching those parts, run `tools/test.sh speakerd pair chain installers` by hand",
+      "why": "speakerd's audio cycle, which every speakerd scenario plays through. speakerd alone by the person's decision, although parts of the Engine are proven only by other checks: its parameter inbox (knob_latency, graph_edit, drag_during_revision, ampd_persistence: pair), its live graph swap in Engine::install (graph_edit, buffer_size: pair; plugin_identity: chain), its level ring (meter_values, monitor_fanout: pair; chain_cost's output/level: chain) and its timing ring (chain_cost: chain; board_cpu: pair; smoke's timing line in test_speakerd_installed: installers). The levels run those before a push; after touching those parts, run what by_hand says",
       "paths": ["dsp/juce_apps/speakerd/Engine.*"],
-      "checks": ["speakerd"]
+      "checks": ["speakerd"],
+      "by_hand": "after touching Engine's parameter inbox, Engine::install or its level and timing rings, run `tools/test.sh speakerd pair chain installers`"
     },
     {
       "why": "speakerd's command line and start: --version (the installers refuse one below their minimum and keep its line), the flags the installed unit passes, the device and playing lines smoke reads, the exit on a signal the unit's wrapper records, a shadowed --lv2-bundle refused with status 2 (installers); its control timer, which calls control.service(), where every live revision applies (pair; plugin_identity's apply: chain), and control.notifyStatus(), the unasked status test_buffer_size reads (pair); and the monitor it wires to Control (pair, chain)",

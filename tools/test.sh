@@ -13,7 +13,8 @@
 #     tools/test.sh tools              the test tools: status.py, impact.py, the lab lock, this script's
 #                                      arguments, and the self-tests of tests/vpair's tools (pool.py's)
 #     tools/test.sh module <name>...   named modules of tests/vpair
-#     tools/test.sh changed [REF]      the checks that cover the files changed (tools/impact.py)
+#     tools/test.sh changed [REF]      the checks that cover the files changed (tools/impact.py),
+#                                      and, before and after them, what its map says to run by hand
 #   Several in one command (tools/test.sh plugin loudness speakerd installers; module last, as it
 #   takes every name after it) run what runs outside the virtual pair first, then all their
 #   modules of tests/vpair in one run; changed does the same with the checks it finds.
@@ -279,9 +280,18 @@ run_checks() {
 
 run_named() { CHECK_LIST=(); add_checks "$@" && run_checks; }
 
+# The checks tools/impact.py finds. What it says on stderr (the files no rule names, a rule's
+# by_hand advice) comes first; the advice again after the checks, whose output would bury it.
 run_changed() {
-    local checks line
-    checks="$(tools/impact.py "$@")" || return 1
+    local checks line said status by_hand
+    NOTE_FILE="$(mktemp)"   # impact.py's stderr, for a moment (the EXIT trap removes it)
+    checks="$(tools/impact.py "$@" 2> "$NOTE_FILE")"
+    status=$?
+    said="$(cat "$NOTE_FILE")"
+    rm -f "$NOTE_FILE"
+    NOTE_FILE=""
+    [ -z "$said" ] || echo "$said" >&2
+    [ $status = 0 ] || return 1
     [ -n "$checks" ] || { echo "changed: nothing to run"; return 0; }
     CHECK_LIST=()
     while read -r line; do
@@ -289,6 +299,10 @@ run_changed() {
         add_checks $line || return 1
     done <<< "$checks"
     run_checks
+    status=$?
+    by_hand="$(grep '^by hand, for ' <<< "$said" | sed 's/^/changed: /')"
+    [ -z "$by_hand" ] || echo "$by_hand" >&2
+    return $status
 }
 
 # --- The levels -----------------------------------------------------------------------------------
@@ -334,11 +348,15 @@ case "$what" in
         add_checks "$what" "$@" || exit 2 ;;
     *) usage ;;
 esac
-# For tools/tests/test_test_sh.py: what the arguments decided, and nothing run.
+# For tools/tests/test_test_sh.py: what the arguments decided, and nothing run. It exits with a
+# status of its own, 3 (not 0: tools/container.sh passes every BPI_* variable into the container,
+# so a stray export must fail every check and level, CI's too, rather than pass them unrun; not 2,
+# the arguments refused), and says so on stderr.
 if [ "${BPI_TEST_DRY_RUN:-}" = 1 ]; then
     echo "jobs $JOBS"; echo "record $record"; echo "run $what${*:+ $*}"
     for entry in ${CHECK_LIST[@]+"${CHECK_LIST[@]}"}; do echo "check $entry"; done
-    exit 0
+    echo "BPI_TEST_DRY_RUN=1: nothing ran" >&2
+    exit 3
 fi
 case "$what" in
     unit)  run_unit || rc=1 ;;

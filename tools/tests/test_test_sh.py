@@ -2,8 +2,9 @@
 """tools/test.sh's arguments: what it refuses (status 2, before it runs anything), and that --jobs
 and --no-record are taken wherever they stand. No virtual pair and no build: test.sh runs natively
 here (BPI_CONTAINER=0; inside the development container it does anyway), and with
-BPI_TEST_DRY_RUN=1 it prints what its arguments decided and stops, so that an argument it should
-refuse but takes runs nothing either. Part of the `tools` check (tools/test.sh tools).
+BPI_TEST_DRY_RUN=1 it prints what its arguments decided and stops with status 3 (DRY_RUN), so that
+an argument it should refuse but takes runs nothing either, and a stray BPI_TEST_DRY_RUN fails a
+run instead of passing it. Part of the `tools` check (tools/test.sh tools).
 
     python3 tools/tests/test_test_sh.py
 """
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST_SH = ROOT / "tools" / "test.sh"
 MAX_JOBS = 64           # tests/vpair/pool.py's limit, what --jobs and BPI_TEST_JOBS take
 MAX_DEFAULT_JOBS = 16   # the default's limit: the container's tasks (pids.max), not the pool's
+DRY_RUN = 3             # a dry run's status: never 0, which would pass a check that ran nothing
 
 
 def run(*args, ci=None, jobs=None, path=None):
@@ -99,10 +101,20 @@ class Refused(unittest.TestCase):
 
 
 class Taken(unittest.TestCase):
+    """Each a dry run: status 3, `nothing ran` on stderr, and what the arguments decided."""
+
     def taken(self, *args, **env):
         status, out, err = run(*args, **env)
-        self.assertEqual(status, 0, f"{args}: status {status}\n{out}{err}")
+        self.assertEqual(status, DRY_RUN, f"{args}: status {status}\n{out}{err}")
+        self.assertIn("BPI_TEST_DRY_RUN=1: nothing ran", err, f"{args}: said\n{err}")
         return decided(out)
+
+    def test_a_dry_run_never_passes(self):
+        # tools/container.sh passes every BPI_* variable into the container: a stray
+        # BPI_TEST_DRY_RUN=1 must fail a check, a level and `changed`, not pass them unrun.
+        for args in (("speakerd",), ("tools",), ("changed",), ("unit",), ("all",)):
+            with self.subTest(args=args):
+                self.assertEqual(self.taken(*args)["run"], args[0])
 
     def test_jobs_and_no_record_anywhere(self):
         for args in (("--jobs", "3", "--no-record", "plugin", "loudness", "speakerd"),
