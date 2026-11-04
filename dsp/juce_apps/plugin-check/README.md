@@ -6,7 +6,8 @@ runs a plugin's **control** build (its editor, no DSP) and each speaker runs its
 build (its DSP, no editor), and the two exchange parameter values and saved state.
 
 ```bash
-dsp/juce_apps/plugin-check/run.sh loudness     # or tools/test.sh unit, for every plugin
+dsp/juce_apps/plugin-check/run.sh loudness                      # or tools/test.sh unit, for every plugin
+PLUGIN_CHECK_LTO=0 dsp/juce_apps/plugin-check/run.sh loudness   # without LTO: tools/test.sh plugin loudness
 ```
 
 `run.sh` runs in the development container when Podman is installed (`tools/container.sh`),
@@ -44,13 +45,58 @@ what they read (`EXPECT` lines), which `run.sh` passes to the checker above as
 `--expect-monitor`.
 
 Exit status 0 means every check passed; the report (in-process checks first) is in
-`build-check/<plugin>-report.txt`, the builds in `build-check/<plugin>-builds/`.
+`<BUILD_DIR>/<plugin>-report.txt`, the builds in `<BUILD_DIR>/<plugin>-builds/` (the bundles in
+`<plugin>-builds/plugin/<target>_artefacts/Release/LV2/<target>.lv2`).
 The audio check uses the parameter values in `juce_plugins/<plugin>/plugin-check.probes`, so it
 exercises the DSP rather than a flat setting.
 
+## Build trees: with and without LTO, ccache
+
+`run.sh` reads these from the environment (and hands `PLUGIN_CHECK_LTO` on to the container
+itself, which is not given it otherwise):
+
+| Variable | | Default |
+|---|---|---|
+| `JUCE_INSTALL_DIR` | the JUCE install | `build/juce-install` at the repository root |
+| `PLUGIN_CHECK_LTO` | `1`: the plugin's builds with link-time optimisation, as they ship; `0`: without | `1` |
+| `BUILD_DIR` | where the builds and the report go | `build-check` here; `build-check-nolto` with `PLUGIN_CHECK_LTO=0` |
+| `BPI_CCACHE` | `1`: ccache as the compiler launcher, when it is on PATH; anything else: none | unset: none |
+
+`PLUGIN_CHECK_LTO` becomes `-DSPEAKER_LTO=ON` or `OFF` on every configure of the plugin's
+builds (the option of `juce_plugins/cmake/SpeakerPlugin.cmake`, which every build that does not
+pass it keeps on). Most of a check after an edit is the plugin's six LTO links, so without LTO
+it is several times faster. Measured for loudness after a one-line edit of
+`PluginProcessor.cpp`, through ccache, on 24 threads that other builds were loading (2026-11-04):
+58, 63 and 73 s with LTO, 8.4, 14 and 16 s without (on a quieter machine before ccache, 54 s
+against 9 to 12.5 s). `tools/test.sh plugin <name>`, the focused
+check, runs without LTO, in `build-check-nolto`; `tools/test.sh plugins` and level 1
+(`tools/test.sh unit`) run with it, in `build-check`, so the levels check what ships. The no-LTO
+builds' report reads as the LTO builds' does (loudness: line for line), but their binaries are
+not the ones that ship.
+
+The two trees are kept apart because `SPEAKER_LTO` changes every compile command: a tree switched
+from one to the other rebuilds everything. An explicit `BUILD_DIR` is configured the way
+`PLUGIN_CHECK_LTO` says on every run, so one used both ways rebuilds each time. Each tree also
+builds the checker itself, once (`<BUILD_DIR>/plugin-check`, the same in both trees), under a
+lock, so the checks of two plugins can run at once in one `BUILD_DIR`.
+
+ccache is the caller's choice: `run.sh` has no policy of its own. `tools/test.sh` sets
+`BPI_CCACHE`, `CCACHE_DIR` and `CCACHE_BASEDIR` (`ccache_env` in `tools/container.sh`: in the
+development container, not under CI), and both configures (the plugin's builds and this checker)
+then set ccache as the compiler launcher. Run on its own, with `BPI_CCACHE` unset, `run.sh` sets
+an empty launcher, which also takes ccache off a tree configured with it before; switching
+rebuilds the tree.
+
+## The display and the editor check
+
 The editor check needs an X display. Without `DISPLAY` the script starts `Xvfb` and `openbox`
 if they are installed (a window manager is needed: without one, opening an LV2 editor fails
-with an X `BadAtom` error) and skips the check otherwise.
+with an X `BadAtom` error) and skips the check otherwise. Xvfb takes the first free display
+number and writes it once it accepts connections (`-displayfd`), so checks running at once
+each get their own display; openbox runs its `--startup` command once it manages the screen,
+and the script waits for both (at most 10 s each; it fails if either does not start, their logs
+are `<plugin>-xvfb.log` and `<plugin>-openbox.log` in `BUILD_DIR`) rather than sleep a fixed
+1.5 s.
 
 The editor stays up until `run.sh` has a screenshot of it painted (at most 40 s of trying),
 because under load an editor can take seconds to paint for the first time. Under load the
@@ -58,6 +104,10 @@ embedded editor also sometimes stays an unpainted rectangle for good: JUCE's XEm
 maps the plugin's window into its own. An editor still unpainted after 3 s is therefore nudged
 (plugin-check hides and shows its window, which makes the host look at the client again), and
 the report says so. Under full CPU load about one run in three needed one nudge; all painted.
+`run.sh` watches the report for the editor every 0.05 s and captures the screen every 0.1 s (plus
+the capture's own time). Against captures every 0.5 s the screenshots were the same pixel for
+pixel (a nudged editor's and an un-nudged one's alike), and nudges no more frequent (4 runs of 11
+against 6 of 9; loudness, 2026-11-04, under load).
 
 ## Four things this checker found
 

@@ -21,6 +21,7 @@ of the two filters moves by the ratio of the rates (`firmware/CLAUDE.md`, "Rates
 ```
 juce_plugins/
 ├── cmake/SpeakerPlugin.cmake   speaker_add_plugin(): identity, formats, flags, LTO for every plugin
+│                               (SPEAKER_LTO=OFF: none, for plugin-check's quick no-LTO tree only)
 ├── cmake/SourceId.cmake        the version and source identity every target embeds (below)
 ├── shared/<name>/              source folders several plugins compile (SHARED), e.g. blockfir/
 ├── tests/                      tests of shared code, outside every plugin's identity
