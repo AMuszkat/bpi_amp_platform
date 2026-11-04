@@ -20,19 +20,15 @@
 #                      of tools/container.sh; this script has no policy of its own)  default unset
 #
 # The editor check needs an X display. With no DISPLAY set, it starts Xvfb (on the first free
-# display number, so that several checks can run at once) and a window manager (openbox)
-# itself when they are installed, and skips the editor check otherwise.
+# display number from :200 up, so that several checks can run at once) and a window manager
+# (openbox) itself when they are installed, and skips the editor check otherwise.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 . "$ROOT/../tools/container.sh"
-# container_or_native, handing PLUGIN_CHECK_LTO on: the container is given BUILD_DIR,
-# JUCE_INSTALL_DIR and the BPI_* variables (tools/container.sh), and not that one.
-if container_wanted; then
-    container_exec env ${PLUGIN_CHECK_LTO+"PLUGIN_CHECK_LTO=$PLUGIN_CHECK_LTO"} "$HERE/run.sh" "$@"
-fi
+container_or_native "$0" "$@"
 PLUGIN="${1:?usage: $0 <plugin> [--no-editor]}"
 EDITOR=1
 [ "${2:-}" = "--no-editor" ] && EDITOR=0
@@ -117,16 +113,35 @@ wait_until() {
 # The display number Xvfb wrote (a line), into $display_number.
 read_display() { read -r display_number < "$BUILD_DIR/$PLUGIN-xvfb.display" && [[ "$display_number" =~ ^[0-9]+$ ]]; }
 
+# Xvfb on the first free display number from :200 up, within 10 s (into pids and
+# $display_number). Not the first free one from :0, which Xvfb's -displayfd alone would take: a
+# JUCE program with no DISPLAY opens :0.0, the plugins speakerd hosts included, and exits when
+# that X server stops (tests/vpair/README.md); :96 is the controller's screenshot run's, :100 to
+# :199 the vpair pool's workers' (tests/vpair/pool.py). Given a number, Xvfb writes it to fd 3
+# (-displayfd) once it accepts connections, and exits at once, writing nothing, when an X server
+# already listens there (it keeps no lock file with -displayfd: the socket decides), so that
+# checks running at once each take the next number. Each try's output goes to the log.
+start_xvfb() {
+    local deadline=$((SECONDS + 10)) n log="$BUILD_DIR/$PLUGIN-xvfb.log"
+    : > "$log"
+    for ((n = 200; n < 300 && SECONDS < deadline; n++)); do
+        : > "$BUILD_DIR/$PLUGIN-xvfb.display"
+        echo "--- Xvfb :$n" >> "$log"
+        Xvfb ":$n" -displayfd 3 -screen 0 1280x800x24 -nolisten tcp \
+            3> "$BUILD_DIR/$PLUGIN-xvfb.display" >> "$log" 2>&1 & pids+=($!)
+        wait_until "${pids[-1]}" $((deadline - SECONDS)) read_display && return 0
+        kill "${pids[-1]}" 2> /dev/null; wait "${pids[-1]}" 2> /dev/null
+        unset 'pids[-1]'
+    done
+    return 1
+}
+
 if [ "$EDITOR" = 1 ] && [ -z "${DISPLAY:-}" ]; then
     if command -v Xvfb > /dev/null && command -v openbox > /dev/null; then
-        # Xvfb takes the first free display number and writes it, once it accepts connections,
-        # to fd 3 (-displayfd); openbox runs its --startup command once it manages the screen.
+        # openbox runs its --startup command once it manages the screen.
         started="$BUILD_DIR/$PLUGIN-openbox.started"
         rm -f "$started"
-        : > "$BUILD_DIR/$PLUGIN-xvfb.display"
-        Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp \
-            3> "$BUILD_DIR/$PLUGIN-xvfb.display" > "$BUILD_DIR/$PLUGIN-xvfb.log" 2>&1 & pids+=($!)
-        if ! wait_until "${pids[-1]}" 10 read_display; then
+        if ! start_xvfb; then
             echo "Xvfb did not start within 10 s ($BUILD_DIR/$PLUGIN-xvfb.log):" >&2
             tail -20 "$BUILD_DIR/$PLUGIN-xvfb.log" >&2
             exit 1
