@@ -9,7 +9,7 @@
 //              [--allow-unsafe-routing] [--lv2-bundle PATH]...
 //     speakerd --version
 
-#include "BuildInfo.h"    // SPEAKERD_COMMIT, written at every build (BuildInfo.cmake)
+#include "BuildInfo.h"    // SPEAKERD_VERSION, SPEAKERD_COMMIT, written at every build (BuildInfo.cmake)
 #include "Control.h"
 #include "DeviceConfig.h"
 #include "Engine.h"

@@ -64,15 +64,19 @@ target_sources(speakerd
         Render.cpp
         StateLayers.cpp)
 
-# The commit speakerd is built from (BuildInfo.h, SPEAKERD_COMMIT), for --version and the first
-# log line. Written at every build, not at configure, so that it follows HEAD and the tree's
-# changes; rewritten only when it changes, so it recompiles Main.cpp only then.
+# speakerd's version and the commit it is built from (BuildInfo.h: SPEAKERD_VERSION, the project()
+# version above, and SPEAKERD_COMMIT), for --version, the first log line and the local link's
+# hello. Written at every build, not at configure, so that the commit follows HEAD and the tree's
+# changes; rewritten only when its text changes, so it recompiles Main.cpp, the one file that
+# includes it, only then. The version is not a compile definition: that would change the command
+# line of every file of the target, the JUCE modules included, and a version bump would recompile
+# them all.
 set(SPEAKERD_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
 add_custom_target(speakerd-build-info
-    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DVERSION=${PROJECT_VERSION}"
             "-DOUTPUT=${SPEAKERD_GENERATED}/BuildInfo.h" -P "${CMAKE_CURRENT_SOURCE_DIR}/BuildInfo.cmake"
     BYPRODUCTS "${SPEAKERD_GENERATED}/BuildInfo.h"
-    COMMENT "speakerd: the commit it is built from"
+    COMMENT "speakerd: the version and the commit it is built from"
     VERBATIM)
 add_dependencies(speakerd speakerd-build-info)
 target_include_directories(speakerd PRIVATE "${SPEAKERD_GENERATED}")
@@ -84,8 +88,7 @@ target_compile_definitions(speakerd
         JUCE_USE_CURL=0
         JUCE_WEB_BROWSER=0
         JUCE_USE_FLAC=0                    # the render mode reads and writes WAV only
-        JUCE_USE_OGGVORBIS=0
-        SPEAKERD_VERSION="${PROJECT_VERSION}")
+        JUCE_USE_OGGVORBIS=0)
 
 # No GUI module: nothing here links X11, so speakerd runs on a speaker with no display.
 target_link_libraries(speakerd

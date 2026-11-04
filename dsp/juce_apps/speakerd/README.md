@@ -43,7 +43,7 @@ speakerd --version
 | `--device DEVICE_JSON` | with `--import-filtergraph`: the speaker's `device.json`, which says whether the session's output channel 0 (`playback_FL`) or 1 (`playback_FR`) is the woofer. Without it, `playback_FL` is |
 | `--prefer-headless` | with `--import-filtergraph`: a complete or control build's URI becomes its `_headless` sibling's, when that plugin is found (in the default paths or a `--lv2-bundle`) |
 | `--allow-unsafe-routing` | with `--import-filtergraph`: import a control build, with a warning, instead of failing |
-| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.2 (999f8ed1a668)`, and exits 0. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. A script reads the version as the first number after `speakerd ` |
+| `--version` | prints `speakerd <version> (<commit>)` on stdout, for example `speakerd 0.3.2 (999f8ed1a668)`, and exits 0. `<version>` is the `project()` version of speakerd's `CMakeLists.txt`. `<commit>` is the short hash (12 characters) of the commit it was built from, with `-dirty` when the working tree had changes (tracked or untracked) at build time, or `unknown` without git. It is taken at every build (`BuildInfo.cmake`), so it follows HEAD without a reconfigure. Both are in the generated `BuildInfo.h`, which only `Main.cpp` includes, so a new version or commit recompiles that file alone. A script reads the version as the first number after `speakerd ` |
 
 | Exit status | |
 |---|---|
@@ -127,9 +127,9 @@ tests/vpair/vpair.sh run left pw-play --target speakerd tone.wav
 
 ### For the board (aarch64)
 
-`tools/build.sh <what> aarch64 [complete|control|headless|all]`
-cross-compiles in the development container into `build/aarch64/<what>/`, with the layout of
-the x86_64 build:
+`tools/build.sh <what> aarch64 [complete|control|headless|all]...` (several kinds build in one
+call; none is all; an application such as speakerd has no kinds) cross-compiles in the
+development container into `build/aarch64/<what>/`, with the layout of the x86_64 build:
 
 ```bash
 tools/build.sh speakerd aarch64      # build/aarch64/speakerd/speakerd_artefacts/Release/speakerd
@@ -1000,6 +1000,6 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `PipeWireNode.*` | the input sink, the `pw_filter` node, the links, and `clock.force-quantum` in the `settings` metadata |
 | `Render.*` | the offline render |
 | `DeviceConfig.*` | `device.json`, its `limits` included |
-| `BuildInfo.cmake` | writes `BuildInfo.h` at every build: the commit speakerd is built from |
+| `BuildInfo.cmake` | writes `BuildInfo.h` at every build: speakerd's version and the commit it is built from (only when they change; only `Main.cpp` includes it) |
 | `FilterGraph.*` | `--import-filtergraph`: an AudioPluginHost session as a graph document |
 | `examples/` | an AudioPluginHost session, `loudness.filtergraph`, and how it was made |
