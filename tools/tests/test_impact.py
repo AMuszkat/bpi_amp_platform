@@ -304,8 +304,10 @@ class TheMap(unittest.TestCase):
             self.assertEqual(checks(path), (["tools"], []), path)
             self.assertEqual(impact.by_hand_for(RULES, [path]), [], path)
         # Every build's `cmake --build` runs under the jobserver: plugin-check's LTO builds (plugins)
-        # and tools/build.sh's (the chain's prebuild); an edit relinks nothing, so by_hand says how.
-        self.assertEqual(checks("tools/jobserver.sh"), (["plugins", "chain"], []))
+        # and tools/build.sh's (the chain's prebuild); an edit relinks nothing, so by_hand says how;
+        # its own test (test_jobserver.py) the tools check runs.
+        self.assertEqual(checks("tools/jobserver.sh"), (["plugins", "chain", "tools"], []))
+        self.assertTrue((ROOT / "tools/tests/test_jobserver.py").is_file())
         advice = impact.rule_for(RULES, "tools/jobserver.sh")["by_hand"]
         for said in ("touch dsp/juce_plugins/loudness/LoudnessDsp.cpp", "`BPI_TEST_LTO=1 tools/test.sh plugin loudness chain`",
                      "`tools/build.sh loudness aarch64 headless`"):
