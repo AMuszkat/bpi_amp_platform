@@ -11,14 +11,26 @@ checkout is not disturbed), all at once, and checked for:
   writes for the same modules: failures, errors, a failed subtest, a skipped test, a skipped class
   and a skip in setUpClass, reasons of several lines on one line;
 - a unit killed mid-run, one past its timeout and one whose log vanishes: each failed under its unit
-  name with its reason, its block printed, the tests it ran before counted;
+  name with its reason, its block printed, the tests it ran before counted (the one past its timeout
+  in a run of its own, the only one with a short --unit-timeout);
 - each unit's output as one block, never interleaved with another's;
 - the exit status: 0 when every test passed (skips allowed), 1 otherwise, 2 for --jobs outside 1 to
   64; SIGTERM ends the pool by that signal, with its note;
 - the built() guard (harness._check_pool_build): under the pool a build the module's POOL_BUILDS
   does not name is refused, saying so, and one whose prebuild failed fails as the build would;
 - the checkout's lock: a second pool on the same files waits for the first, naming it, and starts
-  when it ends; the first keeps every result.
+  when it ends; the first keeps every result; a third and a fourth, sent SIGTERM and SIGINT while
+  they wait, end by that signal there and then, their notes failing their unit, which never started;
+- the pool's last resorts: fewer free worker slots than it needs, and a fault of its own while it
+  handles a unit (work()'s "the pool failed while handling it"): each failed under the unit's name,
+  saying why, the pool going on with the next unit. These two run pool.py's main() in a process that
+  imports it and replaces one function first (take_slots, Pool.read_events): pool.py has no seam for
+  them, and needs none.
+
+No result depends on how fast anything runs: a unit that must still be running when something
+happens blocks on a release file the test writes once it has (ST_RELEASE; 60 s at most, then it
+writes its end stamp and fails), and the only short timeout is the one under test (2 s), of a unit
+that prints its line at once and sleeps.
 
 POOL_SELFTEST_KEEP=1 keeps its temporary folder (the pools' outputs, notes and logs) and names it.
 Its name does not match test*.py, so the vpair level never runs it. It runs where it is started
@@ -188,8 +200,16 @@ MODULES = {
             stamps = Path(os.environ["ST_STAMPS"])
             (stamps / "start").write_text(repr(time.time()))
             print("<<Slow>> started", flush=True)
-            time.sleep(float(os.environ["ST_SLEEP"]))
-            (stamps / "end").write_text(repr(time.time()))
+            released = True
+            if os.environ.get("ST_RELEASE"):    # until the test releases it, 60 s at most
+                release, deadline = Path(os.environ["ST_RELEASE"]), time.monotonic() + 60
+                while not (released := release.exists()) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+            else:
+                time.sleep(float(os.environ["ST_SLEEP"]))
+            (stamps / "end").write_text(repr(time.time()))      # its end, released or not
+            if not released:
+                raise AssertionError(f"not released within 60 s: no {release}")
 
 
         class Slow(unittest.TestCase):
@@ -210,17 +230,45 @@ RESULTS_NOTE = (
     "lines); test_st_results.SkippedClass.test_one (the whole class skipped); test_st_results.SkippedClass.test_two "
     "(the whole class skipped); setUpClass (test_st_results.SkippedInSetUpClass) (setUpClass says no)")
 
+# pool.py's main() with one of its functions replaced first: python3 -c WRAPPER <tests/vpair> <patch> ARGS...
+# (its units still run the real pool.py --unit).
+WRAPPER = """
+import sys
+here, patch = sys.argv[1], sys.argv[2]
+sys.argv = [here + "/pool.py", *sys.argv[3:]]
+sys.path.insert(0, here)
+import pool
+exec(patch)
+sys.exit(pool.main())
+"""
+# One free worker slot fewer than it needs, as when other pools in this /tmp hold the rest.
+FEWER_SLOTS = """
+real = pool.take_slots
+pool.take_slots = lambda n: real(n - 1)
+"""
+# A fault of the pool's own while it handles test_st_slow.Slow, after the unit ran (outside run_unit's
+# own try blocks): work()'s last resort.
+A_FAULT = """
+real = pool.Pool.read_events
+def read_events(unit, *args):
+    if unit.name == "test_st_slow.Slow":
+        raise RuntimeError("a fault of the pool's own, injected")
+    return real(unit, *args)
+pool.Pool.read_events = staticmethod(read_events)
+"""
+
 TMP = Path(tempfile.mkdtemp(prefix="pool-selftest-"))
 TESTS = TMP / "tests" / "vpair"             # as VPAIR_RUNNER finds them from TMP
 RUNS = {}
 SETUP_ERRORS = {}
+FIRST_RAN_ON = {}                           # pool name -> whether the first still ran when it ended
 
 
 class Run:
     """pool.py on the synthetic modules, in the background: its own files folder (and so its own
-    lock) unless given another's."""
+    lock) unless given another's; `patch`, Python run in the pool's process before its main()."""
 
-    def __init__(self, name, args, files=None, **env):
+    def __init__(self, name, args, files=None, patch=None, **env):
         self.name, self.files = name, files or TMP / f"files-{name}"
         self.files.mkdir(parents=True, exist_ok=True)
         self.stamps = TMP / f"stamps-{name}"
@@ -229,13 +277,14 @@ class Run:
         self.out_path = TMP / f"out-{name}.txt"
         environment = dict(os.environ, VPAIR_POOL_TESTS=str(TESTS), VPAIR_POOL_FILES=str(self.files),
                            ST_STAMPS=str(self.stamps), **env)
+        command = [sys.executable, "-c", WRAPPER, str(HERE), patch] if patch else [sys.executable, str(POOL)]
         with open(self.out_path, "wb") as out:
-            self.process = subprocess.Popen([sys.executable, str(POOL), "--note", str(self.note_path), *args],
+            self.process = subprocess.Popen([*command, "--note", str(self.note_path), *args],
                                             cwd=ROOT, env=environment, stdin=subprocess.DEVNULL, stdout=out,
                                             stderr=subprocess.STDOUT)
         self.pid = self.process.pid
 
-    def wait(self, timeout=60):
+    def wait(self, timeout=120):
         self.process.wait(timeout=timeout)
         return self.process.returncode
 
@@ -247,11 +296,21 @@ class Run:
     def note(self):
         return self.note_path.read_text() if self.note_path.exists() else None
 
-    def wait_for(self, path, timeout=20):
+    def wait_for(self, path, timeout=60):
+        self.until(path.exists, f"no {path.name}", timeout)
+
+    def wait_for_output(self, text, timeout=60):
+        self.until(lambda: text in self.output, f"no {text!r} in its output", timeout)
+
+    def until(self, done, what, timeout):
+        """Until done(), while it runs; the timeout is for a pool that hangs, not a measure."""
         deadline = time.monotonic() + timeout
-        while not path.exists():
+        while not done():
             if time.monotonic() > deadline or self.process.poll() is not None:
-                raise AssertionError(f"{self.name}: no {path.name} within {timeout} s:\n{self.output}")
+                if done():
+                    return
+                raise AssertionError(f"{self.name}: {what} within {timeout} s (exit status "
+                                     f"{self.process.poll()}):\n{self.output}")
             time.sleep(0.05)
 
 
@@ -281,8 +340,13 @@ def setUpModule():
         (TESTS / name).write_text(textwrap.dedent(source).lstrip())
     RUNS["results"] = Run("results", ["--jobs", "4", "test_st_results", "test_st_blocks"])
     RUNS["guard"] = Run("guard", ["--jobs", "64", "test_st_guard"])
-    RUNS["broken"] = Run("broken", ["--jobs", "3", "--unit-timeout", "2", "test_st_killed", "test_st_hangs",
-                                    "test_st_nolog"])
+    # The short timeout for the unit under test alone: a slow start of the others is no failure.
+    RUNS["broken"] = Run("broken", ["--jobs", "2", "test_st_killed", "test_st_nolog"])
+    RUNS["hangs"] = Run("hangs", ["--jobs", "1", "--unit-timeout", "2", "test_st_hangs"])
+    RUNS["noslot"] = Run("noslot", ["--jobs", "2", "test_st_slow.Slow", "test_st_slow.AlsoSlow"], patch=FEWER_SLOTS,
+                         ST_SLEEP="0")
+    RUNS["fault"] = Run("fault", ["--jobs", "1", "test_st_slow.Slow", "test_st_slow.AlsoSlow"], patch=A_FAULT,
+                        ST_SLEEP="0")
     RUNS["jobs0"] = Run("jobs0", ["--jobs", "0", "test_st_guard"])
     RUNS["jobs65"] = Run("jobs65", ["--jobs", "65", "test_st_guard"])
     # The serial runner on the same modules, from TMP (it reads tests/vpair from where it runs).
@@ -291,15 +355,32 @@ def setUpModule():
                                            "test_st_results", "test_st_blocks"], cwd=TMP, stdin=subprocess.DEVNULL,
                                           stdout=out, stderr=subprocess.STDOUT)
 
-    # The lock: a pool that holds this checkout's (here: these files') lock while its unit runs, a
-    # second one started then; and a pool stopped by SIGTERM mid-unit. In a thread each, beside the rest.
+    # The lock: a pool that holds this checkout's (here: these files') lock while its unit runs, until
+    # released; three more started then, on its files; once all wait for it, SIGTERM to the third and
+    # SIGINT to the fourth, and when those have ended, the first's release. And a pool stopped by
+    # SIGTERM mid-unit (its unit never released). In a thread each, beside the rest.
     def lock():
-        first = RUNS["first"] = Run("first", ["--jobs", "1", "test_st_slow.Slow"], ST_SLEEP="2.5")
-        first.wait_for(first.stamps / "start")
-        RUNS["second"] = Run("second", ["--jobs", "1", "test_st_slow.AlsoSlow"], files=first.files, ST_SLEEP="0.1")
+        release = TMP / "release-first"
+        try:
+            first = RUNS["first"] = Run("first", ["--jobs", "1", "test_st_slow.Slow"], ST_RELEASE=str(release))
+            first.wait_for(first.stamps / "start")
+            second = RUNS["second"] = Run("second", ["--jobs", "1", "test_st_slow.AlsoSlow"], files=first.files,
+                                          ST_SLEEP="0.1")
+            signalled = {name: Run(name, ["--jobs", "1", "test_st_slow.Slow"], files=first.files, ST_SLEEP="0.1")
+                         for name in ("third", "fourth")}
+            RUNS.update(signalled)
+            for run in (second, *signalled.values()):
+                run.wait_for_output("; waiting for it to end")
+            for run, signum in zip(signalled.values(), (signal.SIGTERM, signal.SIGINT)):
+                run.process.send_signal(signum)
+            for name, run in signalled.items():
+                run.wait()
+                FIRST_RAN_ON[name] = first.process.poll() is None
+        finally:
+            release.touch()                 # whatever happened: the first ends, and the second runs
 
     def term():
-        run = RUNS["term"] = Run("term", ["--jobs", "1", "test_st_slow.Slow"], ST_SLEEP="30")
+        run = RUNS["term"] = Run("term", ["--jobs", "1", "test_st_slow.Slow"], ST_RELEASE=str(TMP / "never"))
         run.wait_for(run.stamps / "start")
         time.sleep(0.3)
         run.process.send_signal(signal.SIGTERM)
@@ -378,18 +459,21 @@ class TheNote(unittest.TestCase):
 
 class BrokenUnits(unittest.TestCase):
     """A unit killed mid-run, one past its timeout, one whose log vanished: each failed under its
-    own name, with its reason, its block printed."""
+    own name, with its reason, its block printed. The one past its timeout in a run of its own, the
+    only one with a short --unit-timeout."""
 
     @classmethod
     def setUpClass(cls):
-        cls.run_ = RUNS["broken"]
-        cls.status = cls.run_.wait()
-        cls.output = cls.run_.output
+        cls.run_, cls.hangs = RUNS["broken"], RUNS["hangs"]
+        cls.status, cls.hangs_status = cls.run_.wait(), cls.hangs.wait()
+        cls.output, cls.hangs_output = cls.run_.output, cls.hangs.output
 
     def test_the_note(self):
         self.assertEqual(self.status, 1, self.output)
-        self.assertEqual(self.run_.note, "4 tests, 3 failed: test_st_killed.Killed, test_st_hangs.Hangs, "
-                                         "test_st_nolog.NoLog, 0 skipped", self.output)
+        self.assertEqual(self.run_.note, "3 tests, 2 failed: test_st_killed.Killed, test_st_nolog.NoLog, 0 skipped",
+                         self.output)
+        self.assertEqual(self.hangs_status, 1, self.hangs_output)
+        self.assertEqual(self.hangs.note, "1 tests, 1 failed: test_st_hangs.Hangs, 0 skipped", self.hangs_output)
 
     def test_killed_mid_run(self):
         lines, _, end = block(self.output, "test_st_killed.Killed")
@@ -400,10 +484,10 @@ class BrokenUnits(unittest.TestCase):
                                       r"FAILED: its process was killed by signal 9$")
 
     def test_past_its_timeout(self):
-        lines, _, end = block(self.output, "test_st_hangs.Hangs")
-        self.assertIn("FAILED: no result within its timeout of 2 s =====", lines[0], self.output)
-        self.assertIsNotNone(end, self.output)
-        self.assertTrue(any("sleeping past the unit's timeout" in line for line in lines), self.output)
+        lines, _, end = block(self.hangs_output, "test_st_hangs.Hangs")
+        self.assertIn("FAILED: no result within its timeout of 2 s =====", lines[0], self.hangs_output)
+        self.assertIsNotNone(end, self.hangs_output)
+        self.assertTrue(any("sleeping past the unit's timeout" in line for line in lines), self.hangs_output)
 
     def test_its_log_gone(self):
         lines, _, _ = block(self.output, "test_st_nolog.NoLog")
@@ -411,9 +495,10 @@ class BrokenUnits(unittest.TestCase):
                          self.output)
 
     def test_every_failure_says_why(self):
-        self.assertNotRegex(self.output, r"(?m)FAILED:\s*(=====)?$", self.output)
-        self.assertNotIn("Exception in thread", self.output)      # a worker thread that died
-        self.assertNotIn("the pool failed while handling it", self.output)
+        for output in (self.output, self.hangs_output):
+            self.assertNotRegex(output, r"(?m)FAILED:\s*(=====)?$", output)
+            self.assertNotIn("Exception in thread", output)      # a worker thread that died
+            self.assertNotIn("the pool failed while handling it", output)
 
 
 class ExitStatus(unittest.TestCase):
@@ -477,7 +562,9 @@ class TheGuard(unittest.TestCase):
 
 class TheCheckoutsLock(unittest.TestCase):
     """Two pools of one checkout: the second waits for the first, naming it, and starts when it
-    ends; the first keeps every result (without the lock the second would delete its logs)."""
+    ends; the first keeps every result (without the lock the second would delete its logs). A third
+    and a fourth, sent SIGTERM and SIGINT while they wait, end by that signal at once, none of their
+    units run."""
 
     def test_the_second_waits(self):
         if "lock" in SETUP_ERRORS:
@@ -497,6 +584,64 @@ class TheCheckoutsLock(unittest.TestCase):
         second_start = float((second.stamps / "start").read_text())
         self.assertGreaterEqual(second_start, first_end, "the second pool's unit started before the first ended")
         self.assertNotIn("waiting", first.output)
+
+    def test_a_signal_while_waiting(self):
+        # SIGTERM to the third, SIGINT to the fourth (whose handler before the wait was Python's own, or
+        # ignored: only SIG_DFL again ends it by the signal), while they wait.
+        if "lock" in SETUP_ERRORS:
+            raise SETUP_ERRORS["lock"]
+        first = RUNS["first"]
+        for name, signum in (("third", signal.SIGTERM), ("fourth", signal.SIGINT)):
+            with self.subTest(name):
+                run = RUNS[name]
+                self.assertEqual(run.wait(), -signum, run.output)         # SIG_DFL again, and itself killed
+                self.assertTrue(FIRST_RAN_ON[name], f"the {name} pool waited for the first to end:\n{run.output}")
+                self.assertRegex(run.output, rf"pool: another pool runs in this checkout: pool\.py pid {first.pid} "
+                                             r".*; waiting for it to end", run.output)
+                self.assertIn(f"pool: {signal.Signals(signum).name} while waiting: none of the 1 unit(s) ran\n",
+                              run.output)
+                self.assertEqual(run.note, "0 tests, 1 failed: test_st_slow.Slow, 0 skipped", run.output)
+                self.assertIn(f"note: {run.note}\n", run.output)
+                self.assertFalse((run.stamps / "start").exists(), f"the {name} pool's unit started:\n{run.output}")
+                self.assertNotIn("unit(s) on", run.output)
+                self.assertNotIn("===== test_st_slow.Slow", run.output)
+                self.assertNotIn("Traceback", run.output)
+
+
+class ThePoolsLastResorts(unittest.TestCase):
+    """What the pool's own side cannot do is a unit's failure, under its name, saying why: fewer free
+    worker slots than it needs (no unit runs), a fault while it handles a unit (work()'s last resort:
+    the next unit runs)."""
+
+    def test_no_free_worker_slot(self):
+        run = RUNS["noslot"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertRegex(run.output, r"(?m)^pool: only 1 of the 100 worker slots are free \(/tmp/vpool<k>\.lock\), "
+                                     r"2 needed: other pools run in this /tmp$")
+        self.assertEqual(run.note, "0 tests, 2 failed: test_st_slow.Slow, test_st_slow.AlsoSlow, 0 skipped", run.output)
+        self.assertIn(f"note: {run.note}\n", run.output)
+        self.assertFalse((run.stamps / "start").exists(), "a unit started without its worker slot:\n" + run.output)
+        self.assertNotIn("unit(s) on", run.output)
+
+    def test_a_fault_while_handling_a_unit(self):
+        run = RUNS["fault"]
+        self.assertEqual(run.wait(), 1, run.output)
+        why = "the pool failed while handling it: RuntimeError: a fault of the pool's own, injected"
+        lines, _, end = block(run.output, "test_st_slow.Slow")
+        self.assertRegex(lines[0], r"^===== test_st_slow\.Slow \(worker \d+\): FAILED: " + re.escape(why) + " =====$",
+                         run.output)
+        self.assertIsNotNone(end, run.output)
+        self.assertTrue(any(line.startswith("Traceback") for line in lines), run.output)
+        self.assertEqual(lines[-2], "RuntimeError: a fault of the pool's own, injected", run.output)
+        self.assertRegex(run.output, r"(?m)^test_st_slow\.Slow\s+\d+\s+[\d.]+\s+FAILED: " + re.escape(why) + "$")
+        # The pool went on: the next unit, on the same worker, ran and passed; the note has both.
+        self.assertRegex(run.output, r"(?m)^===== test_st_slow\.AlsoSlow \(worker \d+, [\d.]+ s\): passed \(1 test\) =====$")
+        self.assertLess(run.output.index("===== test_st_slow.Slow ("), run.output.index("===== test_st_slow.AlsoSlow ("),
+                        "the unit after the fault ran first (the order of two units never timed: as named):\n"
+                        + run.output)
+        self.assertIn("pool: failed: test_st_slow.Slow\n", run.output)
+        self.assertEqual(run.note, "1 tests, 1 failed: test_st_slow.Slow, 0 skipped", run.output)
+        self.assertNotIn("Exception in thread", run.output)
 
 
 if __name__ == "__main__":

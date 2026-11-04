@@ -160,11 +160,16 @@ seconds, no PipeWire, nothing built; `tools/test.sh tools` runs it), runs the po
 modules in a temporary folder and checks the note (failures, errors, a failed subtest, a skipped
 test, a skipped class, a skip in `setUpClass`, reasons of several lines; the same note as the
 serial runner's for the same modules), units killed, past their timeout or whose log vanished,
-each unit's output as one block, the exit status, SIGTERM, the `built()` guard, and the checkout's
-lock. Two variables point the pool there: `VPAIR_POOL_TESTS`, the folder of the modules (default
-this one), and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default the
-checkout's `build/`, the main checkout's for the durations). Its name does not match `test*.py`,
-so the level does not run it.
+each unit's output as one block, the exit status, SIGTERM, the `built()` guard, the checkout's
+lock (SIGTERM and SIGINT while a pool waits for it too), and the pool's last resorts: fewer free
+worker slots than it needs, and a fault of its own while it handles a unit (these two through a
+process that imports `pool.py` and replaces one function before its `main()`). No result in it
+depends on how fast anything runs: a unit that must still be running blocks on a file the test
+writes, and the only short timeout is the one under test, so a loaded machine does not fail it. Two
+variables point the pool there: `VPAIR_POOL_TESTS`, the folder of the modules (default this one),
+and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default the checkout's
+`build/`, the main checkout's for the durations). Its name does not match `test*.py`, so the level
+does not run it.
 
 With none of the pool's variables set (`VPAIR_ADDRESS_BASE`, `VPAIR_PLUGIN_HOST`, `VPAIR_DISPLAY`,
 `VPAIR_POOL_*`) every module behaves as before: that is how `--jobs 1` and CI run them.
