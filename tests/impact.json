@@ -8,15 +8,19 @@
     "module that imports it. A path no rule names is reported, and the levels cover it.",
     "The rules are narrow on purpose, and the levels (tools/test.sh all, before every push) cover",
     "what they leave out. A plugin's editor-only files (its EDITOR sources, and the headers that",
-    "only they include, or that other sources include only where SPEAKER_HEADLESS is 0) are never",
-    "compiled into its headless build, which is what the chain runs: they run the plugin's own",
-    "check, not chain. A speakerd file runs `speakerd` and, beside it, only the checks whose",
-    "scenarios alone read what the file is for: its log lines, its answers on the command line or",
-    "the local link, the PipeWire objects it makes. Where a file only carries what another file is",
-    "for (Engine's parameter inbox and its level and timing rings, which Control and Monitor serve;",
-    "Main's calls into Control), that other file's rule runs the check. tools/tests/test_impact.py",
-    "keeps the map honest: every speakerd file is named by a rule of its own, and every path a",
-    "plugin rule without chain names is editor-only."
+    "only they include, or that other sources include only where SPEAKER_HEADLESS is 0) run the",
+    "plugin's own check, not chain. The chain's modules run the headless builds, which never compile",
+    "them, and one complete build, loudness's, whose identity plugin_identity reads: `plugin <name>`",
+    "builds that bundle too, editor and all, and checks its identity. A speakerd file runs",
+    "`speakerd` and, beside it, only the checks whose scenarios alone read what the file is for: its",
+    "log lines, its answers on the command line or the local link, the values it streams, the",
+    "PipeWire objects it makes. The map is keyed by the file edited: an edit runs its own rule's",
+    "checks and no other's. One rule is narrower than that, by the person's decision: Engine.* runs",
+    "`speakerd` alone, though parts of the Engine are proven only by pair, chain and installers (its",
+    "rule says which); the levels run those before a push, and after touching those parts one runs",
+    "`tools/test.sh speakerd pair chain installers` by hand. tools/tests/test_impact.py keeps the",
+    "map honest: every speakerd file is named by a rule of its own, and every path a plugin rule",
+    "without chain names is editor-only."
   ],
   "rules": [
     {
@@ -25,7 +29,7 @@
       "checks": []
     },
     {
-      "why": "a plugin's editor-only files: in its complete and control builds, never in the headless build the chain runs",
+      "why": "a plugin's editor-only files: in its complete and control builds, never in the headless builds the chain runs; the one complete build the chain reads, loudness's identity in plugin_identity, `plugin <name>` builds too and checks",
       "paths": [
         "dsp/juce_plugins/crossover/PluginEditor.cpp", "dsp/juce_plugins/crossover/PluginEditor.h",
         "dsp/juce_plugins/crossover/PlotComponent.cpp", "dsp/juce_plugins/crossover/PlotComponent.h",
@@ -49,19 +53,19 @@
       "checks": ["plugins", "chain"]
     },
     {
-      "why": "speakerd's audio cycle, which every speakerd scenario plays through; its parameter inbox and its level and timing rings only carry what Control and Monitor serve, whose rules run pair, installers and chain",
+      "why": "speakerd's audio cycle, which every speakerd scenario plays through. speakerd alone by the person's decision, although parts of the Engine are proven only by other checks: its parameter inbox (knob_latency, graph_edit, drag_during_revision, ampd_persistence: pair), its live graph swap in Engine::install (graph_edit, buffer_size: pair; plugin_identity: chain), its level ring (meter_values, monitor_fanout: pair; chain_cost's output/level: chain) and its timing ring (chain_cost: chain; board_cpu: pair; smoke's timing line in test_speakerd_installed: installers). The levels run those before a push; after touching those parts, run `tools/test.sh speakerd pair chain installers` by hand",
       "paths": ["dsp/juce_apps/speakerd/Engine.*"],
       "checks": ["speakerd"]
     },
     {
-      "why": "speakerd's command line and start: --version (the installers refuse one below their minimum and keep its line), the flags the installed unit passes, the device and playing lines smoke reads, the exit on a signal the unit's wrapper records, a shadowed --lv2-bundle refused with status 2; its calls into Control are Control's",
+      "why": "speakerd's command line and start: --version (the installers refuse one below their minimum and keep its line), the flags the installed unit passes, the device and playing lines smoke reads, the exit on a signal the unit's wrapper records, a shadowed --lv2-bundle refused with status 2 (installers); its control timer, which calls control.service(), where every live revision applies (pair; plugin_identity's apply: chain), and control.notifyStatus(), the unasked status test_buffer_size reads (pair); and the monitor it wires to Control (pair, chain)",
       "paths": ["dsp/juce_apps/speakerd/Main.cpp"],
-      "checks": ["speakerd", "installers"]
+      "checks": ["speakerd", "installers", "pair", "chain"]
     },
     {
-      "why": "speakerd's build and its version, which --version says and the installers check against their minimum",
+      "why": "speakerd's build: its version, which --version says and the installers check against their minimum, and how every file of it compiles (flags, definitions, modules), so that an edit can break what pair reads or move chain_cost's CPU figures: every check that runs speakerd",
       "paths": ["dsp/juce_apps/speakerd/CMakeLists.txt"],
-      "checks": ["speakerd", "installers"]
+      "checks": ["speakerd", "installers", "pair", "chain"]
     },
     {
       "why": "the generated BuildInfo.h: the version and commit --version says, which the installers check and keep as the installed build",
@@ -89,29 +93,29 @@
       "checks": ["speakerd", "installers", "pair"]
     },
     {
-      "why": "the local link's operations: ampd's (pair; chain's subscribe and apply are the same ones), and the status with its timing, which only smoke reads",
+      "why": "the local link's operations: ampd's (pair); the apply and the subscriptions the chain's modules make themselves, plugin_identity's apply of revision 2 (its `applied` line and the `plugin node` lines of the graph it builds, once each) and chain_cost's speakerd/timing and output/level (chain); and the status with its timing, which only smoke reads (installers)",
       "paths": ["dsp/juce_apps/speakerd/Control.*"],
-      "checks": ["speakerd", "installers", "pair"]
+      "checks": ["speakerd", "installers", "pair", "chain"]
     },
     {
-      "why": "the monitor thread: output/level and the plugins' streams (pair), speakerd/timing (only chain_cost subscribes to it), and the timing lines in the log, which smoke parses",
+      "why": "the monitor thread: output/level and the plugins' streams (pair; chain_cost's output/level), speakerd/timing (chain_cost: chain; board_cpu: pair), and the timing lines in the log and the status's timing, which smoke parses (installers)",
       "paths": ["dsp/juce_apps/speakerd/Monitor.*"],
       "checks": ["speakerd", "installers", "pair", "chain"]
     },
     {
-      "why": "the timing statistics: speakerd/timing's values (chain_cost), the status's timing and the `timing: last <n> s` line (smoke)",
+      "why": "the timing statistics: speakerd/timing's values, which TimingStats::toVar builds (chain_cost asserts them: chain; board_cpu checks their shape: pair), the status's timing and the `timing: last <n> s` line (smoke: installers)",
       "paths": ["dsp/juce_apps/speakerd/Timing.*"],
-      "checks": ["speakerd", "installers", "chain"]
+      "checks": ["speakerd", "installers", "pair", "chain"]
     },
     {
-      "why": "a plugin node and its time: every node runs through it (speakerd); its time per node, which only chain_cost asserts",
+      "why": "a plugin node and its time: every node runs through it (speakerd); its time per node, which chain_cost asserts (chain), board_cpu finds in speakerd/timing (node 16: pair) and smoke prints per node from speakerd's status, the line test_speakerd_installed asserts (installers)",
       "paths": ["dsp/juce_apps/speakerd/TimedNode.*"],
-      "checks": ["speakerd", "chain"]
+      "checks": ["speakerd", "installers", "pair", "chain"]
     },
     {
-      "why": "which bundle each plugin runs from, and its build identity in the `plugin node` lines, which only plugin_identity reads",
+      "why": "which bundle each plugin runs from, read from ~/.lv2 and every --lv2-bundle at start, which test_speakerd_installed meets with a broken copy of the bundle in ~/.lv2 (installers), and its build identity in the `plugin node` lines, which only plugin_identity reads (chain)",
       "paths": ["dsp/juce_apps/speakerd/PluginBundles.*"],
-      "checks": ["speakerd", "chain"]
+      "checks": ["speakerd", "installers", "chain"]
     },
     {
       "why": "the graph built from a document, which every speakerd scenario plays, and the `plugin node` line it writes for each plugin, which only plugin_identity reads",
@@ -165,9 +169,14 @@
       "checks": ["self"]
     },
     {
-      "why": "the virtual pair itself",
+      "why": "a self-test of the virtual pair's tools (pool_selftest.py: the pool's failure paths), which the tools check runs",
+      "paths": ["tests/vpair/*_selftest.py"],
+      "checks": ["tools"]
+    },
+    {
+      "why": "the virtual pair itself: every check that runs on it; and tools, which runs the self-tests of its tools (pool.py's)",
       "paths": ["tests/vpair/*"],
-      "checks": ["speakerd", "ampd", "pair", "controller", "installers", "chain"]
+      "checks": ["speakerd", "ampd", "pair", "controller", "installers", "chain", "tools"]
     },
     {
       "why": "the test tools",
