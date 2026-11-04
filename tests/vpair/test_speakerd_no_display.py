@@ -32,6 +32,9 @@ Pass when:
 - each speakerd, stopped with SIGTERM, says `stopping` once, as its last line, and exits with
   status 0.
 
+Against 0.3.2 it fails: an X client connects, and (shown separately) speakerd exits when the Xvfb
+goes. The client assertion comes before the kill and ends the test, so one run shows the first.
+
     python3 -m unittest -v tests.vpair.test_speakerd_no_display
 """
 
