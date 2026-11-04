@@ -17,7 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST_SH = ROOT / "tools" / "test.sh"
-MAX_JOBS = 64   # tests/vpair/pool.py's limit
+MAX_JOBS = 64           # tests/vpair/pool.py's limit, what --jobs and BPI_TEST_JOBS take
+MAX_DEFAULT_JOBS = 16   # the default's limit: the container's tasks (pids.max), not the pool's
 
 
 def run(*args, ci=None, jobs=None, path=None):
@@ -49,7 +50,7 @@ def decided(stdout):
 
 def default_jobs():
     processors = int(subprocess.run(["nproc"], capture_output=True, text=True, check=True).stdout)
-    return min(max(processors // 2, 1), MAX_JOBS)
+    return min(max(processors // 2, 1), MAX_DEFAULT_JOBS)
 
 
 class Refused(unittest.TestCase):
@@ -130,15 +131,20 @@ class Taken(unittest.TestCase):
         self.assertEqual(self.taken("tools", "--jobs", "7", jobs="5")["jobs"], "7")
         self.assertEqual(self.taken("tools", "--jobs", "4", ci="true")["jobs"], "4")
 
-    def test_the_default_stays_within_the_pools_limit(self):
-        # Half of 256 processors is above what pool.py takes: the default is 64 there.
+    def test_the_default_is_half_the_processors_at_most_16(self):
+        # A busy worker takes 65 to 75 of the container's 2048 tasks: the default stops at 16 from
+        # 32 processors up, far below the pool's 64, which an explicit number may still ask for.
         with tempfile.TemporaryDirectory(prefix="test-sh-") as tmp:
-            for processors, want in (("256", "64"), ("129", "64"), ("128", "64"), ("127", "63"), ("1", "1")):
-                nproc = Path(tmp) / "nproc"
+            nproc = Path(tmp) / "nproc"
+            for processors, want in (("256", "16"), ("129", "16"), ("128", "16"), ("33", "16"), ("32", "16"),
+                                     ("31", "15"), ("2", "1"), ("1", "1")):
                 nproc.write_text(f"#!/bin/sh\necho {processors}\n")
                 nproc.chmod(nproc.stat().st_mode | stat.S_IXUSR)
                 with self.subTest(processors=processors):
                     self.assertEqual(self.taken("tools", path=tmp)["jobs"], want)
+            self.assertEqual(self.taken("tools", "--jobs", "40", path=tmp)["jobs"], "40")
+            self.assertEqual(self.taken("tools", jobs="40", path=tmp)["jobs"], "40")
+            self.assertEqual(self.taken("tools", path=tmp, ci="true")["jobs"], "1")
 
 
 if __name__ == "__main__":
