@@ -49,9 +49,11 @@ Pass when:
 - the real controller (TheRealController, `built("controller")`, its script test mode as
   test_controller_end_to_end runs it): `buffer-size 256`, `expect-applied`, `expect-buffer-size
   left 256`, `expect-buffer-size right 256` pass, and then both speakers have clock.force-quantum 256
-  and graph.json quantum 256; `buffer-size default` brings both back to 1024 with force-quantum 0
-  and no quantum in graph.json; the script ends with `pass`. Skipped, saying why, when the
-  controller does not build.
+  and graph.json quantum 256, read while the script waits (`wait-param`) for a harness controller to
+  set node 16's s0_e0_gain to 11 dB once those reads are done (a script runs on by itself: its next
+  step would otherwise force 0 under them); then `buffer-size default` brings both back to 1024 with
+  force-quantum 0 and no quantum in graph.json; the script ends with `pass`. Skipped, saying why, when
+  the controller does not build.
 
 It needs the speakerd that knows the buffer size (docs/protocol.md: hello's `quantum_range`), and
 step 3's speakerd (the local socket, 0.3.0): with an older one it fails, saying so.
@@ -75,6 +77,7 @@ from test_speakerd_quantum_change import DOCUMENT as QUANTUM_DOCUMENT, RECORD_SE
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete", "controller?")
+POOL_QUIET = ("TheChosenSize", "TheRealController")   # times: the quantum said, forced and in the state within 10 s
 
 DOCUMENT = revision_document(QUANTUM_DOCUMENT, 1)
 STREAM = tone(100.0, -20.0, 240.0)   # longer than any part of the scenario: stopped at its end
@@ -86,6 +89,9 @@ OUTSIDE = (4096, 100, 48)            # above the range, not a power of two, belo
 NARROW = 1024                        # the right's max-quantum in OutsideOneSpeakersRange
 WAIT = 10.0                          # for a quantum line, the metadata and the state
 NAMES = ("left", "right")
+# TheRealController's go: node 16's shelf gain, 12 dB in DOCUMENT, set to this by another controller
+# once the test has read both speakers at 256 (the sound is not what TheRealController checks).
+GO = ("s0_e0_gain", 11.0)
 
 
 def sized(quantum):
@@ -311,6 +317,9 @@ class TheRealController(BufferSize, unittest.TestCase):
         s.add("expect-buffer-size left 256")
         n["right_256"] = s.add("expect-buffer-size right 256")
         s.add("state")
+        # The script runs on by itself: it waits here while the test reads both speakers at 256,
+        # until another controller sets GO (no time: the next step would force 0 under the reads).
+        s.add(f"wait-param 16 {GO[0]} {GO[1]:g} 60")
         s.add("buffer-size default")
         s.add("expect-applied")
         s.add(f"expect-buffer-size left {SPEAKER_DEFAULT}")
@@ -323,6 +332,9 @@ class TheRealController(BufferSize, unittest.TestCase):
                 for name in NAMES:
                     self.wait_forced(pair, name, 256)
                     self.assertEqual(pair.graph(name).get("quantum"), 256, name)
+                with Controller("ctl-size-go") as go:
+                    go.param(16, GO[0], GO[1])
+                    go.wait(lambda m: m["op"] == "param" and m["id"] == GO[0] and m["value"] == GO[1], what="GO's echo")
                 status, result = ctl.finish(timeout=120)
                 self.assertEqual((status, result and result.get("result")), (0, "pass"),
                                  ctl.report("the buffer-size script failed"))

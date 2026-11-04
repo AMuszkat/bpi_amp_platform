@@ -81,6 +81,7 @@ from test_knob_latency import onset
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless", "controller")
+POOL_QUIET = True   # a time: (b)'s knob heard on both within 60 ms of the send, graph.json within 2 s
 
 FREQ = 200.0                        # test_knob_latency's, whose onset() this uses
 LEFT, RIGHT = -20.0, -32.0          # each side of the stereo tone: what each speaker's Mine carries

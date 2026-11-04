@@ -58,6 +58,7 @@ from harness import (RATE, TWEETER_MUTED, Ampd, Controller, Pair, Player, Speake
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless")
+POOL_QUIET = True   # a time and xruns: no gap longer than the 30 ms fade, no click (an xrun makes either)
 
 HEADLESS = lv2_uri("loudness_headless")
 FREQ, LEVEL = 200.0, -20.0

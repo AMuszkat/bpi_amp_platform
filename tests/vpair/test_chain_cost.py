@@ -75,6 +75,7 @@ from harness import (NO_LIMITS, RATE, Pair, Player, Speakerd, SpeakerdLink, buil
 POOL_BUILDS = ("speakerd", "loudness:headless", "firConv:headless", "crossover:headless")
 # It measures speakerd's CPU: the pool runs it after the others, alone.
 POOL_ALONE = True
+POOL_QUIET = True   # its criterion is a CPU share: firConv's and crossover's mean share of the cycle
 
 LOUDNESS, FIRCONV, CROSSOVER = 16, 17, 18
 URIS = {LOUDNESS: lv2_uri("loudness_headless"), FIRCONV: lv2_uri("firConv_headless"),

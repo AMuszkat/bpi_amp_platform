@@ -44,6 +44,7 @@ from test_graph_edit import chained
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete")
+POOL_QUIET = True   # a rate and times: graph.json at most once a second, graph.lkg.json 3.9 to 6.5 s on
 
 FREQ, LEVEL = 200.0, -20.0
 PARAMS = {"mode": "Force 1", "s0_e0_freq": 1000.0, "s0_e0_gain": 0.0, "glide": 1.0}

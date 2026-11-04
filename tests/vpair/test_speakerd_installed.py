@@ -69,6 +69,7 @@ import numpy as np
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete")
+POOL_QUIET = ("Installed",)   # smoke's: no xrun or late cycle in 3 s, the longest cycle under half
 
 DOCUMENT = graph_document(lv2_uri("loudness_headless"),
                           {"mode": "Force 1", "s0_e0_gain": 12.0, "s0_e0_freq": 120.0})

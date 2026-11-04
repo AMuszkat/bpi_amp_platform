@@ -146,6 +146,13 @@ from stand_in_speakerd import TIMING
 # Its tests are independent (each its own stand-in pair, from setUp): tests/vpair/pool.py runs each
 # in a process of its own (README.md, "The pool").
 POOL_SPLIT = True
+# Quiet: the units whose criterion is a time or a rate (README.md, "The pool").
+POOL_QUIET = ("Protocol.test_monitoring",       # each subscriber's rate within 30 %
+              "Protocol.test_monitor_relay",    # rates within 30 %, first values within 0.1 s, nothing for 0.5 s
+              "Protocol.test_revisions",        # a silent right rejected 9.9 to 11 s after the proposal
+              "Protocol.test_gestures",         # a gesture with no end ended 4.5 to 6 s after the last value
+              "Protocol.test_board_cpu",        # `seconds` 0.05 to 0.3 s, the stored value within 0.2 s
+              "Protocol.test_persistence")      # at most 4 writes in 3 s, the value within 1.1 s, lkg after 1.9 s
 
 HEADLESS = lv2_uri("loudness_headless")
 PARAMS = {"mode": "Force 1", "s0_e0_gain": 0.0, "s0_e1_gain": 0.0}

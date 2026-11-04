@@ -27,6 +27,7 @@ import itertools
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -2257,12 +2258,22 @@ class ScriptedController:
 
 
 class VirtualDisplay:
-    """An X display for a `with` block, for the controller's windows (--gui): Xvfb, on the first free
-    display number it finds itself (-displayfd), or on VPAIR_DISPLAY's (tests/vpair/pool.py gives
-    each worker its own, and DISPLAY pointing at it: a JUCE program without DISPLAY opens :0.0, so
-    every speakerd of the container would otherwise use, and die with, the first worker's
-    display), with openbox as its window manager. Entering returns once Xvfb takes connections and
-    openbox has started (its --startup command ran); `env` is {"DISPLAY": ...}. Leaving stops both."""
+    """An X display for a `with` block, for the controller's windows (--gui): Xvfb on VPAIR_DISPLAY's
+    number (tests/vpair/pool.py gives each worker its own, :100 + k, and DISPLAY pointing at it), or,
+    without it (the serial runner: --jobs 1, CI), on the first free number from :100 up to :199,
+    tried one at a time. Never :0, which Xvfb's -displayfd alone would take: a JUCE program with no
+    DISPLAY opens :0.0 (a build's juce_lv2_helper, the plugins speakerd hosts), so it would attach
+    to this display and die when it stops. Given a number, Xvfb writes it to -displayfd once it takes
+    connections and exits at once, writing nothing, when an X server already listens there, so the
+    next number is tried (as dsp/juce_apps/plugin-check/run.sh does from :200; the controller's own
+    tests take :300 up). openbox is its window manager. Entering returns once Xvfb takes connections
+    and openbox has started (its --startup command ran); `env` is {"DISPLAY": ...}. Leaving stops
+    both."""
+
+    # Without VPAIR_DISPLAY: the pool workers' range (:100 + k), free while the serial runner runs (the
+    # two never run at once in one checkout).
+    NUMBERS = range(100, 200)
+    START_TIMEOUT = 10.0              # seconds for Xvfb to take connections, every number tried included
 
     def __init__(self, size="1720x1000x24"):
         self.size, self.processes, self.env = size, [], {}
@@ -2273,18 +2284,8 @@ class VirtualDisplay:
                 if not shutil.which(tool):
                     raise AssertionError(f"no {tool}: the GUI check needs Xvfb and openbox (the development container has both)")
             self._tmp = Path(tempfile.mkdtemp(prefix="vpair-display-"))
-            read, write = os.pipe()
             own = os.environ.get("VPAIR_DISPLAY")
-            with open(self._tmp / "xvfb.log", "w") as log:
-                xvfb = subprocess.Popen(["Xvfb", *([f":{own}"] if own else []), "-displayfd", str(write),
-                                         "-screen", "0", self.size, "-nolisten", "tcp"],
-                                        pass_fds=(write,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
-            self.processes.append(xvfb)
-            os.close(write)
-            with os.fdopen(read) as pipe:
-                number = pipe.readline().strip()     # written once it takes connections
-            if not number.isdigit():
-                raise AssertionError("Xvfb did not start: " + (self._tmp / "xvfb.log").read_text()[-2000:])
+            number = self._xvfb([int(own)] if own else self.NUMBERS)
             self.env = {"DISPLAY": f":{number}"}
             ready = self._tmp / "openbox-started"
             self.processes.append(subprocess.Popen(["openbox", "--startup", f"touch {ready}"],
@@ -2299,6 +2300,44 @@ class VirtualDisplay:
         except BaseException:
             self.__exit__()
             raise
+
+    def _xvfb(self, numbers):
+        """Xvfb on the first of `numbers` it can take, kept in self.processes: that number. Each
+        try's output goes to xvfb.log."""
+        deadline = time.monotonic() + self.START_TIMEOUT
+        log_path = self._tmp / "xvfb.log"
+        tried = []
+        for n in numbers:
+            if time.monotonic() > deadline:
+                break
+            tried.append(n)
+            read, write = os.pipe()
+            with open(log_path, "a") as log:
+                log.write(f"--- Xvfb :{n}\n")
+                log.flush()
+                xvfb = subprocess.Popen(["Xvfb", f":{n}", "-displayfd", str(write), "-screen", "0", self.size,
+                                         "-nolisten", "tcp"],
+                                        pass_fds=(write,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
+            os.close(write)
+            said = b""
+            try:
+                # The number and a newline once it takes connections; end of file when it exits.
+                while not said.endswith(b"\n") and time.monotonic() < deadline:
+                    if not select.select([read], [], [], max(0.0, deadline - time.monotonic()))[0]:
+                        break
+                    chunk = os.read(read, 64)
+                    if not chunk:
+                        break
+                    said += chunk
+            finally:
+                os.close(read)
+            if said.strip() == str(n).encode() and xvfb.poll() is None:
+                self.processes.append(xvfb)
+                return n
+            _stop_process(xvfb)
+        where = f":{tried[0]} to :{tried[-1]}" if tried else "none tried"
+        log = log_path.read_text()[-2000:] if log_path.exists() else ""
+        raise AssertionError(f"Xvfb did not start on any display ({where}) within {self.START_TIMEOUT:g} s: {log}")
 
     def screenshot(self, path):
         """The whole X screen into `path` (PNG), with ImageMagick's import."""
