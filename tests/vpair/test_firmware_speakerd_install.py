@@ -188,8 +188,8 @@ import threading
 import unittest
 from pathlib import Path
 
-from harness import (FIRMWARE, ROOT, TEST_ENV, TEST_PLUGIN_HOST, Pair, built, firmware, graph_document, lv2_uri,
-                     stub_plugin_host, stub_speakerd)
+from harness import (FIRMWARE, ROOT, TEST_ENV, TEST_PLUGIN_HOST, Pair, build_name, built, firmware, graph_document,
+                     lv2_uri, stub_plugin_host, stub_speakerd)
 
 DOCUMENT = graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1", "s0_e0_gain": 12.0})
 CAPPED = {"gain_db": -20.0, "tweeter": "muted"}
@@ -373,6 +373,12 @@ def version_file(path):
 # The plugin builds the stand-in build tree has: loudness's both, and the headless builds of
 # crossover and firConv (the default bundle's: firmware/install-lib.sh, DEFAULT_PLUGINS).
 STUB_BUILDS = (("loudness", "headless"), ("loudness", "complete"), ("crossover", "headless"), ("firConv", "headless"))
+
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = tuple(build_name(plugin, kind) for plugin, kind in STUB_BUILDS)
+POOL_SPLIT = True
+
 DEFAULT_PLUGINS = re.search(r"(?m)^DEFAULT_PLUGINS=\(([^)]*)\)$", (FIRMWARE / "install-lib.sh").read_text()).group(1).split()
 CHAIN_DOCUMENT = json.loads((FIRMWARE / "speakerd/factory.json").read_text())
 

@@ -32,6 +32,10 @@ from harness import (RATE, Pair, Speakerd, align, built, graph_document, lv2_uri
 
 import numpy as np
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete")
+
 PARAMS = {
     # Auto mode (the default) with the level choosing the setting:
     "s1_thr": -50.0, "s1_e0_gain": 6.0, "s1_e0_freq": 150.0,

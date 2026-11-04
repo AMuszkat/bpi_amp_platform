@@ -72,6 +72,10 @@ from harness import (HERE, NO_LIMITS, Controller, ControllerScript, Player, Reco
                      steady, tone, with_plugin)
 from test_speakerd_quantum_change import DOCUMENT as QUANTUM_DOCUMENT, RECORD_SECONDS, TOLERANCE_DB, TONE, gains
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete", "controller?")
+
 DOCUMENT = revision_document(QUANTUM_DOCUMENT, 1)
 STREAM = tone(100.0, -20.0, 240.0)   # longer than any part of the scenario: stopped at its end
 RATE = 48000

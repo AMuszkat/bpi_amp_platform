@@ -66,6 +66,10 @@ from harness import (FIRMWARE, HERE, RATE, TEST_PLUGIN_HOST, Pair, Player, UserU
 
 import numpy as np
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete")
+
 DOCUMENT = graph_document(lv2_uri("loudness_headless"),
                           {"mode": "Force 1", "s0_e0_gain": 12.0, "s0_e0_freq": 120.0})
 TONE = tone(100.0, -20.0, 1.0)

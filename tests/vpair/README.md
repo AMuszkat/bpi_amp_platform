@@ -25,7 +25,11 @@ tools/test.sh speakerd | ampd | pair | controller | installers | chain   # a che
 tools/test.sh module passthrough_safety                                  # one module, or several
 tools/test.sh vpair                  # every module (level 2), recording the result; or
 python3 -m unittest discover -s tests/vpair -v
+python3 tests/vpair/pool.py --jobs 12 --note note.txt test_knob_latency test_graph_edit   # on 12 pairs at once
 ```
+
+The focused checks of `tools/test.sh` run their modules on a pool of workers, each on its own
+virtual pair (`pool.py`, "The pool" below); the levels and CI run them one after the other.
 
 `tools/test.sh vpair` records `vpair: pass` or `fail` in the test status, with a note
 (`vpair_note`) of how many tests ran, which failed, and which were skipped and why. A skipped
@@ -37,7 +41,8 @@ A scenario that runs speakerd builds what it needs first, once per test run:
 `complete`, the headless builds of firConv and the crossover (what a speaker runs) and
 `tools/build.sh controller` for `test_controller_end_to_end`. The builds are
 incremental, so this takes about a second when nothing changed, and the first run of a fresh
-checkout takes the minutes of a full build.
+checkout takes the minutes of a full build. Under the pool they are built once, before any
+test, from what each module declares (`POOL_BUILDS`).
 
 With Podman installed, the pair and the tests run in the development container
 (`tools/container.sh`, Debian bookworm: PipeWire 0.3.65 and WirePlumber 0.4.13, as on the
@@ -62,6 +67,83 @@ The speakers keep their sockets, state and logs in `$VPAIR_DIR` (default `/tmp/v
 the container when it is used), one folder each. Keep that path short: PipeWire's socket
 path must fit in 108 bytes.
 
+`up` starts both speakers at once and returns once WirePlumber has given each amplifier its
+ports, and fails when either does not come up (PipeWire not taking connections within 10 s,
+PipeWire or WirePlumber exiting, no ports within 20 s); a speaker left half started by an
+earlier run is stopped first. `down` stops both at once and returns once their processes have
+exited (SIGKILL after 5 s). Neither waits a fixed time: up takes about 0.14 s and down 0.03 s
+here (1.6 s and 0.6 s with the fixed waits they had before).
+
+## The pool
+
+```bash
+python3 tests/vpair/pool.py --jobs N --note FILE [MODULE...]     # from the repository root
+```
+
+`tools/test.sh`'s focused checks call it, in the development container (from outside it moves
+there itself). A MODULE is `test_<name>` (`test_<name>.<Class>` is one unit); none is every module
+of this folder, as `unittest discover` finds them. What it does:
+
+1. **The prebuild.** Every module that builds says so in `POOL_BUILDS`, everything its `built()`
+   calls need, also through the harness's classes (`Speakerd`, `render` and `SpeakerPair` need
+   `speakerd`, `ScriptedController` the `controller`):
+
+   ```python
+   POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete", "controller?")
+   ```
+
+   an application by its name, a plugin build as `plugin:kind`, and `?` after one a test skips
+   without (its failed build fails only the `built()` that asks for it, as without the pool).
+   The pool builds them all first, once: one `tools/build.sh` call per build tree with every kind
+   it needs (`tools/build.sh loudness headless complete`), the trees at once. A failed build
+   prints its output and fails the run before any test runs. In the units `built()` builds
+   nothing (`VPAIR_PREBUILT`) and refuses a build the module's `POOL_BUILDS` does not name,
+   saying so: `build/` may hold a stale one.
+2. **The units** are the test classes the unittest loader finds (a base class without tests
+   yields none), each run in a process of its own: a module with `setUpModule` runs it once per
+   unit. A module that must stay whole says `POOL_WHOLE = True`; one whose tests are independent
+   of each other (no state carried from one to the next, each test's fixtures its own or
+   `setUpClass`'s) may say `POOL_SPLIT = True`, a unit per test, `setUpClass` once in each
+   (`test_ampd_protocol`, `test_firmware_speakerd_install`: one class of each was the longest unit
+   of its check). They run on N workers, the longest first, by the durations learned from earlier
+   runs (`build/vpair-pool-durations.json` of the main checkout, merged after each run and written
+   atomically), seeded in `pool.py` with those measured here for units never timed; a unit known
+   to neither counts as long. A module that measures CPU says `POOL_ALONE = True` and runs after
+   the pool, alone (`test_chain_cost`).
+3. **Each worker** has a virtual pair of its own, and so does nothing a test binds, writes or
+   looks for collide with another worker's: `VPAIR_DIR=/tmp/vpool<k>`, `VPAIR_ADDRESS_BASE=127.77.<k>`
+   (the left speaker's ampd on `.1`, the right's on `.2`, another on `.3`, with the protocol's
+   ports), `VPAIR_PLUGIN_HOST=vpairPlugHost<k>` (the stand-in plugin host the installers and
+   `speakerd-run` look for by name, in `TEST_ENV`), an X display, `VPAIR_DISPLAY=<100 + k>` with
+   `DISPLAY` pointing at it (where `VirtualDisplay` runs its Xvfb: a JUCE program without
+   `DISPLAY` opens `:0.0`, so every speakerd in the container would otherwise use the first
+   worker's display, or plugin-check's, and exit when it stops), and
+   `VPAIR_PREBUILT=<checkout>/build`. A worker takes its slot `k` with a lock
+   (`/tmp/vpool<k>.lock`, so two pools in one container take different ones), and first brings
+   down a pair an interrupted run left in its folder and a stand-in plugin host left under its
+   name. A unit runs in a session of its own: whatever it leaves running when it ends is killed,
+   and its pair brought down.
+4. **The output**: each unit's whole output, stdout and stderr, as one block when it ends, also
+   kept in `build/vpair-pool/<unit>.log` (the last run's); then a table (unit, worker, seconds,
+   result), the failed units, and the container's peak use: tasks (threads count) against
+   `pids.max`, memory, `/dev/shm`. The note in FILE is `tools/test.sh`'s, in the same format: `N
+   tests[, K failed: id, ...], M skipped[: id (reason); ...]`. A unit whose process ends without
+   its result (it died, or ran past its timeout: 4 times its learned duration, at least 300 s,
+   900 s for one never timed; `--unit-timeout` sets another) counts as failed under its unit
+   name, with the tests it ran before.
+5. **The exit status** is 0 when every test passed (skips allowed), 1 otherwise. SIGINT or SIGTERM
+   stops the workers (each unit's whole session), brings their pairs down, writes the note so
+   far, and ends the pool by that signal.
+
+With none of the pool's variables set (`VPAIR_ADDRESS_BASE`, `VPAIR_PLUGIN_HOST`, `VPAIR_DISPLAY`,
+`VPAIR_POOL_*`) every module behaves as before: that is how the levels and CI run them.
+
+Measured here (24 threads, 12 workers): every module, 98 units, in about 90 s, the pool 64 s (the
+length of `test_monitor_fanout`, its longest unit) and then `test_chain_cost` alone 26 s, or 11 s
+with `VPAIR_CHAIN_COST_QUICK=1` (on one worker: 591 s). The checks' modules alone: `speakerd` 16 s,
+`ampd` 26 s, `pair` 65 s, `installers` 22 s, `chain` 29 s (13 s quick). A run peaks at about 790 to
+840 tasks of the container's 2048 (`pids.max`), under 3 GiB, and no `/dev/shm`.
+
 ## Files
 
 | File | What it is |
@@ -69,6 +151,7 @@ path must fit in 108 bytes.
 | `speaker.conf` | PipeWire configuration of one virtual speaker |
 | `vpair.sh` | starts, stops and describes the pair or one speaker of it, runs a tool against one speaker |
 | `harness.py` | plays into and records from a speaker, also in the background, once the links exist; signal analysis, builds and runs `speakerd` and its offline render; moves the test run into the container when the pair lives there |
+| `pool.py` | runs modules on a pool of workers, each on its own virtual pair, after building what they declare ("The pool") |
 | `__init__.py` | puts the harness on the path for `python3 -m unittest tests.vpair.<module>` |
 | `test_audio_path.py` | the pair itself works: tones arrive intact on both channels, the speakers are independent |
 | `test_speakerd_same_sound.py` | speakerd running the headless build sounds like the complete build |
@@ -166,7 +249,7 @@ the complete build of the plugin, which is what the plugin outside speakerd outp
 | `test_board_cpu` | on the real pair, a 200 Hz tone on both speakers: no ampd says `board/cpu: sampling` before a subscription; one client of each speaker subscribed to `board/cpu` at 10 Hz and `speakerd/timing` at 5 Hz has the first of each within 5 s; over 3 s, at least 20 `board/cpu` values, each `busy` and `cores` within 0 to 1, as many `cores` as the `cpuN` lines of /proc/stat present both before the subscription and after the window, `seconds` 0.05 to 0.5 (median within 10 % of 0.1 s), `t` within 1 s of the client's monotonic clock; every `speakerd/timing` value of protocol.md's shape with node 16; after the unsubscribe ampd says `board/cpu: stopped sampling` within 2 s, and from 0.3 s on no `board/cpu` value comes for 1.5 s while `speakerd/timing` does |
 | `test_drag_during_revision` | while controller B's revision 2 applies (the right's ampd held 1.5 s), controller A drags node 16's gain and ends at +6 dB: the graph sent, both graph.json, A, B and a later controller have +6 dB, and after the left's speakerd restarts its 200 Hz gain is its graph.json's render within 0.05 dB, 3 dB or more from B's document's |
 | `test_controller_end_to_end` | the real controller (`tools/build.sh controller`, its script test mode, `--trace`) against the real pair (the Mine pin through loudness, a stereo 200 Hz tone, left -20 and right -32 dBFS, the tweeter muted): (a) synced and proven on revision 1 with the hub's document on its canvas, both speakers online on layer current, both monitor links connected; no `error` reaches it, ampd ignores, drops or refuses nothing, one control connection, no OSC echo dropped; (b) nine `set`s (+12 / 0 dB, 1.2 s apart) echoed, each heard on both captures within 60 ms of its line (knob_latency's onset() and set-asides, at least 5 measured), both graph.json at the last value within 2 s; a 1 s `drag` to 3.5 dB heard on both through at least 10 intermediate 20 ms blocks, then at the render's 200 Hz level within 0.1 dB, its value echoed, in both graph.json, the hub's state and the controller; (c) `add loudness` applied (both graph.json have the node, its headless URI, 35 parameters), a `set` of its mode echoed, `disconnect 16:0 2:0` applied and heard (no woofer sample above -100 dBFS), two `connect-pins` putting the new node in the woofer's path applied and heard (the render's level within 0.1 dB), revision 5 in both graph.json, its state the hub's; (d) `open 16`: 8 `mon_levelDb` values from the left, then (`monitor-speaker 16 right`) from the right, each side's level as loudness's detector reads it (BallisticsFilter, computed here for 200 Hz) within 1 dB, the subscription moved; `output/level` woofer peak each side's level and RMS 3.01 dB under within 1 dB, 12 dB apart within 1 dB, tweeters under -100 dBFS; (e) another secret: not proven, not synced, the refusal in `refused`, revision 0, no plugin node, `refused <address>: its hello does not prove the pair's secret` in the hub's log, neither secret printed; (f) `--gui` under Xvfb and openbox (`harness.VirtualDisplay`), the tone stepping -30 / -12 dBFS: synced, both monitor links feeding levels above -60 dBFS, the window's `mon_levelDb` spanning more than 6 dB, `build/e2e-controller/controller-juce.png` and `controller-screen.png` written, neither one flat colour |
-| `test_chain_cost` | speakerd on the left speaker plays the board's chain from graph.json (the Mine pin -> `loudness_headless` 16 -> `firConv_headless` 17 -> `crossover_headless` 18, the headless builds a speaker runs, its low band to the woofer and its high band to the tweeter; the tweeter on) at 48 kHz and quantum 1024, stereo noise at -26 dBFS RMS playing; a client of its local link (`harness.SpeakerdLink`) subscribes to `speakerd/timing` and `output/level` at 2 Hz and, after 5 s, adds up a 20 s window, each value weighted by its cycles: firConv's mean share of the cycle is under 5 % and the crossover's under 1.5 % (juce::dsp::FIR::Filter: 15.1 % and 3.8 % here, x86_64; the block FIR about 1.0 % and 0.27 %); the window holds at least 80 % of 937.5 cycles, each node measured in 80 % of them, no quantum change, the woofer's median RMS above -60 dBFS. Each node's mean and max, the graph's, the cycle's, the cycles, late cycles, position jumps and dropped records are printed, and in the failure; late cycles are not asserted (they measure a runner's scheduler, not the chain) |
+| `test_chain_cost` | speakerd on the left speaker plays the board's chain from graph.json (the Mine pin -> `loudness_headless` 16 -> `firConv_headless` 17 -> `crossover_headless` 18, the headless builds a speaker runs, its low band to the woofer and its high band to the tweeter; the tweeter on) at 48 kHz and quantum 1024, stereo noise at -26 dBFS RMS playing; a client of its local link (`harness.SpeakerdLink`) subscribes to `speakerd/timing` and `output/level` at 2 Hz and, after 5 s, adds up a 20 s window (5 s with `VPAIR_CHAIN_COST_QUICK=1`, the module's docstring says why), each value weighted by its cycles: firConv's mean share of the cycle is under 5 % and the crossover's under 1.5 % (juce::dsp::FIR::Filter: 15.1 % and 3.8 % here, x86_64; the block FIR about 1.0 % and 0.27 %); the window holds at least 80 % of 937.5 cycles (234.4 in 5 s), each node measured in 80 % of them, no quantum change, the woofer's median RMS above -60 dBFS. Each node's mean and max, the graph's, the cycle's, the cycles, late cycles, position jumps and dropped records are printed, and in the failure; late cycles are not asserted (they measure a runner's scheduler, not the chain) |
 | `test_plugin_identity` | `dsp/juce_plugins/tools/plugin-versions.sh list` exits 0 with one `<plugin> <version> <source-id>` line per plugin folder that calls `speaker_add_plugin()` and nothing else, each version its CMakeLists.txt's `project(... VERSION)`; `loudness_headless`, `loudness`, `firConv_headless` and `crossover_headless` each have `buildinfo.ttl` exactly as the module's docstring shows it (its `bpi:version` and `bpi:sourceId`, a final newline or not) with the listed version and source id, and a `manifest.ttl` that does not name it (as JUCE writes it: no LV2 host reads `buildinfo.ttl`); live on both speakers, speakerd says `plugin node <uid>: <URI>, version <version>, source <source-id>, bundle <dir>` exactly once for each of 16, 17 and 18 at start (the bundle the one given, a trailing `/` allowed) and once each again at an apply of revision 2 on the left's local link, and its render once each; a copy of firConv_headless's bundle without buildinfo.ttl, and one with buildinfo.ttl cut off inside its version, each given alone, render Mine -> firConv -> woofer from layer current, sample for sample as the original bundle (whose woofer peaks above -60 dBFS), and say `plugin node 17: <URI>, no build identity (an older build), bundle <the copy>` and `... (buildinfo.ttl unreadable), bundle <the copy>` |
 | `test_ampd_persistence` | during a 2 s drag graph.json is replaced at most 3 times, and holds the last value on both speakers 1.2 s later; speakerd restarted with ampd stopped boots on graph.json and gives its render's gain within 0.05 dB, 3 dB or more from revision 1's original; graph.lkg.json follows after --lkg-after (4 s), and a speakerd restart starts that time again |
 | `test_buffer_size` | at start every speaker of the state says rate 48000, quantum 1024, quantum_range [64, 2048], quantum_default 1024; quantum 256 proposed is applied, both speakerds say `quantum: revision 2 asks for 256: clock.force-quantum 256` and `pipewire: the quantum changed to 256`, `pw-metadata -n settings` shows clock.force-quantum 256 and the state quantum 256 on both, and both amplifiers get the tone with the render's gain within 0.05 dB on both channels (no limit, the tweeter on); 2048 then no quantum: both run 2048, then 1024 with force-quantum 0 (`asks for none ... (PipeWire's default, 1024)`); 4096, 100 and 48 are rejected by the hub with `quantum <v>: a power of two from 64 to 2048` and nothing changes on either speaker (revision, force-quantum 0, quantum 1024, no quantum line for 1 s); 256 again, proposed as `256.0` (a whole JSON number: applied, `asks for 256` on both), comes back from graph.json on both after a speakerd restart (force-quantum reset to 0 by hand before) and after a PipeWire restart (speakerd exits 3 and starts again); with the right's max-quantum 1024 (state range [64, 1024]) 2048 is rejected with `right: quantum 2048: not a power of two from 64 to 1024 (what this speaker's PipeWire allows)`, rolled back on the left, and both end on revision 1, force-quantum 0, quantum 1024, graph.json without a quantum, the right never changing its quantum; the real controller's `buffer-size 256`, `expect-applied`, `expect-buffer-size left 256` and `... right 256` pass with force-quantum and graph.json 256 on both, and `buffer-size default` brings both back (skipped when the controller does not build) |
@@ -185,7 +268,8 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
 ```
 
 - `built(what, kind)` builds with `tools/build.sh` once per test process and returns the
-  program or the LV2 bundle.
+  program or the LV2 bundle. Under the pool it builds nothing: the pool built what the module's
+  `POOL_BUILDS` names, and it refuses anything else.
 - `state_dir()` writes `device.json` and the layers. A layer is a document, a string (written
   as it is, for a broken file), or `None` for no file.
 - `Speakerd` starts speakerd with the speaker's environment and an empty `HOME`, and waits for
@@ -199,7 +283,12 @@ reference, log = render(state_dir(tmp / "ref", current=with_plugin(document, lv2
   are matched as speakerd's README lists them, after the `speakerd: ` prefix.
 - `play_and_record()` plays into one node and records another; `play_and_record_many()`
   records several at once. Each recording is linked before the player starts, and the player
-  has finished when they return, so it is always stopped before speakerd.
+  has finished when they return, so it is always stopped before speakerd. After the player
+  ends each recording goes on until it holds `tail` (0.1 s) more than it did then: pw-play
+  drains before it exits, so what it played has reached the recorders already (17 to 126 ms
+  before, measured at quanta 256, 1024 and 2048), and a recorder a busy machine runs late has
+  written it all once it has written that much more. Each recording holds 128 to 256 ms after
+  the last sample played.
 - `Player(speaker, samples, target)` plays in the background for a `with` block, from the
   moment WirePlumber has linked it to `target`: a stream that outlives a speakerd, or one a
   test changes things under. `Recorder(speaker, node)` records a node's monitor for a `with`
@@ -244,7 +333,11 @@ with Pair({"left": {"dropins": home / ".config/pipewire/pipewire.conf.d"}}) as p
   `TEST_PLUGIN_HOST`, never this machine's own AudioPluginHost, which a test must neither wait
   for nor stop) and `SPEAKERD_SYSTEM_LV2_DIRS` (no system LV2 folder of this machine).
   `UserUnit` runs with them too. `stub_plugin_host(folder)` starts the stand-in plugin host, a
-  copy of sleep with that name; only the processes a test started are ever stopped.
+  copy of sleep with that name, and returns once the kernel names it so; only the processes a
+  test started are ever stopped. `TEST_PLUGIN_HOST` is `vpairPluginHost`, or `VPAIR_PLUGIN_HOST`
+  (at most 15 characters: the kernel's command name; a longer one is refused). With
+  `VPAIR_PREBUILT` set, `firmware()` gives the bundle step that tree too (`BUILD_ROOT`), unless
+  the test gives its own.
 - `Pair(setup)` starts a speaker from
   another PipeWire configuration (`speaker_conf`) or with a folder of drop-ins (`dropins`), as
   `vpair.sh up` does with `VPAIR_SPEAKER_CONF` and `VPAIR_PIPEWIRE_DROPINS`.
@@ -278,7 +371,9 @@ with SpeakerPair(tmp, {"left": document, "right": document}, [built("loudness", 
 - `SpeakerPair(tmp, documents, bundles)` brings the pair up as step 3 runs it: on each speaker its
   PipeWire, speakerd (from `documents[name]` as graph.json) and ampd, the left the hub on 127.0.1.1,
   the right an agent on 127.0.1.2 (the speakers share one network namespace; any 127.x address is
-  the loopback), and waits until each speakerd plays and the hub has caught the agent up.
+  the loopback), and waits until each speakerd plays and the hub has caught the agent up. The
+  addresses are `harness.ADDRESS["left"]` and `["right"]`, `.1` and `.2` of `VPAIR_ADDRESS_BASE`
+  (default `127.0.1`, one block per worker of the pool): a test names them so, never as numbers.
   `pair.speakerd[name]`, `pair.ampd[name]`, `pair.state[name]`, `pair.graph(name)` (its graph.json),
   `pair.start_speakerd(name)` and `pair.start_ampd(name)` after a stop or a kill.
 - `StandInPair(tmp, documents)` is the same with stand-in speakerds and no PipeWire: the protocol
@@ -337,9 +432,9 @@ with ScriptedController(script, name="ctl-test", args=["--trace"]) as ctl:
   `step(n)` waits for step n's line and fails, with everything the controller printed, when a step
   failed or it exited first; `stderr_path` is its stderr (`--trace` writes every message there).
   Leaving the block kills it if it still runs.
-- `VirtualDisplay()` is an Xvfb display (the first free number, `-displayfd`) with openbox, for
-  `--gui`: pass `env=display.env` to the controller; `display.screenshot(path)` captures the X
-  screen with ImageMagick's `import`.
+- `VirtualDisplay()` is an Xvfb display (the first free number, `-displayfd`, or `VPAIR_DISPLAY`'s
+  under the pool) with openbox, for `--gui`: pass `env=display.env` to the controller;
+  `display.screenshot(path)` captures the X screen with ImageMagick's `import`.
 
 ## Before and after step 3's speakerd
 
@@ -392,6 +487,10 @@ real-controller part the controller's `buffer-size` commands. Against older ones
   names it: the installer and speakerd-run skip processes in state Z.
 - **A recording often starts with a quantum or two of zeros**, before the first buffer reaches
   the recorder. The recorder is linked before anything is played, so a capture misses nothing.
+- **A JUCE program without `DISPLAY` opens `:0.0`**, speakerd included: it connects to whatever
+  X server has that number in the container (`VirtualDisplay`'s Xvfb, plugin-check's), and exits
+  with status 1 ("X connection to :0.0 broken") when that server stops. The pool gives each worker
+  a display of its own (`DISPLAY`, `VPAIR_DISPLAY`) for that reason.
 
 ## Next
 

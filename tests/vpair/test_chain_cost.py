@@ -42,11 +42,22 @@ contention, not the code.
 It prints each node's mean and max, the graph's and the cycle's, the window's cycles, late
 cycles, position jumps and dropped records; its failure message carries them too.
 
+VPAIR_CHAIN_COST_QUICK=1 (tools/test.sh sets it for its focused checks, never for the levels or CI)
+shortens the window to 5 s, everything else the same, the coverage threshold with it (80 % of the
+234.4 cycles of 5 s). 5 s is the shortest window that is still a measurement by the rules above
+with a margin: the timing values come at 2 Hz, each adding up the cycles since the one before
+(about 23.4), so the window holds about 10 and needs 187.5 cycles. One value fewer (the one its
+edge cuts off, or one that arrives late) leaves about 211, a value's worth to spare; at 3 s one
+fewer leaves 117 of the 112.5 needed, nothing to spare, and at 2.5 s it fails. The mean of 234
+cycles is still the criterion's: a cycle that took the whole of it moves the mean by 0.43 % of the
+cycle, where the limits stand 4 and 1.2 points above what the block FIR costs.
+
 It needs step 3's speakerd (the local link, the Mine pin): with an older one it fails, saying so.
 
     python3 -m unittest -v tests.vpair.test_chain_cost
 """
 
+import os
 import shutil
 import statistics
 import tempfile
@@ -59,12 +70,20 @@ import numpy as np
 from harness import (NO_LIMITS, RATE, Pair, Player, Speakerd, SpeakerdLink, built, lv2_uri,
                      require_speakerd_local_link, state_dir)
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "firConv:headless", "crossover:headless")
+# It measures speakerd's CPU: the pool runs it after the others, alone.
+POOL_ALONE = True
+
 LOUDNESS, FIRCONV, CROSSOVER = 16, 17, 18
 URIS = {LOUDNESS: lv2_uri("loudness_headless"), FIRCONV: lv2_uri("firConv_headless"),
         CROSSOVER: lv2_uri("crossover_headless")}
 
 QUANTUM = 1024
-SETTLE_S, WINDOW_S = 5.0, 20.0
+# The quick window (VPAIR_CHAIN_COST_QUICK=1): see the docstring for why 5 s.
+QUICK = os.environ.get("VPAIR_CHAIN_COST_QUICK") == "1"
+SETTLE_S, WINDOW_S = 5.0, (5.0 if QUICK else 20.0)
 TIMING_RATE_HZ = 2
 FIRCONV_MEAN_LIMIT, CROSSOVER_MEAN_LIMIT = 0.05, 0.015
 COVERAGE = 0.8

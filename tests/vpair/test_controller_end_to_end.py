@@ -78,6 +78,10 @@ from harness import (ADDRESS, BUILD, RATE, TEST_SECRET, Controller, ControllerSc
                      render, require_speakerd_local_link, revision_document, sine_amplitudes_dbfs, state_dir, tone)
 from test_knob_latency import onset
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "controller")
+
 FREQ = 200.0                        # test_knob_latency's, whose onset() this uses
 LEFT, RIGHT = -20.0, -32.0          # each side of the stereo tone: what each speaker's Mine carries
 LOUDNESS = lv2_uri("loudness_headless")

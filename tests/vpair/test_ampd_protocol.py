@@ -143,6 +143,10 @@ from harness import (ADDRESS, AUTH_VECTOR, KNOB_PORT, TWEETER_MUTED, Ampd, Contr
                      graph_document, lv2_uri, osc_encode, revision_document, state_dir)
 from stand_in_speakerd import TIMING
 
+# Its tests are independent (each its own stand-in pair, from setUp): tests/vpair/pool.py runs each
+# in a process of its own (README.md, "The pool").
+POOL_SPLIT = True
+
 HEADLESS = lv2_uri("loudness_headless")
 PARAMS = {"mode": "Force 1", "s0_e0_gain": 0.0, "s0_e1_gain": 0.0}
 DOCUMENT = graph_document(HEADLESS, PARAMS)
@@ -226,7 +230,7 @@ class Protocol(unittest.TestCase):
             udp.sendto(osc_encode("/bpi/param", "isfiss", 16, "s0_e0_gain", 11.0, 1000, "hub", a.token),
                        (ADDRESS["right"], KNOB_PORT))
             udp.close()
-            line = pair.ampd["right"].wait_for("knobs: dropped a datagram from 127.0.1.1")
+            line = pair.ampd["right"].wait_for(f"knobs: dropped a datagram from {ADDRESS['left']}")
             print(f"\n  {line}")
             self.assertEqual(params_seen(pair.sd["right"], 11.0), [], "the agent applied an OSC value")
             pair.ampd["right"].wait_status(lambda st: st.get("osc_dropped") == 1, what="1 datagram dropped")
@@ -890,7 +894,7 @@ class Protocol(unittest.TestCase):
             print(f"  {agent.wait_for('hub: a line longer than 64 KiB')}")
             time.sleep(0.5)
             self.assertFalse(agent.lines_starting("hub: connected"), agent.log())
-            self.assertTrue(agent.lines_starting("hub: the hub at 127.0.1.1:7450 did not prove the pair's secret"),
+            self.assertTrue(agent.lines_starting(f"hub: the hub at {ADDRESS['left']}:7450 did not prove the pair's secret"),
                             agent.log())
             self.assertEqual(sd.events("apply", "in"), [], "a fake hub applied a revision")
             self.assertEqual(params_seen(sd, 8.5), [], "a fake hub set a value")

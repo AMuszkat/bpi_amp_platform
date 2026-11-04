@@ -42,6 +42,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 VPAIR = HERE / "vpair.sh"
+# Where the pair keeps its sockets and state (vpair.sh). tests/vpair/pool.py gives each of its
+# workers its own, with its own addresses (VPAIR_ADDRESS_BASE), stand-in plugin host name
+# (VPAIR_PLUGIN_HOST) and X display (VPAIR_DISPLAY), below: unset, they are what a single run uses.
 VPAIR_DIR = Path(os.environ.get("VPAIR_DIR", "/tmp/vpair"))
 RATE = 48000
 
@@ -289,25 +292,32 @@ class Speaker:
                     + (f"\n{health}" if health else ""))
             time.sleep(0.02)
 
-    def play_and_record(self, samples, target="amplifier", record_target=None, fmt="s32", tail=0.4):
+    def play_and_record(self, samples, target="amplifier", record_target=None, fmt="s32", tail=0.1):
         """Plays `samples` (mono, or (n, 2) for FL and FR) into `target` and returns what the
         monitor of `record_target` (default: `target` itself) received, as an (n, 2) array:
         column 0 is the woofer channel, column 1 the tweeter channel. The recording is linked
         before the player starts, and the player has finished when this returns."""
         return self.play_and_record_many(samples, target, [(record_target or target, fmt)], tail)[0]
 
-    def play_and_record_many(self, samples, target, records, tail=0.4):
+    def play_and_record_many(self, samples, target, records, tail=0.1):
         """Plays `samples` into `target` while recording each (node, format) of `records` at
         once (format "s32" or "f32", see Recorder), and returns the recordings in that order.
-        After the player has finished, the recordings go on for `tail` seconds: what the player
-        handed over is still on its way through the graph."""
+        After the player has finished, each recording goes on until it holds `tail` seconds more
+        than it held then (5 s more at most, for a recorder the graph no longer feeds): pw-play
+        drains before it exits, so what it played has reached the recorders by then (17 to 126 ms
+        before it exits, measured at quanta 256, 1024 and 2048, into the amplifier and through
+        speakerd), and a recorder that a busy machine runs late has written it all once it has
+        written that much more."""
         recorders = []
         try:
             for node, fmt in records:
                 recorders.append(Recorder(self, node, fmt).start())
             with Player(self, samples, target, linked=False) as player:
                 player.wait(timeout=len(samples) / RATE + 10)
-            time.sleep(tail)
+            wanted = [recorder.frames() + int(tail * RATE) for recorder in recorders]
+            deadline = time.monotonic() + tail + 5.0
+            while any(r.frames() < n for r, n in zip(recorders, wanted)) and time.monotonic() < deadline:
+                time.sleep(0.01)
             return [recorder.stop() for recorder in recorders]
         finally:
             for recorder in recorders:
@@ -411,6 +421,14 @@ class Recorder:
             self.close()
             raise
         return self
+
+    def frames(self):
+        """How much it has written so far, in frames, its WAV header included (pw-record writes the
+        file as the frames come): for the difference between two moments."""
+        try:
+            return self.path.stat().st_size // (2 * 4)
+        except OSError:
+            return 0
 
     def stop(self):
         """Ends the recording and returns it."""
@@ -560,12 +578,37 @@ LV2_URI_BASE = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/"
 _built = {}
 
 
+def build_name(what, kind=None):
+    """How a module's POOL_BUILDS names a build: "speakerd", "loudness:headless"."""
+    return what if kind is None else f"{what}:{kind}"
+
+
+def _check_pool_build(what, kind):
+    """Under tests/vpair/pool.py (VPAIR_POOL_BUILDS set), a build the pool's prebuild did not just
+    make is refused: build/ may hold a stale one. The prebuild makes what the module's POOL_BUILDS
+    names; an optional one ("controller?") that failed to build fails here as the build would."""
+    declared = os.environ.get("VPAIR_POOL_BUILDS")
+    if declared is None:
+        return
+    name, module = build_name(what, kind), os.environ.get("VPAIR_POOL_MODULE", "the module")
+    if name in os.environ.get("VPAIR_POOL_UNBUILT", "").split():
+        raise RuntimeError(f"tools/build.sh {what} {kind or ''} failed in tests/vpair/pool.py's prebuild "
+                           f"(its output is in the pool's output)")
+    if name not in declared.split():
+        raise RuntimeError(f"built({what!r}{f', {kind!r}' if kind else ''}): {module}.POOL_BUILDS does not name "
+                           f"{name!r}, so tests/vpair/pool.py's prebuild did not build it, and build/ may hold a "
+                           f"stale one: add {name!r} to {module}.POOL_BUILDS (README.md, \"The pool\")")
+
+
 def built(what, kind=None):
     """Builds an application (`built("speakerd")`) or one build of a plugin
     (`built("loudness", "headless")`, `"complete"`) with tools/build.sh, once per test process,
     and returns the program or the LV2 bundle. tools/build.sh is incremental, so this is fast
-    when nothing changed."""
+    when nothing changed. Under tests/vpair/pool.py nothing is built here: the pool built what
+    the module's POOL_BUILDS names before any test ran, and anything else is refused."""
     key = (what, kind)
+    if key not in _built:
+        _check_pool_build(what, kind)
     prebuilt = os.environ.get("VPAIR_PREBUILT")
     if prebuilt and key not in _built:
         # A build tree laid out like build/, made elsewhere (another branch's speakerd, say):
@@ -961,8 +1004,13 @@ FIRMWARE = ROOT / "firmware"
 # The process name the installers and speakerd-run look for instead of AudioPluginHost, and the
 # system LV2 folders they look in, in every test: a test must never see, wait for or stop this
 # machine's own AudioPluginHost, nor read its system plugins. A test's stand-in plugin host is
-# a copy of sleep with this name (at most 15 characters, the kernel's comm).
-TEST_PLUGIN_HOST = "vpairPluginHost"
+# a copy of sleep with this name (at most 15 characters, the kernel's comm). VPAIR_PLUGIN_HOST
+# names it otherwise: each worker of tests/vpair/pool.py has its own, so that no test sees
+# another worker's stand-in running.
+TEST_PLUGIN_HOST = os.environ.get("VPAIR_PLUGIN_HOST") or "vpairPluginHost"
+if len(TEST_PLUGIN_HOST) > 15 or not re.fullmatch(r"[A-Za-z0-9_-]+", TEST_PLUGIN_HOST):
+    raise SystemExit(f"VPAIR_PLUGIN_HOST={TEST_PLUGIN_HOST!r}: a process name of 1 to 15 letters, digits, '_' "
+                     f"or '-' (the kernel keeps 15 characters of a command's name)")
 TEST_ENV = {"SPEAKERD_PLUGIN_HOST_NAME": TEST_PLUGIN_HOST, "SPEAKERD_SYSTEM_LV2_DIRS": "/nonexistent-vpair-lv2"}
 
 
@@ -970,8 +1018,12 @@ def firmware(script, *args, env=None, timeout=120, check=True):
     """Runs a firmware/ script (speakerd-setup.sh, setup.sh, snapcast-setup.sh) and returns the
     CompletedProcess, stdout and stderr together, with TEST_ENV and `env` on top of this
     environment. Fails with its output when `check` and it fails."""
+    base = dict(os.environ)
+    # The bundle step reads the build tree that built() uses (VPAIR_PREBUILT), unless told another.
+    if os.environ.get("VPAIR_PREBUILT") and "BUILD_ROOT" not in base:
+        base["BUILD_ROOT"] = os.environ["VPAIR_PREBUILT"]
     result = subprocess.run(["bash", str(FIRMWARE / script), *map(str, args)],
-                            env={**os.environ, **TEST_ENV, **(env or {})}, stdin=subprocess.DEVNULL,
+                            env={**base, **TEST_ENV, **(env or {})}, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             timeout=timeout)
     if check and result.returncode != 0:
@@ -992,8 +1044,17 @@ def stub_plugin_host(folder):
     shutil.copy("/bin/sleep", fake.with_name(fake.name + ".new"))
     os.replace(fake.with_name(fake.name + ".new"), fake)
     host = subprocess.Popen([str(fake), "120"])
-    time.sleep(0.2)
-    return host
+    # Running under its name: the kernel's comm, which the installers look for, once it is.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            if Path(f"/proc/{host.pid}/comm").read_text().strip() == TEST_PLUGIN_HOST:
+                return host
+        except OSError:
+            pass
+        if host.poll() is not None or time.monotonic() > deadline:
+            raise AssertionError(f"the stand-in plugin host {fake} did not start")
+        time.sleep(0.01)
 
 
 def stub_speakerd():
@@ -1178,8 +1239,15 @@ class UnitRun:
 AMPD = FIRMWARE / "ampd" / "ampd.py"
 STAND_IN = HERE / "stand_in_speakerd.py"
 # The two virtual speakers share one network namespace: each ampd listens on its own loopback
-# address, with the protocol's ports (docs/protocol.md, "Framing and addresses").
-ADDRESS = {"left": "127.0.1.1", "right": "127.0.1.2"}
+# address, with the protocol's ports (docs/protocol.md, "Framing and addresses"): .1 and .2 of a
+# block of three octets, 127.0.1 unless VPAIR_ADDRESS_BASE gives another (one per worker of
+# tests/vpair/pool.py, which share the container's loopback). An ampd of another name listens on
+# 127.0.0.1, or on .3 of the block given.
+ADDRESS_BASE = os.environ.get("VPAIR_ADDRESS_BASE") or "127.0.1"
+if not re.fullmatch(r"127\.(25[0-5]|2[0-4]\d|1?\d?\d)\.(25[0-5]|2[0-4]\d|1?\d?\d)", ADDRESS_BASE):
+    raise SystemExit(f"VPAIR_ADDRESS_BASE={ADDRESS_BASE!r}: the first three octets of a loopback block, 127.x.y")
+ADDRESS = {"left": f"{ADDRESS_BASE}.1", "right": f"{ADDRESS_BASE}.2"}
+OTHER_ADDRESS = f"{ADDRESS_BASE}.3" if os.environ.get("VPAIR_ADDRESS_BASE") else "127.0.0.1"
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
 
 
@@ -1380,14 +1448,14 @@ class LoggedProcess:
 class Ampd(LoggedProcess):
     """ampd (firmware/ampd/ampd.py) for one speaker, for a `with` block: `env` is the speaker's
     (speaker.env: its own XDG_RUNTIME_DIR, so the default speakerd socket is that speaker's), its
-    ampd.json is written into `state`. The left speaker is the hub on 127.0.1.1, the right an
-    agent on 127.0.1.2. Entering waits for the `listening on` line; leaving stops it with SIGTERM
-    and checks it exits with status 0 having said `stopping`."""
+    ampd.json is written into `state`. The left speaker is the hub on ADDRESS["left"] (127.0.1.1),
+    the right an agent on ADDRESS["right"] (127.0.1.2). Entering waits for the `listening on`
+    line; leaving stops it with SIGTERM and checks it exits with status 0 having said `stopping`."""
 
     def __init__(self, env, state, name, hub=None, listen=None, hub_address=None, args=(), wait_for="listening on ",
                  timeout=15, secret=TEST_SECRET):
         hub = (name == "left") if hub is None else hub
-        listen = listen or ADDRESS.get(name, "127.0.0.1")
+        listen = listen or ADDRESS.get(name, OTHER_ADDRESS)
         hub_address = hub_address or (None if hub else ADDRESS["left"])
         self.state, self.name = Path(state), name
         self.config = ampd_config(state, name, hub, listen, hub_address, secret)
@@ -1961,9 +2029,10 @@ SPEAKERD_SOCKET_VERSION = "0.3.0"
 
 
 def speakerd_version():
-    """speakerd's version, from `speakerd --version` ("0.2.1")."""
-    out = subprocess.run([str(built("speakerd")), "--version"], capture_output=True, text=True, timeout=30,
-                         env=dict(os.environ, HOME=tempfile.gettempdir())).stdout
+    """speakerd's version, from `speakerd --version` ("0.2.1"), run with an empty HOME of its own."""
+    with tempfile.TemporaryDirectory(prefix="vpair-version-") as home:
+        out = subprocess.run([str(built("speakerd")), "--version"], capture_output=True, text=True, timeout=30,
+                             env=dict(os.environ, HOME=home)).stdout
     found = re.search(r"(\d+\.\d+\.\d+)", out)
     return found.group(1) if found else "0"
 
@@ -1979,9 +2048,10 @@ def require_speakerd_local_link(test):
 
 class SpeakerPair:
     """The virtual pair as step 3 runs it: on each speaker its PipeWire, speakerd (from
-    `documents[name]` as graph.json, with `bundles`) and ampd; the left is the hub on 127.0.1.1,
-    the right an agent on 127.0.1.2. Entering waits until each speakerd plays and the hub has
-    caught the agent up. `setup` is Pair's (another speaker.conf)."""
+    `documents[name]` as graph.json, with `bundles`) and ampd; the left is the hub on
+    ADDRESS["left"] (127.0.1.1), the right an agent on ADDRESS["right"] (127.0.1.2). Entering
+    waits until each speakerd plays and the hub has caught the agent up. `setup` is Pair's
+    (another speaker.conf)."""
 
     def __init__(self, tmp, documents, bundles, setup=None, ampd_args=(), roles=None, limits=None):
         self.tmp, self.documents, self.bundles = Path(tmp), documents, bundles
@@ -2162,9 +2232,11 @@ class ScriptedController:
 
 class VirtualDisplay:
     """An X display for a `with` block, for the controller's windows (--gui): Xvfb, on the first free
-    display number it finds itself (-displayfd), with openbox as its window manager. Entering
-    returns once Xvfb takes connections and openbox has started (its --startup command ran);
-    `env` is {"DISPLAY": ...}. Leaving stops both."""
+    display number it finds itself (-displayfd), or on VPAIR_DISPLAY's (tests/vpair/pool.py gives
+    each worker its own, and DISPLAY pointing at it: a JUCE program without DISPLAY opens :0.0, so
+    every speakerd of the container would otherwise use, and die with, the first worker's
+    display), with openbox as its window manager. Entering returns once Xvfb takes connections and
+    openbox has started (its --startup command ran); `env` is {"DISPLAY": ...}. Leaving stops both."""
 
     def __init__(self, size="1720x1000x24"):
         self.size, self.processes, self.env = size, [], {}
@@ -2176,8 +2248,10 @@ class VirtualDisplay:
                     raise AssertionError(f"no {tool}: the GUI check needs Xvfb and openbox (the development container has both)")
             self._tmp = Path(tempfile.mkdtemp(prefix="vpair-display-"))
             read, write = os.pipe()
+            own = os.environ.get("VPAIR_DISPLAY")
             with open(self._tmp / "xvfb.log", "w") as log:
-                xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write), "-screen", "0", self.size, "-nolisten", "tcp"],
+                xvfb = subprocess.Popen(["Xvfb", *([f":{own}"] if own else []), "-displayfd", str(write),
+                                         "-screen", "0", self.size, "-nolisten", "tcp"],
                                         pass_fds=(write,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
             self.processes.append(xvfb)
             os.close(write)

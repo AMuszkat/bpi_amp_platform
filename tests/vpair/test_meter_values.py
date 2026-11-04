@@ -42,6 +42,10 @@ import numpy as np
 from harness import (ADDRESS, MonitorClient, Player, SpeakerPair, built, lv2_uri, require_speakerd_local_link,
                      revision_document, silence, tone)
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless")
+
 FREQ = 1000.0
 LEFT_STEPS = [-30.0, -20.0, -10.0]
 RIGHT_OFFSET = -12.0
