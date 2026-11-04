@@ -170,15 +170,20 @@ Planned and not built: `graph_rejected`, `power_cut`, `catalogue`, `monitor_fres
 the checks are made to take a minute or two after an edit:
 
 - **Several modules at once.** The virtual pair's modules run `--jobs N` at a time
-  (`BPI_TEST_JOBS`; 1 to 64, by default half the processors and at most 64), each worker on a
+  (`BPI_TEST_JOBS`; 1 to 64, by default half the processors and at most 16), each worker on a
   virtual pair of its own (its own `VPAIR_DIR`, loopback addresses and stand-in plugin host
-  name), through `tests/vpair/pool.py`: it builds once what all the modules need, starts the
-  longest first, prints each module's output whole when it ends, and writes the note the serial
-  runner writes. Every module declares what the pool needs to know of it: the builds its tests
-  use (`POOL_BUILDS`, none for one that builds nothing: the pool builds them before any test,
-  and a test's build the module does not name is refused), `POOL_ALONE = True` when it measures
-  CPU (`chain_cost`, run after the others, alone), and `POOL_SPLIT` or `POOL_WHOLE` to run its
-  tests as a unit each, or the module as one, instead of a unit per test class; the README of
+  name), through `tests/vpair/pool.py`. The default stops at 16 for the development
+  container's tasks, not its processors: a busy worker takes 65 to 75 of the container's 2048
+  (`pids.max`), so the pool warns (past 80 %) at about 23 workers and the limit comes at about
+  29; 16 take about 1200, which leaves room for the pool's builds and the container's own. More
+  than 16 is asked for with `--jobs`, and the pool's warning says when it is too many. The pool
+  builds once what all the modules need, starts the longest first, prints each module's output
+  whole when it ends, and writes the note the serial runner writes. Every module declares what
+  the pool needs to know of it: the builds its tests use (`POOL_BUILDS`, none for one that
+  builds nothing: the pool builds them before any test, and a test's build the module does not
+  name is refused), `POOL_ALONE = True` when it measures CPU (`chain_cost`, run after the
+  others, alone), and `POOL_SPLIT` or `POOL_WHOLE` to run its tests as a unit each, or the
+  module as one, instead of a unit per test class; the README of
   [`tests/vpair/`](../tests/vpair/README.md) ("The pool") has the details. `--jobs 1` is the
   serial runner, one module after another in one process.
 - **One run for several checks.** `tools/test.sh speakerd installers`, and `changed`, run

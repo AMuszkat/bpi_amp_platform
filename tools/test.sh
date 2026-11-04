@@ -23,11 +23,12 @@
 #
 #   --jobs N, anywhere (or BPI_TEST_JOBS=N): the modules of tests/vpair run N at a time, each on
 #   its own virtual pair (tests/vpair/pool.py); 1 runs them one after another, in one process.
-#   N is 1 to 64, the pool's limit. Default: 1 where CI is set, otherwise half the processors, at
-#   most 64. Where CI is set, the checks are also CI's: `plugin <name>` with LTO (BPI_TEST_LTO=1
-#   too), chain_cost's full window (the checks otherwise set VPAIR_CHAIN_COST_QUICK=1 unless it
-#   is set; the levels never do), and no ccache (ccache_env in tools/container.sh; the cache is
-#   otherwise shared by every worktree).
+#   N is 1 to 64, the pool's limit (it warns past 80 % of the container's pids.max). Default: 1
+#   where CI is set, otherwise half the processors, at most 16 (a busy worker takes 65 to 75 of
+#   the container's 2048 tasks). Where CI is set, the checks are also CI's: `plugin <name>` with
+#   LTO (BPI_TEST_LTO=1 too), chain_cost's full window (the checks otherwise set
+#   VPAIR_CHAIN_COST_QUICK=1 unless it is set; the levels never do), and no ccache (ccache_env in
+#   tools/container.sh; the cache is otherwise shared by every worktree).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -36,7 +37,8 @@ container_or_native "$0" "$@"
 ccache_env
 record=1
 rc=0
-MAX_JOBS=64      # tests/vpair/pool.py's limit (its --jobs: 1 to 64)
+MAX_JOBS=64          # tests/vpair/pool.py's limit (its --jobs: 1 to 64)
+MAX_DEFAULT_JOBS=16  # the default's limit: 16 busy workers take about 1200 of the container's 2048 tasks (pids.max)
 
 usage() { awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "$0" >&2; exit 2; }
 
@@ -62,7 +64,7 @@ if [ -z "$JOBS" ]; then
     else
         JOBS=$(( $(nproc) / 2 ))
         [ "$JOBS" -ge 1 ] || JOBS=1
-        [ "$JOBS" -le $MAX_JOBS ] || JOBS=$MAX_JOBS
+        [ "$JOBS" -le $MAX_DEFAULT_JOBS ] || JOBS=$MAX_DEFAULT_JOBS
     fi
 fi
 [[ "$JOBS" =~ ^[1-9][0-9]?$ ]] && [ "$JOBS" -le $MAX_JOBS ] \
