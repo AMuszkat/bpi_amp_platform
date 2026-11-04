@@ -142,6 +142,19 @@ the plugin-check report line for line. The controller reads the control target's
 `INTERFACE_COMPILE_DEFINITIONS` (`ControlPlugins.cmake`): it no longer gets the version, which
 no plugin source reads.
 
+**The rule for plugin authors:** a plugin's own sources, and everything else compiled in its
+shared-code target (complete, control or headless), do not have `JucePlugin_Version`,
+`JucePlugin_VersionString` or `JucePlugin_VersionCode`: a source that uses one does not
+compile (an undeclared identifier; an `#if JucePlugin_VersionCode > ...` silently reads 0). Nor
+does `JucePlugin_ARAFactoryID` carry the version any more. A source that needs the version
+includes the generated `SpeakerBuildInfo.h` (on every target's include path) and reads
+`SPEAKER_PLUGIN_VERSION`, the string `"MAJOR.MINOR.PATCH"` of the plugin's `project()`; there is
+no numeric code. That header also holds `SPEAKER_PLUGIN_SOURCE_ID`, which changes with every
+edit of the plugin's inputs, so a source that includes it recompiles at every such change:
+include it in one small `.cpp`, not in a header the others share. The version a host sees (the
+LV2 `doap:revision` and minor/micro versions, the VST3 version) is unchanged: the wrappers keep
+the three definitions.
+
 ## JUCE is consumed as an installed package, built once
 
 The plugins use `find_package(JUCE CONFIG REQUIRED)`, not `add_subdirectory(JUCE)`.

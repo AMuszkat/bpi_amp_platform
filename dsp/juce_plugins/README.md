@@ -149,7 +149,12 @@ Gotchas, all handled or explained by the script. Details in
    ```
    `VERSION` must be `MAJOR.MINOR.PATCH`, written out (see
    [Versions and source identity](#versions-and-source-identity)); a plugin that compiles a
-   shared folder adds `SHARED <name>`.
+   shared folder adds `SHARED <name>`. The plugin's sources do not get JUCE's
+   `JucePlugin_Version`, `JucePlugin_VersionString` or `JucePlugin_VersionCode` (only the
+   format wrappers do, so a version bump does not recompile JUCE): a source that needs the
+   version includes `SpeakerBuildInfo.h` and reads `SPEAKER_PLUGIN_VERSION`, in one small
+   `.cpp`, since that header changes with every edit
+   ([cmake-reference.md](../docs/juce-knowledge/build-system/cmake-reference.md#a-version-bump-recompiles-the-wrappers-only)).
 2. `tools/build-podman.sh myPlugin`. That's all.
 
 The folder name is the target, product, binary and URI name. The LV2 URI becomes
@@ -331,7 +336,9 @@ target, `<plugin>_build_info`), and rewrites the generated header only when it c
 unchanged identity recompiles nothing. A version bump recompiles only the format wrappers'
 sources, not the JUCE modules: JUCE gives the version to every compile of a plugin, and
 `speaker_add_plugin()` moves it to the wrappers, the only code that reads it
-([cmake-reference.md](../docs/juce-knowledge/build-system/cmake-reference.md)). Where it ends up:
+([cmake-reference.md](../docs/juce-knowledge/build-system/cmake-reference.md)); a plugin
+source reads `SPEAKER_PLUGIN_VERSION` instead, as no `JucePlugin_Version*` reaches it. Where it
+ends up:
 
 | Where | What |
 |---|---|
