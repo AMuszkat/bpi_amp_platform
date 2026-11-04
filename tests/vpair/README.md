@@ -30,9 +30,10 @@ python3 tests/vpair/pool.py --jobs 12 --note note.txt test_knob_latency test_gra
 
 `tools/test.sh` runs the modules on a pool of workers, each on its own virtual pair (`pool.py`,
 "The pool" below), whenever it has more than one job: the checks and the levels alike (`--jobs N`
-or `BPI_TEST_JOBS`, 1 to 64; by default half the processors, at least 1 and at most 16, because
-the container's tasks bound it: "The pool" below). `--jobs 1`, and CI (where `CI` is set the
-default is one job), run them one after another in one process.
+or `BPI_TEST_JOBS`, 1 to 64; by default two thirds of the processors, at least 1 and at most 16:
+"The pool" below), as a step of its schedule, after the builds
+(`docs/autonomous-development.md`, section 4). `--jobs 1`, and CI (where `CI` is set the default
+is one job), run them one after another in one process, the serial runner.
 
 `tools/test.sh vpair` records `vpair: pass` or `fail` in the test status, with a note
 (`vpair_note`) of how many tests ran, which failed, and which were skipped and why. A skipped
@@ -80,14 +81,17 @@ here (1.6 s and 0.6 s with the fixed waits they had before).
 ## The pool
 
 ```bash
-python3 tests/vpair/pool.py --jobs N --note FILE [MODULE...]     # from the repository root
+python3 tests/vpair/pool.py --jobs N [--quiet-jobs M] [--gate FILE] [--after-gate NAME]... --note FILE [MODULE...]
+python3 tests/vpair/pool.py --jobs N --prebuild-only [--note FILE] [MODULE...]   # the prebuild alone
+python3 tests/vpair/pool.py --hold-checkout [--what TEXT] -- COMMAND...          # the serial runner's lock
 ```
 
 `tools/test.sh` calls it for every run with more than one job, the checks and the levels, in the
-development container (from outside it moves there itself). `--jobs` takes 1 to 64 and has no
-default (`tools/test.sh`'s is half the processors, from 1 to 16: the end of this section). A
-MODULE is `test_<name>` (`test_<name>.<Class>` is one unit); none is every module of this folder,
-as `unittest discover` finds them. What it does:
+development container (from outside it moves there itself): `--prebuild-only` among the builds,
+then the pool with `--gate`. `--jobs` takes 1 to 64 and has no default (`tools/test.sh`'s is two
+thirds of the processors, from 1 to 16: the end of this section); `--quiet-jobs` takes 1 to 64,
+by default min(`--jobs`, 12). A MODULE is `test_<name>` (`test_<name>.<Class>` is one unit); none
+is every module of this folder, as `unittest discover` finds them. What it does:
 
 1. **The prebuild.** Every module that builds says so in `POOL_BUILDS`, everything its `built()`
    calls need, also through the harness's classes (`Speakerd`, `render` and `SpeakerPair` need
@@ -108,19 +112,45 @@ as `unittest discover` finds them. What it does:
    runs, no note; SIGTERM there ends it at once, its builds left to end on their own); `built()`
    kills and reaps its build the same way when its reading stops. In the units `built()` builds
    nothing (`VPAIR_PREBUILT`) and refuses a build the module's `POOL_BUILDS` does not name,
-   saying so: `build/` may hold a stale one.
+   saying so: `build/` may hold a stale one. `--prebuild-only` does the prebuild alone (under
+   the checkout's lock) and exits, 0 or 1, no unit run: its note is written only when the
+   prebuild fails, the one a pool whose prebuild failed writes, so that `tools/test.sh` records
+   the same when it stops there. The pool's own prebuild after it then finds the builds up to date.
 2. **The units** are the test classes the unittest loader finds (a base class without tests
    yields none), each run in a process of its own: a module with `setUpModule` runs it once per
    unit. A module that must stay whole says `POOL_WHOLE = True`; one whose tests are independent
    of each other (no state carried from one to the next, each test's fixtures its own or
    `setUpClass`'s) may say `POOL_SPLIT = True`, a unit per test, `setUpClass` once in each
    (`test_ampd_protocol`, `test_firmware_speakerd_install`: one class of each was the longest unit
-   of its check). They run on N workers, the longest first, by the durations learned from earlier
-   runs (`build/vpair-pool-durations.json` of the main checkout, merged after each run and written
+   of its check). They run in three phases, each after the one before has ended:
+   - **main**: the units neither quiet nor alone, on `--jobs` workers;
+   - **quiet**: the units whose pass criterion is a time, a rate, a CPU share or an xrun count,
+     which the module marks, all of them or those it names (relative to the module; a unit is
+     quiet when its name or its class is listed, so a test is named only in a `POOL_SPLIT`
+     module, and a name that is no unit or class of it fails the run), on `--quiet-jobs`
+     workers (by default min(`--jobs`, 12): measured here, the quiet units on their own pool,
+     after everything else, passed six runs of six; beside builds or the other tests timing
+     tests failed):
+
+     ```python
+     POOL_QUIET = True                                              # test_knob_latency
+     POOL_QUIET = ("Protocol.test_monitoring", "Protocol.test_monitor_relay")   # test_ampd_protocol
+     ```
+   - **alone**: a module that measures CPU says `POOL_ALONE = True` and runs last, alone
+     (`test_chain_cost`, quiet too).
+
+   In each phase the longest first, by the durations learned from earlier runs
+   (`build/vpair-pool-durations.json` of the main checkout, merged after each run and written
    atomically), seeded in `pool.py` with those measured here for units never timed; a unit known
-   to neither counts as long. A module that measures CPU says `POOL_ALONE = True` and runs after
-   the pool, alone (`test_chain_cost`).
-3. **Each worker** has a virtual pair of its own, and so does nothing a test binds, writes or
+   to neither counts as long.
+3. **The gate.** With `--gate FILE` the quiet and alone phases wait until FILE exists, saying so
+   once and then every minute: `tools/test.sh`'s schedule creates it when its other tests (the
+   controller's own) have ended, so that what times itself runs beside nothing but the other
+   quiet units. A line `leave-out NAME: why` in it leaves out the units of NAME (a module, class
+   or test): not run, not in the note, the table saying why. `--after-gate NAME` holds NAME's
+   units for the gate as if they were quiet: the `controller` check's `test_controller_end_to_end`,
+   which runs only when the controller's build and its own tests passed.
+4. **Each worker** has a virtual pair of its own, and so does nothing a test binds, writes or
    looks for collide with another worker's: `VPAIR_DIR=/tmp/vpool<k>`, `VPAIR_ADDRESS_BASE=127.77.<k>`
    (the left speaker's ampd on `.1`, the right's on `.2`, another on `.3`, with the protocol's
    ports), `VPAIR_PLUGIN_HOST=vpairPlugHost<k>` (the stand-in plugin host the installers and
@@ -137,9 +167,9 @@ as `unittest discover` finds them. What it does:
    folder and a stand-in plugin host left under its name (in its own PID namespace only: outside
    the container `/proc` shows every container's processes). A unit runs in a session of its own:
    whatever it leaves running when it ends is killed, and its pair brought down.
-4. **The output**: each unit's whole output, stdout and stderr, as one block when it ends, also
-   kept in `build/vpair-pool/<unit>.log` (the last run's); then a table (unit, worker, seconds,
-   result), the failed units, and the container's peak use: tasks (threads count) against
+5. **The output**: each unit's whole output, stdout and stderr, as one block when it ends, also
+   kept in `build/vpair-pool/<unit>.log` (the last run's); then a table (unit, phase, worker,
+   seconds, result), the failed units, and the container's peak use: tasks (threads count) against
    `pids.max`, memory, `/dev/shm`. The note in FILE is `tools/test.sh`'s, in the same format: `N
    tests[, K failed: id, ...], M skipped[: id (reason); ...]`. A unit whose process ends without
    its result (it died, or ran past its timeout: 4 times its learned duration, at least 300 s,
@@ -147,18 +177,23 @@ as `unittest discover` finds them. What it does:
    name, with the tests it ran before; so does one the pool itself could not run to its end,
    bring its pair down after, or read the log of, with what went wrong, its block printed all the
    same.
-5. **The exit status** is 0 when every test passed (skips allowed), 1 otherwise. SIGINT or SIGTERM
+6. **The exit status** is 0 when every test passed (skips allowed), 1 otherwise. SIGINT or SIGTERM
    stops the workers (each unit's whole session), brings their pairs down, writes the note so
    far, and ends the pool by that signal.
 
 **One pool at a time per checkout.** A pool clears `build/vpair-pool/` as it starts and its prebuild
 runs ninja in the checkout's build trees, so it holds the checkout's lock, `build/vpair-pool.lock`,
 for its whole run. A second pool started in the same checkout (two `tools/test.sh` runs at once)
-waits for the first, saying which it is (`pool: another pool runs in this checkout: pool.py pid
-1234 (in the container), since 14:02:11 UTC, --jobs 12 every module; waiting for it to end`, again
+waits for the first, saying which it is (`pool: another run holds this checkout: pool.py pid
+1234 (in the container), since 14:02:11 UTC, --jobs 16 every module; waiting for it to end`, again
 every minute), and starts when it ends; SIGINT or SIGTERM while it waits ends it, its note saying
-no unit ran. A worktree has its own `build/` and its own container, so the pools of two worktrees
-run at the same time.
+no unit ran. The serial runner (`tools/test.sh --jobs 1`) holds the same lock: `pool.py
+--hold-checkout` takes it the same way (`serial runner: another run holds this checkout: ...`),
+then becomes the runner, which keeps the lock's descriptor to itself (`VPAIR_CHECKOUT_LOCK_FD`,
+made non-inheritable), so that nothing it leaves running holds the lock; a pool waits for it in
+turn (`... the serial runner, pid 1234 (in the container), since ..., --jobs 1 every module`). A
+worktree has its own `build/` and its own container, so the pools of two worktrees run at the
+same time.
 
 **The pool's self-test**, `python3 tests/vpair/pool_selftest.py` (inside the container or not, a few
 seconds, no PipeWire, nothing built; `tools/test.sh tools` runs it), runs the pool on synthetic
@@ -177,7 +212,12 @@ line and its SIGINT through a process that imports `pool.py` and replaces one fu
 past its 2 s timeout must print its line within those 2 s; a unit or a stand-in build waiting to
 be released, as the lock test's first pool's unit does, gives up after 60 s): a unit or a build
 that must still be running blocks on a file the test writes, and the only short timeout is the one
-under test, so a loaded machine does not fail it. Two variables point the pool there:
+under test, so a loaded machine does not fail it. It also checks the phases (their order, each
+form of `POOL_QUIET` and a marker that cannot be, the quiet width and its limit of 12), the gate
+(nothing quiet or alone starts before it, `--after-gate`, a unit left out, a line that is not the
+gate's), `--prebuild-only` (built: 0 and no note; failed: 1 and the failed prebuild's note), and
+the serial runner's side of the lock (it waits for a pool and a pool for it, SIGTERM while it
+waits, and a child it leaves running does not hold the lock). Two variables point the pool there:
 `VPAIR_POOL_TESTS`, the folder of the modules (default this one), and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default
 the checkout's `build/`, the main checkout's for the durations). Its name does not match
 `test*.py`, so the level does not run it.
@@ -185,14 +225,16 @@ the checkout's `build/`, the main checkout's for the durations). Its name does n
 With none of the pool's variables set (`VPAIR_ADDRESS_BASE`, `VPAIR_PLUGIN_HOST`, `VPAIR_DISPLAY`,
 `VPAIR_POOL_*`) every module behaves as before: that is how `--jobs 1` and CI run them.
 
-Measured here (24 threads, 12 workers): every module, 98 units, in about 90 s, the pool 64 s (the
-length of `test_monitor_fanout`, its longest unit) and then `test_chain_cost` alone 26 s, or 11 s
-with `VPAIR_CHAIN_COST_QUICK=1` (on one worker: 591 s). The checks' modules alone: `speakerd` 16 s,
-`ampd` 26 s, `pair` 65 s, `installers` 22 s, `chain` 29 s (13 s quick). A run peaks at about 790 to
-840 tasks of the container's 2048 (`pids.max`), under 3 GiB, and no `/dev/shm`: 65 to 75
-tasks a busy worker, so the container's tasks bound `--jobs` long before its 64: the pool warns past
-80 % of `pids.max`, about 23 such workers. That is why `tools/test.sh`'s default, half the
-processors, stops at 16 (and is at least 1); an explicit `--jobs` still takes 1 to 64.
+Measured here (24 threads, 12 workers, before the phases): every module, 98 units, in about 90 s,
+the pool 64 s (the length of `test_monitor_fanout`, its longest unit then) and then
+`test_chain_cost` alone 26 s, or 11 s with `VPAIR_CHAIN_COST_QUICK=1` (on one worker: 591 s). The
+checks' modules alone: `speakerd` 16 s, `ampd` 26 s, `pair` 65 s, `installers` 22 s, `chain` 29 s
+(13 s quick). Every module on one pool of 16, 20 and 24 workers took 64, 63 and 62 s and passed 2,
+1 and 0 runs of 3: the pool gains nothing past 16 and more fails timing tests, which is why
+`tools/test.sh`'s default, two thirds of the processors, stops at 16 (and is at least 1); an
+explicit `--jobs` still takes 1 to 64. The container's tasks do not bound it: 16 workers peaked at
+1008 to 1021 tasks of its 2048 (`pids.max`), 24 at 1393, under 4 GiB, no `/dev/shm`; the pool still
+warns past 80 % of `pids.max`.
 
 ## Files
 
@@ -201,7 +243,7 @@ processors, stops at 16 (and is at least 1); an explicit `--jobs` still takes 1 
 | `speaker.conf` | PipeWire configuration of one virtual speaker |
 | `vpair.sh` | starts, stops and describes the pair or one speaker of it, runs a tool against one speaker |
 | `harness.py` | plays into and records from a speaker, also in the background, once the links exist; signal analysis, builds and runs `speakerd` and its offline render; moves the test run into the container when the pair lives there |
-| `pool.py` | runs modules on a pool of workers, each on its own virtual pair, after building what they declare ("The pool") |
+| `pool.py` | runs modules on a pool of workers, each on its own virtual pair, after building what they declare, the quiet units after the others; holds the checkout's lock for the serial runner too ("The pool") |
 | `pool_selftest.py` | the pool's own test, on synthetic modules, in seconds ("The pool") |
 | `__init__.py` | puts the harness on the path for `python3 -m unittest tests.vpair.<module>` |
 | `test_audio_path.py` | the pair itself works: tones arrive intact on both channels, the speakers are independent |

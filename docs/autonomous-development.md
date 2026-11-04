@@ -170,25 +170,23 @@ Planned and not built: `graph_rejected`, `power_cut`, `catalogue`, `monitor_fres
 the checks are made to take a minute or two after an edit:
 
 - **Several modules at once.** The virtual pair's modules run `--jobs N` at a time
-  (`BPI_TEST_JOBS`; 1 to 64, by default half the processors and at most 16), each worker on a
-  virtual pair of its own (its own `VPAIR_DIR`, loopback addresses and stand-in plugin host
-  name), through `tests/vpair/pool.py`. The default stops at 16 for the development
-  container's tasks, not its processors: a busy worker takes 65 to 75 of the container's 2048
-  (`pids.max`), so the pool warns (past 80 %) at about 23 workers and the limit comes at about
-  29; 16 take about 1200, which leaves room for the pool's builds and the container's own. More
-  than 16 is asked for with `--jobs`, and the pool's warning says when it is too many. The pool
-  builds once what all the modules need, starts the longest first, prints each module's output
-  whole when it ends, and writes the note the serial runner writes. Every module declares what
-  the pool needs to know of it: the builds its tests use (`POOL_BUILDS`, none for one that
+  (`BPI_TEST_JOBS`; 1 to 64, by default two thirds of the processors and at most 16), each
+  worker on a virtual pair of its own (its own `VPAIR_DIR`, loopback addresses, stand-in plugin
+  host name and X display), through `tests/vpair/pool.py`. The default stops at 16 because,
+  measured on 24 threads, the pool gains nothing past 16 workers and 20 or 24 made timing tests
+  fail; the container's tasks are not the bound (16 workers peak at about 1020 of its 2048). The
+  pool builds once what all the modules need, starts the longest first, prints each module's
+  output whole when it ends, and writes the note the serial runner writes. Every module declares
+  what the pool needs to know of it: the builds its tests use (`POOL_BUILDS`, none for one that
   builds nothing: the pool builds them before any test, and a test's build the module does not
-  name is refused), `POOL_ALONE = True` when it measures CPU (`chain_cost`, run after the
-  others, alone), and `POOL_SPLIT` or `POOL_WHOLE` to run its tests as a unit each, or the
-  module as one, instead of a unit per test class; the README of
-  [`tests/vpair/`](../tests/vpair/README.md) ("The pool") has the details. `--jobs 1` is the
-  serial runner, one module after another in one process.
-- **One run for several checks.** `tools/test.sh speakerd installers`, and `changed`, run
-  what needs no virtual pair first (`plugin`, `plugins`, `tools`, the controller's build and
-  its own tests), then every module the checks name, once each, in one run of the pool.
+  name is refused), `POOL_QUIET` when a pass criterion is a time, a rate, a CPU share or an xrun
+  count (`True`, or the classes and tests it names: they run after every other unit, on
+  min(N, 12) workers), `POOL_ALONE = True` when it measures CPU (`chain_cost`, run last, alone),
+  and `POOL_SPLIT` or `POOL_WHOLE` to run its tests as a unit each, or the module as one, instead
+  of a unit per test class; the README of [`tests/vpair/`](../tests/vpair/README.md) ("The
+  pool") has the details. `--jobs 1` is the serial runner, one module after another in one
+  process; it holds the pool's lock of the checkout (`build/vpair-pool.lock`), so that it and a
+  pool never run at once.
 - **What `changed` runs.** `tests/impact.json` is narrow on purpose. An edit of a plugin's
   editor runs the plugin's own check, not `chain`: the chain runs the headless builds, which
   never compile the editor, and reads only the identity of one complete build, loudness's,
@@ -207,7 +205,8 @@ the checks are made to take a minute or two after an edit:
   (`build/speakerd/.build.lock`, say) from before its configure to its end, so that the pool's
   prebuild, a serial run's builds and a build by hand in the same tree wait for each other,
   saying which tree, instead of running two ninjas in it; the pool's own lock
-  (`build/vpair-pool.lock`) keeps two pools of one checkout apart.
+  (`build/vpair-pool.lock`) keeps two pools of one checkout, or a pool and the serial runner,
+  apart.
 - **No LTO in `plugin <name>`.** The focused plugin check builds without link-time
   optimisation, in `dsp/juce_apps/plugin-check/build-check-nolto`, so that a one-line edit
   relinks in seconds rather than in most of a minute. `plugins`, level 1 and CI build with
@@ -219,11 +218,33 @@ the checks are made to take a minute or two after an edit:
   ccache, with one cache, the main checkout's `build/ccache`, for it and all its worktrees
   (`ccache_env` in `tools/container.sh`), so that a new worktree's first build mostly hits.
 
-The levels keep LTO and `chain_cost`'s full window wherever they run, and use the pool like
-the checks (`--jobs 1` for the serial runner). Where `CI` is set, as it is in
-`.github/workflows/ci.yml`, the defaults are CI's: one job (the serial runner), LTO
-everywhere, the full window and no ccache, so CI runs the levels with the same runner and
-settings as before.
+**One schedule, in three phases.** With more than one job, `tools/test.sh` runs a check,
+several (`tools/test.sh speakerd installers`, `changed`: every module they name once, in one
+run of the pool) or a level as one schedule (`tools/schedule.py`), because a test beside an LTO
+build fails (measured: 5 to 9 failures a run, not only timing tests) and a timing test beside
+other tests may:
+
+<!-- diagram: schedule -->
+```mermaid
+flowchart LR
+    p1["Phase 1: the builds, two at once, nice 19<br/>plugin-check with LTO, plugin name, the pool's prebuild<br/>beside them: tools, plugin-versions, the block FIR,<br/>the aarch64 build identity, the controller's build"]
+    p2["Phase 2: the tests<br/>the pool's main units, N workers<br/>the controller's own tests"]
+    p3["Phase 3: the gate, in the pool<br/>its quiet units, min(N, 12) workers<br/>then chain_cost alone"]
+    p1 -- "every step ended" --> p2 -- "every other test ended" --> p3
+```
+
+The pool's prebuild takes both build slots. A failed step stops nothing that does not need it;
+one that does is skipped, saying so (the controller's own tests after its failed build; the
+`controller` check's end to end after either). Each step's output is printed whole when it ends
+and kept in `build/test-steps/`, and a table ends the run; one schedule runs at a time per
+checkout (`build/test-run.lock`). `test_controller_end_to_end` runs once: level 1's controller
+step is its build and its own tests, level 2 runs the end to end.
+
+The levels keep LTO and `chain_cost`'s full window wherever they run, and use the schedule like
+the checks. With `--jobs 1` there is no schedule: the steps run one after another and the
+modules on the serial runner. Where `CI` is set, as it is in `.github/workflows/ci.yml`, the
+defaults are CI's: one job, LTO everywhere, the full window and no ccache, so CI runs the levels
+with the same runner and settings as before.
 
 **Level 3** is one smoke test on a board, not a copy of level 2: deploy, play, check that
 `speakerd` plays the right layer through the right sink with no restart, xrun or late cycle,

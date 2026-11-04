@@ -16,20 +16,32 @@
 #     tools/test.sh changed [REF]      the checks that cover the files changed (tools/impact.py),
 #                                      and, before and after them, what its map says to run by hand
 #   Several in one command (tools/test.sh plugin loudness speakerd installers; module last, as it
-#   takes every name after it) run what runs outside the virtual pair first, then all their
-#   modules of tests/vpair in one run; changed does the same with the checks it finds.
+#   takes every name after it) run all their modules of tests/vpair in one run of the pool;
+#   changed does the same with the checks it finds.
 #
 #   Levels, end to end, run when asked and before a push (recorded by tools/status.py):
 #     tools/test.sh unit | vpair | all [--no-record]
 #
-#   --jobs N, anywhere (or BPI_TEST_JOBS=N): the modules of tests/vpair run N at a time, each on
-#   its own virtual pair (tests/vpair/pool.py); 1 runs them one after another, in one process.
-#   N is 1 to 64, the pool's limit (it warns past 80 % of the container's pids.max). Default: 1
-#   where CI is set, otherwise half the processors, at most 16 (a busy worker takes 65 to 75 of
-#   the container's 2048 tasks). Where CI is set, the checks are also CI's: `plugin <name>` with
-#   LTO (BPI_TEST_LTO=1 too), chain_cost's full window (the checks otherwise set
-#   VPAIR_CHAIN_COST_QUICK=1 unless it is set; the levels never do), and no ccache (ccache_env in
-#   tools/container.sh; the cache is otherwise shared by every worktree).
+#   With more than one job, every check and level runs as a schedule (tools/schedule.py), in
+#   phases: 1, the builds (plugin-check with LTO, `plugin <name>`, the pool's prebuild: at most two
+#   at once, at nice 19) and the light steps beside them (tools, plugin-versions, the block FIR,
+#   the aarch64 build identity, the controller's build); 2, once all of those have ended, the
+#   tests (the pool, the controller's own tests); 3, in the pool, its quiet units, once every other
+#   test has ended (the gate), then those alone. Each step's output is printed whole when it ends
+#   and kept in build/test-steps/<step>.log; a table at the end. One schedule at a time per
+#   checkout (build/test-run.lock). With one job (CI), the steps run one after another as before.
+#
+#   --jobs N, anywhere (or BPI_TEST_JOBS=N): the pool's main phase runs N units at a time, each on
+#   its own virtual pair (tests/vpair/pool.py), its quiet phase min(N, 12); 1 runs the modules one
+#   after another, in one process (the serial runner, which holds the pool's lock of the checkout,
+#   build/vpair-pool.lock, so that it and a pool never run at once). N is 1 to 64, the pool's
+#   limit. Default: 1 where CI is set, otherwise two thirds of the processors, at most 16: measured
+#   on 24 threads, the pool gains nothing past 16 workers, and 20 or 24 made timing tests fail. The
+#   container's tasks are not the bound: 16 workers peaked at 1008 to 1021 of its 2048 (24 at
+#   1393); the schedule prints a run's own peak at its end. Where CI is set, the checks are also
+#   CI's: `plugin <name>` with LTO (BPI_TEST_LTO=1 too), chain_cost's full window (the checks
+#   otherwise set VPAIR_CHAIN_COST_QUICK=1 unless it is set; the levels never do), and no ccache
+#   (ccache_env in tools/container.sh; the cache is otherwise shared by every worktree).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -39,7 +51,7 @@ ccache_env
 record=1
 rc=0
 MAX_JOBS=64          # tests/vpair/pool.py's limit (its --jobs: 1 to 64)
-MAX_DEFAULT_JOBS=16  # the default's limit: 16 busy workers take about 1200 of the container's 2048 tasks (pids.max)
+MAX_DEFAULT_JOBS=16  # the default's limit: where the pool stops gaining (measured; 20 and 24 failed timing tests)
 
 usage() { awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "$0" >&2; exit 2; }
 
@@ -63,7 +75,7 @@ if [ -z "$JOBS" ]; then
     if [ -n "${CI:-}" ]; then
         JOBS=1
     else
-        JOBS=$(( $(nproc) / 2 ))
+        JOBS=$(( $(nproc) * 2 / 3 ))
         [ "$JOBS" -ge 1 ] || JOBS=1
         [ "$JOBS" -le $MAX_DEFAULT_JOBS ] || JOBS=$MAX_DEFAULT_JOBS
     fi
@@ -74,13 +86,31 @@ fi
 # The note's temporary file (modules) goes however the script ends, by a signal too, which then
 # still ends it (bash runs the EXIT trap, then dies of the signal).
 NOTE_FILE=""
-trap '[ -z "$NOTE_FILE" ] || rm -f "$NOTE_FILE"' EXIT
+PLAN_FILE=""
+trap '[ -z "$NOTE_FILE" ] || rm -f "$NOTE_FILE"; [ -z "$PLAN_FILE" ] || rm -f "$PLAN_FILE"' EXIT
 
-record() { [ $record = 0 ] || tools/status.py set "$@"; }
+# BPI_TEST_STUB=DIR, for tools/tests/test_test_sh.py: a run as it is, its steps (run_step, the
+# serial runner) replaced by DIR/step STEP ARG..., tools/status.py by DIR/status, pipewire not asked
+# for, the schedule's folder and lock DIR's; and what would end with 0 ends with 3 (as a dry run,
+# for the same reason: tools/container.sh passes every BPI_* variable on), saying so on stderr.
+STUB="${BPI_TEST_STUB:-}"
+STATUS_PY=tools/status.py
+[ -z "$STUB" ] || STATUS_PY="$STUB/status"
+leave() {
+    if [ -n "$STUB" ] && [ "$1" = 0 ]; then echo "BPI_TEST_STUB: stand-in steps, so no pass (3)" >&2; exit 3; fi
+    exit "$1"
+}
+
+record() { [ $record = 0 ] || "$STATUS_PY" set "$@"; }
 
 # python3 -c "$VPAIR_RUNNER" NOTE [MODULE ...]: the modules of tests/vpair named, or all of them.
+# Run under pool.py --hold-checkout (the checkout's lock, which a pool holds too), it keeps the
+# lock's descriptor to itself: nothing it starts inherits it, so nothing left running holds it.
 VPAIR_RUNNER='
-import sys, unittest
+import os, sys, unittest
+lock_fd = os.environ.pop("VPAIR_CHECKOUT_LOCK_FD", None)
+if lock_fd:
+    os.set_inheritable(int(lock_fd), False)
 if sys.argv[2:]:
     sys.path.insert(0, "tests/vpair")
     suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[2:])
@@ -100,27 +130,27 @@ sys.exit(0 if result.wasSuccessful() else 1)
 '
 
 have_pipewire() {
+    [ -z "$STUB" ] || return 0
     command -v pipewire > /dev/null && command -v wireplumber > /dev/null && return 0
     echo "$1: pipewire and wireplumber are needed: install Podman (tools/container.sh), or see CLAUDE.md"
     return 1
 }
 
-# Runs the named modules of tests/vpair (none: all of them): with JOBS 1 one after another, in
-# one process (VPAIR_RUNNER, what CI runs); otherwise JOBS at a time, each on its own virtual
-# pair, after one build of what they all need (tests/vpair/pool.py, which writes the same note).
-# Prints the note; the note's text in $NOTE.
+# The serial runner (JOBS 1, what CI runs): the named modules of tests/vpair (none: all of them)
+# one after another, in one process (VPAIR_RUNNER), holding the checkout's lock as a pool does
+# (tests/vpair/pool.py --hold-checkout: it waits for a pool of this checkout, or another serial
+# runner, naming it). Prints the note; the note's text in $NOTE. With more than one job the pool
+# runs them, as a step of the schedule (run_step pool).
 modules() {
     local what="$1" rc
     shift
     have_pipewire "$what" || { NOTE="skipped: no pipewire"; return 1; }
     NOTE_FILE="$(mktemp)"
-    if [ "$JOBS" -gt 1 ]; then
-        local count="every module"
-        [ $# = 0 ] || count="$# module(s)"
-        echo "$what: $count, $JOBS at a time (tests/vpair/pool.py; --jobs 1: one after another)"
-        python3 tests/vpair/pool.py --jobs "$JOBS" --note "$NOTE_FILE" "$@"
+    if [ -n "$STUB" ]; then
+        "$STUB/step" serial "$NOTE_FILE" "$@"
     else
-        python3 -c "$VPAIR_RUNNER" "$NOTE_FILE" "$@"
+        python3 tests/vpair/pool.py --hold-checkout --what "${*:-every module}" -- \
+            python3 -c "$VPAIR_RUNNER" "$NOTE_FILE" "$@"
     fi
     rc=$?
     NOTE="$(cat "$NOTE_FILE")"
@@ -169,9 +199,9 @@ check_plugin_focused() {
 
 check_plugins() {
     local p ok=0
-    for p in $(plugins_with_targets); do check_plugin "$p" lto || ok=1; done
-    dsp/juce_plugins/tests/blockfir/run.sh || ok=1
-    dsp/juce_plugins/tests/plugin-versions/run.sh || ok=1
+    for p in $(plugins_with_targets); do run_step plugin-lto "$p" || ok=1; done
+    run_step blockfir || ok=1
+    run_step plugin-versions || ok=1
     return $ok
 }
 
@@ -183,6 +213,12 @@ check_build_info_aarch64() {
     tools/build.sh loudness aarch64 headless \
         && dsp/juce_plugins/tests/buildinfo/check.sh --arch aarch64 loudness \
                "$out/${name}_artefacts/Release/LV2/$name.lv2" "$out/copied/lv2/$name.lv2"
+}
+
+# The unit level's controller: its build and its own tests. test_controller_end_to_end, which the
+# `controller` check runs after them, the vpair level runs (once, not here too).
+check_controller_own() {
+    run_step controller-build && run_step controller-tests
 }
 
 # The test tools' own tests (tools/tests/test_*.py), and the self-tests of tests/vpair's tools
@@ -250,11 +286,11 @@ run_checks() {
         what="$1"
         shift
         case "$what" in
-            plugin)     header plugin "$1"; check_plugin_focused "$1" || ok=1 ;;
+            plugin)     header plugin "$1"; run_step plugin "$1" || ok=1 ;;
             plugins)    header plugins; check_plugins || ok=1 ;;
-            tools)      header tools; check_tools || ok=1 ;;
+            tools)      header tools; run_step tools || ok=1 ;;
             controller) header controller
-                        if tools/build.sh controller && dsp/juce_apps/controller/tests/run.sh; then
+                        if check_controller_own; then
                             shown+=(controller); said+=(controller); names+=(test_controller_end_to_end)
                         else
                             echo "controller: its build or its own tests failed: test_controller_end_to_end not run"; ok=1
@@ -311,13 +347,12 @@ run_unit() {
     local p failed=0 checked=""
     for p in $(plugins_with_targets); do
         header plugin "$p"
-        if check_plugin "$p" lto; then echo "unit: $p passed"; else echo "unit: $p FAILED"; failed=1; fi
+        if run_step plugin-lto "$p"; then echo "unit: $p passed"; else echo "unit: $p FAILED"; failed=1; fi
         checked+="$p "
     done
     local step
-    for step in buildinfo-aarch64:check_build_info_aarch64 blockfir:dsp/juce_plugins/tests/blockfir/run.sh \
-                plugin-versions:dsp/juce_plugins/tests/plugin-versions/run.sh \
-                controller:"run_named controller" tools:"run_named tools"; do
+    for step in buildinfo-aarch64:"run_step buildinfo-aarch64" blockfir:"run_step blockfir" \
+                plugin-versions:"run_step plugin-versions" controller:check_controller_own tools:"run_named tools"; do
         echo "=== /test unit: ${step%%:*}"
         if ${step#*:}; then echo "unit: ${step%%:*} passed"; else echo "unit: ${step%%:*} FAILED"; failed=1; fi
         checked+="${step%%:*} "
@@ -335,8 +370,215 @@ run_vpair() {
     [ "$result" = pass ]
 }
 
+# --- The schedule (JOBS > 1) ----------------------------------------------------------------------
+#
+# The steps of a check or a level, for tools/schedule.py (its docstring has the plan's format):
+# each runs `tools/test.sh --jobs N __step STEP ARG...` (run_step, below), in phases, so that no
+# test runs beside a build (docs/autonomous-development.md, section 4, "How the checks run").
+STEPS_DIR=build/test-steps      # the schedule's own: its logs, the pool's note, the gate, the results
+RUN_LOCK=build/test-run.lock    # one schedule at a time per checkout
+[ -z "$STUB" ] || { STEPS_DIR="$STUB/steps"; RUN_LOCK="$STUB/test-run.lock"; }
+PLAN=()
+PLAN_FIRST=()                   # the pool's prebuild: first of the heavy steps
+declare -A PLANNED=()
+declare -A RESULT=()
+
+# plan NAME KIND [OPTION...] -- STEP [ARG...]: a step (once, by its name).
+plan() {
+    local name="$1" line="" w
+    [ -z "${PLANNED[$name]:-}" ] || { while [ "$1" != -- ]; do shift; done; return 0; }
+    PLANNED[$name]=1
+    while [ "$1" != -- ]; do line+="$(printf '%q ' "$1")"; shift; done
+    shift
+    for w in -- "$ROOT/tools/test.sh" --jobs "$JOBS" __step "$@"; do line+="$(printf '%q ' "$w")"; done
+    PLAN+=("${line% }")
+}
+
+# The pool's prebuild (phase 1, both heavy slots, first) and its run (phase 2), of modules $2...
+# shown as $1; --after-gate for those AFTER_GATE names (the controller check's end to end).
+AFTER_GATE=()
+plan_pool() {
+    local shown="$1" said="$2" a held=()
+    shift 2
+    for a in ${AFTER_GATE[@]+"${AFTER_GATE[@]}"}; do held+=(--after-gate "$a"); done
+    plan prebuild heavy slots=2 "title=the pool's prebuild" -- prebuild "$@"
+    PLAN_FIRST+=("${PLAN[-1]}")
+    unset 'PLAN[-1]'
+    plan pool test gated needs=prebuild "title=$shown" -- pool "$said" ${held[@]+"${held[@]}"} -- "$@"
+}
+
+plan_plugins_lto() {   # $1: the title's prefix ("unit:", "plugins:")
+    local p
+    for p in $(plugins_with_targets); do
+        plan "plugin-lto-$p" heavy "title=$1 $p" -- plugin-lto "$p"
+    done
+}
+
+# The checks of CHECK_LIST as steps. MODULE_SHOWN, MODULE_SAID: the modules' title and name.
+# shellcheck disable=SC2086 # a check and its arguments; the module lists, one word each
+plan_checks() {
+    local entry what m names=() shown=() said=()
+    CONTROLLER_CHECKED=0
+    for entry in "${CHECK_LIST[@]}"; do
+        set -- $entry
+        what="$1"
+        shift
+        case "$what" in
+            plugin)     plan "plugin-$1" heavy "title=plugin $1" -- plugin "$1" ;;
+            plugins)    plan_plugins_lto plugins:
+                        plan blockfir light title=blockfir -- blockfir
+                        plan plugin-versions light title=plugin-versions -- plugin-versions ;;
+            tools)      plan tools light title=tools -- tools ;;
+            controller) plan controller-build light "title=controller: its build" -- controller-build
+                        plan controller-tests test "title=controller: its own tests" needs=controller-build \
+                             guards=test_controller_end_to_end -- controller-tests
+                        CONTROLLER_CHECKED=1
+                        AFTER_GATE+=(test_controller_end_to_end)
+                        shown+=(controller); said+=(controller); names+=(test_controller_end_to_end) ;;
+            speakerd)   shown+=(speakerd); said+=(speakerd); names+=($SPEAKERD_MODULES) ;;
+            ampd)       shown+=(ampd); said+=(ampd); names+=($AMPD_MODULES) ;;
+            pair)       shown+=(pair); said+=(pair); names+=($PAIR_MODULES) ;;
+            installers) shown+=(installers); said+=(installers); names+=($INSTALLER_MODULES) ;;
+            chain)      shown+=(chain); said+=(chain); names+=($CHAIN_MODULES) ;;
+            module)     shown+=("module $*"); said+=(module); for m in "$@"; do names+=("test_${m#test_}"); done ;;
+        esac
+    done
+    MODULE_SAID="${said[*]}"
+    MODULES_PLANNED=0
+    [ ${#names[@]} -gt 0 ] || return 0
+    local -A seen=()
+    UNIQUE_MODULES=()
+    for m in "${names[@]}"; do [ -n "${seen[$m]:-}" ] || { seen[$m]=1; UNIQUE_MODULES+=("$m"); }; done
+    [ "${BPI_TEST_DRY_RUN:-}" = 1 ] || have_pipewire "$MODULE_SAID" || return 1
+    plan_pool "${shown[*]}" "$MODULE_SAID" "${UNIQUE_MODULES[@]}"
+    MODULES_PLANNED=1
+}
+
+plan_unit() {
+    plan_plugins_lto unit:
+    plan buildinfo-aarch64 light "title=unit: buildinfo-aarch64" -- buildinfo-aarch64
+    plan blockfir light "title=unit: blockfir" -- blockfir
+    plan plugin-versions light "title=unit: plugin-versions" -- plugin-versions
+    plan controller-build light "title=unit: controller (its build)" -- controller-build
+    plan controller-tests test "title=unit: controller (its own tests)" needs=controller-build -- controller-tests
+    plan tools light "title=unit: tools" -- tools
+}
+
+plan_vpair() {
+    MODULES_PLANNED=0
+    [ "${BPI_TEST_DRY_RUN:-}" = 1 ] || have_pipewire vpair || return 1
+    plan_pool vpair vpair
+    MODULES_PLANNED=1
+}
+
+# Runs PLAN (the prebuild first); RESULT[step] = passed, failed, skipped or interrupted.
+run_schedule() {
+    local status line name result
+    PLAN_FILE="$(mktemp)"
+    printf '%s\n' ${PLAN_FIRST[@]+"${PLAN_FIRST[@]}"} "${PLAN[@]}" > "$PLAN_FILE"
+    python3 tools/schedule.py --plan "$PLAN_FILE" --logs "$STEPS_DIR" --results "$STEPS_DIR/results" \
+        --gate "$STEPS_DIR/gate" --lock "$RUN_LOCK" --what "tools/test.sh $ARGS_TEXT"
+    status=$?
+    rm -f "$PLAN_FILE"
+    PLAN_FILE=""
+    if [ -f "$STEPS_DIR/results" ]; then
+        while read -r name result; do RESULT[$name]="$result"; done < "$STEPS_DIR/results"
+    fi
+    return $status
+}
+
+passed() { local s; for s in "$@"; do [ "${RESULT[$s]:-}" = passed ] || return 1; done; }
+
+# The modules' note, after the schedule: the pool's, or its prebuild's when it failed.
+pool_note() {
+    NOTE=""
+    [ ! -f "$STEPS_DIR/pool.note" ] || NOTE="$(cat "$STEPS_DIR/pool.note")"
+    [ -n "$NOTE" ] || NOTE="the test run wrote no note"
+}
+
+scheduled_checks() {
+    local ok=0
+    plan_checks || ok=1
+    [ ${#PLAN[@]} -gt 0 ] || [ ${#PLAN_FIRST[@]} -gt 0 ] || return $ok
+    [ "$MODULES_PLANNED" = 0 ] || quick_chain_cost "${UNIQUE_MODULES[@]}"
+    run_schedule || ok=1
+    if [ "$CONTROLLER_CHECKED" = 1 ] && ! passed controller-build controller-tests; then
+        echo "controller: its build or its own tests failed: test_controller_end_to_end not run"
+    fi
+    if [ "$MODULES_PLANNED" = 1 ]; then pool_note; echo "$MODULE_SAID: $NOTE"; fi
+    return $ok
+}
+
+scheduled_levels() {   # $1: unit, vpair or all
+    local ok=0 unit_ok=1 vpair_skipped=0 p checked="" step
+    case "$1" in unit|all) plan_unit ;; esac
+    case "$1" in vpair|all) plan_vpair || vpair_skipped=1 ;; esac
+    run_schedule || ok=1
+    if [ "$1" != vpair ]; then
+        echo "=== /test unit"
+        for p in $(plugins_with_targets); do
+            if passed "plugin-lto-$p"; then echo "unit: $p passed"; else echo "unit: $p FAILED"; unit_ok=0; fi
+            checked+="$p "
+        done
+        for step in buildinfo-aarch64:buildinfo-aarch64 blockfir:blockfir plugin-versions:plugin-versions \
+                    controller:"controller-build controller-tests" tools:tools; do
+            # shellcheck disable=SC2086 # the step's steps, one word each
+            if passed ${step#*:}; then echo "unit: ${step%%:*} passed"; else echo "unit: ${step%%:*} FAILED"; unit_ok=0; fi
+            checked+="${step%%:*} "
+        done
+        if [ $unit_ok = 1 ]; then record unit pass "$checked"; else record unit fail "$checked"; ok=1; fi
+    fi
+    if [ "$1" != unit ]; then
+        echo "=== /test vpair"
+        if [ $vpair_skipped = 1 ]; then
+            record vpair skipped "no pipewire"; ok=1
+        else
+            pool_note
+            echo "vpair: $NOTE"
+            if passed pool; then record vpair pass "$NOTE"; else record vpair fail "$NOTE"; ok=1; fi
+        fi
+    fi
+    return $ok
+}
+
+# tools/test.sh --jobs N __step STEP [ARG...]: one step of the schedule, as plan() names it.
+run_step() {
+    local step="$1"
+    shift
+    [ -z "$STUB" ] || { "$STUB/step" "$step" "$@"; return; }
+    case "$step" in
+        plugin-lto)        check_plugin "$1" lto ;;
+        plugin)            check_plugin_focused "$1" ;;
+        buildinfo-aarch64) check_build_info_aarch64 ;;
+        blockfir)          dsp/juce_plugins/tests/blockfir/run.sh ;;
+        plugin-versions)   dsp/juce_plugins/tests/plugin-versions/run.sh ;;
+        tools)             check_tools ;;
+        controller-build)  tools/build.sh controller ;;
+        controller-tests)  dsp/juce_apps/controller/tests/run.sh ;;
+        prebuild)          python3 tests/vpair/pool.py --jobs "$JOBS" --prebuild-only --note "$STEPS_DIR/pool.note" "$@" ;;
+        pool)              # pool SAID [--after-gate NAME]... -- MODULE...
+                           local said="$1" held=() count
+                           shift
+                           while [ "$1" != -- ]; do held+=("$1"); shift; done
+                           shift
+                           count="every module"
+                           [ $# = 0 ] || count="$# module(s)"
+                           echo "$said: $count, $JOBS at a time, the quiet ones min($JOBS, 12) after the other tests" \
+                                "(tests/vpair/pool.py; --jobs 1: one after another)"
+                           python3 tests/vpair/pool.py --jobs "$JOBS" --gate "$STEPS_DIR/gate" --note "$STEPS_DIR/pool.note" \
+                               ${held[@]+"${held[@]}"} "$@" ;;
+        *)                 echo "__step: no step named $step" >&2; return 2 ;;
+    esac
+}
+
+ARGS_TEXT="$*"
 what="${1:-}"
 shift || true
+if [ "$what" = __step ]; then
+    [ $# -ge 1 ] || { echo "__step: which step?" >&2; exit 2; }
+    run_step "$@"
+    exit $?             # a step's own status: the schedule reads it (never a run's end)
+fi
 CHECK_LIST=()
 case "$what" in
     unit | vpair | all)
@@ -352,11 +594,32 @@ esac
 # status of its own, 3 (not 0: tools/container.sh passes every BPI_* variable into the container,
 # so a stray export must fail every check and level, CI's too, rather than pass them unrun; not 2,
 # the arguments refused), and says so on stderr.
+# With more than one job, the plan too, a line "plan NAME KIND [OPTION...] -- STEP [ARG...]" a step
+# in the schedule's order (not for changed, whose checks tools/impact.py finds when it runs).
 if [ "${BPI_TEST_DRY_RUN:-}" = 1 ]; then
     echo "jobs $JOBS"; echo "record $record"; echo "run $what${*:+ $*}"
     for entry in ${CHECK_LIST[@]+"${CHECK_LIST[@]}"}; do echo "check $entry"; done
+    if [ "$JOBS" -gt 1 ] && [ "$what" != changed ]; then
+        case "$what" in
+            unit | vpair | all) case "$what" in unit|all) plan_unit ;; esac
+                                case "$what" in vpair|all) plan_vpair ;; esac ;;
+            *)                  plan_checks ;;
+        esac
+        for line in ${PLAN_FIRST[@]+"${PLAN_FIRST[@]}"} ${PLAN[@]+"${PLAN[@]}"}; do
+            line="${line%% -- "$ROOT"/tools/test.sh --jobs "$JOBS" __step *} -- ${line##* __step }"
+            echo "plan $line"
+        done
+    fi
     echo "BPI_TEST_DRY_RUN=1: nothing ran" >&2
     exit 3
+fi
+if [ "$JOBS" -gt 1 ]; then
+    run_checks() { scheduled_checks; }
+    case "$what" in
+        unit | vpair | all) scheduled_levels "$what" || rc=1
+                            [ $record = 0 ] || { echo "=== status"; "$STATUS_PY" show; }
+                            leave $rc ;;
+    esac
 fi
 case "$what" in
     unit)  run_unit || rc=1 ;;
@@ -364,7 +627,7 @@ case "$what" in
     all)   run_unit || rc=1; run_vpair || rc=1 ;;
     changed) run_changed "$@" || rc=1 ;;
     *)     run_checks || rc=1
-           exit $rc ;;
+           leave $rc ;;
 esac
-case "$what" in unit|vpair|all) [ $record = 0 ] || { echo "=== status"; tools/status.py show; } ;; esac
-exit $rc
+case "$what" in unit|vpair|all) [ $record = 0 ] || { echo "=== status"; "$STATUS_PY" show; } ;; esac
+leave $rc
