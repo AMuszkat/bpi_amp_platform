@@ -235,6 +235,8 @@ timeout (in seconds, the last argument where shown; default 5) passes.
 | `main-window X Y W H` | places the main window (`--gui`) |
 | `screenshot FILE` | every window, as JUCE paints it, into one PNG (`--gui`) |
 | `sweep UID SECONDS` | sets every parameter of a node on every tick, without a gesture (a preset morph): as much traffic as the control link takes, 50 a second per parameter |
+| `wait-file PATH [s]` | until PATH exists: a test's signal, for a condition only the test sees |
+| `wait-refused TEXT`, `wait-monitor-refused SPEAKER TEXT` | until the hub refused this controller (or failed to prove itself), or that speaker's monitor link did, with TEXT (the rest of the line) in the reason; 10 s; prints `refused` |
 | `sleep MS`, `print TEXT` | |
 
 Lines starting with `#` are comments. Every line carries `max_tick_ms`, the longest gap between two
@@ -299,7 +301,7 @@ With it comes `test-probe-bypass` (`urn:bpi-amp:controller:test-probe-bypass`), 
 
 `tests/fake_hub.py` is a small hub for these tests (Python, standard library only): the control
 link, the knobs link and both speakers' monitor links, on 127.0.3.1 (the hub, left) and
-127.0.3.2 (right). It authenticates both ways as docs/protocol.md says, with the tests' secret
+127.0.3.2 (right), or the pair a test run's worker gives it (below). It authenticates both ways as docs/protocol.md says, with the tests' secret
 (`fake_hub.SECRET`, or `--secret-file`; `--no-secret` for a hub without one): it speaks first
 with a nonce, checks each client proof with Python's `hmac`, refuses a wrong one, answers with
 its `welcome` proof (a wrong one when a test sets `wrong_welcome`), takes OSC only with the token
@@ -307,7 +309,8 @@ of an authenticated connection from its address, and stamps each controller's ec
 controller's token. `forge_echo()` sends echoes without a token or with a wrong one. It stamps `seq`, echoes, relays gestures, applies or rejects proposals
 (stale base, an unknown plugin, a `quantum` the hub or a speaker's range refuses, with their
 reasons, a speaker's in the real hub's form `<speaker>: <speakerd's reason>`, or a reason a test sets; `answer_delay` holds the answer back), gives each speaker
-`rate`, `quantum`, `quantum_range` and `quantum_default` in its state, and once a revision is
+`rate`, `quantum`, `quantum_range` and `quantum_default` in its state (and `after_state` runs
+once a controller's state is sent, before its next line is read: a hub that moves on silently), and once a revision is
 applied makes the speakers run its `quantum` (or their default) and sends the state again
 (`quantum_delay`, 0.3 s, as the agents' reports would), and produces monitor values at the
 rate asked for: `output/level`, `speakerd/timing` and `board/cpu` per speaker, and a node's
@@ -317,7 +320,29 @@ interrupted.
 ```sh
 dsp/juce_apps/controller/tests/run.sh                # builds the controller if needed, runs the tests
 dsp/juce_apps/controller/tests/run.sh --screenshot   # and the GUI under Xvfb + openbox, with screenshots
+dsp/juce_apps/controller/tests/run.sh --jobs 4       # 4 tests at a time ($BPI_CONTROLLER_JOBS too)
 ```
+
+`run.sh` runs `tests/runner.py`, which runs the tests 6 at a time (`--jobs N` or
+`$BPI_CONTROLLER_JOBS`; one at a time where `CI` is set). Measured on 24 threads (n = 3 or more,
+2026-11-04): 77 s one after the other before this runner; now 49 s one at a time, 31 s 2 at a
+time, 21 s at 4, 18 to 20 s at 6, 8 and 12. The floor is the longest test (`test_14`, its 7 s
+window of retries) plus those run alone (11 s); 6 workers hold about 100 tasks, 12 about 190,
+and the run uses under half a processor. Each worker has its own
+display (`tests/display.py`: Xvfb on the first free number from :300 up, with `-displayfd` per
+number, and openbox waited for; never :0, nor the vpair pool's :100 to :199 or plugin-check's :200
+to :299), its own fake hub addresses (worker k: 127.0.3.(2k+1) and 127.0.3.(2k+2), the same
+ports), and each test its own `HOME`; each test runs in a process of its own, so it sees what it
+sees run alone (`python3 -m unittest discover -s dsp/juce_apps/controller/tests -v` still works,
+one at a time, a display from :300 up for each GUI test). The longest start first
+(`build/controller-check/durations.json`, the last run's times). The tests marked `@alone` in
+`test_controller.py`, whose pass criterion is a time or a rate, run after the others, one at a
+time: `test_03` (at least 40 datagrams in 1.2 s, at most 51 in a second), `test_09` (more than 8
+level values in 0.5 s), `test_12` and `test_13` (the message thread's ticks under 250 ms). The
+output is unittest's `-v`, one test after the other as they end (each with its time and worker),
+and its summary; the exit status is 0 when every test passed. The tests wait on conditions (the
+hub's state sent, a refusal, a file the test writes), not on fixed sleeps, except where the time
+is what a test checks (a 7 s window of retries, a negative check that nothing more came).
 
 `tests/test_controller.py` runs the controller's test mode against the fake hub and checks what
 it printed and what the hub received: hello and state; a change without a gesture over the
@@ -346,7 +371,7 @@ own period; and a
 plugin's own bypass parameter (the bypass probe) as the node's bypass: *Toggle Bypass* and a
 knob on it proposed as revisions with `bypassed`, never a `param` and never in `params`, a
 mirrored revision applied without an echo, and another controller's `param` of it ignored; and,
-with `--gui` on its own Xvfb + openbox (skipped without them), firConv, crossover and loudness
+with `--gui` on a display of its own (the worker's; skipped without Xvfb and openbox), firConv, crossover and loudness
 each opened, closed and opened again with the plugin's own editor both times; and the buffer
 size: the speakers' four fields parsed and printed, the selector's choices for two ranges'
 intersection (128 to 1024), disabled by an online speaker without a range and not by an
@@ -419,7 +444,7 @@ getters (`getLevelDb()`) must read its `mon_` parameter in the control build (do
 | `Source/Plugins/ControlPlugins.*` | the plugins compiled in, the speaker's I/O nodes, placeholders, the test probe, parameter values in the document's units |
 | `Source/Plugins/PluginGraph.*` | the canvas's graph, mirroring a document (from AudioPluginHost's `PluginGraph`) |
 | `Source/UI/*` | the canvas, main window and plugin windows (from AudioPluginHost), the speakers panel |
-| `tests/` | the fake hub, the tests, `run.sh` |
+| `tests/` | the fake hub, the tests, `run.sh`, `runner.py` (several at a time), `display.py` (Xvfb from :300 up) |
 
 The files derived from AudioPluginHost say so at their top, with what changed. JUCE is under the
 AGPLv3 or the JUCE licence, as for the plugins.

@@ -249,6 +249,45 @@ namespace bpi
             return false;
         }
 
+        if (cmd == "wait-file")
+        {
+            // wait-file PATH [s]: until PATH exists (a test's signal: a condition only it can see).
+            if (! need (1)) return true;
+            setTimeout (2, defaultTimeoutSeconds);
+            return juce::File (arg (1)).exists() ? edit (true, {}) : false;
+        }
+
+        if (cmd == "wait-refused" || cmd == "wait-monitor-refused")
+        {
+            // wait-refused TEXT: until the hub refused this controller (or failed to prove
+            // itself) with TEXT in the reason; wait-monitor-refused SPEAKER TEXT: the same for
+            // that speaker's monitor link. TEXT is the rest of the line; default 10 s.
+            const auto monitor = cmd == "wait-monitor-refused";
+            if (! need (monitor ? 2 : 1)) return true;
+            setTimeout (99, 10.0);
+            auto rest = step.line.fromFirstOccurrenceOf (" ", false, false).trim();
+            juce::String reason;
+
+            if (monitor)
+            {
+                rest = rest.fromFirstOccurrenceOf (" ", false, false).trim();
+
+                for (const auto& s : bridge.getSpeakers())
+                    if (s.name == arg (1))
+                        reason = s.monitorRefusal;
+            }
+            else
+            {
+                reason = bridge.getRefusal();
+            }
+
+            waitDetail = object ({ { "refused", reason } });
+            if (reason.isNotEmpty() && reason.contains (rest.unquoted()))
+                return edit (true, {}, object ({ { "refused", reason } }));
+
+            return false;
+        }
+
         if (cmd == "set")
         {
             if (! need (3)) return true;

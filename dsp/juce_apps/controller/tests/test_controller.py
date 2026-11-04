@@ -12,7 +12,10 @@ waits. Each test runs the controller in its test mode
 
 The controller is build/controller/controller_artefacts/Release/controller at the repository
 root (tools/build.sh controller), or $CONTROLLER. The hub listens on 127.0.3.1 and the right
-speaker's monitor link on 127.0.3.2 (any 127.x address is the loopback).
+speaker's monitor link on 127.0.3.2 (any 127.x address is the loopback), or on
+$CONTROLLER_TEST_LEFT and $CONTROLLER_TEST_RIGHT: runner.py (what run.sh runs) gives each of its
+workers its own pair. A test marked @alone has a bound on a time or a rate: runner.py runs it
+after the others, one at a time.
 """
 
 import copy
@@ -25,12 +28,14 @@ import threading
 import time
 import unittest
 
+from display import VirtualDisplay
 from fake_hub import CROSSOVER_URI, FIRCONV_URI, FakeHub, LOUDNESS_URI, PROBE_BYPASS_URI, SECRET, client_proof, default_document, hmac_hex, osc_token, server_proof
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
 CONTROLLER = os.environ.get("CONTROLLER", os.path.join(ROOT, "build", "controller", "controller_artefacts", "Release", "controller"))
-LEFT, RIGHT = "127.0.3.1", "127.0.3.2"
+LEFT = os.environ.get("CONTROLLER_TEST_LEFT", "127.0.3.1")
+RIGHT = os.environ.get("CONTROLLER_TEST_RIGHT", "127.0.3.2")
 # A plugin this controller has no control build of (ampScope builds complete only): shown as a placeholder.
 AMPSCOPE_URI = "https://github.com/AMuszkat/bpi_amp_dsp_tuning/ampScope"
 
@@ -40,6 +45,15 @@ def report(name, **numbers):
     print("\n    [%s] %s" % (name, ", ".join("%s=%s" % kv for kv in numbers.items())), end=" ")
 
 
+def alone(why):
+    """Marks a test whose pass criterion is a time or a rate: runner.py runs it after the
+    others, one at a time, never beside another test (`why` is printed)."""
+    def mark(test):
+        test.run_alone = why
+        return test
+    return mark
+
+
 def secret_file(directory, secret):
     """The pair's secret in a file of mode 600, as the controller reads it."""
     path = os.path.join(directory, "secret-%d" % abs(hash(secret)))
@@ -47,58 +61,6 @@ def secret_file(directory, secret):
         f.write(secret + "\n")
     os.chmod(path, 0o600)
     return path
-
-
-class VirtualDisplay:
-    """Xvfb on the first free display (-displayfd) with openbox, for a `with` block; `env` is
-    {"DISPLAY": ...}. Raises unittest.SkipTest when either is missing."""
-
-    def __init__(self, size="1720x1000x24"):
-        self.size, self.processes, self.env, self.tmp = size, [], {}, None
-
-    def __enter__(self):
-        for tool in ("Xvfb", "openbox"):
-            if not shutil.which(tool):
-                raise unittest.SkipTest("no %s: the GUI test needs Xvfb and openbox" % tool)
-        try:
-            self.tmp = tempfile.mkdtemp(prefix="controller-display-")
-            read, write = os.pipe()
-            with open(os.path.join(self.tmp, "xvfb.log"), "w") as log:
-                self.processes.append(subprocess.Popen(
-                    ["Xvfb", "-displayfd", str(write), "-screen", "0", self.size, "-nolisten", "tcp"],
-                    pass_fds=(write,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log))
-            os.close(write)
-            with os.fdopen(read) as pipe:
-                number = pipe.readline().strip()      # written once it takes connections
-            if not number.isdigit():
-                raise AssertionError("Xvfb did not start")
-            self.env = {"DISPLAY": ":" + number}
-            ready = os.path.join(self.tmp, "openbox-started")
-            self.processes.append(subprocess.Popen(["openbox", "--startup", "touch " + ready],
-                                                   env=dict(os.environ, **self.env), stdin=subprocess.DEVNULL,
-                                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-            deadline = time.monotonic() + 10
-            while not os.path.exists(ready):
-                if self.processes[-1].poll() is not None or time.monotonic() > deadline:
-                    raise AssertionError("openbox did not start within 10 s")
-                time.sleep(0.02)
-            return self
-        except BaseException:
-            self.__exit__()
-            raise
-
-    def __exit__(self, *exc):
-        for process in reversed(self.processes):
-            process.terminate()
-            try:
-                process.wait(5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        self.processes = []
-        if self.tmp:
-            shutil.rmtree(self.tmp, ignore_errors=True)
-            self.tmp = None
 
 
 class ControllerTest(unittest.TestCase):
@@ -169,6 +131,26 @@ class ControllerTest(unittest.TestCase):
             time.sleep(0.02)
         return False
 
+    def wait_for_state_sent(self, hub=None, timeout=10):
+        """Until the hub has sent a controller its welcome and its state: whatever the hub sends
+        that connection next reaches the controller after its state (fake_hub writes a
+        connection's lines one at a time, in order)."""
+        hub = hub or self.hub
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with hub.lock:
+                if any(l == "control" and m.get("op") == "state" for l, m, _ in hub.sent):
+                    return
+            time.sleep(0.02)
+        raise AssertionError("the hub sent no state within %d s" % timeout)
+
+    def wait_until(self, condition, what, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not condition():
+            if time.monotonic() > deadline:
+                raise AssertionError("%s: not within %d s" % (what, timeout))
+            time.sleep(0.02)
+
     @staticmethod
     def step(steps, cmd, index=0):
         return [s for s in steps if s.get("cmd") == cmd][index]
@@ -227,6 +209,7 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(echo["seq"], 1001)
         report("set", control_params=len(params), osc_params=0, echo_seq=echo["seq"], echo_ms=echo["ms"])
 
+    @alone("at least 40 datagrams in 1.2 s, at most 51 in a second")
     def test_03_gesture_over_osc_at_50_hz_and_last_value_over_control(self):
         hub = self.start_hub()
         hub.echo_delay = 0.08   # our own echoes come back late, while later values are already out
@@ -263,10 +246,8 @@ class ControllerTest(unittest.TestCase):
         hub = self.start_hub()
 
         def other():
-            self.wait_for_controller()
-            time.sleep(0.3)
+            self.wait_for_state_sent()
             hub.change_param(16, "s0_e0_gain", -3.0)
-            time.sleep(0.1)
             hub.change_param(16, "mode", "Force 2")
 
         t0 = time.monotonic()
@@ -325,13 +306,10 @@ class ControllerTest(unittest.TestCase):
         hub = self.start_hub()
 
         def silently_newer():
-            self.wait_for_controller()
-            time.sleep(0.3)
-            with hub.lock:
-                hub.revision = 9    # the hub moved on without telling this controller
+            hub.revision = 9    # the hub moved on without telling this controller
 
-        code, steps, err = self.run_script("wait-synced\nsleep 600\nremove 16\nexpect-rejected stale\nexpect-node 16\n",
-                                           during=silently_newer)
+        hub.after_state = silently_newer
+        code, steps, err = self.run_script("wait-synced\nremove 16\nexpect-rejected stale\nexpect-node 16\n")
         self.assertPassed(code, steps, err)
         report("stale", proposed=8, hub_revision=9, outcome=self.step(steps, "expect-rejected")["outcome"])
 
@@ -348,8 +326,7 @@ class ControllerTest(unittest.TestCase):
                                {"src": {"node": 31, "channel": 1}, "dst": {"node": 2, "channel": 1}}]
 
         def other():
-            self.wait_for_controller()
-            time.sleep(0.3)
+            self.wait_for_state_sent()
             hub.new_revision(doc)
 
         code, steps, err = self.run_script(
@@ -369,12 +346,13 @@ class ControllerTest(unittest.TestCase):
         report("other", revision_seen=8, placeholder_uid=31, next_revision=hub.document["revision"],
                kept_keys=len(kept))
 
+    @alone("more than 8 level values in 0.5 s")
     def test_09_monitor_subscriptions(self):
         hub = self.start_hub(document=default_document(probe=True))
         code, steps, err = self.run_script(
             "wait-synced\nopen 20\nwait-monitor 20 mon_level -20.5\n"
             "monitor-speaker 20 right\nwait-monitor 20 mon_level -30.25\n"
-            "close 20\nsleep 300\n"
+            "close 20\n"
             "output-levels on\nwait-value left output/level\nwait-value right output/level\nsleep 500\nstate\n",
             extra=["--test-probe", "--speaker", "right=" + RIGHT])
         self.assertPassed(code, steps, err)
@@ -400,7 +378,7 @@ class ControllerTest(unittest.TestCase):
 
     def test_10_no_hub_no_edit(self):
         """Without the hub's state an edit is undone and nothing is sent anywhere."""
-        code, steps, err = self.run_script("add loudness\nsleep 300\nexpect-no-node $new\nstate\n")
+        code, steps, err = self.run_script("add loudness\nexpect-no-node $new\nstate\n")
         self.assertPassed(code, steps, err)
         state = self.step(steps, "state")["state"]
         self.assertFalse(state["synced"])
@@ -413,10 +391,9 @@ class ControllerTest(unittest.TestCase):
         newer["nodes"][0]["params"]["s0_e0_gain"] = -2.0
 
         def restart():
-            self.wait_for_controller()
-            time.sleep(0.4)
+            self.wait_until(lambda: hub.received_ops("control", "param"), "the change at the first hub")
             hub.stop()
-            time.sleep(0.5)
+            time.sleep(0.5)     # the hub is away for half a second
             self.hub = FakeHub(LEFT, RIGHT, document=newer).start()
 
         code, steps, err = self.run_script("wait-synced\nset 16 s0_e0_gain 9\nexpect-revision 12 15\n"
@@ -430,12 +407,11 @@ class ControllerTest(unittest.TestCase):
 
     def stalled_run(self, script, extra=(), resume_after=None, timeout=60):
         """Runs a script while the hub stops reading the controller's first control connection
-        0.5 s after it connected; it reads again `resume_after` seconds later (or never)."""
+        once it sent its state; it reads again `resume_after` seconds later (or never)."""
         hub = self.start_hub(control_rcvbuf=4096)
 
         def stall():
-            self.wait_for_controller()
-            time.sleep(0.5)
+            self.wait_for_state_sent()
             hub.stall_controllers()
             if resume_after is not None:
                 time.sleep(resume_after)
@@ -443,13 +419,16 @@ class ControllerTest(unittest.TestCase):
 
         return self.run_script(script, extra=extra, during=stall, timeout=timeout)
 
+    @alone("the message thread's ticks under 250 ms")
     def test_12_hub_stops_reading_the_ui_keeps_running(self):
         """A hub that stops reading never blocks the message thread; the queued lines go out when
         it reads again, in order. The hub echoes the thousands of queued sweep lines one by one,
         which takes more than 30 s on a slow CI runner: the drain may take up to 120 s."""
+        # The stall starts as the state goes out, before the 3 s sweep; it ends 1 s after the
+        # sweep would end, once the script has looked at the backlog (`state`).
         code, steps, err = self.stalled_run(
             "wait-synced\nsweep 16 3\nstate\nset 16 s0_e0_gain 5.5\nwait-echo 16 s0_e0_gain 5.5 120\nstate\n",
-            resume_after=3.0, timeout=180)
+            resume_after=4.0, timeout=180)
         self.assertPassed(code, steps, err)
         sweep = self.step(steps, "sweep")
         during = self.step(steps, "state", 0)["state"]
@@ -465,6 +444,7 @@ class ControllerTest(unittest.TestCase):
         report("stall", sweep_ticks=sweep["ticks"], values_set=sweep["values"], queued_kib=during["queued_bytes"] // 1024,
                longest_tick_gap_ms=ticks, lines_received=len(params), recovered_ms=self.step(steps, "wait-echo")["ms"])
 
+    @alone("the message thread's ticks under 250 ms")
     def test_13_hub_that_never_reads_again_is_dropped_and_reconnected(self):
         """Past the queue's bound the link drops the connection and connects again, and the new
         connection starts from the hub's state."""
@@ -529,7 +509,7 @@ class ControllerTest(unittest.TestCase):
         failed = [s for s in steps if s.get("ok") is False]
         self.assertEqual(code, 1, "set must fail: no state, no node 16")
         self.assertEqual(failed[0]["cmd"], "set")
-        code, steps, err = self.run_script("sleep 200\nstate\n")
+        code, steps, err = self.run_script("wait-refused did not prove the pair's secret\nstate\n")
         self.assertPassed(code, steps, err)
         state = self.step(steps, "state")["state"]
         self.assertFalse(state["synced"])
@@ -547,15 +527,16 @@ class ControllerTest(unittest.TestCase):
         hub = self.start_hub()
 
         def forge():
-            self.wait_for_controller()
-            time.sleep(0.5)
+            self.wait_for_state_sent()
             hub.forge_echo(16, "s0_e0_gain", -20.0)                      # no token
             hub.forge_echo(16, "s0_e0_gain", -21.0, "0" * 32)            # a wrong one
             hub.forge_echo(16, "s0_e0_gain", -22.0, osc_token("not-the-secret-0123456789", "a" * 32, "b" * 32))
+            # The hub's own, stamped, also over the control link: well after the forged ones, so
+            # that they are counted before it is applied (UDP and TCP are read apart).
             time.sleep(0.3)
-            hub.change_param(16, "s0_e0_gain", 7.5)                       # the hub's own, stamped
+            hub.change_param(16, "s0_e0_gain", 7.5)
 
-        code, steps, err = self.run_script("wait-synced\nsleep 700\nwait-param 16 s0_e0_gain 7.5\nstate\n", during=forge)
+        code, steps, err = self.run_script("wait-synced\nwait-param 16 s0_e0_gain 7.5\nstate\n", during=forge)
         self.assertPassed(code, steps, err)
         state = self.step(steps, "state")["state"]
         self.assertGreaterEqual(state["osc_dropped"], 3)
@@ -565,7 +546,7 @@ class ControllerTest(unittest.TestCase):
 
     def test_18_hub_without_a_secret_only_with_insecure(self):
         hub = self.start_hub(secret=None)
-        code, steps, err = self.run_script("sleep 1500\nstate\n", secret=None)
+        code, steps, err = self.run_script("wait-refused has no secret\nstate\n", secret=None)
         self.assertPassed(code, steps, err)
         refused = self.step(steps, "state")["state"]
         self.assertFalse(refused["synced"])
@@ -589,7 +570,8 @@ class ControllerTest(unittest.TestCase):
         hub = self.start_hub(document=default_document(probe=True))
         hub.monitor_names = {"right": "left"}
         code, steps, err = self.run_script(
-            "wait-synced\nopen 20\nwait-monitor 20 mon_level -20.5\nmonitor-speaker 20 right\nsleep 3000\nstate\n",
+            "wait-synced\nopen 20\nwait-monitor 20 mon_level -20.5\nmonitor-speaker 20 right\n"
+            "wait-monitor-refused right is named \"left\", not \"right\"\nstate\n",
             extra=["--test-probe", "--speaker", "right=" + RIGHT, "--hub-name", "left"])
         self.assertPassed(code, steps, err)
         speakers = {s["name"]: s for s in self.step(steps, "state")["state"]["speakers"]}
@@ -601,7 +583,7 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(right_hellos, 0, "no hello, no proof to a server with the wrong name")
         self.assertEqual(right_subscribes, 0)
 
-        code, steps, err = self.run_script("sleep 1500\nstate\n", extra=["--hub-name", "other"])
+        code, steps, err = self.run_script("wait-refused is named \"left\", not \"other\"\nstate\n", extra=["--hub-name", "other"])
         self.assertPassed(code, steps, err)
         state = self.step(steps, "state")["state"]
         self.assertFalse(state["synced"])
@@ -661,35 +643,47 @@ class ControllerTest(unittest.TestCase):
             {"after_s": 2, "skipped": [(23, 5)] * 10},                  # 4: the first value on a new link
             {"stop": True}]}
 
+        def timing_sent():
+            with hub.lock:
+                return len([1 for l, m, _ in hub.sent if l == "monitor right" and m.get("stream") == "speakerd/timing"])
+
+        signal_dir = tempfile.mkdtemp(prefix="controller-load-")
+        value_4 = os.path.join(signal_dir, "value-4-sent")
+
         def other():
             # Drop the right speaker's monitor link 0.8 s after value 3 (once the script has
             # looked at it, before value 4 is due): the controller reconnects, and value 4 goes
-            # at once on the new link.
-            deadline = time.monotonic() + 40
-            while time.monotonic() < deadline:
-                if len([1 for l, m, _ in hub.sent if l == "monitor right" and m.get("stream") == "speakerd/timing"]) >= 3:
-                    time.sleep(0.8)
-                    hub.drop_monitor("right")
-                    return
-                time.sleep(0.02)
+            # at once on the new link; then tell the script.
+            self.wait_until(lambda: timing_sent() >= 3, "value 3", 40)
+            time.sleep(0.8)
+            hub.drop_monitor("right")
+            self.wait_until(lambda: timing_sent() >= 4, "value 4", 40)
+            open(value_4, "w").close()
 
-        code, steps, err = self.run_script(
-            "wait-synced\nspeaker-load on\nwait-load left\nwait-load right 10 2\nstate\n"
-            "wait-load right 10 3\nstate\nsleep 3000\nwait-load right 20 1\nstate\n"
-            "speaker-load off\nsleep 500\nstate\n",
-            extra=["--speaker", "right=" + RIGHT], during=other)
+        try:
+            code, steps, err = self.run_script(
+                "wait-synced\nspeaker-load on\nwait-load left\nwait-load right 10 2\nstate\n"
+                "wait-load right 10 3\nstate\nwait-file %s 20\nwait-load right 10 1\nstate\n"
+                "speaker-load off\nsleep 500\nstate\n" % value_4,
+                extra=["--speaker", "right=" + RIGHT], during=other)
+        finally:
+            shutil.rmtree(signal_dir, ignore_errors=True)
         self.assertPassed(code, steps, err)
 
         load_streams = ("speakerd/timing", "board/cpu")
         lines = {name: [(m["op"], m["stream"], m.get("rate_hz")) for m, _ in hub.received_ops("monitor " + name)
                         if m["op"] in ("subscribe", "unsubscribe")]
                  for name in ("left", "right")}
-        self.assertEqual(lines["left"], [("subscribe", "speakerd/timing", 2), ("subscribe", "board/cpu", 2),
-                                         ("unsubscribe", "speakerd/timing", None), ("unsubscribe", "board/cpu", None)])
+        # Both asked for at once, in either order: `wait-synced` is the control link's, and the
+        # monitor link may prove itself before `speaker-load on` (then the panel's order) or
+        # after it (then its welcome asks for every stream wanted, in name order).
+        both = [("subscribe", "board/cpu", 2), ("subscribe", "speakerd/timing", 2)]
+        self.assertEqual(sorted(lines["left"][:2]), both)
+        self.assertEqual(lines["left"][2:], [("unsubscribe", "speakerd/timing", None), ("unsubscribe", "board/cpu", None)])
         # The refused stream is not asked for again on that connection, nor withdrawn (ampd dropped
         # it); the new connection asks for both again (in either order).
-        self.assertEqual(lines["right"][:2], [("subscribe", "speakerd/timing", 2), ("subscribe", "board/cpu", 2)])
-        self.assertEqual(sorted(lines["right"][2:4]), [("subscribe", "board/cpu", 2), ("subscribe", "speakerd/timing", 2)])
+        self.assertEqual(sorted(lines["right"][:2]), both)
+        self.assertEqual(sorted(lines["right"][2:4]), both)
         self.assertEqual(lines["right"][4:], [("unsubscribe", "speakerd/timing", None)])
         self.assertEqual(hub.subscriptions, {"left": {}, "right": {}})
 
@@ -985,7 +979,7 @@ class ControllerTest(unittest.TestCase):
 
         hub.during_answer = resend_soon
         code, steps, err = self.run_script(
-            "wait-synced\nadd loudness\nsleep 600\nstate\nexpect-applied\nexpect-revision 8\nexpect-node $new\n"
+            "wait-synced\nadd loudness\nexpect-buffer-size left 1024\nstate\nexpect-applied\nexpect-revision 8\nexpect-node $new\n"
             "buffer-size 256\nexpect-applied\nexpect-revision 9\nexpect-buffer-size left 256\nstate\n")
         self.assertPassed(code, steps, err)
         self.assertEqual(len(resent), 2)
