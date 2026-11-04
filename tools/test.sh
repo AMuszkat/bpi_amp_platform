@@ -444,8 +444,10 @@ plan_pool() {
 
 # The plugins' LTO builds, heavy: the block FIR first (the longest of them when nothing changed,
 # a few seconds; as long as the LTO plugins' when everything did), then plugin-check of each
-# plugin. Two LTO trees at most at once, and so the aarch64 build identity, an LTO cross build,
-# is heavy too (plan_unit, after these: the shortest).
+# plugin. Two heavy steps at most at once (the pool's prebuild takes both slots, its trees built
+# together: one tools/build.sh each, speakerd and the headless plugins, a no-op when they are
+# built), and so the aarch64 build identity, an LTO cross build, is heavy too (plan_unit, after
+# these: the shortest).
 plan_plugin_builds() {   # $1: the title's prefix ("unit:", "plugins:")
     local p
     plan blockfir heavy "title=$1 blockfir" -- blockfir

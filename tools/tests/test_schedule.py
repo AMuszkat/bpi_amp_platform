@@ -4,8 +4,8 @@ light step has ended), at most two heavy steps at once (a step of two slots alon
 the plan's order, at nice 19, light ones beside them and not niced; the gate (created once every
 other test has ended, with what it leaves out); a dependent skipped, saying why, the independent
 ones run; each step's output as one block; the results, the table, the exit status (2 for a plan
-it cannot run, and no results then); the lock (a second schedule waits, naming the first; SIGTERM
-or SIGHUP while it waits); SIGTERM and SIGHUP passed to the running steps; the schedule's process ID
+it cannot run, and no results then; 1, said, for results into a folder gone); the lock (a second
+schedule waits, naming the first; SIGTERM or SIGHUP while it waits); SIGTERM and SIGHUP passed to the running steps; the schedule's process ID
 in each step's environment (TEST_SCHEDULE_PID, the pool's --gate-owner). Part of the `tools` check
 (tools/test.sh tools).
 
@@ -141,6 +141,15 @@ class ThePhases(unittest.TestCase):
         self.assertTrue(overlap(s.interval("b1"), s.interval("l1")), "the light step did not run beside the build")
         self.assertEqual(s.results(), {n: "passed" for n in ("b1", "b2", "l1", "t1", "t2")})
         self.assertRegex(s.output, r"schedule: 5 step\(s\) in [\d.]+ s: all passed\n")
+
+    def test_results_into_a_folder_gone(self):
+        # tools/test.sh's EXIT trap may remove the run's folder while the schedule drains: said, status 1.
+        gone = Path(tempfile.mkdtemp(prefix="test-schedule-gone-")) / "run" / "results"
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(gone.parent.parent)]))
+        s, status = run(self, ["t1 test -- sleep=0"], "--results", str(gone))
+        self.assertEqual(status, 1, s.output)
+        self.assertIn(f"schedule: the results could not be written to {gone}: ", s.output)
+        self.assertRegex(s.output, r"schedule: 1 step\(s\) in [\d.]+ s: all passed\n")   # the table still printed
 
     def test_at_most_two_heavy(self):
         s = Schedule(self, ["h0 heavy -- wait=RELEASE", "h1 heavy -- wait=RELEASE", "h2 heavy -- ",

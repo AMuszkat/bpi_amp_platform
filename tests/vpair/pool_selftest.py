@@ -27,6 +27,8 @@ checkout is not disturbed), all at once, and checked for:
   tree's lock: in built() (a print to a closed stderr), in the prebuild's reader (to a closed
   stdout) and in the prebuild (a SIGINT, a SIGTERM and a SIGHUP to the pool alone: the stand-in
   build runs in a session of its own, and its own child, as ninja is tools/build.sh's, goes too);
+  a build already reaped sent nothing (its PID may be another's); the prebuild's report into a
+  folder that is gone an OSError, which --prebuild-only says and exits 1 on;
 - a failed build failing the units that require it, under their names, not run, and the others
   running;
 - the checkout's lock: a second pool on the same files waits for the first, naming it, and starts
@@ -1196,6 +1198,23 @@ class AStoppedRead(unittest.TestCase):
                 self.assertIn(f"pool: {signum.name} during the prebuild: its builds killed, no unit run\n", run.output)
                 self.assertFalse(Path(env["ST_BUILD_END"]).exists(), run.output)
                 self.assertNotIn("<<Builds>>", run.output)       # no unit ran
+
+    def test_a_reaped_build_is_not_signalled(self):
+        # The prebuild's cleanup kills every build it started, the reaped ones among them: their PIDs
+        # may be another's by then, so kill_build sends a reaped build nothing.
+        process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        process.wait()
+        with mock.patch.object(os, "killpg") as killpg, mock.patch.object(os, "getpgid") as getpgid, \
+                mock.patch.object(process, "kill") as kill:
+            pool.kill_build(process)
+        self.assertEqual((killpg.call_count, getpgid.call_count, kill.call_count), (0, 0, 0))
+
+    def test_a_report_into_a_folder_gone(self):
+        # Its run's folder removed (a schedule's EXIT trap): an OSError, and no temporary file left.
+        folder = TMP / "report-folder-gone"
+        with self.assertRaises(OSError):
+            pool.write_report(folder / "built.json", {"st_app"}, {})
+        self.assertFalse(folder.exists())
 
 
 class TheCheckoutsLock(unittest.TestCase):
