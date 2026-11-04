@@ -116,14 +116,29 @@ and the layer, the `apply` or the render goes on.
 
 ```bash
 tools/build.sh speakerd              # build/speakerd/speakerd_artefacts/Release/speakerd
-tools/build.sh loudness headless     # puts loudness_headless.lv2 in ~/.lv2 (the container's)
+tools/build.sh loudness headless     # build/loudness/loudness_headless_artefacts/Release/LV2/loudness_headless.lv2
 ```
 
-On the virtual pair (`tests/vpair/README.md`), against the left speaker's PipeWire:
+`tools/build.sh` copies nothing into `~/.lv2`: JUCE's copy of each bundle goes into the build
+tree's own `copied/lv2` (here `build/loudness/copied/lv2/`), so speakerd finds a plugin built
+this way only through `--lv2-bundle`. Give it an empty `HOME` too: a bundle of the same URI and
+version left in `~/.lv2` (by `tools/build.sh` before 2026-11-04, or by
+`dsp/juce_plugins/tools/build-podman.sh`'s local flows, which still copy there) would shadow
+the one named, and speakerd would stop with status 2 ([Which build runs](#command-line)).
+
+On the virtual pair (`tests/vpair/README.md`), against the left speaker's PipeWire, with a
+state directory whose `device.json` names the virtual amplifier (without one speakerd waits for
+the board's) and whose `graph.json` is the example session with `loudness_headless`:
 
 ```bash
+speakerd=build/speakerd/speakerd_artefacts/Release/speakerd
+bundle=build/loudness/loudness_headless_artefacts/Release/LV2/loudness_headless.lv2
+DIR=$(mktemp -d)
+echo '{"role": "left", "amplifier": "amplifier"}' > $DIR/device.json
+HOME=$(mktemp -d) $speakerd --import-filtergraph dsp/juce_apps/speakerd/examples/loudness.filtergraph \
+    --prefer-headless --lv2-bundle $bundle > $DIR/graph.json
 tests/vpair/vpair.sh up
-tests/vpair/vpair.sh run left build/speakerd/speakerd_artefacts/Release/speakerd --state-dir DIR &
+HOME=$(mktemp -d) tests/vpair/vpair.sh run left $speakerd --state-dir $DIR --lv2-bundle $bundle &
 tests/vpair/vpair.sh run left pw-play --target speakerd tone.wav
 ```
 
@@ -141,9 +156,10 @@ tools/build.sh loudness aarch64      # build/aarch64/loudness/<target>_artefacts
 It uses the native JUCE install (its `juceaide` runs on the build machine) with
 `dsp/juce_plugins/tools/toolchain-aarch64-linux.cmake`, the `:arm64` libraries of the image
 through pkg-config, and `qemu-aarch64-static` for the LV2 manifest helper JUCE runs after each
-plugin. A cross build never copies a bundle into a `~/.lv2`: its copy directories are pinned
-inside the build tree and it runs with a throwaway `HOME`, and the script fails if an aarch64
-binary is in the `~/.lv2` of the machine that builds. When cross-compiling, speakerd's
+plugin. Like the x86_64 build, a cross build never copies a bundle into a `~/.lv2` (its copy
+directories are pinned inside the build tree, `build/aarch64/<what>/copied/`); it also runs with
+a throwaway `HOME`, and the script fails if an aarch64 binary is in the `~/.lv2` of the machine
+that builds. When cross-compiling, speakerd's
 `CMakeLists.txt` points pkg-config at the target's multiarch directory unless `PKG_CONFIG_LIBDIR`
 says otherwise, and stops if the libpipewire it finds is not the target's.
 
@@ -193,8 +209,8 @@ the samples bit for bit, the gains equal to 1e-6 dB). speakerd's own path (copie
 the limits, the caps) has no multiply-add to fuse.
 
 To run the aarch64 build in the container, under qemu (the image's multiarch libraries are
-found without `-L`), give it an empty `HOME`, so that lilv does not find the x86_64 bundles of
-`~/.lv2`:
+found without `-L`), give it an empty `HOME`, so that lilv does not find any x86_64 bundles left
+in `~/.lv2` (above):
 
 ```bash
 HOME=$(mktemp -d) qemu-aarch64-static build/aarch64/speakerd/speakerd_artefacts/Release/speakerd \
