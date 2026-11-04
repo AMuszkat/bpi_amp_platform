@@ -56,26 +56,33 @@ def with_importers(modules):
     return sorted(result)
 
 
+def rule_for(rules, path):
+    """The rule that decides `path`: the first whose pattern matches it, or None."""
+    for rule in rules:
+        if any(fnmatch.fnmatchcase(path, p) for p in rule["paths"]):
+            return rule
+    return None
+
+
 def checks_for(rules, files):
     """(checks, uncovered): the checks to run, in the rules' order, and the files no rule names."""
     checks, modules, uncovered = [], set(), []
     for path in files:
-        for rule in rules:
-            if any(fnmatch.fnmatchcase(path, p) for p in rule["paths"]):
-                for check in rule["checks"]:
-                    if check == "plugin":
-                        check = "plugin " + path.split("/")[2]
-                    elif check == "self":
-                        module = os.path.basename(path)[:-3]
-                        if os.path.exists(os.path.join(ROOT, path)):
-                            modules.add(module)
-                        modules.update(m for m in with_importers([module]) if m != module)
-                        continue
-                    if check not in checks:
-                        checks.append(check)
-                break
-        else:
+        rule = rule_for(rules, path)
+        if rule is None:
             uncovered.append(path)
+            continue
+        for check in rule["checks"]:
+            if check == "plugin":
+                check = "plugin " + path.split("/")[2]
+            elif check == "self":
+                module = os.path.basename(path)[:-3]
+                if os.path.exists(os.path.join(ROOT, path)):
+                    modules.add(module)
+                modules.update(m for m in with_importers([module]) if m != module)
+                continue
+            if check not in checks:
+                checks.append(check)
     if modules:
         checks.append("module " + " ".join(sorted(modules)))
     return checks, uncovered
