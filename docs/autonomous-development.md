@@ -198,9 +198,16 @@ the checks are made to take a minute or two after an edit:
   `speakerd` alone, by the person's decision, although its parameter inbox, its live graph
   swap and its level and timing rings are proven only by `pair`, `chain` and `installers`: the
   levels run those before the push, and after touching those parts one runs
-  `tools/test.sh speakerd pair chain installers` by hand. `tools/tests/test_impact.py` keeps
+  `tools/test.sh speakerd pair chain installers` by hand. `changed` says so before and after
+  its checks: a rule's optional `by_hand` is such advice, which `tools/impact.py` prints on
+  stderr, once, for the files changed that the rule decides. `tools/tests/test_impact.py` keeps
   the map honest (every `speakerd` file is named by a rule, every path that skips `chain` is
   editor-only), and what the map leaves out, the levels catch before the push.
+- **One build at a time per build tree.** `tools/build.sh` holds the tree's `.build.lock`
+  (`build/speakerd/.build.lock`, say) from before its configure to its end, so that the pool's
+  prebuild, a serial run's builds and a build by hand in the same tree wait for each other,
+  saying which tree, instead of running two ninjas in it; the pool's own lock
+  (`build/vpair-pool.lock`) keeps two pools of one checkout apart.
 - **No LTO in `plugin <name>`.** The focused plugin check builds without link-time
   optimisation, in `dsp/juce_apps/plugin-check/build-check-nolto`, so that a one-line edit
   relinks in seconds rather than in most of a minute. `plugins`, level 1 and CI build with

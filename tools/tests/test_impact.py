@@ -7,8 +7,10 @@ build, which is what the chain runs). Part of the `tools` check (tools/test.sh t
     python3 tools/tests/test_impact.py
 """
 
+import contextlib
 import fnmatch
 import importlib.util
+import io
 import json
 import re
 import shutil
@@ -17,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGINS = ROOT / "dsp" / "juce_plugins"
@@ -157,10 +160,34 @@ class TheMap(unittest.TestCase):
 
     def test_an_edit_of_the_engine_runs_speakerd_alone(self):
         # The person's decision: the Engine's parts that only pair, chain and installers prove are
-        # left to the levels, and to that command by hand, which its rule says.
+        # left to the levels, and to that command by hand, which its rule's by_hand says.
         self.assertEqual(checks(f"{SPEAKERD}/Engine.cpp"), (["speakerd"], []))
         rule = impact.rule_for(RULES, f"{SPEAKERD}/Engine.cpp")
-        self.assertIn("`tools/test.sh speakerd pair chain installers` by hand", rule["why"])
+        self.assertIn("run `tools/test.sh speakerd pair chain installers`", rule["by_hand"])
+
+    def test_by_hand_is_said_once_per_rule_with_its_files(self):
+        engine, header = f"{SPEAKERD}/Engine.cpp", f"{SPEAKERD}/Engine.h"
+        advice = impact.rule_for(RULES, engine)["by_hand"]
+        self.assertEqual(impact.by_hand_for(RULES, [engine, f"{SPEAKERD}/Render.cpp", header, "README.md"]),
+                         [(advice, [engine, header])])
+        self.assertEqual(impact.by_hand_for(RULES, [f"{SPEAKERD}/Render.cpp", f"{SPEAKERD}/Monitor.cpp", "tools/build.sh"]), [])
+
+        # What impact.py prints: the checks on stdout, the advice on stderr (where `tools/test.sh
+        # changed` shows it), once, beside the files no rule names.
+        def said(*files):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.object(impact, "changed_files", lambda ref: list(files)), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                self.assertEqual(impact.main(["HEAD"]), 0)
+            return stdout.getvalue().splitlines(), stderr.getvalue().splitlines()
+
+        out, err = said(engine, header, "tools/build.sh")
+        self.assertEqual(out, ["speakerd"])
+        self.assertEqual(err, ["no check covers tools/build.sh: the levels do (tools/test.sh all)",
+                               f"by hand, for {engine}, {header}: {advice}",
+                               "3 file(s) changed since HEAD"])
+        out, err = said(f"{SPEAKERD}/Render.cpp")
+        self.assertEqual((out, err), (["speakerd"], ["1 file(s) changed since HEAD"]))
 
     def test_several_speakerd_files_run_what_each_needs_once(self):
         self.assertEqual(checks(f"{SPEAKERD}/Engine.cpp", f"{SPEAKERD}/GraphBuilder.cpp", f"{SPEAKERD}/GraphDocument.cpp",
@@ -214,6 +241,9 @@ class TheMapIsHonest(unittest.TestCase):
         for rule in RULES:
             self.assertLessEqual(set(rule["checks"]), CHECKS, rule["why"])
             self.assertTrue(rule["why"] and rule["paths"], rule)
+            self.assertLessEqual(set(rule), {"why", "paths", "checks", "by_hand"}, rule["why"])
+            if "by_hand" in rule:
+                self.assertTrue(isinstance(rule["by_hand"], str) and rule["by_hand"].strip(), rule["why"])
 
     def test_every_speakerd_file_is_named_by_a_rule_of_its_own(self):
         files = [f for f in repository_files(SPEAKERD) if not f.endswith(".md")]

@@ -13,6 +13,12 @@
 # With ccache (in the development container; ccache_env in tools/container.sh says when), every
 # configure sets it as the compiler launcher, and otherwise sets no launcher, so that a build
 # tree configured with it still builds where it is missing.
+#
+# One build at a time per build tree: each call holds <tree>/.build.lock (flock) from before its
+# configure to its end, so that a serial test run's build, tests/vpair/pool.py's prebuild and a
+# build by hand in the same tree wait for each other (saying once, on stderr, which tree they wait
+# for) instead of running two ninjas in it. tools/build.sh never calls itself, so it cannot wait
+# for its own lock. Without flock (util-linux: in the container and on CI) it builds unlocked.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -35,6 +41,8 @@ for kind in "${kinds[@]}"; do
         *) echo "unknown target kind '$kind'" >&2; echo "$usage" >&2; exit 2 ;;
     esac
 done
+[ -f "dsp/juce_apps/$what/CMakeLists.txt" ] || [ -f "dsp/juce_plugins/$what/CMakeLists.txt" ] \
+    || { echo "no plugin '$what' in dsp/juce_plugins and no application in dsp/juce_apps" >&2; exit 2; }
 
 . tools/container.sh
 container_or_native "$0" "$@"
@@ -42,6 +50,17 @@ ensure_juce
 ccache_env
 
 out="build/$what"
+[ $arch = x86_64 ] || out="build/aarch64/$what"
+# The tree's lock (the header), before anything writes to the tree, held to the end of the script;
+# what it runs inherits the descriptor, and none of that outlives the build.
+if command -v flock > /dev/null; then
+    mkdir -p "$out"
+    exec {tree_lock}> "$out/.build.lock"
+    if ! flock -n "$tree_lock"; then
+        echo "tools/build.sh: waiting for $out: another build runs in it ($out/.build.lock)" >&2
+        flock "$tree_lock"
+    fi
+fi
 # --log-level=NOTICE: no STATUS lines, among them JUCE's pkg-config search for libcurl, webkit2gtk
 # and gtk, which none of these builds uses.
 configure=(cmake -G Ninja --log-level=NOTICE -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR")
@@ -59,7 +78,6 @@ if [ $arch = aarch64 ]; then
     # JUCE builds for the target and runs after each plugin (the flags of
     # dsp/juce_plugins/tools/build-podman.sh -setup). In the development container, or natively
     # where the packages of its Containerfile are installed.
-    out="build/aarch64/$what"
     toolchain="$ROOT/dsp/juce_plugins/tools/toolchain-aarch64-linux.cmake"
     for tool in aarch64-linux-gnu-g++ qemu-aarch64-static; do
         command -v $tool > /dev/null || { echo "no $tool: the aarch64 build needs the packages of dsp/juce_plugins/tools/Containerfile" >&2; exit 2; }
@@ -122,7 +140,6 @@ if [ -f "dsp/juce_apps/$what/CMakeLists.txt" ]; then
 fi
 
 src="dsp/juce_plugins/$what"
-[ -f "$src/CMakeLists.txt" ] || { echo "no plugin '$what' in dsp/juce_plugins and no application in dsp/juce_apps" >&2; exit 2; }
 
 # Plugins without TARGETS build only their complete target.
 has_targets=0

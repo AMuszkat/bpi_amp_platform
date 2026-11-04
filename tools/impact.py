@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """The checks of tools/test.sh that cover the files changed, by tests/impact.json.
 
-    tools/impact.py [REF]      the checks, one per line; the files no rule names on stderr
+    tools/impact.py [REF]      the checks, one per line; on stderr, the files no rule names
+                               and the by_hand advice of the rules that decide a file changed
 
 The files changed are those that differ from REF in the working tree, untracked files
-included. REF defaults to the merge base with develop, or to HEAD on develop itself.
+included. REF defaults to the merge base with develop, or to HEAD on develop itself. A rule's
+optional "by_hand" is advice: a command its checks leave out, to run by hand after some edits
+(the Engine's rule). It is said once per rule, with the rule's files that changed.
 """
 
 import fnmatch
@@ -88,14 +91,28 @@ def checks_for(rules, files):
     return checks, uncovered
 
 
-def main():
-    ref = sys.argv[1] if len(sys.argv) > 1 else default_ref()
+def by_hand_for(rules, files):
+    """[(advice, paths)]: the "by_hand" of every rule that decides one of the files, once per rule,
+    with the files it decides, in the order the files reach the rules."""
+    found = {}
+    for path in files:
+        rule = rule_for(rules, path)
+        if rule is not None and rule.get("by_hand"):
+            found.setdefault(id(rule), (rule["by_hand"], []))[1].append(path)
+    return list(found.values())
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    ref = argv[0] if argv else default_ref()
     with open(os.path.join(ROOT, "tests", "impact.json")) as f:
         rules = json.load(f)["rules"]
     files = changed_files(ref)
     checks, uncovered = checks_for(rules, files)
     for path in uncovered:
         print(f"no check covers {path}: the levels do (tools/test.sh all)", file=sys.stderr)
+    for advice, paths in by_hand_for(rules, files):
+        print(f"by hand, for {', '.join(paths)}: {advice}", file=sys.stderr)
     print(f"{len(files)} file(s) changed since {ref[:12]}", file=sys.stderr)
     for check in checks:
         print(check)
