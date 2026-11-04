@@ -5,7 +5,8 @@ The headless plugin host that runs on each speaker: steps 2 and 3 of
 the window removed. JUCE's `AudioProcessorGraph` hosts the headless LV2 builds of the plugins
 and runs inside the PipeWire cycle. At boot it loads its graph from the first state layer that
 loads, and it plays with no network, no controller and no `ampd`. It has no GUI and links no
-X11. It opens no network socket: only PipeWire's local one, the local socket pair JUCE's
+X11, and it connects to no X server, nor do the plugins it hosts ([No X display](#no-x-display)).
+It opens no network socket: only PipeWire's local one, the local socket pair JUCE's
 message loop uses inside the process, and the [local link](#the-local-link) to `ampd`, a Unix
 socket.
 
@@ -18,7 +19,8 @@ not swap the graph: it re-prepares the running one in place, behind silence. 0.3
 build each plugin node runs ([Which build it is](#command-line)). 0.3.2 knows the document's
 buffer size, its top-level `quantum` ([Rate and block size](#in-pipewire)): it refuses an apply
 whose size its PipeWire does not allow, forces the size of the document in force as PipeWire's
-`clock.force-quantum`, and reports the rate and the quantum it runs at to `ampd`.
+`clock.force-quantum`, and reports the rate and the quantum it runs at to `ampd`. 0.3.3 connects
+to no X server, nor do its plugins ([No X display](#no-x-display)).
 
 ## Command line
 
@@ -158,7 +160,28 @@ No X11, and no ALSA library but ampScope's. At run time libpipewire loads PipeWi
 modules and SPA plugins (`libpipewire-0.3-modules`, `libspa-0.2-modules`), which any board
 running PipeWire has.
 The plugins link fontconfig and freetype because every target links `juce_gui_basics`
-(`SpeakerPlugin.cmake`); the headless build never opens a display.
+(`SpeakerPlugin.cmake`); they load libX11 at run time if it is there (`dlopen`), and under
+speakerd never connect to a display ([No X display](#no-x-display)).
+
+### No X display
+
+speakerd starts with `DISPLAY=speakerd-opens-no-display`, whatever `DISPLAY` it was given or
+none (`NoDisplay.h`, first thing in `main`, before any thread), and so does
+`speakerd-make-filtergraph`. speakerd itself links no GUI module, but every JUCE LV2 plugin
+does, the headless build too: each instance starts JUCE's plugin message thread
+(`juce_audio_plugin_client_LV2.cpp`, `detail::MessageThread`), which opens `$DISPLAY`, or
+`:0.0` when it is unset (`XWindowSystem::initialiseXDisplay`), and a plugin installs no X error
+handler, so when that server went away Xlib ended speakerd: status 1, `X connection to :0.0
+broken (explicit kill or server shutdown).` On a board with a desktop (its user manager has
+`DISPLAY`) that looked like a crash, and in the development container speakerd held on to any
+Xvfb that had `:0`, or the one `DISPLAY` named. A `DISPLAY` with no `:` and no leading `/` is one
+Xlib (libxcb's `xcb_parse_display`) refuses before any socket, file or name lookup, so each
+plugin runs without X, as with no libX11 at all. The complete build behaves the same: speakerd
+never asks a plugin for its editor (its LV2 hosting has no UI side), and a JUCE window would not
+open with no display. Measured in the container (2026-11-04, `loudness` headless and complete,
+an `Xvfb -audit 4` on `:0` with `DISPLAY` unset and on `:7` with `DISPLAY=:7`): before, one X
+client per speakerd and exit 1 two seconds after a `kill -9` of the Xvfb; now no client, the
+only `connect()` speakerd makes is to PipeWire's socket, and it plays on after the server goes.
 
 **Same output on both.** Rendered with the aarch64 `speakerd` and `loudness_headless` under
 `qemu-aarch64-static`, the document of `test_speakerd_same_sound` differs from the x86_64 render
@@ -997,6 +1020,7 @@ residual against a threshold (say -80 dBFS), not samples bit for bit.
 | `TimedNode.*` | a plugin node: the hosted instance, forwarded as the graph needs, with its processing time |
 | `Timing.*` | the timing statistics: means, maxima, late cycles, position jumps |
 | `Samples.h` | the absolute caps: NaN and infinity to 0, clamping |
+| `NoDisplay.h` | the `DISPLAY` no X server has, set first in `main`: no X connection for speakerd's plugins ([No X display](#no-x-display)) |
 | `PipeWireNode.*` | the input sink, the `pw_filter` node, the links, and `clock.force-quantum` in the `settings` metadata |
 | `Render.*` | the offline render |
 | `DeviceConfig.*` | `device.json`, its `limits` included |

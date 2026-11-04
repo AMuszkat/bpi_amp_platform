@@ -18,6 +18,7 @@
 #include "LocalLink.h"
 #include "Log.h"
 #include "Monitor.h"
+#include "NoDisplay.h"
 #include "PipeWireNode.h"
 #include "PluginBundles.h"
 #include "Render.h"
@@ -699,6 +700,9 @@ namespace
 //==============================================================================
 int main (int argc, char* argv[])
 {
+    // First, before any thread: no X server for speakerd or its plugins (NoDisplay.h).
+    openNoDisplay();
+
     Options options;
 
     if (! parseArguments (argc, argv, options))
@@ -722,7 +726,7 @@ int main (int argc, char* argv[])
         pthread_sigmask (SIG_BLOCK, &signals, nullptr);
     }
 
-    // The message manager only: speakerd has no GUI and opens no display.
+    // The message manager only: speakerd has no GUI, and the plugins open no display (above).
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
 
     if (! options.render && ! importing)

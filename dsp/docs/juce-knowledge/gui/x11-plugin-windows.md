@@ -187,7 +187,7 @@ trips added for window tracking (section 2) cost 0.04-0.07 ms each, and the 60 H
 
 `XWindowSystem::initialiseXDisplay()` (`juce_gui_basics/native/juce_XWindowSystem_linux.cpp`)
 falls back to `":0.0"` when `DISPLAY` is empty. So a JUCE program started without `DISPLAY`
-(speakerd and the plugins it hosts, in the development container) connects to whatever X server
+(a hosted plugin, until speakerd 0.3.3: section 5) connects to whatever X server
 holds `:0` at that moment, and exits with status 1 ("X connection to :0.0 broken") when that
 server stops ([`tests/vpair/README.md`](../../../../tests/vpair/README.md)). Checked against the
 pinned submodule, JUCE 8.0.12 (`8.0.12-4-g501c07674e`), lines 3227-3228. An Xvfb that a check
@@ -204,3 +204,25 @@ Xvfb 21.1.7 (Debian bookworm, the development container), checked 2026-11-04:
   `Cannot establish any listening sockets`. That is what lets two scripts that start at the same
   time each take the next free number. `plugin-check/run.sh` tries `:200` upward this way
   ([its README](../../../juce_apps/plugin-check/README.md), "The display and the editor check").
+
+## 5. Every JUCE LV2 plugin instance opens a display, the headless build too; how a host stops it
+
+A JUCE LV2 plugin links `juce_gui_basics` whatever it compiles (`juce_audio_plugin_client` needs
+`juce_audio_processors`, which needs `juce_gui_extra`), and `LV2PluginInstance` holds a
+`SharedResourcePointer<detail::MessageThread>` (`juce_audio_plugin_client_LV2.cpp`), whose
+`run()` calls `XWindowSystem::getInstance()` (`detail/juce_LinuxMessageThread.h`): so the first
+instance, editor or not, dlopens libX11 and calls `XOpenDisplay` on `$DISPLAY` or `:0.0`
+(section 4). A plugin is no standalone app, so `XWindowSystem` installs no X error handler, and
+Xlib's default one calls `exit(1)` when that server goes away: the *host* dies, with
+`X connection to :0.0 broken (explicit kill or server shutdown).` Measured with speakerd and
+`loudness` headless and complete (pinned JUCE 8.0.12, Xvfb `-audit 4`, 2026-11-04).
+
+The plugin's JUCE is its own copy, its symbols hidden, so a host cannot reach that
+`XWindowSystem`. What a headless host can do without patching JUCE: give the process, before any
+thread starts, a `DISPLAY` that Xlib refuses to parse, with no `:` and no leading `/`
+(speakerd: `DISPLAY=speakerd-opens-no-display`, its `NoDisplay.h`). libX11's `_XConnectXCB`
+calls `xcb_parse_display` first and returns at once (libX11 1.8.4, libxcb 1.15, Debian bookworm:
+no `socket()`, `connect()` or name lookup, checked with an `LD_PRELOAD` shim), `XOpenDisplay`
+returns null, and `XWindowSystem` turns X off for the plugin (`isX11Available()` false: no
+window can be created, no fd is watched). Unsetting `DISPLAY` does not help (`:0.0`), and a name
+with a `:` would be a connection attempt, a host name a DNS lookup.

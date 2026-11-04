@@ -21,6 +21,7 @@
 // graph document node (speakerd's README).
 
 #include "../GraphBuilder.h"
+#include "../NoDisplay.h"
 
 #include <iostream>
 
@@ -107,6 +108,8 @@ namespace
 
 int main (int argc, char* argv[])
 {
+    speakerd::openNoDisplay();    // the plugin it hosts opens no X display either
+
     juce::String uri;
     juce::File paramsFile, out;
     juce::StringArray bundles;
