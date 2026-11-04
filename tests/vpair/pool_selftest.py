@@ -20,23 +20,29 @@ checkout is not disturbed), all at once, and checked for:
   does not name is refused, saying so, and one whose prebuild failed fails as the build would;
 - tools/build.sh's line that it waits for another build in its tree, passed through as it comes,
   once, by the prebuild and by built() (harness.run_build), while the rest of a build's output shows
-  only when it fails: a stand-in tools/build.sh says the line and waits until the test saw it;
+  only when it fails: a stand-in tools/build.sh says the line and waits until the test saw it; the
+  prefix both look for, harness.BUILD_WAITING (the stand-in's line is made from it), is how
+  tools/build.sh's echo begins, and that line, $out expanded, goes through both readers;
+- a build whose reading stops killed and reaped, as subprocess.run does, not left running with its
+  tree's lock: in built() (a print to a closed stderr), in the prebuild's reader (to a closed
+  stdout) and in the prebuild (a SIGINT to the pool alone);
 - the checkout's lock: a second pool on the same files waits for the first, naming it, and starts
   when it ends; the first keeps every result; a third and a fourth, sent SIGTERM and SIGINT while
   they wait, end by that signal there and then, their notes failing their unit, which never started;
 - the pool's last resorts: fewer free worker slots than it needs, and a fault of its own while it
   handles a unit (work()'s "the pool failed while handling it"): each failed under the unit's name,
-  saying why, the pool going on with the next unit. These two, and the prebuild's waiting line, run
-  pool.py's main() in a process that imports it and replaces one of its functions first
-  (take_slots, Pool.read_events, build_command): pool.py needs no other seam for them.
+  saying why, the pool going on with the next unit. These two, the prebuild's waiting line and the
+  SIGINT in the prebuild run pool.py's main() in a process that imports it and replaces one of its
+  functions first (take_slots, Pool.read_events, build_command): pool.py needs no other seam for
+  them.
 
 No result depends on how fast anything runs, within generous bounds (the unit past its 2 s timeout
 must print its line within those 2 s; what waits to be released, the lock test's first pool's unit
 or a stand-in build, gives up after 60 s; the test's own waits, there for a pool that hangs, after
-60 or 120 s): a unit or a build that must still be running when something happens blocks on a
-release file the test writes once it has (ST_RELEASE, ST_BUILD_RELEASE; 60 s at most, then it
-writes its end stamp and fails), and the only short timeout is the one under test (2 s), of a unit
-that prints its line at once and sleeps.
+60 or 120 s, 30 s for the prebuild's reader to give up a build): a unit or a build that must still
+be running when something happens blocks on a release file the test writes once it has (ST_RELEASE,
+ST_BUILD_RELEASE; 60 s at most, then it writes its end stamp and fails), and the only short timeout
+is the one under test (2 s), of a unit that prints its line at once and sleeps.
 
 POOL_SELFTEST_KEEP=1 keeps its temporary folder (the pools' outputs, notes and logs) and names it.
 Its name does not match test*.py, so the vpair level never runs it. It runs where it is started
@@ -44,6 +50,7 @@ Its name does not match test*.py, so the vpair level never runs it. It runs wher
 imports (the container and CI have both).
 """
 
+import io
 import os
 import re
 import shutil
@@ -71,6 +78,7 @@ except ImportError:
 
 sys.path.insert(0, str(HERE))
 import harness  # noqa: E402
+import pool  # noqa: E402  (its prebuild's reader, read_build, tested here in this process)
 
 MODULES = {
     "test_st_results.py": '''
@@ -279,19 +287,24 @@ STAND_IN_BUILD = """
 import os
 pool.build_command = lambda what, kinds: [sys.executable, os.environ["ST_STAND_IN"], what, *kinds]
 """
-# The stand-in: a line of the build's own (kept to itself unless the build fails), tools/build.sh's
-# line when another build holds the tree, then, until ST_BUILD_RELEASE exists (60 s at most), nothing;
-# then its end stamp, ST_BUILD_END. With ST_BUILD_FAIL it fails at once instead.
+# The stand-in: its process ID in ST_BUILD_PID (if set), a line of the build's own (kept to itself
+# unless the build fails), tools/build.sh's line when another build holds the tree (WAITING_LINE, from
+# the prefix built() and the prebuild look for, harness.BUILD_WAITING, which
+# TheBuildsWaitingLine.test_the_prefix_is_tools_build_shs checks against tools/build.sh), then, until
+# ST_BUILD_RELEASE exists (60 s at most), nothing; then its end stamp, ST_BUILD_END. With ST_BUILD_FAIL
+# it fails at once instead.
 STAND_IN = '''
 import os
 import sys
 import time
 from pathlib import Path
 
+WAITING = ...
 what = sys.argv[1]
+if os.environ.get("ST_BUILD_PID"):
+    Path(os.environ["ST_BUILD_PID"]).write_text(str(os.getpid()))
 print(f"<<build>> {what}: the build's own output", flush=True)
-print(f"tools/build.sh: waiting for build/{what}: another build runs in it (build/{what}/.build.lock)",
-      file=sys.stderr, flush=True)
+print(f"{WAITING} build/{what}: another build runs in it (build/{what}/.build.lock)", file=sys.stderr, flush=True)
 if os.environ.get("ST_BUILD_FAIL"):
     print(f"<<build>> {what}: an error of the build's own", flush=True)
     sys.exit(2)
@@ -300,8 +313,8 @@ while not release.exists() and time.monotonic() < deadline:
     time.sleep(0.02)
 Path(os.environ["ST_BUILD_END"]).write_text(repr(time.time()))
 sys.exit(0 if release.exists() else 1)
-'''
-WAITING_LINE = "tools/build.sh: waiting for build/st_app: another build runs in it (build/st_app/.build.lock)"
+'''.replace("WAITING = ...", f"WAITING = {harness.BUILD_WAITING!r}")
+WAITING_LINE = f"{harness.BUILD_WAITING} build/st_app: another build runs in it (build/st_app/.build.lock)"
 
 TMP = Path(tempfile.mkdtemp(prefix="pool-selftest-"))
 TESTS = TMP / "tests" / "vpair"             # as VPAIR_RUNNER finds them from TMP
@@ -369,6 +382,38 @@ def block(output, unit):
         raise AssertionError(f"no block of {unit} in:\n{output}")
     end = next((i for i in range(start, len(lines)) if lines[i] == f"===== end of {unit}"), None)
     return lines[start:end + 1 if end is not None else start + 1], start, end
+
+
+def build_sh_waiting_line():
+    """tools/build.sh's line when another build holds its tree's lock, as its echo writes it ($out
+    unexpanded): found by its place, the echo just before the flock that waits, not by its words."""
+    text = (ROOT / "tools" / "build.sh").read_text()
+    found = re.findall(r'^[ \t]*echo "([^"\n]*)" >&2\n[ \t]*flock "\$tree_lock"[ \t]*$', text, re.MULTILINE)
+    if len(found) != 1:
+        raise AssertionError(f"tools/build.sh has {len(found)} echo \"...\" >&2 lines just before a "
+                             f"flock \"$tree_lock\" (its line that it waits for another build), not one")
+    return found[0]
+
+
+def gone(pid):
+    """Whether process `pid` has ended and been reaped (a zombie is not gone)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def kill_if_running(pid):
+    """A stand-in build a failed test left running (its 60 s are not waited for)."""
+    if not gone(pid):
+        os.kill(pid, signal.SIGKILL)
+
+
+def stop(process):
+    if process.poll() is None:
+        process.kill()
+        process.wait()
 
 
 def vpair_runner():
@@ -685,6 +730,98 @@ class TheBuildsWaitingLine(unittest.TestCase):
         self.assertEqual("".join(said), WAITING_LINE + "\n")   # that line alone, once
         self.assertIn("<<build>> st_app: the build's own output", output)
         self.assertIn(WAITING_LINE, output)                   # kept too, for a failure's tail
+
+    def test_the_prefix_is_tools_build_shs(self):
+        # The prefix built() and the prebuild look for, harness.BUILD_WAITING (the pool's is the
+        # harness's), is how tools/build.sh's line begins: the stand-in says what the harness looks for,
+        # so a rewording in tools/build.sh would otherwise stop the pass-through with every other test
+        # green. tools/build.sh's own line, $out expanded, goes through both readers.
+        echo = build_sh_waiting_line()
+        self.assertTrue(echo.startswith(harness.BUILD_WAITING),
+                        f"tools/build.sh's waiting line, {echo!r}, does not begin with harness.BUILD_WAITING, "
+                        f"{harness.BUILD_WAITING!r}: built() and the pool's prebuild would no longer pass it "
+                        f"through (change them together)")
+        self.assertTrue(WAITING_LINE.startswith(harness.BUILD_WAITING), WAITING_LINE)
+        self.assertIn(f"\nWAITING = {harness.BUILD_WAITING!r}\n", STAND_IN)    # the stand-in's line, from it
+        line = echo.replace("$out", "build/st_app")
+        command = [sys.executable, "-c", f"import sys; print('<<build>> its own'); print({line!r}, file=sys.stderr)"]
+        said = io.StringIO()
+        with mock.patch.object(sys, "stderr", said):
+            status, output = harness.run_build(command)
+        self.assertEqual((status, said.getvalue()), (0, line + "\n"), output)
+        process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, errors="replace")
+        shown, lines, ended = [], [], []
+        pool.read_build(process, lines, ended, shown.append)
+        self.assertEqual((process.returncode, shown), (0, [line]), "".join(lines))
+
+
+class AStoppedRead(unittest.TestCase):
+    """What stops a build's reading kills the build and reaps it before it goes on, as subprocess.run
+    does, rather than leave it running with its tree's lock: in built() (harness.run_build: a
+    KeyboardInterrupt to the test process alone, a print to a closed stderr), in the prebuild's reader
+    (a print to a closed stdout) and in the prebuild itself (a SIGINT to the pool alone). Each stand-in
+    build would otherwise wait 60 s for a release that never comes."""
+
+    def stand_in(self, name):
+        """The stand-in's environment for test `name`: never released, its PID in a file."""
+        pid_file = TMP / f"build-pid-{name}"
+        return pid_file, dict(ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_RELEASE=str(TMP / "never"),
+                              ST_BUILD_END=str(TMP / f"build-end-{name}"), ST_BUILD_PID=str(pid_file))
+
+    def pid(self, pid_file):
+        pid = int(pid_file.read_text())
+        self.addCleanup(kill_if_running, pid)
+        return pid
+
+    def test_in_built(self):
+        pid_file, env = self.stand_in("built-stopped")
+        closed = io.StringIO()
+        closed.close()
+        command = [sys.executable, env["ST_STAND_IN"], "st_app"]
+        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "stderr", closed):
+            with self.assertRaisesRegex(ValueError, "closed file"):        # at its waiting line
+                harness.run_build(command)
+        self.assertTrue(gone(self.pid(pid_file)), "harness.run_build left the build it stopped reading running "
+                                                  "(or did not reap it)")
+
+    def test_in_the_prebuilds_reader(self):
+        pid_file, env = self.stand_in("reader-stopped")
+
+        def out(_text):
+            raise BrokenPipeError(32, "Broken pipe")     # the pool's stdout, closed
+
+        process = subprocess.Popen([sys.executable, env["ST_STAND_IN"], "st_app"], cwd=ROOT, env=dict(os.environ, **env),
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   errors="replace")
+        self.addCleanup(stop, process)
+        lines, ended, raised = [], [], []
+
+        def read():
+            try:
+                pool.read_build(process, lines, ended, out)
+            except BrokenPipeError as error:
+                raised.append(error)
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(30)                                   # at once; 30 s for a loaded machine, not a measure
+        self.assertFalse(reader.is_alive(), "pool.read_build still waits for the build it stopped reading")
+        self.assertEqual(len(raised), 1, "pool.read_build did not raise what stopped it")
+        self.assertEqual((process.returncode, len(ended)), (-signal.SIGKILL, 1), "".join(lines))
+        self.assertTrue(gone(self.pid(pid_file)))
+
+    def test_in_the_prebuild(self):
+        pid_file, env = self.stand_in("prebuild-sigint")
+        run = RUNS["prebuild-sigint"] = Run("prebuild-sigint", ["--jobs", "1", "test_st_builds"], patch=STAND_IN_BUILD,
+                                            **env)
+        run.wait_for_output(WAITING_LINE)
+        pid = self.pid(pid_file)
+        run.process.send_signal(signal.SIGINT)            # to the pool alone, not to its build
+        self.assertEqual(run.wait(), -signal.SIGINT, run.output)
+        self.assertTrue(gone(pid), "the pool ended with its build still running (or not reaped):\n" + run.output)
+        self.assertFalse(Path(env["ST_BUILD_END"]).exists(), run.output)
+        self.assertNotIn("<<Builds>>", run.output)       # no unit ran
 
 
 class TheCheckoutsLock(unittest.TestCase):
