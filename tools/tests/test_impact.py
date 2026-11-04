@@ -290,12 +290,25 @@ class TheMap(unittest.TestCase):
         self.assertEqual(got, ["installers"])
         self.assertEqual(uncovered, [".github/workflows/ci.yml", "firmware/Makefile"])
 
-    def test_no_display_runs_speakerd_and_says_what_no_scenario_reads(self):
-        # NoDisplay.h: every speakerd scenario starts after it, none reads that speakerd stays off X.
+    def test_no_display_runs_speakerd_whose_check_reads_what_it_is_for(self):
+        # NoDisplay.h: every speakerd scenario starts after it, and speakerd_no_display, which the
+        # speakerd check runs, reads that speakerd and its plugins stay off X. SPEAKERD_MODULES is read
+        # out of tools/test.sh here, so that a scenario dropped from the check fails this.
         rule = impact.rule_for(RULES, f"{SPEAKERD}/NoDisplay.h")
         self.assertEqual(rule["paths"], [f"{SPEAKERD}/NoDisplay.h"])
-        self.assertIn("speakerd still running", rule["by_hand"])
-        self.assertIn("--target speakerd-make-filtergraph", rule["by_hand"])
+        self.assertEqual(checks(f"{SPEAKERD}/NoDisplay.h"), (["speakerd"], []))
+        self.assertTrue((ROOT / "tests/vpair/test_speakerd_no_display.py").is_file())
+        modules = re.search(r'^SPEAKERD_MODULES="([^"]*)"', (ROOT / "tools" / "test.sh").read_text(), re.M)
+        self.assertIsNotNone(modules, "tools/test.sh has no SPEAKERD_MODULES")
+        self.assertIn("test_speakerd_no_display", modules.group(1).split())
+        # The scenario itself runs as its own module, as every test module of the virtual pair does.
+        self.assertEqual(checks("tests/vpair/test_speakerd_no_display.py"), (["module test_speakerd_no_display"], []))
+        # What no check builds is left to by_hand: speakerd-make-filtergraph, built only on request.
+        self.assertNotIn("no scenario", rule["by_hand"])
+        self.assertIn("`tools/container.sh cmake --build build/speakerd --target speakerd-make-filtergraph`",
+                      rule["by_hand"])
+        self.assertRegex((ROOT / SPEAKERD / "CMakeLists.txt").read_text(),
+                         r"set_target_properties\(speakerd-make-filtergraph PROPERTIES EXCLUDE_FROM_ALL TRUE\)")
 
     def test_the_build_and_test_tools(self):
         # The schedule runs every multi-check and level, yet the tools check alone proves it: its own
