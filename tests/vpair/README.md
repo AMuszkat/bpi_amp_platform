@@ -81,14 +81,16 @@ here (1.6 s and 0.6 s with the fixed waits they had before).
 ## The pool
 
 ```bash
-python3 tests/vpair/pool.py --jobs N [--quiet-jobs M] [--gate FILE] [--after-gate NAME]... --note FILE [MODULE...]
-python3 tests/vpair/pool.py --jobs N --prebuild-only [--note FILE] [MODULE...]   # the prebuild alone
+python3 tests/vpair/pool.py --jobs N [--quiet-jobs M] [--prebuilt REPORT] [--gate FILE [--gate-owner PID]] \
+                            [--after-gate NAME]... --note FILE [MODULE...]
+python3 tests/vpair/pool.py --jobs N --prebuild-only [--built REPORT] [--note FILE] [MODULE...]   # the prebuild alone
 python3 tests/vpair/pool.py --hold-checkout [--what TEXT] -- COMMAND...          # the serial runner's lock
 ```
 
 `tools/test.sh` calls it for every run with more than one job, the checks and the levels, in the
-development container (from outside it moves there itself): `--prebuild-only` among the builds,
-then the pool with `--gate`. `--jobs` takes 1 to 64 and has no default (`tools/test.sh`'s is two
+development container (from outside it moves there itself): `--prebuild-only --built REPORT`
+among the builds, then the pool with `--prebuilt REPORT` and `--gate` (`--gate-owner`, the
+schedule's process). `--jobs` takes 1 to 64 and has no default (`tools/test.sh`'s is two
 thirds of the processors, from 1 to 16: the end of this section); `--quiet-jobs` takes 1 to 64,
 by default min(`--jobs`, 12). A MODULE is `test_<name>` (`test_<name>.<Class>` is one unit); none
 is every module of this folder, as `unittest discover` finds them. What it does:
@@ -104,18 +106,26 @@ is every module of this folder, as `unittest discover` finds them. What it does:
    an application by its name, a plugin build as `plugin:kind`, and `?` after one a test skips
    without (its failed build fails only the `built()` that asks for it, as without the pool).
    The pool builds them all first, once: one `tools/build.sh` call per build tree with every kind
-   it needs (`tools/build.sh loudness headless complete`), the trees at once. A build's output
-   is printed only if it fails, which fails the run before any test runs; `tools/build.sh`'s line
-   that it waits for another build in its tree (`tools/build.sh: waiting for build/speakerd:
+   it needs (`tools/build.sh loudness headless complete`), the trees at once, each in a session
+   of its own. A build's output is printed only if it fails; **a failed build fails the units
+   that require it** (not run, failed under their names, the table saying which build) **and the
+   others run**, so that a failed build stops only what needs it (`tools/test.sh controller
+   speakerd` with a broken controller still runs every `speakerd` module). `tools/build.sh`'s
+   line that it waits for another build in its tree (`tools/build.sh: waiting for build/speakerd:
    another build runs in it (...)`, a build by hand there, say) is printed as it comes. A
-   SIGINT during the prebuild kills its builds and reaps them before it ends the pool (no unit
-   runs, no note; SIGTERM there ends it at once, its builds left to end on their own); `built()`
-   kills and reaps its build the same way when its reading stops. In the units `built()` builds
-   nothing (`VPAIR_PREBUILT`) and refuses a build the module's `POOL_BUILDS` does not name,
-   saying so: `build/` may hold a stale one. `--prebuild-only` does the prebuild alone (under
-   the checkout's lock) and exits, 0 or 1, no unit run: its note is written only when the
-   prebuild fails, the one a pool whose prebuild failed writes, so that `tools/test.sh` records
-   the same when it stops there. The pool's own prebuild after it then finds the builds up to date.
+   SIGINT, SIGTERM or SIGHUP during the prebuild kills its builds, each with its whole session
+   (cmake, ninja and the compilers, so that none goes on holding its tree's lock), reaps them,
+   and ends the pool by that signal (no unit runs, no note); `built()` kills and reaps its build
+   the same way when its reading stops. In the units `built()` builds nothing (`VPAIR_PREBUILT`)
+   and refuses a build the module's `POOL_BUILDS` does not name, saying so: `build/` may hold a
+   stale one. `--prebuild-only` does the prebuild alone (under the checkout's lock) and exits, no
+   unit run: 1 when a build a unit requires failed, else 0. `--built REPORT` writes what it built
+   and what failed (JSON, atomically); its note (`--note`) is written only when a required build
+   failed, of the units that cannot run. `--prebuilt REPORT` makes a pool build nothing and take
+   that report instead: `tools/test.sh`'s schedule runs the prebuild among the builds and the
+   pool later, beside no build, which runs even when the prebuild failed (the units a failed
+   build stops fail, the others run; a unit whose builds the report does not list, or a report
+   that cannot be read, fails, not run).
 2. **The units** are the test classes the unittest loader finds (a base class without tests
    yields none), each run in a process of its own: a module with `setUpModule` runs it once per
    unit. A module that must stay whole says `POOL_WHOLE = True`; one whose tests are independent
@@ -151,8 +161,21 @@ is every module of this folder, as `unittest discover` finds them. What it does:
      silent right rejected 9.9 to 11 s on), `test_gestures` (ended 4.5 to 6 s on), `test_board_cpu`
      (`seconds` 0.05 to 0.3 s) and `test_persistence` (at most 4 writes in 3 s), and `chain_cost`
      (a CPU share).
-   - **alone**: a module that measures CPU says `POOL_ALONE = True` and runs last, alone
-     (`test_chain_cost`, quiet too).
+   - **alone**: the units that must have no other test beside them, one at a time, last (after
+     the gate too). The module marks them as for `POOL_QUIET`: `POOL_ALONE = True`, all of its
+     units (`test_chain_cost`, which measures CPU, quiet too), or the classes and tests it names
+     (relative to the module, a test only in a `POOL_SPLIT` module; a name that is no unit or
+     class of it fails the run):
+
+     ```python
+     POOL_ALONE = True                                     # test_chain_cost: a CPU share
+     POOL_ALONE = ("KnobLatency.test_at_quantum_128",)     # test_knob_latency (POOL_SPLIT)
+     ```
+
+     Measured for `test_knob_latency.KnobLatency.test_at_quantum_128` (2.67 ms cycles, a 3 ms
+     settle bound): with the other quiet units beside it, 8 to 12 at once, it failed 5 runs of 12
+     ("not at its new level 3 ms after it began", no xrun recorded), while it passed 3 of 3 in a
+     mixed pool of 16 workers before the phases and alone; the rest of the quiet phase passed.
 
    In each phase the longest first, by the durations learned from earlier runs
    (`build/vpair-pool-durations.json` of the main checkout, merged after each run and written
@@ -160,8 +183,11 @@ is every module of this folder, as `unittest discover` finds them. What it does:
    to neither counts as long.
 3. **The gate.** With `--gate FILE` the quiet and alone phases wait until FILE exists, saying so
    once and then every minute: `tools/test.sh`'s schedule creates it when its other tests (the
-   controller's own) have ended, so that what times itself runs beside nothing but the other
-   quiet units. A line `leave-out NAME: why` in it leaves out the units of NAME (a module, class
+   controller's own, the `tools` check) have ended, so that what times itself runs beside nothing
+   but the other quiet units. `--gate-owner PID` names the process that creates it (the
+   schedule's, `TEST_SCHEDULE_PID`): if that ends first (killed, say), the pool stops waiting,
+   the units held for the gate fail, not run, and it ends, rather than hold the checkout's lock
+   for ever. A line `leave-out NAME: why` in it leaves out the units of NAME (a module, class
    or test): not run, not in the note, the table saying why. `--after-gate NAME` holds NAME's
    units for the gate as if they were quiet: the `controller` check's `test_controller_end_to_end`,
    which runs only when the controller's build and its own tests passed.
@@ -188,16 +214,16 @@ is every module of this folder, as `unittest discover` finds them. What it does:
    name, with the tests it ran before; so does one the pool itself could not run to its end,
    bring its pair down after, or read the log of, with what went wrong, its block printed all the
    same.
-6. **The exit status** is 0 when every test passed (skips allowed), 1 otherwise. SIGINT or SIGTERM
-   stops the workers (each unit's whole session), brings their pairs down, writes the note so
-   far, and ends the pool by that signal.
+6. **The exit status** is 0 when every test passed (skips allowed), 1 otherwise. SIGINT, SIGTERM
+   or SIGHUP stops the workers (each unit's whole session), brings their pairs down, writes the
+   note so far, and ends the pool by that signal.
 
 **One pool at a time per checkout.** A pool clears `build/vpair-pool/` as it starts and its prebuild
 runs ninja in the checkout's build trees, so it holds the checkout's lock, `build/vpair-pool.lock`,
 for its whole run. A second pool started in the same checkout (two `tools/test.sh` runs at once)
 waits for the first, saying which it is (`pool: another run holds this checkout: pool.py pid
 1234 (in the container), since 14:02:11 UTC, --jobs 16 every module; waiting for it to end`, again
-every minute), and starts when it ends; SIGINT or SIGTERM while it waits ends it, its note saying
+every minute), and starts when it ends; SIGINT, SIGTERM or SIGHUP while it waits ends it, its note saying
 no unit ran. The serial runner (`tools/test.sh --jobs 1`) holds the same lock: `pool.py
 --hold-checkout` takes it the same way (`serial runner: another run holds this checkout: ...`),
 then becomes the runner, which keeps the lock's descriptor to itself (`VPAIR_CHECKOUT_LOCK_FD`,
@@ -215,7 +241,8 @@ each unit's output as one block, the exit status, SIGTERM, the `built()` guard, 
 waiting line passed through as it comes by the prebuild and by `built()` (a stand-in build that
 says it and waits until the test saw it; the prefix they look for, `harness.BUILD_WAITING`,
 checked against `tools/build.sh`'s echo), a build whose reading stops killed and reaped (in
-`built()`, in the prebuild's reader, and a SIGINT in the prebuild), the checkout's lock (SIGTERM
+`built()`, in the prebuild's reader, and a SIGINT, SIGTERM or SIGHUP in the prebuild, the stand-in
+build's own child too), a failed build failing only the units that need it, the checkout's lock (SIGTERM
 and SIGINT while a pool waits for it too), and the pool's last resorts: fewer free worker slots
 than it needs, and a fault of its own while it handles a unit (these two, the prebuild's waiting
 line and its SIGINT through a process that imports `pool.py` and replaces one function before its
@@ -224,9 +251,11 @@ past its 2 s timeout must print its line within those 2 s; a unit or a stand-in 
 be released, as the lock test's first pool's unit does, gives up after 60 s): a unit or a build
 that must still be running blocks on a file the test writes, and the only short timeout is the one
 under test, so a loaded machine does not fail it. It also checks the phases (their order, each
-form of `POOL_QUIET` and a marker that cannot be, the quiet width and its limit of 12), the gate
-(nothing quiet or alone starts before it, `--after-gate`, a unit left out, a line that is not the
-gate's), `--prebuild-only` (built: 0 and no note; failed: 1 and the failed prebuild's note), and
+form of `POOL_QUIET` and of `POOL_ALONE`, the units alone one at a time, a marker that cannot be,
+the quiet width and its limit of 12), the gate (nothing quiet or alone starts before it,
+`--after-gate`, a unit left out, a line that is not the gate's, its owner gone), SIGHUP like
+SIGTERM, `--prebuild-only` (built: 0, no note, its report; failed: 1, the note of the units that
+cannot run, its report), `--prebuilt` (a report of builds made, failed, missing, unreadable), and
 the serial runner's side of the lock (it waits for a pool and a pool for it, SIGTERM while it
 waits, and a child it leaves running does not hold the lock). Two variables point the pool there:
 `VPAIR_POOL_TESTS`, the folder of the modules (default this one), and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default

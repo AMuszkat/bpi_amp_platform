@@ -134,7 +134,8 @@ flowchart LR
 
 **Level 1** runs `plugin-check` on every plugin that declares its three targets (its build under
 `tools/jobserver.sh`, so that the LTO links share the processors; its copies in
-`<BUILD_DIR>/<plugin>-builds/copied/`, as nothing writes `~/.lv2`; a version bump recompiles only
+`<BUILD_DIR>/<plugin>-builds/copied/`, as no build of `tools/build.sh` or `plugin-check` writes
+`~/.lv2`; a version bump recompiles only
 the format wrappers), and:
 
 - **the block FIR test** (`dsp/juce_plugins/tests/blockfir`): the block FIR firConv and the
@@ -143,11 +144,12 @@ the format wrappers), and:
   `buildinfo.ttl` of this tree, with its plugin's version and source identity;
 - **the version tool's test** (`dsp/juce_plugins/tests/plugin-versions`): a changed plugin
   whose version was not raised fails;
-- **the controller's bridge test** against a fake hub, six tests at a time, each with its own
-  Xvfb from `:300` up, the timing ones alone after (one at a time where `CI` is set), and
+- **the controller's bridge test** against a fake hub, six tests at a time, each worker with its
+  own Xvfb from `:300` up, the timing ones alone after (one at a time where `CI` is set), and
   **the `tools` check**: the test
   tools' own tests in `tools/tests` (what green is and the hook's lab lock, the impact map,
-  `tools/test.sh`'s arguments) and the self-tests of the virtual pair's tools,
+  `tools/test.sh`'s arguments, the schedule) and the self-tests of the virtual pair's tools
+  (all at once with more than one job, one after another with one),
   `tests/vpair/*_selftest.py` (the pool's), which are not `test_*` so that level 2 never runs them.
 
 Two plugin tests are standalone: firConv's response test and the level-matched bypass test
@@ -188,7 +190,10 @@ the checks are made to take a minute or two after an edit:
   count (`True`, or the classes and tests it names: they run after every other unit, on
   min(N, 12) workers; `knob_latency`, `monitor_fanout`, `controller_end_to_end`, `board_cpu`,
   `speakerd_quantum_change`, `ampd_restart`, `ampd_persistence`, `hub_down`, `graph_edit`,
-  `chain_cost` and parts of `speakerd_installed`, `buffer_size` and `ampd_protocol`), `POOL_ALONE = True` when it measures CPU (`chain_cost`, run last, alone),
+  `chain_cost` and parts of `speakerd_installed`, `buffer_size` and `ampd_protocol`),
+  `POOL_ALONE` for what must run with no other test beside it (`True`, or the classes and tests
+  it names: one at a time, last; `chain_cost`, which measures CPU, and `knob_latency`'s
+  `test_at_quantum_128`, whose 3 ms settle bound failed 5 runs of 12 beside the other quiet units),
   and `POOL_SPLIT` or `POOL_WHOLE` to run its tests as a unit each, or the module as one, instead
   of a unit per test class; the README of [`tests/vpair/`](../tests/vpair/README.md) ("The
   pool") has the details. `--jobs 1` is the serial runner, one module after another in one
@@ -238,18 +243,25 @@ other tests may:
 <!-- diagram: schedule -->
 ```mermaid
 flowchart LR
-    p1["Phase 1: the builds, two at once, nice 19<br/>plugin-check with LTO, plugin name, the pool's prebuild<br/>beside them: tools, plugin-versions, the block FIR,<br/>the aarch64 build identity, the controller's build"]
-    p2["Phase 2: the tests<br/>the pool's main units, N workers<br/>the controller's own tests"]
-    p3["Phase 3: the gate, in the pool<br/>its quiet units, min(N, 12) workers<br/>then chain_cost alone"]
+    p1["Phase 1: the builds, two at once, nice 19<br/>the pool's prebuild, every LTO build:<br/>the block FIR, plugin-check, the aarch64 build identity;<br/>plugin name; beside them: plugin-versions,<br/>the controller's build"]
+    p2["Phase 2: the tests<br/>the pool's main units, N workers<br/>the controller's own tests, the tools check"]
+    p3["Phase 3: the gate, in the pool<br/>its quiet units, min(N, 12) workers<br/>then those alone, one at a time"]
     p1 -- "every step ended" --> p2 -- "every other test ended" --> p3
 ```
 
-The pool's prebuild takes both build slots. A failed step stops nothing that does not need it;
-one that does is skipped, saying so (the controller's own tests after its failed build; the
-`controller` check's end to end after either). Each step's output is printed whole when it ends
-and kept in `build/test-steps/`, and a table ends the run; one schedule runs at a time per
-checkout (`build/test-run.lock`). `test_controller_end_to_end` runs once: level 1's controller
-step is its build and its own tests, level 2 runs the end to end.
+The pool's prebuild takes both build slots, then the block FIR's build, plugin-check's and the
+aarch64 build identity's take them two at a time (never more than two LTO trees at once). A
+failed step stops nothing that does not need it; one that does is skipped, saying so (the
+controller's own tests after its failed build; the `controller` check's end to end after
+either). The pool does not need its prebuild to pass: it runs on the prebuild's report, the
+units whose required build failed failing under their names and the others running (a failed
+controller build stops the end to end, not `speakerd`'s modules). Each step's output is printed
+whole when it ends and kept in `build/test-steps/`; what the steps tell each other (the gate,
+the results, the pool's note) is the run's own, in a temporary folder; a table ends the run; one
+schedule runs at a time per checkout (`build/test-run.lock`). A SIGINT, SIGTERM or SIGHUP stops
+every step; a schedule killed outright leaves its steps to end on their own, and the pool,
+waiting at its gate, stops waiting once the schedule is gone. `test_controller_end_to_end` runs
+once: level 1's controller step is its build and its own tests, level 2 runs the end to end.
 
 The levels keep LTO and `chain_cost`'s full window wherever they run, and use the schedule like
 the checks. With `--jobs 1` there is no schedule: the steps run one after another and the

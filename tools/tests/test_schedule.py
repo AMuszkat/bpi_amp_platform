@@ -4,8 +4,10 @@ light step has ended), at most two heavy steps at once (a step of two slots alon
 the plan's order, at nice 19, light ones beside them and not niced; the gate (created once every
 other test has ended, with what it leaves out); a dependent skipped, saying why, the independent
 ones run; each step's output as one block; the results, the table, the exit status (2 for a plan
-it cannot run); the lock (a second schedule waits, naming the first); SIGTERM passed to the
-running steps. Part of the `tools` check (tools/test.sh tools).
+it cannot run, and no results then); the lock (a second schedule waits, naming the first; SIGTERM
+or SIGHUP while it waits); SIGTERM and SIGHUP passed to the running steps; the schedule's process ID
+in each step's environment (TEST_SCHEDULE_PID, the pool's --gate-owner). Part of the `tools` check
+(tools/test.sh tools).
 
     python3 tools/tests/test_schedule.py
 
@@ -28,8 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCHEDULE = ROOT / "tools" / "schedule.py"
 
-# STEP NAME [sleep=S] [rc=N] [wait=FILE] [trap=1]: stamps NAME.start and NAME.end (time.time()) and
-# its niceness in DIR (ST_DIR), prints some lines of its own, waits, and exits with rc.
+# STEP NAME [sleep=S] [rc=N] [wait=FILE] [trap=1]: stamps NAME.start and NAME.end (time.time()), its
+# niceness and its TEST_SCHEDULE_PID (NAME.env) in DIR (ST_DIR), prints some lines of its own, waits,
+# and exits with rc. trap=1: SIGTERM and SIGHUP stamp NAME.term (the signal's number) and exit 7.
 STEP = r'''
 import os, signal, sys, time
 from pathlib import Path
@@ -37,11 +40,13 @@ name, opts = sys.argv[1], dict(a.split("=", 1) for a in sys.argv[2:])
 d = Path(os.environ["ST_DIR"])
 if opts.get("trap"):
     def on_term(signum, frame):
-        (d / f"{name}.term").write_text(repr(time.time()))
+        (d / f"{name}.term").write_text(str(signum))
         sys.exit(7)
     signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGHUP, on_term)
 (d / f"{name}.start").write_text(repr(time.time()))
 (d / f"{name}.nice").write_text(str(os.nice(0)))
+(d / f"{name}.env").write_text(os.environ.get("TEST_SCHEDULE_PID", "(none)"))
 for i in range(3):
     print(f"<<{name}>> line {i}", flush=True)
 print(f"<<{name}>> on stderr", file=sys.stderr, flush=True)
@@ -160,6 +165,8 @@ class ThePhases(unittest.TestCase):
                         "no two heavy steps ever ran at once")
         started = re.findall(r"(?m)^schedule: \[\s*[\d.]+ s\] start (h\d) ", s.output)
         self.assertEqual(started, names, "the heavy steps did not start in the plan's order")
+        for n in names + ["l"]:                       # the schedule's process ID, for the pool's --gate-owner
+            self.assertEqual((s.dir / f"{n}.env").read_text(), str(s.process.pid), n)
         base = os.nice(0)
         for n in names:
             self.assertEqual(int((s.dir / f"{n}.nice").read_text()), min(base + 19, 19), n)
@@ -265,6 +272,7 @@ class TheOutput(unittest.TestCase):
                 (["a light needs=b -- ", "b light -- "], "a needs b, which no line before it is"),
                 (["t test -- ", "b light needs=t -- "], "b (phase 1) needs t, a later phase's"),
                 (["l light gated -- "], "only a test step is gated"),
+                (["p test gated guards=test_x -- "], "a gated step guards nothing"),
                 (["l light slots=2 -- "], "slots are a heavy step's"),
                 (["h heavy slots=0 -- "], "option 'slots=0'"),
                 (["x odd -- "], "kind 'odd'"),
@@ -275,6 +283,7 @@ class TheOutput(unittest.TestCase):
                 self.assertEqual(status, 2, s.output)
                 self.assertIn(said, s.output)
                 self.assertFalse(s.logs.exists(), "a step ran")
+                self.assertFalse(s.results_file.exists(), "results of a plan that never ran")
         folder = Path(tempfile.mkdtemp(prefix="test-schedule-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(folder)]))
         (folder / "plan").write_text("a light\n")
@@ -306,38 +315,44 @@ class TheLock(unittest.TestCase):
         self.assertRegex(second.output, r"schedule: the other run ended; this one starts after waiting [\d.]+ s")
         self.assertNotIn("waiting", first.output)
 
-    def test_sigterm_while_waiting(self):
+    def test_sigterm_or_sighup_while_waiting(self):
         folder = Path(tempfile.mkdtemp(prefix="test-schedule-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(folder)]))
         lock = folder / "run.lock"
         first = Schedule(self, ["a light -- wait=RELEASE"], "--lock", str(lock), folder=folder)
         self.addCleanup(lambda: (folder / "RELEASE").touch())
         first.until(lambda: first.stamp("a", "start") is not None, "the first's step")
-        second_dir = folder / "second"
-        second_dir.mkdir()
-        second = Schedule(self, ["b light -- "], "--lock", str(lock), folder=second_dir)
-        second.until(lambda: "waiting for it to end" in second.output, "the second's waiting line")
-        second.process.send_signal(signal.SIGTERM)
-        self.assertEqual(second.wait(), -signal.SIGTERM, second.output)
-        self.assertIn("schedule: SIGTERM while waiting: nothing ran", second.output)
-        self.assertIsNone(second.stamp("b", "start"))
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum.name):
+                second_dir = folder / f"second-{signum.name}"
+                second_dir.mkdir()
+                second = Schedule(self, ["b light -- "], "--lock", str(lock), folder=second_dir)
+                second.until(lambda: "waiting for it to end" in second.output, "the second's waiting line")
+                second.process.send_signal(signum)
+                self.assertEqual(second.wait(), -signum, second.output)
+                self.assertIn(f"schedule: {signum.name} while waiting: nothing ran", second.output)
+                self.assertIsNone(second.stamp("b", "start"))
 
 
 class Signals(unittest.TestCase):
-    def test_sigterm_reaches_the_running_steps(self):
-        s = Schedule(self, ["a light -- trap=1 wait=never", "b light -- sleep=0.1",
-                            "c heavy -- wait=never", "t test -- "])
-        s.until(lambda: s.stamp("a", "start") is not None and s.stamp("c", "start") is not None
-                and s.stamp("b", "end") is not None, "the steps' starts")
-        time.sleep(0.2)
-        s.process.send_signal(signal.SIGTERM)
-        self.assertEqual(s.wait(), -signal.SIGTERM, s.output)
-        self.assertIsNotNone(s.stamp("a", "term"), "the running step never got the SIGTERM")
-        self.assertIsNone(s.stamp("t", "start"), "a step started after the signal")
-        self.assertEqual(s.results(), {"a": "interrupted", "b": "passed", "c": "interrupted", "t": "interrupted"})
-        self.assertIn("=== /test a: interrupted (exit 7)", s.output)
-        self.assertIn("=== /test c: interrupted (signal 15)", s.output)
-        self.assertRegex(s.output, r"(?m)^\s+2  t\s+[\d.]+\s+interrupted: not started$")
+    def test_sigterm_and_sighup_reach_the_running_steps(self):
+        # SIGHUP (a closed terminal) as SIGTERM: passed on to every running step's session.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum.name):
+                s = Schedule(self, ["a light -- trap=1 wait=never", "b light -- sleep=0.1",
+                                    "c heavy -- wait=never", "t test -- "])
+                s.until(lambda: s.stamp("a", "start") is not None and s.stamp("c", "start") is not None
+                        and s.stamp("b", "end") is not None, "the steps' starts")
+                time.sleep(0.2)
+                s.process.send_signal(signum)
+                self.assertEqual(s.wait(), -signum, s.output)
+                self.assertEqual(s.stamp("a", "term"), int(signum), "the running step never got the signal")
+                self.assertIsNone(s.stamp("t", "start"), "a step started after the signal")
+                self.assertEqual(s.results(), {"a": "interrupted", "b": "passed", "c": "interrupted",
+                                               "t": "interrupted"})
+                self.assertIn("=== /test a: interrupted (exit 7)", s.output)
+                self.assertIn(f"=== /test c: interrupted (signal {int(signum)})", s.output)
+                self.assertRegex(s.output, r"(?m)^\s+2  t\s+[\d.]+\s+interrupted: not started$")
 
 
 if __name__ == "__main__":

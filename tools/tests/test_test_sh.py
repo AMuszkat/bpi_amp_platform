@@ -8,10 +8,13 @@ BPI_TEST_DRY_RUN fails a run instead of passing it.
 
 And its runs, with stand-in steps (BPI_TEST_STUB: every step, the serial runner and tools/status.py
 replaced by small scripts in a folder of build/, which record what they were asked and when):
-the schedule's phases and niceness as test.sh plans them, what each level records (the same
-checked list, the pool's note), a dependent skipped, the gate leaving out the controller check's
-end to end after its own tests failed, test_controller_end_to_end once (in the vpair level, not in
-the unit level's controller step, in the serial path too), and a run that would pass ending with 3.
+the schedule's phases and niceness as test.sh plans them (every LTO build heavy, `tools` a test
+step), what each level records (the same checked list, the pool's note, read from the run's own
+folder: a stale results file of another run is never taken), a dependent skipped, a failed prebuild
+stopping only what needs it (the pool still runs), the gate leaving out the controller check's end
+to end after its own tests failed, no schedule for a vpair level without PipeWire,
+test_controller_end_to_end once (in the vpair level, not in the unit level's controller step, in
+the serial path too), and a run that would pass ending with 3.
 Part of the `tools` check (tools/test.sh tools).
 
     python3 tools/tests/test_test_sh.py
@@ -175,48 +178,74 @@ class Taken(unittest.TestCase):
         got = run("all", "--jobs", "4")[1]
         plan = [line[len("plan "):] for line in got.splitlines() if line.startswith("plan ")]
         self.assertTrue(plan[0].startswith("prebuild heavy slots=2 "), plan)       # first of the heavy steps
-        self.assertTrue(any(re.match(r"plugin-lto-\w+ heavy ", line) for line in plan), plan)
+        heavy = [line.split()[0] for line in plan if line.split()[1] == "heavy"]
+        lto = [f"plugin-lto-{p}" for p in plugins_with_targets()]
+        # Every LTO build heavy (two LTO trees at most at once): the block FIR first after the
+        # prebuild, the aarch64 build identity last.
+        self.assertEqual(heavy, ["prebuild", "blockfir", *lto, "buildinfo-aarch64"], plan)
+        light = [line.split()[0] for line in plan if line.split()[1] == "light"]
+        self.assertEqual(light, ["plugin-versions", "controller-build"], plan)
+        self.assertIn("tools test title=unit:\\ tools -- tools", plan)              # builds nothing: phase 2
         self.assertIn("controller-tests test title=unit:\\ controller\\ \\(its\\ own\\ tests\\) needs=controller-build "
                       "-- controller-tests", plan)
-        self.assertEqual(plan[-1], "pool test gated needs=prebuild title=vpair -- pool vpair --")
+        # The pool does not need its prebuild to pass: it fails only what needs a failed build.
+        self.assertEqual(plan[-1], "pool test gated title=vpair -- pool vpair --")
+        got = run("plugins", "tools", "--jobs", "4")[1]
+        self.assertIn("plan blockfir heavy title=plugins:\\ blockfir -- blockfir\n", got)
+        self.assertIn("plan tools test title=tools -- tools\n", got)
         self.assertFalse(any("guards=" in line for line in plan), plan)            # the levels run every module
         got = run("controller", "--jobs", "4")[1]
         self.assertIn("plan controller-tests test title=controller:\\ its\\ own\\ tests needs=controller-build "
                       "guards=test_controller_end_to_end -- controller-tests\n", got)
-        self.assertIn("plan pool test gated needs=prebuild title=controller -- pool controller --after-gate "
+        self.assertIn("plan pool test gated title=controller -- pool controller --after-gate "
                       "test_controller_end_to_end -- test_controller_end_to_end\n", got)
         for args in (("all", "--jobs", "1"), ("speakerd", "--jobs", "1"), ("changed", "--jobs", "4")):
             with self.subTest(args=args):
                 self.assertNotIn("plan ", run(*args)[1])
 
 
-# The stand-ins: DIR/step records each call (its words, start, end, niceness) in DIR/calls; fails the
-# steps STUB_FAIL names (a step, or plugin-lto-<name>); the pool waits for the gate, keeps what it
-# says in DIR/gate-seen and writes its note; a failed prebuild writes the note of one; the serial
-# runner writes its note. DIR/status records its words in DIR/status-calls.
+# The stand-ins: DIR/step records each call (its words, start, end, niceness, the run's folder
+# TEST_RUN_DIR and TEST_SCHEDULE_PID) in DIR/calls; fails the steps STUB_FAIL names (a step, or
+# plugin-lto-<name>); the prebuild writes its report in the run's folder (and a failed one the note
+# of the units that cannot run); the pool waits for the gate there, keeps what it says in
+# DIR/gate-seen and writes its note (a failure when it fails or the report says a build failed);
+# the serial runner writes its note. DIR/status records its words in DIR/status-calls.
 STUB_STEP = r"""#!/usr/bin/env python3
 import json, os, sys, time
 from pathlib import Path
 d = Path(os.environ["BPI_TEST_STUB"])
+run = Path(os.environ.get("TEST_RUN_DIR") or "/nonexistent")
 step, args = sys.argv[1], sys.argv[2:]
 key = f"{step}-{args[0]}" if step in ("plugin-lto", "plugin") else step
 fail = set(filter(None, os.environ.get("STUB_FAIL", "").split(",")))
 start = time.time()
 print(f"<<stub>> {key} {' '.join(args)}", flush=True)
 if step == "pool":
-    gate, deadline = d / "steps" / "gate", time.monotonic() + 60
+    gate, deadline = run / "gate", time.monotonic() + 60
     while not gate.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     (d / "gate-seen").write_text(gate.read_text() if gate.exists() else "(no gate within 60 s)")
-    (d / "steps" / "pool.note").write_text("1 tests, 1 failed: test_x.X, 0 skipped" if key in fail else "7 tests, 0 skipped")
-elif step == "prebuild" and key in fail:
-    (d / "steps" / "pool.note").write_text("0 tests, 1 failed: test_x.X, 0 skipped")
+    report = json.loads((run / "prebuilt.json").read_text()) if (run / "prebuilt.json").exists() else None
+    if report is None or report["failed"]:
+        key_failed = True
+        (run / "pool.note").write_text("6 tests, 1 failed: test_x.X, 0 skipped")
+    else:
+        key_failed = key in fail
+        (run / "pool.note").write_text("1 tests, 1 failed: test_x.X, 0 skipped" if key_failed else "7 tests, 0 skipped")
+    if key_failed:
+        fail.add(key)
+elif step == "prebuild":
+    (run / "prebuilt.json").write_text(json.dumps({"built": [], "failed": {"x": "tools/build.sh x"}} if key in fail
+                                                  else {"built": ["x"], "failed": {}}))
+    if key in fail:
+        (run / "pool.note").write_text("0 tests, 1 failed: test_x.X, 0 skipped")
 elif step == "serial":
     Path(args[0]).write_text("3 tests, 0 skipped")
 time.sleep(float(os.environ.get("STUB_SLEEP", "0.2")))
 with open(d / "calls", "a") as f:
     f.write(json.dumps({"step": step, "key": key, "args": args, "start": start, "end": time.time(),
-                        "nice": os.nice(0)}) + "\n")
+                        "nice": os.nice(0), "run": os.environ.get("TEST_RUN_DIR"),
+                        "schedule": os.environ.get("TEST_SCHEDULE_PID")}) + "\n")
 sys.exit(1 if key in fail else 0)
 """
 STUB_STATUS = r"""#!/usr/bin/env python3
@@ -241,7 +270,7 @@ class Stubbed(unittest.TestCase):
     """tools/test.sh's runs with stand-in steps (BPI_TEST_STUB), in a folder of build/ (a temporary
     folder may be noexec), with or without the schedule."""
 
-    def stub_run(self, *args, fail=""):
+    def stub_run(self, *args, fail="", prepare=None, **extra):
         build = ROOT / "build"
         build.mkdir(exist_ok=True)
         folder = Path(tempfile.mkdtemp(prefix="test-sh-stub-", dir=build))
@@ -249,8 +278,11 @@ class Stubbed(unittest.TestCase):
         for name, text in (("step", STUB_STEP), ("status", STUB_STATUS)):
             (folder / name).write_text(text)
             (folder / name).chmod(0o755)
-        env = {k: v for k, v in os.environ.items() if k not in ("CI", "BPI_TEST_JOBS", "BPI_TEST_DRY_RUN")}
-        env.update(BPI_CONTAINER="0", BPI_TEST_STUB=str(folder), STUB_FAIL=fail)
+        if prepare is not None:
+            prepare(folder)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CI", "BPI_TEST_JOBS", "BPI_TEST_DRY_RUN", "TEST_RUN_DIR", "TEST_SCHEDULE_PID")}
+        env.update(BPI_CONTAINER="0", BPI_TEST_STUB=str(folder), STUB_FAIL=fail, **extra)
         result = subprocess.run([str(TEST_SH), *args], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
         calls = [json.loads(line) for line in (folder / "calls").read_text().splitlines()] \
             if (folder / "calls").exists() else []
@@ -279,12 +311,22 @@ class Stubbed(unittest.TestCase):
         self.assertEqual(sorted(self.keys(calls)), sorted(lto + ["buildinfo-aarch64", "blockfir", "plugin-versions",
                                                                  "controller-build", "controller-tests", "tools"]))
         found = self.by_key(calls)
-        phase1_end = max(c["end"] for c in calls if c["key"] != "controller-tests")
+        phase1_end = max(c["end"] for c in calls if c["key"] not in ("controller-tests", "tools"))
         self.assertGreaterEqual(found["controller-tests"]["start"], phase1_end, out)
+        self.assertGreaterEqual(found["tools"]["start"], phase1_end, out)          # a test step: phase 2
         base = os.nice(0)
-        for key in lto:
+        for key in lto + ["blockfir", "buildinfo-aarch64"]:                         # every LTO build heavy
             self.assertEqual(found[key]["nice"], min(base + 19, 19), key)
-        self.assertEqual(found["tools"]["nice"], base)
+        for key in ("tools", "plugin-versions", "controller-build", "controller-tests"):
+            self.assertEqual(found[key]["nice"], base, key)
+        heavy = sorted((c for c in calls if c["key"] in lto + ["blockfir", "buildinfo-aarch64"]), key=lambda c: c["start"])
+        for c in heavy:                                                             # two at most at once
+            at_once = sum(1 for o in heavy if o["start"] <= c["start"] < o["end"])
+            self.assertLessEqual(at_once, 2, out)
+        runs = {c["run"] for c in calls}
+        self.assertEqual(len(runs), 1, calls)                                       # one run's folder,
+        self.assertFalse(Path(runs.pop()).exists(), "the run's folder was left behind")   # removed at the end
+        self.assertEqual(len({c["schedule"] for c in calls}), 1, calls)
         self.assertEqual(status, [["set", "unit", "pass", UNIT_CHECKED], ["show"]])
         for p in plugins_with_targets() + ["controller", "tools"]:
             self.assertIn(f"unit: {p} passed\n", out)
@@ -311,20 +353,48 @@ class Stubbed(unittest.TestCase):
         self.assertFalse(any("test_controller_end_to_end" in c["args"] for c in calls), calls)
         heavy = [c for c in calls if c["key"].startswith("plugin-lto-")]
         self.assertLessEqual(found["prebuild"]["start"], min(c["start"] for c in heavy) + 0.05, out)
-        phase1_end = max(c["end"] for c in calls if c["key"] not in ("pool", "controller-tests"))
-        self.assertGreaterEqual(found["pool"]["start"], phase1_end, out)
-        self.assertGreaterEqual(found["controller-tests"]["start"], phase1_end, out)
+        phase1_end = max(c["end"] for c in calls if c["key"] not in ("pool", "controller-tests", "tools"))
+        for key in ("pool", "controller-tests", "tools"):
+            self.assertGreaterEqual(found[key]["start"], phase1_end, f"{key}\n{out}")
         self.assertEqual(gate, "")
         self.assertEqual(status, [["set", "unit", "pass", UNIT_CHECKED], ["set", "vpair", "pass", "7 tests, 0 skipped"],
                                   ["show"]])
         self.assertIn("vpair: 7 tests, 0 skipped\n", out)
 
-    def test_a_failed_prebuild_records_its_note(self):
+    def test_a_failed_prebuild_stops_only_what_needs_it(self):
+        # The pool runs all the same, on the prebuild's report: the units whose build failed fail,
+        # the others run (tests/vpair/pool.py --prebuilt); its note is the one recorded.
         code, out, calls, status, _ = self.stub_run("vpair", "--jobs", "4", fail="prebuild")
         self.assertEqual(code, 1, out)
-        self.assertNotIn("pool", self.keys(calls))
-        self.assertIn("=== /test vpair: skipped: the pool's prebuild failed", out)
-        self.assertEqual(status, [["set", "vpair", "fail", "0 tests, 1 failed: test_x.X, 0 skipped"], ["show"]])
+        found = self.by_key(calls)
+        self.assertGreaterEqual(found["pool"]["start"], found["prebuild"]["end"], out)
+        self.assertEqual(found["pool"]["run"], found["prebuild"]["run"], calls)      # the same run's folder
+        self.assertNotIn("skipped:", out)
+        self.assertEqual(status, [["set", "vpair", "fail", "6 tests, 1 failed: test_x.X, 0 skipped"], ["show"]])
+
+    def test_results_are_the_runs_own(self):
+        # A schedule that ends without writing results (here: its lock cannot be opened) passes no
+        # step, whatever an earlier run left in the steps' folder.
+        def prepare(folder):
+            (folder / "test-run.lock").mkdir()                   # os.open(O_RDWR) of a folder fails
+            (folder / "steps").mkdir()
+            (folder / "steps" / "results").write_text("".join(f"{k} passed\n" for k in (
+                [f"plugin-lto-{p}" for p in plugins_with_targets()]
+                + ["buildinfo-aarch64", "blockfir", "plugin-versions", "controller-build", "controller-tests", "tools"])))
+        code, out, calls, status, _ = self.stub_run("unit", "--jobs", "4", prepare=prepare)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(calls, [])
+        self.assertEqual(status, [["set", "unit", "fail", UNIT_CHECKED], ["show"]])
+        self.assertIn("unit: tools FAILED\n", out)
+        self.assertRegex(out, r"schedule: the lock \S+test-run\.lock: .*: nothing ran\n")
+
+    def test_no_schedule_for_a_vpair_level_without_pipewire(self):
+        code, out, calls, status, _ = self.stub_run("vpair", "--jobs", "4", STUB_PIPEWIRE="no")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(calls, [])
+        self.assertNotIn("schedule:", out)                       # no plan of no step (its exit 2)
+        self.assertIn("vpair: pipewire and wireplumber are needed", out)
+        self.assertEqual(status, [["set", "vpair", "skipped", "no pipewire"], ["show"]])
 
     def test_a_failed_pool_records_fail(self):
         code, out, _, status, _ = self.stub_run("vpair", "--jobs", "4", fail="pool")

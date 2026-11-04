@@ -23,13 +23,14 @@
 #     tools/test.sh unit | vpair | all [--no-record]
 #
 #   With more than one job, every check and level runs as a schedule (tools/schedule.py), in
-#   phases: 1, the builds (plugin-check with LTO, `plugin <name>`, the pool's prebuild: at most two
-#   at once, at nice 19) and the light steps beside them (tools, plugin-versions, the block FIR,
-#   the aarch64 build identity, the controller's build); 2, once all of those have ended, the
-#   tests (the pool, the controller's own tests); 3, in the pool, its quiet units, once every other
-#   test has ended (the gate), then those alone. Each step's output is printed whole when it ends
-#   and kept in build/test-steps/<step>.log; a table at the end. One schedule at a time per
-#   checkout (build/test-run.lock). With one job (CI), the steps run one after another as before.
+#   phases: 1, the builds (every LTO build: plugin-check's, the block FIR's, the aarch64 build
+#   identity's; `plugin <name>`, the pool's prebuild: at most two at once, at nice 19) and the
+#   light steps beside them (plugin-versions, the controller's build); 2, once all of those have
+#   ended, the tests (the pool's main units, the controller's own tests, the `tools` check); 3, in
+#   the pool, its quiet units, once every other test has ended (the gate), then those alone. Each
+#   step's output is printed whole when it ends and kept in build/test-steps/<step>.log; a table at
+#   the end. One schedule at a time per checkout (build/test-run.lock). With one job (CI), the
+#   steps run one after another as before.
 #
 #   --jobs N, anywhere (or BPI_TEST_JOBS=N): the pool's main phase runs N units at a time, each on
 #   its own virtual pair (tests/vpair/pool.py), its quiet phase min(N, 12); 1 runs the modules one
@@ -87,11 +88,15 @@ fi
 # still ends it (bash runs the EXIT trap, then dies of the signal).
 NOTE_FILE=""
 PLAN_FILE=""
-trap '[ -z "$NOTE_FILE" ] || rm -f "$NOTE_FILE"; [ -z "$PLAN_FILE" ] || rm -f "$PLAN_FILE"' EXIT
+RUN_DIR=""
+TOOLS_OUT=""
+trap '[ -z "$NOTE_FILE" ] || rm -f "$NOTE_FILE"; [ -z "$PLAN_FILE" ] || rm -f "$PLAN_FILE"
+      [ -z "$RUN_DIR" ] || rm -rf "$RUN_DIR"; [ -z "$TOOLS_OUT" ] || rm -rf "$TOOLS_OUT"' EXIT
 
 # BPI_TEST_STUB=DIR, for tools/tests/test_test_sh.py: a run as it is, its steps (run_step, the
 # serial runner) replaced by DIR/step STEP ARG..., tools/status.py by DIR/status, pipewire not asked
-# for, the schedule's folder and lock DIR's; and what would end with 0 ends with 3 (as a dry run,
+# for (STUB_PIPEWIRE=no: as if missing), the schedule's folder and lock DIR's; and what would end
+# with 0 ends with 3 (as a dry run,
 # for the same reason: tools/container.sh passes every BPI_* variable on), saying so on stderr.
 STUB="${BPI_TEST_STUB:-}"
 STATUS_PY=tools/status.py
@@ -129,9 +134,13 @@ with open(sys.argv[1], "w") as f:
 sys.exit(0 if result.wasSuccessful() else 1)
 '
 
+# (With BPI_TEST_STUB, there unless STUB_PIPEWIRE=no.)
 have_pipewire() {
-    [ -z "$STUB" ] || return 0
-    command -v pipewire > /dev/null && command -v wireplumber > /dev/null && return 0
+    if [ -n "$STUB" ]; then
+        [ "${STUB_PIPEWIRE:-yes}" = no ] || return 0
+    elif command -v pipewire > /dev/null && command -v wireplumber > /dev/null; then
+        return 0
+    fi
     echo "$1: pipewire and wireplumber are needed: install Podman (tools/container.sh), or see CLAUDE.md"
     return 1
 }
@@ -223,13 +232,32 @@ check_controller_own() {
 
 # The test tools' own tests (tools/tests/test_*.py), and the self-tests of tests/vpair's tools
 # (tests/vpair/*_selftest.py, pool.py's: not test_*, so that the vpair level never runs them).
+# With more than one job all at once, each one's output printed whole, in this order, when all
+# have ended (none depends on how fast the others run: they wait on files, not on time); with
+# one (CI), one after another.
 check_tools() {
-    local t ok=0
-    for t in tools/tests/test_*.py tests/vpair/*_selftest.py; do
-        [ -e "$t" ] || continue
-        echo "tools: $t"
-        python3 "$t" || { echo "tools: $t FAILED"; ok=1; }
+    local t ok=0 files=() pids=() i
+    for t in tools/tests/test_*.py tests/vpair/*_selftest.py; do [ -e "$t" ] && files+=("$t"); done
+    if [ "$JOBS" = 1 ]; then
+        for t in "${files[@]}"; do
+            echo "tools: $t"
+            python3 "$t" || { echo "tools: $t FAILED"; ok=1; }
+        done
+        return $ok
+    fi
+    TOOLS_OUT="$(mktemp -d)"
+    for i in "${!files[@]}"; do
+        python3 "${files[$i]}" > "$TOOLS_OUT/$i.out" 2>&1 < /dev/null &
+        pids+=($!)
     done
+    for i in "${!files[@]}"; do
+        if wait "${pids[$i]}"; then t=""; else t=FAILED; fi
+        echo "tools: ${files[$i]}"
+        cat "$TOOLS_OUT/$i.out"
+        [ -z "$t" ] || { echo "tools: ${files[$i]} FAILED"; ok=1; }
+    done
+    rm -rf "$TOOLS_OUT"
+    TOOLS_OUT=""
     return $ok
 }
 
@@ -375,7 +403,11 @@ run_vpair() {
 # The steps of a check or a level, for tools/schedule.py (its docstring has the plan's format):
 # each runs `tools/test.sh --jobs N __step STEP ARG...` (run_step, below), in phases, so that no
 # test runs beside a build (docs/autonomous-development.md, section 4, "How the checks run").
-STEPS_DIR=build/test-steps      # the schedule's own: its logs, the pool's note, the gate, the results
+# What a run's steps tell each other and this script is the run's own, in RUN_DIR (a mktemp -d,
+# TEST_RUN_DIR in the steps' environment, removed at the end): the results, the gate, the pool's
+# note and the prebuild's report; another run's schedule never empties it, nor leaves its results
+# for this one to read.
+STEPS_DIR=build/test-steps      # the schedule's own: the steps' logs (the last run's)
 RUN_LOCK=build/test-run.lock    # one schedule at a time per checkout
 [ -z "$STUB" ] || { STEPS_DIR="$STUB/steps"; RUN_LOCK="$STUB/test-run.lock"; }
 PLAN=()
@@ -395,7 +427,10 @@ plan() {
 }
 
 # The pool's prebuild (phase 1, both heavy slots, first) and its run (phase 2), of modules $2...
-# shown as $1; --after-gate for those AFTER_GATE names (the controller check's end to end).
+# shown as $1; --after-gate for those AFTER_GATE names (the controller check's end to end). The
+# pool does not need the prebuild to pass: it runs the units whose builds the prebuild made, from
+# its report (pool.py --prebuilt), and fails those whose required build failed under their names,
+# so that a failed build stops only what needs it (a failed controller build, the end to end).
 AFTER_GATE=()
 plan_pool() {
     local shown="$1" said="$2" a held=()
@@ -404,11 +439,16 @@ plan_pool() {
     plan prebuild heavy slots=2 "title=the pool's prebuild" -- prebuild "$@"
     PLAN_FIRST+=("${PLAN[-1]}")
     unset 'PLAN[-1]'
-    plan pool test gated needs=prebuild "title=$shown" -- pool "$said" ${held[@]+"${held[@]}"} -- "$@"
+    plan pool test gated "title=$shown" -- pool "$said" ${held[@]+"${held[@]}"} -- "$@"
 }
 
-plan_plugins_lto() {   # $1: the title's prefix ("unit:", "plugins:")
+# The plugins' LTO builds, heavy: the block FIR first (the longest of them when nothing changed,
+# a few seconds; as long as the LTO plugins' when everything did), then plugin-check of each
+# plugin. Two LTO trees at most at once, and so the aarch64 build identity, an LTO cross build,
+# is heavy too (plan_unit, after these: the shortest).
+plan_plugin_builds() {   # $1: the title's prefix ("unit:", "plugins:")
     local p
+    plan blockfir heavy "title=$1 blockfir" -- blockfir
     for p in $(plugins_with_targets); do
         plan "plugin-lto-$p" heavy "title=$1 $p" -- plugin-lto "$p"
     done
@@ -425,10 +465,9 @@ plan_checks() {
         shift
         case "$what" in
             plugin)     plan "plugin-$1" heavy "title=plugin $1" -- plugin "$1" ;;
-            plugins)    plan_plugins_lto plugins:
-                        plan blockfir light title=blockfir -- blockfir
+            plugins)    plan_plugin_builds plugins:
                         plan plugin-versions light title=plugin-versions -- plugin-versions ;;
-            tools)      plan tools light title=tools -- tools ;;
+            tools)      plan tools test title=tools -- tools ;;
             controller) plan controller-build light "title=controller: its build" -- controller-build
                         plan controller-tests test "title=controller: its own tests" needs=controller-build \
                              guards=test_controller_end_to_end -- controller-tests
@@ -455,13 +494,12 @@ plan_checks() {
 }
 
 plan_unit() {
-    plan_plugins_lto unit:
-    plan buildinfo-aarch64 light "title=unit: buildinfo-aarch64" -- buildinfo-aarch64
-    plan blockfir light "title=unit: blockfir" -- blockfir
+    plan_plugin_builds unit:
+    plan buildinfo-aarch64 heavy "title=unit: buildinfo-aarch64" -- buildinfo-aarch64
     plan plugin-versions light "title=unit: plugin-versions" -- plugin-versions
     plan controller-build light "title=unit: controller (its build)" -- controller-build
     plan controller-tests test "title=unit: controller (its own tests)" needs=controller-build -- controller-tests
-    plan tools light "title=unit: tools" -- tools
+    plan tools test "title=unit: tools" -- tools
 }
 
 plan_vpair() {
@@ -471,28 +509,30 @@ plan_vpair() {
     MODULES_PLANNED=1
 }
 
-# Runs PLAN (the prebuild first); RESULT[step] = passed, failed, skipped or interrupted.
+# Runs PLAN (the prebuild first); RESULT[step] = passed, failed, skipped or interrupted, from this
+# run's own results (none, when the schedule ended without writing them: no step passed).
 run_schedule() {
     local status line name result
     PLAN_FILE="$(mktemp)"
-    printf '%s\n' ${PLAN_FIRST[@]+"${PLAN_FIRST[@]}"} "${PLAN[@]}" > "$PLAN_FILE"
-    python3 tools/schedule.py --plan "$PLAN_FILE" --logs "$STEPS_DIR" --results "$STEPS_DIR/results" \
-        --gate "$STEPS_DIR/gate" --lock "$RUN_LOCK" --what "tools/test.sh $ARGS_TEXT"
+    RUN_DIR="$(mktemp -d)"
+    printf '%s\n' ${PLAN_FIRST[@]+"${PLAN_FIRST[@]}"} ${PLAN[@]+"${PLAN[@]}"} > "$PLAN_FILE"
+    TEST_RUN_DIR="$RUN_DIR" python3 tools/schedule.py --plan "$PLAN_FILE" --logs "$STEPS_DIR" \
+        --results "$RUN_DIR/results" --gate "$RUN_DIR/gate" --lock "$RUN_LOCK" --what "tools/test.sh $ARGS_TEXT"
     status=$?
     rm -f "$PLAN_FILE"
     PLAN_FILE=""
-    if [ -f "$STEPS_DIR/results" ]; then
-        while read -r name result; do RESULT[$name]="$result"; done < "$STEPS_DIR/results"
+    if [ -f "$RUN_DIR/results" ]; then
+        while read -r name result; do RESULT[$name]="$result"; done < "$RUN_DIR/results"
     fi
     return $status
 }
 
 passed() { local s; for s in "$@"; do [ "${RESULT[$s]:-}" = passed ] || return 1; done; }
 
-# The modules' note, after the schedule: the pool's, or its prebuild's when it failed.
+# The modules' note, after the schedule: the pool's (or its prebuild's, when the pool never ran).
 pool_note() {
     NOTE=""
-    [ ! -f "$STEPS_DIR/pool.note" ] || NOTE="$(cat "$STEPS_DIR/pool.note")"
+    [ -z "$RUN_DIR" ] || [ ! -f "$RUN_DIR/pool.note" ] || NOTE="$(cat "$RUN_DIR/pool.note")"
     [ -n "$NOTE" ] || NOTE="the test run wrote no note"
 }
 
@@ -513,7 +553,7 @@ scheduled_levels() {   # $1: unit, vpair or all
     local ok=0 unit_ok=1 vpair_skipped=0 p checked="" step
     case "$1" in unit|all) plan_unit ;; esac
     case "$1" in vpair|all) plan_vpair || vpair_skipped=1 ;; esac
-    run_schedule || ok=1
+    if [ ${#PLAN[@]} -gt 0 ] || [ ${#PLAN_FIRST[@]} -gt 0 ]; then run_schedule || ok=1; fi
     if [ "$1" != vpair ]; then
         echo "=== /test unit"
         for p in $(plugins_with_targets); do
@@ -555,17 +595,22 @@ run_step() {
         tools)             check_tools ;;
         controller-build)  tools/build.sh controller ;;
         controller-tests)  dsp/juce_apps/controller/tests/run.sh ;;
-        prebuild)          python3 tests/vpair/pool.py --jobs "$JOBS" --prebuild-only --note "$STEPS_DIR/pool.note" "$@" ;;
+        prebuild)          [ -n "${TEST_RUN_DIR:-}" ] || { echo "__step prebuild: no TEST_RUN_DIR (a schedule's)" >&2; return 2; }
+                           python3 tests/vpair/pool.py --jobs "$JOBS" --prebuild-only --built "$TEST_RUN_DIR/prebuilt.json" \
+                               --note "$TEST_RUN_DIR/pool.note" "$@" ;;
         pool)              # pool SAID [--after-gate NAME]... -- MODULE...
-                           local said="$1" held=() count
+                           local said="$1" held=() count owner=()
                            shift
                            while [ "$1" != -- ]; do held+=("$1"); shift; done
                            shift
+                           [ -n "${TEST_RUN_DIR:-}" ] || { echo "__step pool: no TEST_RUN_DIR (a schedule's)" >&2; return 2; }
+                           [ -z "${TEST_SCHEDULE_PID:-}" ] || owner=(--gate-owner "$TEST_SCHEDULE_PID")
                            count="every module"
                            [ $# = 0 ] || count="$# module(s)"
                            echo "$said: $count, $JOBS at a time, the quiet ones min($JOBS, 12) after the other tests" \
                                 "(tests/vpair/pool.py; --jobs 1: one after another)"
-                           python3 tests/vpair/pool.py --jobs "$JOBS" --gate "$STEPS_DIR/gate" --note "$STEPS_DIR/pool.note" \
+                           python3 tests/vpair/pool.py --jobs "$JOBS" --prebuilt "$TEST_RUN_DIR/prebuilt.json" \
+                               --gate "$TEST_RUN_DIR/gate" ${owner[@]+"${owner[@]}"} --note "$TEST_RUN_DIR/pool.note" \
                                ${held[@]+"${held[@]}"} "$@" ;;
         *)                 echo "__step: no step named $step" >&2; return 2 ;;
     esac
