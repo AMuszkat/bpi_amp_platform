@@ -11,8 +11,10 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
 1. The prebuild. Every module says what its built() calls need, also through the harness's
    classes, in POOL_BUILDS ("speakerd", "loudness:headless"; "controller?" for one a test skips
    without). The pool builds all of them first, once, with tools/build.sh: one call per build tree
-   with every kind it needs, the trees at once. A failed build prints its output and fails the run
-   before any test (one marked "?" fails only the built() that asks for it, as it would have).
+   with every kind it needs, the trees at once. A build's output is kept and printed only if it
+   fails, which fails the run before any test (one marked "?" fails only the built() that asks for
+   it, as it would have); tools/build.sh's line that it waits for another build in its tree
+   ("tools/build.sh: waiting for build/speakerd: ...") is printed as it comes.
    Under the pool built() builds nothing (VPAIR_PREBUILT) and refuses what the module's POOL_BUILDS
    does not name: build/ may hold a stale one.
 2. The units: each test class the unittest loader finds in a module (a module with POOL_WHOLE =
@@ -320,6 +322,32 @@ def alone(module):
 # ---------------------------------------------------------------------------------------------
 # The prebuild
 
+# How tools/build.sh begins the line it says once, on stderr, when another build holds its tree's
+# lock: the prebuild passes it through as it comes (the wait may last as long as that build).
+BUILD_WAITING = "tools/build.sh: waiting for"
+
+
+def build_command(what, kinds):
+    """The prebuild's call of tools/build.sh for one build tree (pool_selftest.py puts a stand-in
+    in its place)."""
+    return [str(ROOT / "tools" / "build.sh"), what, *kinds]
+
+
+def read_build(process, lines, ended, out):
+    """A build's output (stdout and stderr), kept in `lines` to be shown if it fails; its waiting
+    line also goes to the pool's output at once. Then its end, in `ended` (its own: the builds are
+    reported in their order, each after the one before)."""
+    try:
+        with process.stdout:
+            for line in process.stdout:
+                lines.append(line)
+                if line.startswith(BUILD_WAITING):
+                    out(line.rstrip("\n"))
+    finally:
+        process.wait()
+        ended.append(time.monotonic())
+
+
 def prebuild(units, out):
     """Builds what the units' modules declare, one tools/build.sh per build tree, the trees at once.
     Returns (the names built, the optional names that failed, whether a required one failed)."""
@@ -340,15 +368,18 @@ def prebuild(units, out):
     started = time.monotonic()
     running = []
     for what, tree in trees.items():
-        command = [str(ROOT / "tools" / "build.sh"), what, *tree["kinds"]]
-        process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True)
-        running.append((what, tree, command, process, time.monotonic()))
+        process = subprocess.Popen(build_command(what, tree["kinds"]), cwd=ROOT, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        lines, ended = [], []
+        reader = threading.Thread(target=read_build, args=(process, lines, ended, out), daemon=True)
+        running.append((what, tree, process, reader, lines, ended, time.monotonic()))
+        reader.start()
     built, unbuilt, failed = set(), set(), False
-    for what, tree, command, process, t0 in running:
-        output = process.communicate()[0]
-        shown = " ".join(["tools/build.sh", *command[1:]])
-        took = time.monotonic() - t0
+    for what, tree, process, reader, lines, ended, t0 in running:
+        reader.join()
+        output = "".join(lines)
+        shown = " ".join(["tools/build.sh", what, *tree["kinds"]])
+        took = ended[0] - t0
         if process.returncode == 0:
             built |= tree["names"]
             out(f"prebuild: {shown}: built in {took:.1f} s")
