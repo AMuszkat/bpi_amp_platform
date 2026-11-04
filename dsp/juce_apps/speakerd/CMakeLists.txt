@@ -13,7 +13,8 @@ cmake_minimum_required(VERSION 3.22)
 # 0.3.2: the graph document's buffer size (top-level "quantum"): checked on apply, set as PipeWire's
 #        clock.force-quantum; rate, quantum, quantum_range and quantum_default in hello and status,
 #        and an unasked status when the running quantum or rate changes.
-project(SPEAKERD VERSION 0.3.2)
+# 0.3.3: connects to no X server, and neither do its plugins, with DISPLAY set or not (NoDisplay.h).
+project(SPEAKERD VERSION 0.3.3)
 
 # A cross build (tools/build.sh speakerd aarch64) links the target's libpipewire, never this
 # machine's, and checks that it does (below) by the target's multiarch triplet.
