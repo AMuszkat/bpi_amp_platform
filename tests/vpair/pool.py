@@ -383,8 +383,11 @@ class Slot:
 
     def env(self):
         # The X display a JUCE program of its own opens (speakerd, the controller), and where its
-        # harness.VirtualDisplay runs: without DISPLAY, JUCE opens :0.0, which would be any
-        # worker's (or plugin-check's) Xvfb, and dies when that one stops.
+        # harness.VirtualDisplay runs (:100 to :199): without DISPLAY, JUCE opens :0.0, which would
+        # be the first worker's Xvfb (VirtualDisplay without VPAIR_DISPLAY takes the first free
+        # number, -displayfd) or the controller's own tests' (test_controller.py's, the same way),
+        # and dies when that one stops. plugin-check's Xvfb is never :0 (it takes :200 to :299),
+        # nor the controller's screenshot run's (tests/run.sh --screenshot, a fixed :96).
         return {"VPAIR_DIR": self.dir, "VPAIR_ADDRESS_BASE": self.base, "VPAIR_PLUGIN_HOST": self.host,
                 "VPAIR_DISPLAY": self.display, "DISPLAY": f":{self.display}"}
 
@@ -763,8 +766,10 @@ def main():
     args = parser.parse_args()
     # 64 at most. Nothing of a worker's own runs out there: the slots' names allow 100 in one /tmp
     # (SLOTS), and 64 leaves the rest to another pool there (pool_selftest.py's beside a real one);
-    # the address blocks (127.77.<k>) allow 256, the displays (:<100 + k>) more. What runs out first
-    # is the container's: 65 to 75 tasks a busy worker against its pids.max of 2048 (README.md).
+    # the address blocks (127.77.<k>) allow 256, the displays (:<100 + k>) 100, :100 to :199
+    # (plugin-check's Xvfb takes :200 up). What runs out first is the container's: 65 to 75 tasks a
+    # busy worker against its pids.max of 2048, about 23 workers to the warning at 80 % (README.md),
+    # which is why tools/test.sh's default (half the processors) stops at 16.
     if not 1 <= args.jobs <= 64:
         parser.error("--jobs: 1 to 64")
     os.chdir(ROOT)
