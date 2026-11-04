@@ -107,15 +107,19 @@ with the PipeWire version the boards run.
 git clone --recurse-submodules https://github.com/AMuszkat/bpi_amp_platform
 cd bpi_amp_platform
 tools/test.sh all          # level 1 (plugin-check) and level 2 (the virtual pair)
+tools/test.sh changed      # while working: the checks that cover the files changed
 tools/build.sh loudness    # one plugin or application, into build/
 tools/container.sh         # a shell in the container
 ```
 
-The first run builds the container image and JUCE, which takes a few minutes. For a board,
+The first run builds the container image and JUCE, which takes a few minutes. While working,
+a focused check takes minutes (`tools/test.sh speakerd`, `plugin loudness`, ...): the virtual
+pair's scenarios run several at a time, each on a pair of its own. For a board,
 `tools/build.sh speakerd aarch64` cross-compiles into `build/aarch64/`, and
-`firmware/setup.sh --mode target-remote` installs; nothing reaches a board unless the commit
-has passed the tests. The Python measurement and tuning tools have their own quick start in
-[`dsp/README.md`](dsp/README.md). The development process (the test levels, the agents, the
+`firmware/setup.sh --mode target-remote` installs. Nothing checks that the commit has passed
+the tests first, so run `tools/test.sh all` before a deploy; only the lab lock
+(`.claude/lab.lock`, there while the boards are on a bench) stops one. The Python measurement
+and tuning tools have their own quick start in [`dsp/README.md`](dsp/README.md). The development process (the test levels, the agents, the
 hooks and CI) is in [`CLAUDE.md`](CLAUDE.md) and
 [`docs/autonomous-development.md`](docs/autonomous-development.md).
 

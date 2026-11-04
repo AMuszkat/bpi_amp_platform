@@ -1,11 +1,22 @@
 {
-  "version": 2,
+  "version": 3,
   "about": [
     "Which checks of tools/test.sh cover a file: what `tools/test.sh changed` runs for the files",
     "changed. The first rule whose pattern matches a path decides (fnmatch on the path from the",
     "repository's root, where * also matches /). \"plugin\" is the plugin-check of the plugin whose",
     "folder the path is in; \"self\" is the changed test module of tests/vpair itself, with every",
-    "module that imports it. A path no rule names is reported, and the levels cover it."
+    "module that imports it. A path no rule names is reported, and the levels cover it.",
+    "The rules are narrow on purpose, and the levels (tools/test.sh all, before every push) cover",
+    "what they leave out. A plugin's editor-only files (its EDITOR sources, and the headers that",
+    "only they include, or that other sources include only where SPEAKER_HEADLESS is 0) are never",
+    "compiled into its headless build, which is what the chain runs: they run the plugin's own",
+    "check, not chain. A speakerd file runs `speakerd` and, beside it, only the checks whose",
+    "scenarios alone read what the file is for: its log lines, its answers on the command line or",
+    "the local link, the PipeWire objects it makes. Where a file only carries what another file is",
+    "for (Engine's parameter inbox and its level and timing rings, which Control and Monitor serve;",
+    "Main's calls into Control), that other file's rule runs the check. tools/tests/test_impact.py",
+    "keeps the map honest: every speakerd file is named by a rule of its own, and every path a",
+    "plugin rule without chain names is editor-only."
   ],
   "rules": [
     {
@@ -14,7 +25,21 @@
       "checks": []
     },
     {
-      "why": "one plugin",
+      "why": "a plugin's editor-only files: in its complete and control builds, never in the headless build the chain runs",
+      "paths": [
+        "dsp/juce_plugins/crossover/PluginEditor.cpp", "dsp/juce_plugins/crossover/PluginEditor.h",
+        "dsp/juce_plugins/crossover/PlotComponent.cpp", "dsp/juce_plugins/crossover/PlotComponent.h",
+        "dsp/juce_plugins/firConv/PluginEditor.cpp", "dsp/juce_plugins/firConv/PluginEditor.h",
+        "dsp/juce_plugins/firConv/PlotComponent.cpp", "dsp/juce_plugins/firConv/PlotComponent.h",
+        "dsp/juce_plugins/loudness/PluginEditor.cpp", "dsp/juce_plugins/loudness/PluginEditor.h",
+        "dsp/juce_plugins/loudness/MorphPad.cpp", "dsp/juce_plugins/loudness/MorphPad.h",
+        "dsp/juce_plugins/loudness/HostWindowTracker.cpp", "dsp/juce_plugins/loudness/HostWindowTracker.h",
+        "dsp/juce_plugins/loudness/Theme.h"
+      ],
+      "checks": ["plugin"]
+    },
+    {
+      "why": "one plugin: its SOURCES, DSP, CMakeLists.txt and probes, which its headless build compiles",
       "paths": ["dsp/juce_plugins/crossover/*", "dsp/juce_plugins/firConv/*", "dsp/juce_plugins/loudness/*", "dsp/juce_plugins/ampScope/*"],
       "checks": ["plugin", "chain"]
     },
@@ -24,7 +49,98 @@
       "checks": ["plugins", "chain"]
     },
     {
-      "why": "speakerd",
+      "why": "speakerd's audio cycle, which every speakerd scenario plays through; its parameter inbox and its level and timing rings only carry what Control and Monitor serve, whose rules run pair, installers and chain",
+      "paths": ["dsp/juce_apps/speakerd/Engine.*"],
+      "checks": ["speakerd"]
+    },
+    {
+      "why": "speakerd's command line and start: --version (the installers refuse one below their minimum and keep its line), the flags the installed unit passes, the device and playing lines smoke reads, the exit on a signal the unit's wrapper records, a shadowed --lv2-bundle refused with status 2; its calls into Control are Control's",
+      "paths": ["dsp/juce_apps/speakerd/Main.cpp"],
+      "checks": ["speakerd", "installers"]
+    },
+    {
+      "why": "speakerd's build and its version, which --version says and the installers check against their minimum",
+      "paths": ["dsp/juce_apps/speakerd/CMakeLists.txt"],
+      "checks": ["speakerd", "installers"]
+    },
+    {
+      "why": "the generated BuildInfo.h: the version and commit --version says, which the installers check and keep as the installed build",
+      "paths": ["dsp/juce_apps/speakerd/BuildInfo.*"],
+      "checks": ["speakerd", "installers"]
+    },
+    {
+      "why": "device.json: the speakerd scenarios read the limits line; only the installers' scenarios have speakerd read a device.json the installers wrote, and smoke matches that line exactly",
+      "paths": ["dsp/juce_apps/speakerd/DeviceConfig.*"],
+      "checks": ["speakerd", "installers"]
+    },
+    {
+      "why": "the state layers: the speakerd scenarios read `using layer`; only the installers' unit passes --from, and its wrapper's scenario reads `starting at layer ... (--from)`",
+      "paths": ["dsp/juce_apps/speakerd/StateLayers.*"],
+      "checks": ["speakerd", "installers"]
+    },
+    {
+      "why": "the PipeWire node: the sink, the links and the quantum the speakerd scenarios play through; the sink speakerd makes without the drop-in (`NO INPUT SINK CONFIGURED`) and the amplifier as the only driver, which the installers' scenarios check; clock.force-quantum, which only pair's buffer_size sets",
+      "paths": ["dsp/juce_apps/speakerd/PipeWireNode.*"],
+      "checks": ["speakerd", "installers", "pair"]
+    },
+    {
+      "why": "the local link's socket: ampd's connection (pair, chain's clients alike); its default path and the busy answer, which only smoke's status meets",
+      "paths": ["dsp/juce_apps/speakerd/LocalLink.*"],
+      "checks": ["speakerd", "installers", "pair"]
+    },
+    {
+      "why": "the local link's operations: ampd's (pair; chain's subscribe and apply are the same ones), and the status with its timing, which only smoke reads",
+      "paths": ["dsp/juce_apps/speakerd/Control.*"],
+      "checks": ["speakerd", "installers", "pair"]
+    },
+    {
+      "why": "the monitor thread: output/level and the plugins' streams (pair), speakerd/timing (only chain_cost subscribes to it), and the timing lines in the log, which smoke parses",
+      "paths": ["dsp/juce_apps/speakerd/Monitor.*"],
+      "checks": ["speakerd", "installers", "pair", "chain"]
+    },
+    {
+      "why": "the timing statistics: speakerd/timing's values (chain_cost), the status's timing and the `timing: last <n> s` line (smoke)",
+      "paths": ["dsp/juce_apps/speakerd/Timing.*"],
+      "checks": ["speakerd", "installers", "chain"]
+    },
+    {
+      "why": "a plugin node and its time: every node runs through it (speakerd); its time per node, which only chain_cost asserts",
+      "paths": ["dsp/juce_apps/speakerd/TimedNode.*"],
+      "checks": ["speakerd", "chain"]
+    },
+    {
+      "why": "which bundle each plugin runs from, and its build identity in the `plugin node` lines, which only plugin_identity reads",
+      "paths": ["dsp/juce_apps/speakerd/PluginBundles.*"],
+      "checks": ["speakerd", "chain"]
+    },
+    {
+      "why": "the graph built from a document, which every speakerd scenario plays, and the `plugin node` line it writes for each plugin, which only plugin_identity reads",
+      "paths": ["dsp/juce_apps/speakerd/GraphBuilder.*"],
+      "checks": ["speakerd", "chain"]
+    },
+    {
+      "why": "the graph document: every layer the speakerd scenarios load; its top-level quantum, which only pair's buffer_size gives",
+      "paths": ["dsp/juce_apps/speakerd/GraphDocument.*"],
+      "checks": ["speakerd", "pair"]
+    },
+    {
+      "why": "the offline render, which the speakerd scenarios compare the live sound with (its `plugin node` lines are GraphBuilder's)",
+      "paths": ["dsp/juce_apps/speakerd/Render.*"],
+      "checks": ["speakerd"]
+    },
+    {
+      "why": "the `speakerd: ` lines: every check reads them, the speakerd scenarios too",
+      "paths": ["dsp/juce_apps/speakerd/Log.h"],
+      "checks": ["speakerd"]
+    },
+    {
+      "why": "speakerd alone: the import of an AudioPluginHost session (speakerd_import, with the examples), the plugins' LV2 state, the sample helpers",
+      "paths": ["dsp/juce_apps/speakerd/FilterGraph.*", "dsp/juce_apps/speakerd/LV2State.*", "dsp/juce_apps/speakerd/Samples.h",
+                "dsp/juce_apps/speakerd/examples/*"],
+      "checks": ["speakerd"]
+    },
+    {
+      "why": "a speakerd file no rule above names: everything that runs speakerd, until it is named (tools/tests/test_impact.py fails meanwhile)",
       "paths": ["dsp/juce_apps/speakerd/*"],
       "checks": ["speakerd", "installers", "pair", "chain"]
     },

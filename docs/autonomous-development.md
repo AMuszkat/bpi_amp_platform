@@ -148,8 +148,8 @@ Two plugin tests are standalone: firConv's response test and the level-matched b
 
 **Level 2** is the virtual pair's scenarios, one Python module each in `tests/vpair/`. Each
 module's docstring says exactly what it proves and the thresholds it uses; the README there
-lists them. The checks of `tools/test.sh` run them a few at a time (`speakerd`, `ampd`,
-`pair`, `controller`, `installers`, `chain`); in short:
+lists them. The checks of `tools/test.sh` run them by area (`speakerd`, `ampd`, `pair`,
+`controller`, `installers`, `chain`; how, below); in short:
 
 | Scenarios | Prove that |
 |---|---|
@@ -163,6 +163,42 @@ lists them. The checks of `tools/test.sh` run them a few at a time (`speakerd`, 
 
 Planned and not built: `graph_rejected`, `power_cut`, `catalogue`, `monitor_freshness`,
 `scope_resolution`, `triggered_record`, `monitor_rt_safety`.
+
+**How the checks run.** While working, an agent runs a check, not a level (section 3), and
+the checks are made to take a minute or two after an edit:
+
+- **Several modules at once.** The virtual pair's modules run `--jobs N` at a time
+  (`BPI_TEST_JOBS`; by default half the processors), each worker on a virtual pair of its own
+  (its own `VPAIR_DIR`, loopback addresses and stand-in plugin host name), through
+  `tests/vpair/pool.py`: it builds once what all the modules need, starts the longest first,
+  prints each module's output whole when it ends, and writes the note the serial runner
+  writes. A module that measures CPU (`chain_cost`) runs after the others, alone. `--jobs 1`
+  is the serial runner, one module after another in one process.
+- **One run for several checks.** `tools/test.sh speakerd installers`, and `changed`, run
+  what needs no virtual pair first (`plugin`, `plugins`, `tools`, the controller's build and
+  its own tests), then every module the checks name, once each, in one run of the pool.
+- **What `changed` runs.** `tests/impact.json` is narrow on purpose. An edit of a plugin's
+  editor runs the plugin's own check, not `chain`: the chain runs the headless builds, which
+  never compile the editor. An edit in `speakerd` runs `speakerd` and, beside it, only the
+  checks whose scenarios alone read what that file is for: `Engine.cpp` runs `speakerd`
+  alone, `Monitor.cpp` all four. `tools/tests/test_impact.py` keeps the map honest (every
+  `speakerd` file is named by a rule, every path that skips `chain` is editor-only), and what
+  the map leaves out, the levels catch before the push.
+- **No LTO in `plugin <name>`.** The focused plugin check builds without link-time
+  optimisation, in `dsp/juce_apps/plugin-check/build-check-nolto`, so that a one-line edit
+  relinks in seconds rather than in most of a minute. `plugins`, level 1 and CI build with
+  LTO, in `build-check`, as the plugins ship; `BPI_TEST_LTO=1` keeps it in `plugin <name>`.
+- **A quick `chain_cost`.** The checks that run `chain_cost` (`chain`, `module`, `changed`)
+  measure it over a shorter window (`VPAIR_CHAIN_COST_QUICK=1`; its module says how long);
+  the levels and CI measure the full 20 s.
+- **One ccache for every worktree.** In the development container the builds go through
+  ccache, with one cache, the main checkout's `build/ccache`, for it and all its worktrees
+  (`ccache_env` in `tools/container.sh`), so that a new worktree's first build mostly hits.
+
+The levels keep LTO and `chain_cost`'s full window wherever they run, and use the pool like
+the checks (`--jobs 1` for the serial runner). Where `CI` is set, as it is in
+`.github/workflows/ci.yml`, the defaults are CI's: one job (the serial runner), LTO
+everywhere, the full window and no ccache, so CI runs the levels exactly as before.
 
 **Level 3** is one smoke test on a board, not a copy of level 2: deploy, play, check that
 `speakerd` plays the right layer through the right sink with no restart, xrun or late cycle,
