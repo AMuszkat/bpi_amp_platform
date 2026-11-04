@@ -610,8 +610,11 @@ BUILD_WAITING = "tools/build.sh: waiting for"
 def run_build(command):
     """tools/build.sh (`command`), its output (stdout and stderr) kept and returned with its exit
     status, to be shown if it fails; its waiting line also goes to stderr at once. What stops the
-    reading (a KeyboardInterrupt, a print to a closed stderr) kills the build and reaps it before it
-    goes on, as subprocess.run does, rather than leave it running with its tree's lock."""
+    reading (a KeyboardInterrupt, a print to a closed stderr) kills the build, its cmake and ninja and
+    their compilers included (_kill_tree), and reaps it before it goes on, rather than leave any of
+    them running with its tree's lock (tools/build.sh's .build.lock, which they inherit). The build
+    stays in this process's group, so a signal to the group (a terminal's ^C, a killpg) still reaches
+    all of it."""
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                errors="replace")
     lines = []
@@ -622,10 +625,48 @@ def run_build(command):
                 if line.startswith(BUILD_WAITING):
                     print(line.rstrip("\n"), file=sys.stderr, flush=True)
     except BaseException:
-        process.kill()
+        _kill_tree(process.pid)
         process.wait()
         raise
     return process.wait(), "".join(lines)
+
+
+def _children():
+    """{parent PID: [child PIDs]} of every process /proc shows."""
+    tree = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as stat:
+                # The fields after the command (in parentheses, which may hold spaces): state, ppid.
+                ppid = int(stat.read().rpartition(")")[2].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        tree.setdefault(ppid, []).append(int(entry))
+    return tree
+
+
+def _kill_tree(pid):
+    """SIGKILL to `pid` and every process under it. Each is stopped (SIGSTOP) as it is found, so none
+    starts another, or exits and leaves its children to init, while the tree is gathered; then all
+    are killed. The caller reaps `pid`; the others, orphaned, are reaped by init."""
+    found, todo = [], [pid]
+    while todo:
+        for p in todo:
+            try:
+                os.kill(p, signal.SIGSTOP)
+                found.append(p)
+            except ProcessLookupError:
+                pass
+        tree = _children()
+        # Under any of them, not only the last found: one may have forked as it was stopped.
+        todo = [c for p in found for c in tree.get(p, []) if c not in found]
+    for p in found:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def built(what, kind=None):
@@ -2262,31 +2303,37 @@ class VirtualDisplay:
     number (tests/vpair/pool.py gives each worker its own, :100 + k, and DISPLAY pointing at it), or,
     without it (the serial runner: --jobs 1, CI), on the first free number from :100 up to :199,
     tried one at a time. Never :0, which Xvfb's -displayfd alone would take: a JUCE program with no
-    DISPLAY opens :0.0 (a build's juce_lv2_helper, the plugins speakerd hosts), so it would attach
-    to this display and die when it stops. Given a number, Xvfb writes it to -displayfd once it takes
-    connections and exits at once, writing nothing, when an X server already listens there, so the
-    next number is tried (as dsp/juce_apps/plugin-check/run.sh does from :200; the controller's own
-    tests take :300 up). openbox is its window manager. Entering returns once Xvfb takes connections
-    and openbox has started (its --startup command ran); `env` is {"DISPLAY": ...}. Leaving stops
-    both."""
+    DISPLAY opens :0.0 (a build's juce_lv2_helper, the controller run without one; speakerd opens
+    none since 0.3.3, nor do the plugins it hosts), so it would attach to this display and die when
+    it stops. Given a number, Xvfb writes it to -displayfd once it takes connections and exits at
+    once, writing nothing, when an X server already listens there, so the next number is tried (as
+    dsp/juce_apps/plugin-check/run.sh does from :200; the controller's own tests take :300 up).
+    openbox is its window manager, unless `window_manager` is False. With `audit`, Xvfb runs with
+    -audit 4 and says each client that connects in its log (audit_log(): "client 1 connected from
+    local host ( uid=... pid=... )"). Entering returns once Xvfb takes connections and openbox has
+    started (its --startup command ran); `env` is {"DISPLAY": ...}, `number` the display's number.
+    kill() ends the Xvfb with SIGKILL, as a server that goes away. Leaving stops both."""
 
     # Without VPAIR_DISPLAY: the pool workers' range (:100 + k), free while the serial runner runs (the
     # two never run at once in one checkout).
     NUMBERS = range(100, 200)
     START_TIMEOUT = 10.0              # seconds for Xvfb to take connections, every number tried included
 
-    def __init__(self, size="1720x1000x24"):
-        self.size, self.processes, self.env = size, [], {}
+    def __init__(self, size="1720x1000x24", audit=False, window_manager=True):
+        self.size, self.audit, self.window_manager = size, audit, window_manager
+        self.processes, self.env, self.number, self.xvfb = [], {}, None, None
 
     def __enter__(self):
         try:
-            for tool in ("Xvfb", "openbox"):
+            for tool in ("Xvfb", "openbox") if self.window_manager else ("Xvfb",):
                 if not shutil.which(tool):
                     raise AssertionError(f"no {tool}: the GUI check needs Xvfb and openbox (the development container has both)")
             self._tmp = Path(tempfile.mkdtemp(prefix="vpair-display-"))
             own = os.environ.get("VPAIR_DISPLAY")
-            number = self._xvfb([int(own)] if own else self.NUMBERS)
-            self.env = {"DISPLAY": f":{number}"}
+            self.number = self._xvfb([int(own)] if own else self.NUMBERS)
+            self.env = {"DISPLAY": f":{self.number}"}
+            if not self.window_manager:
+                return self
             ready = self._tmp / "openbox-started"
             self.processes.append(subprocess.Popen(["openbox", "--startup", f"touch {ready}"],
                                                    env=dict(os.environ, **self.env), stdin=subprocess.DEVNULL,
@@ -2316,7 +2363,7 @@ class VirtualDisplay:
                 log.write(f"--- Xvfb :{n}\n")
                 log.flush()
                 xvfb = subprocess.Popen(["Xvfb", f":{n}", "-displayfd", str(write), "-screen", "0", self.size,
-                                         "-nolisten", "tcp"],
+                                         "-nolisten", "tcp", *(["-audit", "4"] if self.audit else [])],
                                         pass_fds=(write,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
             os.close(write)
             said = b""
@@ -2333,11 +2380,34 @@ class VirtualDisplay:
                 os.close(read)
             if said.strip() == str(n).encode() and xvfb.poll() is None:
                 self.processes.append(xvfb)
+                self.xvfb, self._log_start = xvfb, log_path.stat().st_size
                 return n
             _stop_process(xvfb)
         where = f":{tried[0]} to :{tried[-1]}" if tried else "none tried"
         log = log_path.read_text()[-2000:] if log_path.exists() else ""
         raise AssertionError(f"Xvfb did not start on any display ({where}) within {self.START_TIMEOUT:g} s: {log}")
+
+    def audit_log(self):
+        """What the Xvfb said since it took connections (its tries on taken numbers left out): with
+        `audit`, a line for each client that connected or disconnected."""
+        with open(self._tmp / "xvfb.log", errors="replace") as log:
+            log.seek(self._log_start)
+            return log.read()
+
+    def kill(self):
+        """Ends the Xvfb with SIGKILL, as a server that goes away, and removes the socket file it
+        leaves (/tmp/.X11-unix/X<n>; a lock file, /tmp/.X<n>-lock, too, though with -displayfd it
+        makes none): the number was its own, and the next Xvfb on it (the pool worker's next unit)
+        starts as on a free one."""
+        if self.xvfb is None or self.xvfb.poll() is not None:
+            return
+        self.xvfb.kill()
+        self.xvfb.wait(timeout=5)
+        for leftover in (Path(f"/tmp/.X11-unix/X{self.number}"), Path(f"/tmp/.X{self.number}-lock")):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
 
     def screenshot(self, path):
         """The whole X screen into `path` (PNG), with ImageMagick's import."""

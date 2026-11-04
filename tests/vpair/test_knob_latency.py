@@ -25,8 +25,9 @@ test uses; speakerd's own late-cycle and position-jump counts are also available
 `status`, its `speakerd/timing` stream and its log, and are not used here). A change that is not at its new level 3 ms
 after it began, drops out in the 30 ms after it, or is not a clean change (steady again at a
 level more than 6 dB away, the way the change goes, from 50 ms to 500 ms after it), with no xrun
-or late cycle recorded there, is a FAILURE. Up to 30 changes are sent (10 at least), and at least
-5 must be measured.
+or late cycle recorded there, is a FAILURE; its message also names what pw-profiler recorded for
+the other nodes in that window (the players, the sinks), which does not set it aside. Up to 30
+changes are sent (10 at least), and at least 5 must be measured.
 
 Pass when at least 5 changes are measured, and for every measured change:
 
@@ -53,7 +54,12 @@ from harness import (RATE, Controller, Player, Profiler, SpeakerPair, TimedRecor
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless")
+# Its two tests are independent (each its own pair, from measure()): a unit each (README.md, "The pool").
+POOL_SPLIT = True
 POOL_QUIET = True   # a time: each change heard within 60 ms of the send, the two captures within 5 ms
+# Alone: beside the quiet phase's other units (18 on 12 workers) quantum 128 failed 5 of 12 runs, "not at
+# its new level 3 ms after it began" with no xrun recorded; alone and in the mixed main phase it passed.
+POOL_ALONE = ("KnobLatency.test_at_quantum_128",)
 
 FREQ, LEVEL = 200.0, -20.0
 PARAMS = {"mode": "Force 1", "s0_e0_freq": 1000.0, "s0_e0_gain": 0.0, "glide": 1.0}
@@ -173,8 +179,10 @@ class KnobLatency(unittest.TestCase):
                             break
             finally:
                 captures = {name: (r.stop()[0], r) for name, r in recorders.items()}
-                # What PipeWire recorded for speakerd's graph, the recorder, and the cycles.
+                # What PipeWire recorded for speakerd's graph, the recorder, and the cycles; and, for a
+                # failure's message only, what it recorded for the other nodes (the player, the sinks).
                 xruns = {name: p.events(["speakerd-dsp", recorders[name].name]) for name, p in profilers.items()}
+                elsewhere = {name: [e for e in p.events() if e not in xruns[name]] for name, p in profilers.items()}
                 for p in profilers.values():
                     p.__exit__(None, None, None)
         aside_, failures = [], []
@@ -189,7 +197,10 @@ class KnobLatency(unittest.TestCase):
                     if seen:
                         set_aside.append(f"{name}: {r['problem']}, with {seen[0]} recorded there (pw-profiler)")
                     else:
-                        failed.append(f"{name}: {r['problem']}, and pw-profiler recorded no xrun or late cycle there")
+                        other = sorted({what for t, what in elsewhere[name] if t_send - 0.7 <= t <= t_send + 1.0})
+                        failed.append(f"{name}: {r['problem']}, and pw-profiler recorded no xrun or late cycle there"
+                                      + (f" (for speakerd-dsp or the recorder; it did record {', '.join(other)})"
+                                         if other else ""))
             if failed:
                 failures.append(f"change {k + 1} ({CHANGES[k]:+g} dB): " + "; ".join(failed))
                 print(f"\n  quantum {quantum}, change {k + 1}: FAILED: {'; '.join(failed)}", end="")
