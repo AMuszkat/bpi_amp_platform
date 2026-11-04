@@ -34,7 +34,8 @@ juce_plugins/
 │   ├── common.sh                 config loading + plugin discovery used by the scripts
 │   ├── plugin-versions.sh        every plugin's version and source identity; the version rule
 │   ├── Containerfile             the builder image (Debian bookworm + aarch64 cross toolchain),
-│   │                             also the repository's development container (tools/container.sh)
+│   │                             also the repository's development container (tools/container.sh);
+│   │                             it carries ccache for the build scripts' compiler launcher
 │   ├── toolchain-aarch64-linux.cmake
 │   ├── build-aarch64.sh          alternative: cross-build on a bare Linux host
 │   ├── build-native-linux.sh     alternative: build on the ARM board itself

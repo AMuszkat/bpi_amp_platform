@@ -91,3 +91,10 @@ RUN apt-get update \
 
 # juce_plugins/ is bind-mounted here; each step sets its own working directory.
 WORKDIR /work
+
+# ccache, for the build scripts' compiler launcher. Its own layer, last, so that the image
+# of the Containerfile without it is this one's parent: a checkout on either side of the
+# change gets its image back from the layer cache.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ccache \
+ && rm -rf /var/lib/apt/lists/*
