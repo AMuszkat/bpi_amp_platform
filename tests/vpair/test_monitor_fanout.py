@@ -6,8 +6,8 @@ is within 30 % of what it asked for.
 Both virtual speakers run speakerd and ampd (the left the hub, the right its agent) on
 test_graph_edit's document (loudness_headless, flat), each playing a steady 200 Hz tone at -20 dBFS
 into its speakerd sink, so that every audio cycle runs and `output/level` has a value in every
-period. On one speaker at a time, the hub's first and then the agent's, eight harness monitor
-clients (plugin windows) connect to its ampd and subscribe to `output/level` at 20 Hz, the k-th
+period. On both speakers at once, eight harness monitor clients (plugin windows) each connect to
+that speaker's ampd, the hub's and the agent's, and subscribe to `output/level` at 20 Hz, the k-th
 1.5 k / 8 periods after the first: their phases (0, 3/16, 6/16, ... of the 50 ms period) all
 differ, and the subscriptions are spread over 1.3 periods, so a relay that sends each client's
 values on a clock of its own makes each value wait for that client's phase. From 1 s after every
@@ -18,11 +18,24 @@ its `t` (speakerd's `CLOCK_MONOTONIC` when its monitor thread sampled it: one cl
 Why 30 s: each flush sends one value to all eight clients, so a stall (speakerd's monitor thread,
 ampd's loop or the harness held up a moment, on a shared runner that also runs two PipeWire graphs)
 makes all eight late at once. The window's 4800 values are about 600 periods, and the 99th
-percentile stays under 5 ms with six of them stalled; a 10 s window tolerated two. Each speaker's
-measurement takes about 32 s, and the scenario about 70 s, the pair's start included. Each tone
-lasts both measurements and 20 s more, so that both speakers play through both windows: no node
-or link goes away in the middle of one. At the end of each window both players must still play,
-or the scenario fails.
+percentile stays under 5 ms with six of them stalled; a 10 s window tolerated two. The two
+measurements take about 32 s together, and the scenario about 33 s, the pair's start included (one
+speaker after the other took about 64). Each tone lasts the measurement and 20 s more, so that both
+speakers play through both windows: no node or link goes away in the middle of one. At the end of
+each window both players must still play, or the scenario fails.
+
+Why both at once measures the same as one after the other. A speaker's monitor link is its own
+ampd's, fed by its own speakerd's monitor thread (ampd relays no other speaker's values: the hub's
+monitor link carries its own speaker's only), so neither speaker's clients reach the other's
+speakerd, ampd or link, and each ampd's CPU (its own /proc/<pid>/stat) counts its own relay alone.
+Both PipeWire graphs ran through both windows before as well; what the two at once share is the
+machine and the harness process, whose sixteen reader threads (one per client) take an arrival a
+little later when two values come together. That can only make an age longer (the arrival is read
+later, never earlier), so it makes the 5 ms harder to meet, not easier, and a relay on a clock of
+its own still shows its tens of milliseconds; a rate counts the values that arrived, which nothing
+here creates or removes. Measured on the machine this was written on (12 pool workers): the age's
+median 0.35 to 0.62 ms and 99th percentile 0.94 to 1.77 ms over five runs at once, against 0.29 to
+0.48 ms and 0.80 to 1.33 ms for each speaker in a unit of its own.
 
 Pass when, on each speaker:
 
@@ -33,7 +46,8 @@ Pass when, on each speaker:
 
 Printed, per client: its rate and its age's median, 90th and 99th percentile and maximum; per
 speaker: the age's percentiles over all clients, and ampd's CPU over the window (its utime and
-stime from /proc, a share of one core; printed, not asserted).
+stime from /proc, a share of one core; printed, not asserted). A measurement that fails (no first
+value within 5 s, a tone that ended) fails the scenario with the other's results printed.
 
 With the per-client pump of ampd 0.1.0 (one task per client and stream, on its own clock) the
 age's 99th percentile is about 50 ms on the virtual pair; relayed as it arrives, about 1 ms.
@@ -49,6 +63,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -59,13 +74,14 @@ from test_graph_edit import DOCUMENT
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless")
+POOL_QUIET = True   # a time and a rate: the value age's p99 under 5 ms, each client's rate within 30 %
 
 STREAM = "output/level"
 CLIENTS = 8
 RATE_HZ = 20.0
 STAGGER = 1.5 / CLIENTS          # periods between two clients' subscriptions
 SETTLE, WINDOW = 1.0, 30.0       # seconds (WINDOW: the docstring's "Why 30 s")
-TONE = 2 * (SETTLE + WINDOW) + 20.0  # seconds: both measurements, one after the other, and 20 s to spare
+TONE = SETTLE + WINDOW + 20.0    # seconds: the two measurements, at once, and 20 s to spare
 AGE_P99_MS = 5.0
 RATE_TOLERANCE = 0.3
 FREQ, LEVEL = 200.0, -20.0
@@ -97,9 +113,16 @@ class MonitorFanout(unittest.TestCase):
                 Player(pair["left"], tone(FREQ, LEVEL, TONE), target="speakerd") as left, \
                 Player(pair["right"], tone(FREQ, LEVEL, TONE), target="speakerd") as right:
             players = {"left": left, "right": right}
-            for name in ("left", "right"):
-                results[name] = self.measure(name, pair.ampd[name].process.pid, players)
-        failures = []
+            # Both speakers at once (the docstring's "Why both at once"), each with its own clients.
+            with ThreadPoolExecutor(2) as pool:
+                futures = {name: pool.submit(self.measure, name, pair.ampd[name].process.pid, players)
+                           for name in ("left", "right")}
+            failures = []
+            for name, future in futures.items():
+                try:
+                    results[name] = future.result()
+                except AssertionError as e:
+                    failures.append(f"{name}: {e}")
         for name, (clients, cpu) in results.items():
             role = "the hub" if name == "left" else "the agent"
             every = np.concatenate([ages for _, ages in clients]) if clients else np.array([])
@@ -142,7 +165,7 @@ class MonitorFanout(unittest.TestCase):
             end, cpu1 = time.monotonic(), cpu_seconds(ampd_pid)
             ended = [speaker for speaker, player in players.items() if not player.playing()]
             if ended:
-                self.fail(f"{name}: the tone on {' and '.join(ended)} ended before the window did "
+                self.fail(f"the tone on {' and '.join(ended)} ended before the window did "
                           f"({TONE:g} s of tone): the window did not measure a speaker playing")
             measured = []
             for client in clients:

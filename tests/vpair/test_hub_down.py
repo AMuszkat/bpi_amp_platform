@@ -38,6 +38,7 @@ from test_graph_edit import DOCUMENT, chained
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless")
+POOL_QUIET = True   # an xrun count: no 10 ms block of the right's capture 1 dB under its level, none zeros
 
 FREQ, LEVEL = 200.0, -20.0
 

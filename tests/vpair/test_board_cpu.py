@@ -59,6 +59,7 @@ from test_graph_edit import DOCUMENT
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
 # ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
 POOL_BUILDS = ("speakerd", "loudness:headless")
+POOL_QUIET = True   # a rate and times: 20 board/cpu values in 3 s, `seconds` near 0.1 s, a stop within 2 s
 
 CPU, TIMING = "board/cpu", "speakerd/timing"
 CPU_RATE, TIMING_RATE = 10.0, 5.0
