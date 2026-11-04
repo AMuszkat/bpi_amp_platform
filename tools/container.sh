@@ -154,10 +154,16 @@ ensure_juce() {
 # (BPI_CCACHE=1 uses it with CI too): BPI_CCACHE=1, and the cache in build/ccache of the main
 # checkout, which every checkout's and worktree's container mounts, so they all share it;
 # paths under this checkout are hashed relative to it (CCACHE_BASEDIR), so that two worktrees
-# hit each other's entries for their own sources. Otherwise BPI_CCACHE=0. A build script then
-# sets ccache as the compiler launcher when BPI_CCACHE=1 and ccache is on PATH, and sets no
-# launcher otherwise. CCACHE_DIR and CCACHE_BASEDIR already set are kept; the container is not
-# given the outside ones (a CCACHE_DIR of the host is not mounted in it).
+# hit each other's entries for their own sources (the JUCE install, outside every worktree,
+# keeps its absolute paths there; in the main checkout, which contains it, they are relative,
+# so the main checkout and the worktrees do not hit each other's entries).
+# Otherwise BPI_CCACHE=0. A build script then sets ccache as the compiler launcher when
+# BPI_CCACHE=1 and ccache is on PATH, and sets no launcher otherwise. CCACHE_DIR and
+# CCACHE_BASEDIR already set are kept; the container is not given the outside ones (a
+# CCACHE_DIR of the host is not mounted in it). Nothing else is needed: the builds have no -g
+# (so the directory is not hashed), and the one compile that misses at another path is JUCE's
+# three-line juce_core_CompilationTime.cpp (__TIME__). Its statistics:
+# tools/container.sh env CCACHE_DIR=<main checkout>/build/ccache ccache -s
 ccache_env() {
     if command -v ccache > /dev/null && [ "${BPI_CCACHE:-}" != 0 ] \
        && { [ -z "${CI:-}" ] || [ "${BPI_CCACHE:-}" = 1 ]; }; then

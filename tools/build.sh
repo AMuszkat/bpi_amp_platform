@@ -22,7 +22,9 @@ arch=x86_64
 [ "${2:-}" = aarch64 ] && arch=aarch64
 first_kind=2
 [ $arch = aarch64 ] && first_kind=3
-kinds=("${@:$first_kind}")
+# An empty argument names no kind, as it did when there was one at most.
+kinds=()
+for kind in "${@:$first_kind}"; do [ -z "$kind" ] || kinds+=("$kind"); done
 [ ${#kinds[@]} -gt 0 ] || kinds=(all)
 for kind in "${kinds[@]}"; do
     case "$kind" in
