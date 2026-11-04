@@ -8,8 +8,14 @@ fake hub addresses (worker k: 127.0.3.<2k+1> for the hub, 127.0.3.<2k+2> for the
 the same ports), and each test its own HOME (the controller's settings file). Each test runs in
 a process of its own (`python3 -m unittest -v <test>`), so a test sees exactly what it sees when
 run alone. The tests marked @alone in test_controller.py (a bound on a time or a rate) run after
-the others, one at a time, on the first worker. The output is unittest's -v output, one test
-after the other as they end, and its summary; the exit status is 0 when every test passed.
+the others, one at a time, on the first worker whose display started. The output is unittest's
+-v output, one test after the other as they end, and its summary; the exit status is 0 when
+every test passed.
+
+A test that outlives TEST_TIMEOUT_S is killed and is an error; its worker goes on with the next.
+A worker whose display does not start is an error and runs nothing (the others take its tests).
+A test that did not run (no display started, the run stopped) is an error named in the summary,
+with why.
 
 N: --jobs, or $BPI_CONTROLLER_JOBS, or 1 where $CI is set, or DEFAULT_JOBS. Standard library only.
 """
@@ -25,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -131,16 +138,24 @@ class Worker:
         self.tmp = os.path.join(tmp, "worker-%d" % index)
         os.makedirs(self.tmp)
         self.display = None
+        self.display_error = None      # why its display did not start: it runs nothing
         self.process = None
         self.lock = threading.Lock()
         self.stopping = False
 
     def start_display(self):
+        """True when the worker can run tests: its display started, or there is no Xvfb or
+        openbox (the GUI tests skip themselves). False, with display_error, when it failed."""
         try:
             self.display = VirtualDisplay().__enter__()
         except unittest.SkipTest:
             self.display = None      # no Xvfb or openbox: the GUI tests skip themselves
-        return self
+        except Exception as e:       # none started within its timeout, or Xvfb/openbox failed
+            self.display = None
+            self.display_error = "%s: %s" % (type(e).__name__, e)
+            return False
+        self.display_error = None
+        return True
 
     def stop_display(self):
         if self.display is not None:
@@ -171,21 +186,29 @@ class Worker:
         try:
             out, err = self.process.communicate(timeout=TEST_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            self.kill()
+            self.kill_current()      # this test only: the worker goes on with the next
             out, err = self.process.communicate()
             err += "\n(killed after %d s)" % TEST_TIMEOUT_S
+        if self.stopping and self.process.returncode == -signal.SIGKILL:
+            err += "\n(killed: the run was stopped)"
         code, self.process = self.process.returncode, None
         result.seconds = time.monotonic() - t0
         return parse(result, code, out, err)
 
-    def kill(self):
+    def kill_current(self):
+        """Kills the test running now, and what it started (its session)."""
         with self.lock:
-            self.stopping = True
             if self.process is not None and self.process.poll() is None:
                 try:
                     os.killpg(self.process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+    def kill(self):
+        """The run stops: the test running now is killed, and the worker starts no other."""
+        with self.lock:
+            self.stopping = True
+        self.kill_current()
 
 
 def main():
@@ -225,54 +248,112 @@ def main():
     workers = [Worker(k, tmp) for k in range(jobs)]
     queue, queue_lock = list(together), threading.Lock()
 
-    def work(worker):
-        worker.start_display()
+    display_errors = []        # [(worker index, why)]: each an error of the run
+    not_run = {}               # {test: why}: each an error, named in the summary
+
+    def run_one(worker, test):
         try:
-            while True:
+            show(worker.run(test))
+        except Exception:          # the runner's own failure (a HOME it cannot make, ...): this test's error
+            result = Result(test, worker)
+            result.errors = 1
+            result.head = "%s ... ERROR" % test
+            result.blocks = "%s\nERROR: %s (the runner failed to run it)\n%s\n%s" % (
+                SEPARATOR1, test, SEPARATOR2, traceback.format_exc())
+            show(result)
+
+    def start_display(worker):
+        if worker.start_display():
+            return True
+        with out_lock:
+            display_errors.append((worker.index, worker.display_error))
+            print("-- worker %d: its display did not start, it runs nothing: %s" % (worker.index, worker.display_error),
+                  file=sys.stderr, flush=True)
+        return False
+
+    def work(worker):
+        if not start_display(worker):
+            return             # the others take its tests
+        try:
+            while not worker.stopping:
                 with queue_lock:
                     if not queue:
                         break
                     test = queue.pop(0)
-                show(worker.run(test))
+                run_one(worker, test)
         finally:
             if worker.index != 0:
                 worker.stop_display()
 
+    def alone_worker():
+        """Worker 0 with its display; else the first other whose display started, its display
+        started again (it stopped it); None when none starts."""
+        if workers[0].display_error is None:
+            return workers[0]
+        for w in workers[1:]:
+            if w.display_error is None and start_display(w):
+                return w
+        return None
+
     threads = [threading.Thread(target=work, args=(w,), daemon=True) for w in workers]
+    stopped, code = None, None
     try:
         for t in threads:
             t.start()
         for t in threads:
             while t.is_alive():
                 t.join(0.5)
+        with queue_lock:       # left by workers whose displays all failed
+            not_run.update((test, "no worker's display started") for test in queue)
+            del queue[:]
         if alone:
             with out_lock:
                 print("-- run alone, one at a time: %s" % ", ".join(
                     "%s (%s)" % (t.rsplit(".", 1)[-1], alone[t]) for t in ids if t in alone), file=sys.stderr, flush=True)
+            w = alone_worker()
             for test in (t for t in ids if t in alone):
-                show(workers[0].run(test))
+                if w is None:
+                    not_run[test] = "no worker's display started"
+                else:
+                    run_one(w, test)
+    except KeyboardInterrupt:
+        stopped, code = "the run was interrupted", 130
+    except SystemExit as e:    # SIGTERM
+        stopped, code = "the run was stopped", e.code
     finally:
         for w in workers:
             w.kill()
+        for t in threads:      # each ends its test's communicate() and starts no other
+            t.join(10)
+        for w in workers:
             w.stop_display()
         shutil.rmtree(tmp, ignore_errors=True)
     elapsed = time.monotonic() - t0
     save_durations(durations, results)
 
-    failures = sum(r.failures for r in results)
-    errors = sum(r.errors for r in results)
-    skipped = sum(r.skipped for r in results)
-    order = {t: i for i, t in enumerate(ids)}
-    blocks = [r.blocks for r in sorted(results, key=lambda r: order[r.test]) if r.blocks]
-    missing = len(ids) - len(results)
-    lines = [""] + blocks + [SEPARATOR2, "Ran %d tests in %.3fs" % (len(results), elapsed), ""]
-    extra = [("failures", failures), ("errors", errors + missing), ("skipped", skipped)]
-    if failures or errors or missing:
-        lines.append("FAILED (%s)" % ", ".join("%s=%d" % kv for kv in extra if kv[1]))
-    else:
-        lines.append("OK" + (" (skipped=%d)" % skipped if skipped else ""))
-    print("\n".join(lines), file=sys.stderr, flush=True)
-    return 1 if failures or errors or missing else 0
+    with out_lock:
+        ran = {r.test for r in results}
+        for test in ids:
+            if test not in ran and test not in not_run:
+                not_run[test] = stopped or "lost by the runner (a bug of runner.py)"
+        failures = sum(r.failures for r in results)
+        errors = sum(r.errors for r in results) + len(not_run) + len(display_errors)
+        skipped = sum(r.skipped for r in results)
+        order = {t: i for i, t in enumerate(ids)}
+        blocks = ["%s\nERROR: the display of worker %d (it ran no test)\n%s\n%s" % (SEPARATOR1, k, SEPARATOR2, why)
+                  for k, why in sorted(display_errors)]
+        blocks += [r.blocks for r in sorted(results, key=lambda r: order[r.test]) if r.blocks]
+        blocks += ["%s\nERROR: %s (not run: %s)" % (SEPARATOR1, test, not_run[test]) for test in ids if test in not_run]
+        lines = [""] + blocks + [SEPARATOR2, "Ran %d tests in %.3fs" % (len(results), elapsed), ""]
+        extra = [("failures", failures), ("errors", errors), ("skipped", skipped)]
+        if failures or errors:
+            lines.append("FAILED (%s)" % ", ".join("%s=%d" % kv for kv in extra if kv[1]))
+        else:
+            lines.append("OK" + (" (skipped=%d)" % skipped if skipped else ""))
+        print("\n".join(lines), file=sys.stderr, flush=True)
+    if code is not None:
+        return code
+    return 1 if failures or errors else 0
 
 
 if __name__ == "__main__":

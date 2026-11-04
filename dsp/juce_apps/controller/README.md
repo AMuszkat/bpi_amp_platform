@@ -337,12 +337,20 @@ sees run alone (`python3 -m unittest discover -s dsp/juce_apps/controller/tests 
 one at a time, a display from :300 up for each GUI test). The longest start first
 (`build/controller-check/durations.json`, the last run's times). The tests marked `@alone` in
 `test_controller.py`, whose pass criterion is a time or a rate, run after the others, one at a
-time: `test_03` (at least 40 datagrams in 1.2 s, at most 51 in a second), `test_09` (more than 8
+time, on worker 0 (or the first other worker whose display starts): `test_03` (at least 40 datagrams in 1.2 s, at most 51 in a second), `test_09` (more than 8
 level values in 0.5 s), `test_12` and `test_13` (the message thread's ticks under 250 ms). The
 output is unittest's `-v`, one test after the other as they end (each with its time and worker),
-and its summary; the exit status is 0 when every test passed. The tests wait on conditions (the
+and its summary; the exit status is 0 when every test passed. A test still running after 600 s
+is killed and is an error (`killed after 600 s`), and its worker goes on with the next; a worker
+whose display does not start is an error (`ERROR: the display of worker K`) and runs nothing, the
+others taking its tests; every test that did not run is an error named in the summary with why
+(`ERROR: <test> (not run: no worker's display started)`, or `the run was stopped` after a
+SIGTERM or Ctrl-C, which still prints the summary). The tests wait on conditions (the
 hub's state sent, a refusal, a file the test writes), not on fixed sleeps, except where the time
-is what a test checks (a 7 s window of retries, a negative check that nothing more came).
+is what a test checks (a 7 s window of retries, a negative check that nothing more came: an
+undone edit still undone 300 ms on, no hello in the second after a wrong name's refusal).
+`fake_hub.py` never writes to a connection while holding its lock: a write to a controller
+that does not read (test_12, 13) holds only that connection's write lock.
 
 `tests/test_controller.py` runs the controller's test mode against the fake hub and checks what
 it printed and what the hub received: hello and state; a change without a gesture over the
