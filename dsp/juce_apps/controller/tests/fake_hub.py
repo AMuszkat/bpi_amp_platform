@@ -177,7 +177,7 @@ class FakeHub:
         self.quantum_delay = 0.3          # seconds from an applied quantum to the state that shows it run
         self.answer_delay = 0.0           # seconds before a proposal is answered
         self.during_answer = None         # called while a proposal waits for its answer (answer_delay)
-        self.after_state = None           # called (under the lock) once a controller's first state is sent, before its next line is read
+        self.after_state = None           # called (under the lock, so it sends nothing) once a controller's first state is sent, before its next line is read
         self.known_plugins = {LOUDNESS_URI, FIRCONV_URI, CROSSOVER_URI, PROBE_URI, PROBE_BYPASS_URI}
         self.reject_next = None           # a reason: the next proposal is rejected with it
         self.echo_delay = 0.0             # seconds before an OSC echo leaves (to test reordering)
@@ -293,6 +293,13 @@ class FakeHub:
             self.received.append((link, message, time.monotonic()))
 
     def _send_line(self, conn, link, message):
+        """One line to a connection. Never with self.lock held: it takes the connection's
+        write lock, then self.lock, and a write to a peer that does not read (test_12, 13)
+        holds the write lock; under self.lock that would be an ABBA deadlock with another
+        writer of the connection, and every user of self.lock would wait on the peer."""
+        owned = getattr(self.lock, "_is_owned", None)
+        if owned is not None and owned():
+            raise RuntimeError("fake_hub: _send_line with the hub's lock held")
         with conn.write_lock:
             with self.lock:
                 self.sent.append((link, message, time.monotonic()))
@@ -513,16 +520,20 @@ class FakeHub:
 
     def _param(self, message, link, conn=None):
         node, pid, value, origin = message.get("node"), message.get("id"), message.get("value"), message.get("origin", "")
+        refusal = None
         with self.lock:
             n = self._node(node)
             if n is None or str(pid).startswith("mon_"):
-                if conn is not None:
-                    self._send_line(conn, "control", {"op": "error", "about": "param", "node": node, "id": pid,
-                                                      "reason": "no such node" if n is None else "a monitor is never set"})
-                return
-            self.seq += 1
-            seq = self.seq
-            n.setdefault("params", {})[pid] = value
+                refusal = "no such node" if n is None else "a monitor is never set"
+            else:
+                self.seq += 1
+                seq = self.seq
+                n.setdefault("params", {})[pid] = value
+        if refusal is not None:     # sent outside the lock (_send_line)
+            if conn is not None:
+                self._send_line(conn, "control", {"op": "error", "about": "param", "node": node, "id": pid,
+                                                  "reason": refusal})
+            return
         if isinstance(value, (int, float)):
             self._osc_out("/bpi/param", int(node), str(pid), float(value), seq, origin)
         if link == "control":
@@ -611,11 +622,12 @@ class FakeHub:
                     reason = self._quantum_refusal(doc)
             if reason is None and self.reject_next:
                 reason, self.reject_next = self.reject_next, None
-            if reason is not None:
-                self._send_line(conn, "control", {"op": "rejected", "revision": rev, "reason": reason})
-                return
-            self.revision = rev
-            self.document = copy.deepcopy(doc)
+            if reason is None:
+                self.revision = rev
+                self.document = copy.deepcopy(doc)
+        if reason is not None:      # sent outside the lock (_send_line)
+            self._send_line(conn, "control", {"op": "rejected", "revision": rev, "reason": reason})
+            return
         self._send_line(conn, "control", {"op": "applied", "revision": rev})
         self._to_controllers({"op": "graph", "revision": rev, "base": base, "time": message.get("time"),
                               "origin": message.get("origin"), "document": doc})
@@ -700,17 +712,18 @@ class FakeHub:
                     self._welcome(conn, "monitor " + speaker, nonce, message["nonce"], "speaker", claimed)
                     threading.Thread(target=produce, daemon=True).start()
                     continue
+                op = message.get("op")
                 with self.lock:
-                    refusal = self.refuse_streams.get(speaker, {}).get(message.get("stream"))
-                    if message.get("op") == "subscribe" and refusal is not None:
-                        self._send_line(conn, "monitor " + speaker, {"op": "error", "about": "subscribe",
-                                                                     "stream": message.get("stream"), "reason": refusal})
-                    elif message.get("op") == "subscribe":
+                    refusal = self.refuse_streams.get(speaker, {}).get(message.get("stream")) if op == "subscribe" else None
+                    if op == "subscribe" and refusal is None:
                         subs[message["stream"]] = int(message.get("rate_hz", 30))
                         self.subscriptions[speaker][message["stream"]] = subs[message["stream"]]
-                    elif message.get("op") == "unsubscribe":
+                    elif op == "unsubscribe":
                         subs.pop(message.get("stream"), None)
                         self.subscriptions[speaker].pop(message.get("stream"), None)
+                if refusal is not None:     # answered outside the lock (_send_line)
+                    self._send_line(conn, "monitor " + speaker, {"op": "error", "about": "subscribe",
+                                                                 "stream": message.get("stream"), "reason": refusal})
         except (OSError, ValueError):
             pass
         finally:

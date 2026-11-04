@@ -378,7 +378,8 @@ class ControllerTest(unittest.TestCase):
 
     def test_10_no_hub_no_edit(self):
         """Without the hub's state an edit is undone and nothing is sent anywhere."""
-        code, steps, err = self.run_script("add loudness\nexpect-no-node $new\nstate\n")
+        # The state 300 ms after the undo: the edit stays undone.
+        code, steps, err = self.run_script("add loudness\nexpect-no-node $new\nsleep 300\nstate\n")
         self.assertPassed(code, steps, err)
         state = self.step(steps, "state")["state"]
         self.assertFalse(state["synced"])
@@ -571,23 +572,28 @@ class ControllerTest(unittest.TestCase):
         hub.monitor_names = {"right": "left"}
         code, steps, err = self.run_script(
             "wait-synced\nopen 20\nwait-monitor 20 mon_level -20.5\nmonitor-speaker 20 right\n"
-            "wait-monitor-refused right is named \"left\", not \"right\"\nstate\n",
+            "wait-monitor-refused right is named \"left\", not \"right\"\nsleep 1000\nstate\n",
             extra=["--test-probe", "--speaker", "right=" + RIGHT, "--hub-name", "left"])
         self.assertPassed(code, steps, err)
         speakers = {s["name"]: s for s in self.step(steps, "state")["state"]["speakers"]}
         self.assertIn('is named "left", not "right"', speakers["right"]["monitor_refusal"])
         self.assertFalse(speakers["right"]["monitor_connected"])
         self.assertTrue(speakers["left"]["monitor_connected"])
+        # Read 1 s after the refusal (its retry is 5 s after it): no hello came in that window.
         right_hellos = len(hub.received_ops("monitor right", "hello"))
         right_subscribes = len(hub.received_ops("monitor right", "subscribe"))
         self.assertEqual(right_hellos, 0, "no hello, no proof to a server with the wrong name")
         self.assertEqual(right_subscribes, 0)
 
-        code, steps, err = self.run_script("wait-refused is named \"left\", not \"other\"\nstate\n", extra=["--hub-name", "other"])
+        control_hellos = len(hub.received_ops("control", "hello"))
+        code, steps, err = self.run_script("wait-refused is named \"left\", not \"other\"\nsleep 1000\nstate\n",
+                                           extra=["--hub-name", "other"])
         self.assertPassed(code, steps, err)
         state = self.step(steps, "state")["state"]
         self.assertFalse(state["synced"])
         self.assertIn('is named "left", not "other"', state["refused"])
+        self.assertEqual(len(hub.received_ops("control", "hello")), control_hellos,
+                         "no hello to a hub with the wrong name, in the 1 s after its refusal")
         report("names", monitor_refusal=speakers["right"]["monitor_refusal"][:34], hellos_to_wrong_speaker=right_hellos,
                hub_refusal=state["refused"][:34])
 
