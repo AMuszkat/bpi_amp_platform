@@ -43,6 +43,10 @@ from harness import (RATE, Controller, SpeakerPair, active, block_levels, built,
                      with_plugin)
 from test_graph_edit import chained
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete")
+
 FREQ, LEVEL = 200.0, -20.0
 PERIOD = int(RATE / FREQ)    # samples of one 200 Hz period
 ATTEMPTS = 3                 # plays of a capture an xrun broke

@@ -34,7 +34,8 @@ socket and no WebSocket client, and nothing in this system is a browser.
   **7452** (monitor), on the address in its own configuration (below). The hub role only
   changes what it does with what arrives. On the virtual pair the two speakers share one
   network namespace, so the left listens on `127.0.1.1` and the right on `127.0.1.2` (any
-  `127.x` address is the loopback).
+  `127.x` address is the loopback; each worker of `tests/vpair/pool.py` runs its pair on a
+  block of its own, `127.77.<k>.1` and `.2`).
 - **The local socket** is `$XDG_RUNTIME_DIR/speakerd/control.sock`, mode 0600. `speakerd`
   listens (it starts first and outlives `ampd` restarts); `ampd` connects and reconnects every
   second while it cannot. One client at a time; a second is refused with

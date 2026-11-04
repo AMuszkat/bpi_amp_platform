@@ -49,6 +49,10 @@ from pathlib import Path
 
 from harness import FIRMWARE, TEST_PLUGIN_HOST, Pair, UserUnit, built, firmware, stub_plugin_host, stub_speakerd
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless")
+
 LAYER_LINE = "speakerd: stub:"
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
 PAIR = None

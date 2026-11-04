@@ -50,6 +50,10 @@ import numpy as np
 from harness import (RATE, Controller, Player, Profiler, SpeakerPair, TimedRecorder, block_levels, built, graph_document,
                      lv2_uri, require_speakerd_local_link, revision_document, speaker_conf_with, tone)
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless")
+
 FREQ, LEVEL = 200.0, -20.0
 PARAMS = {"mode": "Force 1", "s0_e0_freq": 1000.0, "s0_e0_gain": 0.0, "glide": 1.0}
 DOCUMENT = revision_document(graph_document(lv2_uri("loudness_headless"), PARAMS), 1)

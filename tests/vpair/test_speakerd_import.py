@@ -44,6 +44,10 @@ from harness import ROOT, built, lv2_uri, render, state_dir, tone
 
 import numpy as np
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete")
+
 EXAMPLES = ROOT / "dsp/juce_apps/speakerd/examples"
 SESSION = EXAMPLES / "loudness.filtergraph"
 PARAMS = EXAMPLES / "loudness.params.json"

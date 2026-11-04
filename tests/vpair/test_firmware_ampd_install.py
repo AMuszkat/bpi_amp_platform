@@ -49,6 +49,10 @@ from pathlib import Path
 from harness import (ADDRESS, AMPD, FIRMWARE, StandInSpeakerd, UserUnit, built, firmware, graph_document, lv2_uri,
                      revision_document, stub_speakerd)
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("loudness:headless",)
+
 MIN_VERSION = re.search(r"(?m)^SPEAKERD_MIN_VERSION=(\S+)$", (FIRMWARE / "speakerd-setup.sh").read_text()).group(1)
 SECRET = "the-pairs-test-secret-0123456789"
 DOCUMENT = revision_document(graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1"}), 2)
@@ -168,8 +172,8 @@ class AmpdInstall(unittest.TestCase):
         # A reinstall keeps it; --listen changes only itself.
         self.ampd_setup(folder, "install")
         self.assertEqual(self.config(folder)["listen"], "0.0.0.0")
-        self.ampd_setup(folder, "install", "--listen", "127.0.1.1")
-        self.assertEqual(self.config(folder), {"version": 1, "name": "left", "hub": True, "listen": "127.0.1.1",
+        self.ampd_setup(folder, "install", "--listen", ADDRESS["left"])
+        self.assertEqual(self.config(folder), {"version": 1, "name": "left", "hub": True, "listen": ADDRESS["left"],
                                                "hub_address": None, "secret": SECRET})
 
     def test_refusals(self):
@@ -243,8 +247,9 @@ class AmpdInstall(unittest.TestCase):
         order = [result.index(f"==> {c}:") for c in ("pipewire", "speakerd", "ampd")]
         self.assertEqual(order, sorted(order), result)
         self.assertEqual(self.config(folder)["hub_address"], "bpi-amp.local")
-        firmware("setup.sh", "--home", folder, "--no-systemd", "--only", "ampd", "--listen", "127.0.1.2", env=self.env)
-        self.assertEqual(self.config(folder), {"version": 1, "name": "right", "hub": False, "listen": "127.0.1.2",
+        firmware("setup.sh", "--home", folder, "--no-systemd", "--only", "ampd", "--listen", ADDRESS["right"],
+                 env=self.env)
+        self.assertEqual(self.config(folder), {"version": 1, "name": "right", "hub": False, "listen": ADDRESS["right"],
                                                "hub_address": "bpi-amp.local", "secret": SECRET})
 
     def test_under_systemd_ampd_must_say_it_listens(self):

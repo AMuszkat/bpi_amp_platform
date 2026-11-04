@@ -62,6 +62,10 @@ from harness import (RATE, Pair, Speakerd, align, built, graph_document, lv2_uri
 
 import numpy as np
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd",)
+
 CAP_DB = -20.0
 ROUNDING_DB = 0.01
 TOLERANCE_DB = 0.05

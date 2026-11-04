@@ -25,6 +25,10 @@ from pathlib import Path
 from harness import (Pair, Speakerd, active, built, graph_document, lv2_uri, render, rms_dbfs,
                      state_dir, steady, tone, with_plugin)
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless", "loudness:complete")
+
 
 def layer(gain_db, revision):
     return graph_document(lv2_uri("loudness_headless"),

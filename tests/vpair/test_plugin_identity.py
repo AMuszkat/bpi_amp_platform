@@ -82,8 +82,8 @@ from pathlib import Path
 
 import numpy as np
 
-from harness import (NO_LIMITS, RATE, ROOT, Pair, Speakerd, SpeakerdLink, built, lv2_uri, peak_dbfs, render,
-                     require_speakerd_local_link, state_dir)
+from harness import (NO_LIMITS, RATE, ROOT, Pair, Speakerd, SpeakerdLink, build_name, built, lv2_uri, peak_dbfs,
+                     render, require_speakerd_local_link, state_dir)
 from test_chain_cost import CROSSOVER, FIRCONV, LOUDNESS, URIS, chain_document
 
 PLUGINS_DIR = ROOT / "dsp" / "juce_plugins"
@@ -106,6 +106,10 @@ CHAIN = {LOUDNESS: ("loudness", "loudness_headless"), FIRCONV: ("firConv", "firC
 # runs; loudness's complete build shows that every target of a plugin shares its identity.
 BUNDLES = {"loudness_headless": ("loudness", "headless"), "loudness": ("loudness", "complete"),
            "firConv_headless": ("firConv", "headless"), "crossover_headless": ("crossover", "headless")}
+
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", *(build_name(plugin, kind) for plugin, kind in BUNDLES.values()))
 
 # firConv alone, for the older builds: Mine -> firConv (17) -> the woofer.
 FIRCONV_ALONE = {"format": "speakerd-graph", "version": 1, "revision": 1,

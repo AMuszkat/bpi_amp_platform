@@ -34,6 +34,10 @@ from harness import (ADDRESS, RATE, MonitorClient, Player, SpeakerPair, TimedRec
                      require_speakerd_local_link, rms_dbfs, tone)
 from test_graph_edit import DOCUMENT
 
+# What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
+# ScriptedController): tests/vpair/pool.py builds them before any test runs (README.md, "The pool").
+POOL_BUILDS = ("speakerd", "loudness:headless")
+
 FREQ, LEVEL = 200.0, -20.0
 
 
