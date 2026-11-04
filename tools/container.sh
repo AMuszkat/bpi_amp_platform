@@ -14,6 +14,9 @@
 #     auto   (default) in the container when Podman is installed, natively otherwise
 #     1      always in the container
 #     0      always natively: the packages of the root CLAUDE.md must be installed
+# The container is given TERM, CI, JUCE_INSTALL_DIR, BUILD_DIR and every BPI_* and VPAIR_*
+# variable, nothing else. The build scripts then call ccache_env (below): BPI_CCACHE=0 builds
+# without ccache, BPI_CCACHE=1 with it even where CI is set.
 #
 # Each checkout, and each git worktree, has its own long-running container named after its
 # path. What runs in it, such as the virtual pair, survives between commands and cannot
@@ -88,7 +91,8 @@ container_exec() {
 
     local flags=(-i) var dir="$PWD" main
     [ -t 0 ] && [ -t 1 ] && flags+=(-t)
-    for var in TERM JUCE_INSTALL_DIR BUILD_DIR $(compgen -e | grep -E '^(BPI|VPAIR)_' || true); do
+    # CI too, so that what CI decides (ccache_env, the test defaults) is decided alike inside.
+    for var in TERM CI JUCE_INSTALL_DIR BUILD_DIR $(compgen -e | grep -E '^(BPI|VPAIR)_' || true); do
         [ -n "${!var:-}" ] && flags+=(-e "$var=${!var}")
     done
     main="$(main_checkout)"
@@ -143,6 +147,26 @@ ensure_juce() {
         } > "$log" 2>&1 || { tail -30 "$log"; exit 1; }
         echo "$pin" > "$JUCE_INSTALL_DIR/.juce-commit"
     ) 9> "$main/build/.juce.lock" >&2
+}
+
+# The ccache policy of the build scripts, called after container_or_native (in the container,
+# or natively), before a configure. With ccache on PATH, BPI_CCACHE not 0 and CI unset
+# (BPI_CCACHE=1 uses it with CI too): BPI_CCACHE=1, and the cache in build/ccache of the main
+# checkout, which every checkout's and worktree's container mounts, so they all share it;
+# paths under this checkout are hashed relative to it (CCACHE_BASEDIR), so that two worktrees
+# hit each other's entries for their own sources. Otherwise BPI_CCACHE=0. A build script then
+# sets ccache as the compiler launcher when BPI_CCACHE=1 and ccache is on PATH, and sets no
+# launcher otherwise. CCACHE_DIR and CCACHE_BASEDIR already set are kept; the container is not
+# given the outside ones (a CCACHE_DIR of the host is not mounted in it).
+ccache_env() {
+    if command -v ccache > /dev/null && [ "${BPI_CCACHE:-}" != 0 ] \
+       && { [ -z "${CI:-}" ] || [ "${BPI_CCACHE:-}" = 1 ]; }; then
+        export BPI_CCACHE=1
+        export CCACHE_DIR="${CCACHE_DIR:-$(main_checkout)/build/ccache}"
+        export CCACHE_BASEDIR="${CCACHE_BASEDIR:-$CONTAINER_CHECKOUT}"
+    else
+        export BPI_CCACHE=0
+    fi
 }
 
 container_status() {
