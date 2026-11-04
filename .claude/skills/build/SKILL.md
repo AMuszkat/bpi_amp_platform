@@ -1,18 +1,20 @@
 ---
 name: build
-description: Build a plugin or a JUCE application of the remote plugin host. `/build <plugin> [complete|control|headless|all]` builds it for x86_64 (in the development container, or natively); `/build <plugin|app> aarch64 [complete|control|headless|all]` cross-compiles it for the board into build/aarch64/; `/build <app>` builds an application of dsp/juce_apps (plugin-check, speakerd). Use instead of writing cmake lines by hand.
+description: Build a plugin or a JUCE application of the remote plugin host. `/build <plugin> [complete|control|headless|all]...` builds it for x86_64 (in the development container, or natively); `/build <plugin|app> aarch64 [complete|control|headless|all]...` cross-compiles it for the board into build/aarch64/; `/build <app>` builds an application of dsp/juce_apps (plugin-check, speakerd). Use instead of writing cmake lines by hand.
 ---
 
 # /build
 
 ```
-tools/build.sh <plugin> [complete|control|headless|all]           # x86_64, into build/<plugin>/
-tools/build.sh <app>                                               # dsp/juce_apps/<app>, into build/<app>/
-tools/build.sh <plugin|app> aarch64 [complete|control|headless|all] # the board, into build/aarch64/<what>/
+tools/build.sh <plugin> [complete|control|headless|all]...            # x86_64, into build/<plugin>/
+tools/build.sh <app>                                                  # dsp/juce_apps/<app>, into build/<app>/
+tools/build.sh <plugin|app> aarch64 [complete|control|headless|all]... # the board, into build/aarch64/<what>/
 ```
 
-Anything after the target kind is refused (`tools/build.sh loudness headless aarch64` is an
-error, not an x86_64 build). The builds run in the development container when Podman is installed
+Several kinds build in one call, and none means all. `aarch64` must come right after the name
+(`tools/build.sh loudness headless aarch64` is an error, not an x86_64 build). Builds go
+through ccache in the container. A tree's build holds `<tree>/.build.lock`, and says
+"tools/build.sh: waiting for build/<what>" while another build holds it. The builds run in the development container when Podman is installed
 (`tools/container.sh`; `BPI_CONTAINER=0` builds natively), against the JUCE install in
 `JUCE_INSTALL_DIR`, by default `build/juce-install` of the main checkout, which the first
 build makes. Plugins without `TARGETS` build only their complete target (`all` is then just

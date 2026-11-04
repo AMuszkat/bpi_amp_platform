@@ -34,4 +34,6 @@ Rules:
   covers your change (`tools/test.sh changed`, or one by name: `speakerd`, `plugin <name>`,
   `installers`, `module <scenario>`...). Never run the levels (`tools/test.sh all`, `unit` or
   `vpair`): the orchestrator runs them once on the merged branch, before the push. Say in
-  your report which checks you ran.
+  your report which checks you ran. An edit of `Engine.*` runs only `speakerd` under `changed`;
+  after touching the parameter inbox, `Engine::install` or the level and timing rings, run
+  `tools/test.sh speakerd pair chain installers`.

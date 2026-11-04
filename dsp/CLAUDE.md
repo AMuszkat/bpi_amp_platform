@@ -79,7 +79,7 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   `<plugin>/build-podman/`. `tools/build-aarch64.sh`, `build-native-linux.sh` and
   `build-linux-vm.sh` are the non-container alternatives. Never copy build scripts into a
   plugin folder again. For the remote plugin host, the repository root's
-  `tools/build.sh <plugin|app> aarch64 [target]` cross-compiles any target (headless included)
+  `tools/build.sh <plugin|app> aarch64 [kind]...` cross-compiles any target (headless included)
   and `speakerd` in the same image into `build/aarch64/`, which is what the board installer
   (`firmware/speakerd-setup.sh`) deploys.
 - **Plugin CMake:** each `CMakeLists.txt` is one `speaker_add_plugin()` call
@@ -129,7 +129,8 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   silent plugin-load failures): `docs/juce-knowledge/hosting/audiopluginhost-linux.md`.
   Editor-window gotchas (fixed-size windows maximised by JUCE's X11 size-hint bug, patched
   for the host via `juce_plugins/patches/`; floating panels from an embedded editor; Debug
-  repaint cost): `docs/juce-knowledge/gui/x11-plugin-windows.md`.
+  repaint cost; with no `DISPLAY` a JUCE program opens `:0.0`, so a headless check's Xvfb
+  must not take it): `docs/juce-knowledge/gui/x11-plugin-windows.md`.
 - `juce_plugins/ampScope/build-podman/plot-check/` is a gitignored off-tree render harness
   (builds the editor without a host, drives it from the Demo source, asserts on PNGs).
   Configure it in the container with `-DCMAKE_PREFIX_PATH=/work/build-podman/juce-install`.

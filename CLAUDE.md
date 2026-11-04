@@ -64,8 +64,10 @@ The rules in the `CLAUDE.md` files and everything in `.claude/` stay the person'
 
 **Checks while working, the levels before a push.** While working, an agent runs the check
 that covers its change (`tools/test.sh speakerd`, `plugin <name>`, `installers`, ..., or
-`tools/test.sh changed` for whatever changed; minutes each); no hook runs tests at the end of
-a turn. The levels, end to end (`tools/test.sh all`: level 1 `unit`, level 2 `vpair`), run
+`tools/test.sh changed` for whatever changed; seconds to two minutes each); no hook runs tests
+at the end of a turn. Several checks in one command run as one, their scenarios `--jobs N` at a
+time (default half the processors, at most 16; 1 where `CI` is set). `plugin <name>` builds
+without LTO; `plugins`, the levels and CI keep it. The levels, end to end (`tools/test.sh all`: level 1 `unit`, level 2 `vpair`), run
 once on the finished branch before it is pushed, and again only if code changed since; CI
 repeats them on the pull request. Level 3 is a board (`/board smoke`).
 
@@ -111,12 +113,14 @@ The scripts move into the container themselves (`tools/container.sh`, which says
 nothing changes in how they are called. The first run builds the image and a JUCE install
 in `build/juce-install`, which takes a few minutes; later runs start at once. Each checkout
 and each git worktree has its own long-running container, with the checkout mounted at its
-own path, so worktrees can run the virtual pair at the same time.
+own path, so worktrees can run the virtual pair at the same time. Builds go through ccache,
+one cache in the main checkout's `build/ccache` for it and its worktrees (`BPI_CCACHE=0` turns
+it off; it is off where `CI` is set), and one test pool runs at a time per checkout.
 `BPI_CONTAINER=0` runs the same scripts natively instead, where Podman is missing (cloud
 sessions) or the packages are installed (CI): the package list is the one in
 `.github/workflows/ci.yml`.
 
-For the boards, `tools/build.sh <plugin|app> aarch64 [target]` cross-compiles in the same
+For the boards, `tools/build.sh <plugin|app> aarch64 [kind]...` cross-compiles in the same
 container into `build/aarch64/`; that is what `firmware/speakerd-setup.sh` and `/board deploy`
 install. `dsp/juce_plugins/tools/build-podman.sh` keeps its own flows (complete builds deployed
 to `~/.lv2`, the local AudioPluginHost debug loop), and `firmware/Makefile` builds the kernel

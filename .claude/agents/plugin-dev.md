@@ -19,8 +19,8 @@ Rules:
   code, `SPEAKER_HEADLESS` builds with no GUI module use at runtime.
 - Nothing on the audio thread allocates, locks or does I/O. Coefficient updates assign from
   `ArrayCoefficients` into storage allocated in `prepareToPlay`.
-- After a change: `/build <plugin> all`, and `dsp/juce_apps/plugin-check/run.sh <plugin>`
-  for the plugin you changed only. Read its report line by line; a build warning in our
+- After a change: `/build <plugin> all`, and `tools/test.sh plugin <plugin>` (no LTO: the fast
+  loop) for the plugin you changed only; `plugins` and level 1 test what ships, with LTO. Read its report line by line; a build warning in our
   sources is a defect. A raised version, when the plugin's folder changed, stays yours.
 - You do not touch `dsp/juce_apps/speakerd/`, the controller, `firmware/` or the tests of
   the virtual pair.

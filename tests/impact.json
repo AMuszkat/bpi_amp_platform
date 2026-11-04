@@ -15,7 +15,7 @@
     "`speakerd` and, beside it, only the checks whose scenarios alone read what the file is for: its",
     "log lines, its answers on the command line or the local link, the values it streams, the",
     "PipeWire objects it makes. The map is keyed by the file edited: an edit runs its own rule's",
-    "checks and no other's. One rule is narrower than that, by the person's decision: Engine.* runs",
+    "checks and no other's. One rule is narrower than that, on purpose: Engine.* runs",
     "`speakerd` alone, though parts of the Engine are proven only by pair, chain and installers (its",
     "rule says which); the levels run those before a push, and its \"by_hand\" says what to run",
     "after touching those parts. A rule's optional \"by_hand\" is such advice: tools/impact.py, and",
@@ -54,7 +54,7 @@
       "checks": ["plugins", "chain"]
     },
     {
-      "why": "speakerd's audio cycle, which every speakerd scenario plays through. speakerd alone by the person's decision, although parts of the Engine are proven only by other checks: its parameter inbox (knob_latency, graph_edit, drag_during_revision, ampd_persistence: pair), its live graph swap in Engine::install (graph_edit, buffer_size: pair; plugin_identity: chain), its level ring (meter_values, monitor_fanout: pair; chain_cost's output/level: chain) and its timing ring (chain_cost: chain; board_cpu: pair; smoke's timing line in test_speakerd_installed: installers). The levels run those before a push; after touching those parts, run what by_hand says",
+      "why": "speakerd's audio cycle, which every speakerd scenario plays through. speakerd alone on purpose, although parts of the Engine are proven only by other checks: its parameter inbox (knob_latency, graph_edit, drag_during_revision, ampd_persistence: pair), its live graph swap in Engine::install (graph_edit, buffer_size: pair; plugin_identity: chain), its level ring (meter_values, monitor_fanout: pair; chain_cost's output/level: chain) and its timing ring (chain_cost: chain; board_cpu: pair; smoke's timing line in test_speakerd_installed: installers). The levels run those before a push; after touching those parts, run what by_hand says",
       "paths": ["dsp/juce_apps/speakerd/Engine.*"],
       "checks": ["speakerd"],
       "by_hand": "after touching Engine's parameter inbox, Engine::install or its level and timing rings, run `tools/test.sh speakerd pair chain installers`"

@@ -9,7 +9,7 @@ description: Operate the virtual pair, two virtual speakers on this machine (tes
 tests/vpair/vpair.sh up | down | status
 tests/vpair/vpair.sh run <left|right> <command...>   # e.g. pw-link -l, pw-dump, pw-top -b -n 1
 python3 -m unittest -v tests.vpair.<module>          # one scenario, from the repository root
-python3 -m unittest discover -s tests/vpair -v       # every scenario (what /test vpair runs)
+python3 -m unittest discover -s tests/vpair -v       # every scenario, one at a time (/test vpair runs them on the pool)
 ```
 
 With Podman installed the pair runs in the development container of this checkout
@@ -27,7 +27,9 @@ Rules:
 - The tests bring the pair up and down themselves. Bring it up by hand only to inspect
   something, and take it down afterwards: a pair left running makes the next test run fail.
 - The speakers live under `$VPAIR_DIR` (default `/tmp/vpair`, inside the container when it
-  is used), one folder each, with `pipewire.log` and `wireplumber.log`. Read those when a
+  is used), one folder each, with `pipewire.log` and `wireplumber.log`. `up` takes about
+  0.14 s and `down` 0.03 s. The test pool's pairs live in `/tmp/vpool<k>`, and the pool never
+  touches `/tmp/vpair`. Read those when a
   speaker does not come up: `tools/container.sh cat /tmp/vpair/left/pipewire.log`.
 - A new scenario is a new `tests/vpair/test_<name>.py`; the scenario names and pass criteria
   are in `docs/autonomous-development.md`, section 4. Never weaken a pass criterion to make

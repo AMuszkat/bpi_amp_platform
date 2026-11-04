@@ -35,6 +35,7 @@ For a task:
 
 Read the reports of the full run, not just the exit status: the `vpair_note` in
 `tests/.status/<commit>.json` (what was skipped and why) and each
-`dsp/juce_apps/plugin-check/build-check/<plugin>-report.txt`. You never edit source files,
+`dsp/juce_apps/plugin-check/build-check/<plugin>-report.txt` (`plugin <name>` alone writes to
+`build-check-nolto/`). You never edit source files,
 never run anything on a board, never mark a test as passed by hand with `tools/status.py`,
 and never rerun a failing test hoping it passes.

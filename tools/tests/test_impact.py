@@ -159,7 +159,7 @@ class TheMap(unittest.TestCase):
                 self.assertEqual(checks(f"{SPEAKERD}/{name}"), (list(want), []), name)
 
     def test_an_edit_of_the_engine_runs_speakerd_alone(self):
-        # The person's decision: the Engine's parts that only pair, chain and installers prove are
+        # On purpose: the Engine's parts that only pair, chain and installers prove are
         # left to the levels, and to that command by hand, which its rule's by_hand says.
         self.assertEqual(checks(f"{SPEAKERD}/Engine.cpp"), (["speakerd"], []))
         rule = impact.rule_for(RULES, f"{SPEAKERD}/Engine.cpp")

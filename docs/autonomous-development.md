@@ -195,7 +195,7 @@ the checks are made to take a minute or two after an edit:
   which `plugin <name>` builds too, editor and all, and checks. An edit in `speakerd` runs
   `speakerd` and, beside it, only the checks whose scenarios alone read what that file is for
   (the map is keyed by the file edited): `Monitor.cpp` runs all four. `Engine.cpp` runs
-  `speakerd` alone, by the person's decision, although its parameter inbox, its live graph
+  `speakerd` alone, on purpose, although its parameter inbox, its live graph
   swap and its level and timing rings are proven only by `pair`, `chain` and `installers`: the
   levels run those before the push, and after touching those parts one runs
   `tools/test.sh speakerd pair chain installers` by hand. `changed` says so before and after
