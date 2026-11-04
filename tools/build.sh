@@ -2,37 +2,55 @@
 # Builds a plugin or application, for this machine (x86_64) or for the board (aarch64). See
 # .claude/skills/build.
 #
-#     tools/build.sh <plugin|app> [complete|control|headless|all]            # build/<what>/
-#     tools/build.sh <plugin|app> aarch64 [complete|control|headless|all]    # build/aarch64/<what>/
+#     tools/build.sh <plugin|app> [complete|control|headless|all]...            # build/<what>/
+#     tools/build.sh <plugin|app> aarch64 [complete|control|headless|all]...    # build/aarch64/<what>/
+#
+# Several kinds build together, in one `cmake --build` of all their targets
+# (tools/build.sh loudness complete headless); no kind is all, a kind named twice is built
+# once. An application has no kinds: they are checked and ignored. The architecture comes
+# right after the name: "loudness headless aarch64" is refused, never an x86_64 build.
+#
+# With ccache (in the development container; ccache_env in tools/container.sh says when), every
+# configure sets it as the compiler launcher, and otherwise sets no launcher, so that a build
+# tree configured with it still builds where it is missing.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-usage="usage: $0 <plugin|app> [aarch64] [complete|control|headless|all]"
+usage="usage: $0 <plugin|app> [aarch64] [complete|control|headless|all]..."
 what="${1:?$usage}"
-kind="${2:-all}"
 arch=x86_64
-max_args=2
-if [ "$kind" = aarch64 ]; then
-    arch=aarch64
-    kind="${3:-all}"
-    max_args=3
-fi
-# Nothing else: "loudness headless aarch64" must not quietly build for x86_64.
-if [ $# -gt $max_args ]; then
-    echo "unexpected argument(s) after '${*:1:$max_args}': ${*:$((max_args + 1))}" >&2
-    echo "$usage" >&2
-    exit 2
-fi
-case "$kind" in complete | control | headless | all) ;; *) echo "unknown target kind '$kind'" >&2; echo "$usage" >&2; exit 2 ;; esac
+[ "${2:-}" = aarch64 ] && arch=aarch64
+first_kind=2
+[ $arch = aarch64 ] && first_kind=3
+# An empty argument names no kind, as it did when there was one at most.
+kinds=()
+for kind in "${@:$first_kind}"; do [ -z "$kind" ] || kinds+=("$kind"); done
+[ ${#kinds[@]} -gt 0 ] || kinds=(all)
+for kind in "${kinds[@]}"; do
+    case "$kind" in
+        complete | control | headless | all) ;;
+        # Nothing else: "loudness headless aarch64" must not quietly build for x86_64.
+        aarch64) echo "'aarch64' is not a target kind: the architecture comes right after the name ($0 $what aarch64 [kind]...)" >&2
+                 echo "$usage" >&2; exit 2 ;;
+        *) echo "unknown target kind '$kind'" >&2; echo "$usage" >&2; exit 2 ;;
+    esac
+done
 
 . tools/container.sh
 container_or_native "$0" "$@"
 ensure_juce
+ccache_env
 
 out="build/$what"
 # --log-level=NOTICE: no STATUS lines, among them JUCE's pkg-config search for libcurl, webkit2gtk
 # and gtk, which none of these builds uses.
 configure=(cmake -G Ninja --log-level=NOTICE -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR")
+# The compiler launcher, set on every configure: ccache, or none (empty), which also takes it
+# off a tree an earlier configure gave it to. Switching rebuilds the tree (the compile commands
+# change).
+launcher=
+[ "$BPI_CCACHE" = 1 ] && command -v ccache > /dev/null && launcher=ccache
+configure+=(-DCMAKE_C_COMPILER_LAUNCHER="$launcher" -DCMAKE_CXX_COMPILER_LAUNCHER="$launcher")
 run=()
 
 if [ $arch = aarch64 ]; then
@@ -110,20 +128,25 @@ src="dsp/juce_plugins/$what"
 has_targets=0
 grep -q '^[[:space:]]*TARGETS' "$src/CMakeLists.txt" && has_targets=1
 targets=()
-case "$kind" in
-    complete) targets=("${what}_LV2") ;;
-    control)  targets=("${what}_control_LV2") ;;
-    headless) targets=("${what}_headless_LV2") ;;
-    all)
-        targets=("${what}_LV2")
-        [ $has_targets = 1 ] && targets+=("${what}_control_LV2" "${what}_headless_LV2")
-        ;;
-    *) echo "unknown target kind '$kind'" >&2; exit 2 ;;
-esac
-if [ $has_targets = 0 ] && [ "$kind" != complete ] && [ "$kind" != all ]; then
-    echo "$what lists no TARGETS: it builds only its complete target" >&2
-    exit 2
-fi
+for kind in "${kinds[@]}"; do
+    case "$kind" in
+        complete) add=("${what}_LV2") ;;
+        control)  add=("${what}_control_LV2") ;;
+        headless) add=("${what}_headless_LV2") ;;
+        all)
+            add=("${what}_LV2")
+            [ $has_targets = 1 ] && add+=("${what}_control_LV2" "${what}_headless_LV2")
+            ;;
+    esac
+    if [ $has_targets = 0 ] && [ "$kind" != complete ] && [ "$kind" != all ]; then
+        echo "$what lists no TARGETS: it builds only its complete target" >&2
+        exit 2
+    fi
+    # Each target once, in the order the kinds name them.
+    for t in "${add[@]}"; do
+        case " ${targets[*]} " in *" $t "*) ;; *) targets+=("$t") ;; esac
+    done
+done
 
 "${run[@]}" "${configure[@]}" -S "$src" -B "$out"
 "${run[@]}" cmake --build "$out" -j"$(nproc)" --target "${targets[@]}"
