@@ -601,21 +601,29 @@ def _check_pool_build(what, kind):
 
 
 # How tools/build.sh begins the line it says once, on stderr, when another build holds its tree's
-# lock (a pool's prebuild, a build by hand): built() passes it through as it comes.
+# lock (a pool's prebuild, a build by hand): built() and the pool's prebuild pass it through as it
+# comes. pool_selftest.py checks it against tools/build.sh's echo.
 BUILD_WAITING = "tools/build.sh: waiting for"
 
 
 def run_build(command):
     """tools/build.sh (`command`), its output (stdout and stderr) kept and returned with its exit
-    status, to be shown if it fails; its waiting line also goes to stderr at once."""
+    status, to be shown if it fails; its waiting line also goes to stderr at once. What stops the
+    reading (a KeyboardInterrupt, a print to a closed stderr) kills the build and reaps it before it
+    goes on, as subprocess.run does, rather than leave it running with its tree's lock."""
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                errors="replace")
     lines = []
-    with process.stdout:
-        for line in process.stdout:
-            lines.append(line)
-            if line.startswith(BUILD_WAITING):
-                print(line.rstrip("\n"), file=sys.stderr, flush=True)
+    try:
+        with process.stdout:
+            for line in process.stdout:
+                lines.append(line)
+                if line.startswith(BUILD_WAITING):
+                    print(line.rstrip("\n"), file=sys.stderr, flush=True)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
     return process.wait(), "".join(lines)
 
 

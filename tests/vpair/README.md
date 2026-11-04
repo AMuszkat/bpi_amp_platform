@@ -103,9 +103,12 @@ as `unittest discover` finds them. What it does:
    it needs (`tools/build.sh loudness headless complete`), the trees at once. A build's output
    is printed only if it fails, which fails the run before any test runs; `tools/build.sh`'s line
    that it waits for another build in its tree (`tools/build.sh: waiting for build/speakerd:
-   another build runs in it (...)`, a build by hand there, say) is printed as it comes. In the
-   units `built()` builds nothing (`VPAIR_PREBUILT`) and refuses a build the module's
-   `POOL_BUILDS` does not name, saying so: `build/` may hold a stale one.
+   another build runs in it (...)`, a build by hand there, say) is printed as it comes. A
+   SIGINT during the prebuild kills its builds and reaps them before it ends the pool (no unit
+   runs, no note; SIGTERM there ends it at once, its builds left to end on their own); `built()`
+   kills and reaps its build the same way when its reading stops. In the units `built()` builds
+   nothing (`VPAIR_PREBUILT`) and refuses a build the module's `POOL_BUILDS` does not name,
+   saying so: `build/` may hold a stale one.
 2. **The units** are the test classes the unittest loader finds (a base class without tests
    yields none), each run in a process of its own: a module with `setUpModule` runs it once per
    unit. A module that must stay whole says `POOL_WHOLE = True`; one whose tests are independent
@@ -164,16 +167,18 @@ test, a skipped class, a skip in `setUpClass`, reasons of several lines; the sam
 serial runner's for the same modules), units killed, past their timeout or whose log vanished,
 each unit's output as one block, the exit status, SIGTERM, the `built()` guard, `tools/build.sh`'s
 waiting line passed through as it comes by the prebuild and by `built()` (a stand-in build that
-says it and waits until the test saw it), the checkout's lock (SIGTERM and SIGINT while a pool
-waits for it too), and the pool's last resorts: fewer free worker slots than it needs, and a fault
-of its own while it handles a unit (these two and the prebuild's waiting line through a process
-that imports `pool.py` and replaces one function before its `main()`). No result in it depends on
-how fast anything runs, within generous bounds (the unit past its 2 s timeout must print its line
-within those 2 s; a unit or a stand-in build waiting to be released, as the lock test's first
-pool's unit does, gives up after 60 s): a unit or a build that must still be running blocks on a
-file the test writes, and the only short timeout is the one under test, so a loaded machine does
-not fail it. Two variables point the pool there: `VPAIR_POOL_TESTS`, the folder of the modules
-(default this one), and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default
+says it and waits until the test saw it; the prefix they look for, `harness.BUILD_WAITING`,
+checked against `tools/build.sh`'s echo), a build whose reading stops killed and reaped (in
+`built()`, in the prebuild's reader, and a SIGINT in the prebuild), the checkout's lock (SIGTERM
+and SIGINT while a pool waits for it too), and the pool's last resorts: fewer free worker slots
+than it needs, and a fault of its own while it handles a unit (these two, the prebuild's waiting
+line and its SIGINT through a process that imports `pool.py` and replaces one function before its
+`main()`). No result in it depends on how fast anything runs, within generous bounds (the unit
+past its 2 s timeout must print its line within those 2 s; a unit or a stand-in build waiting to
+be released, as the lock test's first pool's unit does, gives up after 60 s): a unit or a build
+that must still be running blocks on a file the test writes, and the only short timeout is the one
+under test, so a loaded machine does not fail it. Two variables point the pool there:
+`VPAIR_POOL_TESTS`, the folder of the modules (default this one), and `VPAIR_POOL_FILES`, the folder of its logs, lock and durations (default
 the checkout's `build/`, the main checkout's for the durations). Its name does not match
 `test*.py`, so the level does not run it.
 

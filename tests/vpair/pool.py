@@ -14,7 +14,9 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
    with every kind it needs, the trees at once. A build's output is kept and printed only if it
    fails, which fails the run before any test (one marked "?" fails only the built() that asks for
    it, as it would have); tools/build.sh's line that it waits for another build in its tree
-   ("tools/build.sh: waiting for build/speakerd: ...") is printed as it comes.
+   ("tools/build.sh: waiting for build/speakerd: ...") is printed as it comes. A SIGINT during the
+   prebuild kills its builds and reaps them before it ends the pool (no unit runs, no note; SIGTERM
+   there ends it at once, its builds left to end on their own).
    Under the pool built() builds nothing (VPAIR_PREBUILT) and refuses what the module's POOL_BUILDS
    does not name: build/ may hold a stale one.
 2. The units: each test class the unittest loader finds in a module (a module with POOL_WHOLE =
@@ -236,7 +238,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "--unit":
 # The pool itself runs where the virtual pair runs: the harness moves this command line into the
 # development container when it is used (BPI_CONTAINER), and the modules import it anyway.
 sys.path.insert(0, str(HERE))
-import harness  # noqa: E402,F401  (its import is the move into the container)
+import harness  # noqa: E402  (its import is the move into the container)
 if TESTS != HERE:
     sys.path.insert(0, str(TESTS))
 
@@ -322,11 +324,6 @@ def alone(module):
 # ---------------------------------------------------------------------------------------------
 # The prebuild
 
-# How tools/build.sh begins the line it says once, on stderr, when another build holds its tree's
-# lock: the prebuild passes it through as it comes (the wait may last as long as that build).
-BUILD_WAITING = "tools/build.sh: waiting for"
-
-
 def build_command(what, kinds):
     """The prebuild's call of tools/build.sh for one build tree (pool_selftest.py puts a stand-in
     in its place)."""
@@ -335,14 +332,19 @@ def build_command(what, kinds):
 
 def read_build(process, lines, ended, out):
     """A build's output (stdout and stderr), kept in `lines` to be shown if it fails; its waiting
-    line also goes to the pool's output at once. Then its end, in `ended` (its own: the builds are
-    reported in their order, each after the one before)."""
+    line (it begins with harness.BUILD_WAITING) also goes to the pool's output at once: the wait may
+    last as long as the other build. Then its end, in `ended` (its own: the builds are reported in
+    their order, each after the one before). A fault while it reads (a print to a closed stdout)
+    kills the build, as subprocess.run does, rather than leave it running with its tree's lock."""
     try:
         with process.stdout:
             for line in process.stdout:
                 lines.append(line)
-                if line.startswith(BUILD_WAITING):
+                if line.startswith(harness.BUILD_WAITING):
                     out(line.rstrip("\n"))
+    except BaseException:
+        process.kill()
+        raise
     finally:
         process.wait()
         ended.append(time.monotonic())
@@ -367,32 +369,42 @@ def prebuild(units, out):
         return set(), set(), False
     started = time.monotonic()
     running = []
-    for what, tree in trees.items():
-        process = subprocess.Popen(build_command(what, tree["kinds"]), cwd=ROOT, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-        lines, ended = [], []
-        reader = threading.Thread(target=read_build, args=(process, lines, ended, out), daemon=True)
-        running.append((what, tree, process, reader, lines, ended, time.monotonic()))
-        reader.start()
-    built, unbuilt, failed = set(), set(), False
-    for what, tree, process, reader, lines, ended, t0 in running:
-        reader.join()
-        output = "".join(lines)
-        shown = " ".join(["tools/build.sh", what, *tree["kinds"]])
-        took = ended[0] - t0
-        if process.returncode == 0:
-            built |= tree["names"]
-            out(f"prebuild: {shown}: built in {took:.1f} s")
-            continue
-        for_whom = ", ".join(sorted(tree["modules"]))
-        if tree["required"]:
-            failed = True
-            out(f"prebuild: {shown} FAILED (exit {process.returncode}) after {took:.1f} s, for {for_whom}:\n"
-                + output.rstrip() + f"\nprebuild: end of {shown}")
-        else:
-            unbuilt |= tree["names"]
-            out(f"prebuild: {shown} failed (exit {process.returncode}), optional for {for_whom}: its built() "
-                f"fails as the build would\n" + "\n".join(output.rstrip().splitlines()[-40:]))
+    try:
+        for what, tree in trees.items():
+            process = subprocess.Popen(build_command(what, tree["kinds"]), cwd=ROOT, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+            lines, ended = [], []
+            reader = threading.Thread(target=read_build, args=(process, lines, ended, out), daemon=True)
+            running.append((what, tree, process, reader, lines, ended, time.monotonic()))
+            reader.start()
+        built, unbuilt, failed = set(), set(), False
+        for what, tree, process, reader, lines, ended, t0 in running:
+            reader.join()
+            output = "".join(lines)
+            shown = " ".join(["tools/build.sh", what, *tree["kinds"]])
+            took = ended[0] - t0
+            if process.returncode == 0:
+                built |= tree["names"]
+                out(f"prebuild: {shown}: built in {took:.1f} s")
+                continue
+            for_whom = ", ".join(sorted(tree["modules"]))
+            if tree["required"]:
+                failed = True
+                out(f"prebuild: {shown} FAILED (exit {process.returncode}) after {took:.1f} s, for {for_whom}:\n"
+                    + output.rstrip() + f"\nprebuild: end of {shown}")
+            else:
+                unbuilt |= tree["names"]
+                out(f"prebuild: {shown} failed (exit {process.returncode}), optional for {for_whom}: its built() "
+                    f"fails as the build would\n" + "\n".join(output.rstrip().splitlines()[-40:]))
+    except BaseException:
+        # A KeyboardInterrupt to the pool alone (in a join), a print to a closed stdout: the builds
+        # still running are killed and reaped, as subprocess.run does, rather than left running with
+        # their trees' locks.
+        for _, _, process, *_ in running:
+            process.kill()
+        for _, _, process, *_ in running:
+            process.wait()
+        raise
     out(f"prebuild: {len(trees)} build tree(s) in {time.monotonic() - started:.1f} s")
     return built, unbuilt, failed
 
