@@ -19,6 +19,15 @@
 # build by hand in the same tree wait for each other (saying once, on stderr, which tree they wait
 # for) instead of running two ninjas in it. tools/build.sh never calls itself, so it cannot wait
 # for its own lock. Without flock (util-linux: in the container and on CI) it builds unlocked.
+#
+# No build of this script copies a plugin into a ~/.lv2 or ~/.vst3: JUCE's copy step copies
+# each bundle into the build tree's own <tree>/copied/lv2 and copied/vst3 (copy-dirs.cmake,
+# below), so that two builds at once, of two worktrees or of a test pool, never write one
+# folder, and no host here finds a bundle it was not given. The bundle to use is the one in
+# <tree>/<target>_artefacts/Release/LV2/.
+#
+# `cmake --build` runs under a make jobserver (tools/jobserver.sh), so that the LTO links that
+# run at once share one pool of $(nproc) LTRANS jobs.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -85,24 +94,33 @@ if [ $arch = aarch64 ]; then
     export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
     unset PKG_CONFIG_PATH
 
-    # JUCE copies every plugin it builds into ~/.lv2 and ~/.vst3 (SpeakerPlugin.cmake adds the
-    # copy step, juce_enable_copy_plugin_step), where an x86_64 host, speakerd included, would then find
-    # aarch64 binaries under the URIs of its own plugins. So the copy directories of a cross
-    # build are pinned inside it, in the build tree's own cache (CMAKE_PROJECT_INCLUDE), so
-    # that a later reconfigure keeps them too; and the build runs with a throwaway HOME.
-    mkdir -p "$out" build/aarch64/home
-    cat > "$out/copy-dirs.cmake" <<'CMAKE'
-# Written by tools/build.sh: a cross build copies its plugins here, never into a ~/.lv2.
+    # The copy directories below keep aarch64 binaries out of every ~/.lv2, where an x86_64
+    # host, speakerd included, would find them under the URIs of its own plugins; the cross
+    # build also runs with a throwaway HOME, and check_home_lv2 fails if one is found there.
+    mkdir -p build/aarch64/home
+    configure+=(-DCMAKE_TOOLCHAIN_FILE="$toolchain"
+                -DCMAKE_FIND_ROOT_PATH="/;$JUCE_INSTALL_DIR"
+                -DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/qemu-aarch64-static)
+    run=(env HOME="$ROOT/build/aarch64/home")
+fi
+
+# JUCE copies every plugin it builds (SpeakerPlugin.cmake adds the copy step,
+# juce_enable_copy_plugin_step) into ~/.lv2 and ~/.vst3 unless told otherwise. Here the copy
+# directories are pinned inside the build tree, in its own cache (CMAKE_PROJECT_INCLUDE), so that
+# a later reconfigure keeps them too: <tree>/copied/lv2 and copied/vst3, for either architecture.
+# Not a HOME of its own for each x86_64 build: the copy directory is in the link step's command, so
+# a HOME that changed would relink every plugin. The file is written only when its text changes,
+# so its date never makes CMake run again.
+copy_dirs="$(cat <<'CMAKE'
+# Written by tools/build.sh: its builds copy their plugins here, never into a ~/.lv2 or ~/.vst3.
 set_directory_properties(PROPERTIES
     JUCE_LV2_COPY_DIR  "${CMAKE_BINARY_DIR}/copied/lv2"
     JUCE_VST3_COPY_DIR "${CMAKE_BINARY_DIR}/copied/vst3")
 CMAKE
-    configure+=(-DCMAKE_TOOLCHAIN_FILE="$toolchain"
-                -DCMAKE_FIND_ROOT_PATH="/;$JUCE_INSTALL_DIR"
-                -DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/qemu-aarch64-static
-                -DCMAKE_PROJECT_INCLUDE="$ROOT/$out/copy-dirs.cmake")
-    run=(env HOME="$ROOT/build/aarch64/home")
-fi
+)"
+mkdir -p "$out"
+[ "$(cat "$out/copy-dirs.cmake" 2> /dev/null)" = "$copy_dirs" ] || printf '%s\n' "$copy_dirs" > "$out/copy-dirs.cmake"
+configure+=(-DCMAKE_PROJECT_INCLUDE="$ROOT/$out/copy-dirs.cmake")
 
 # Says what was built; for the aarch64 build, after checking that it is aarch64 code.
 report() {
@@ -130,7 +148,7 @@ check_home_lv2() {
 # An application: a folder of dsp/juce_apps (plugin-check, speakerd, the controller).
 if [ -f "dsp/juce_apps/$what/CMakeLists.txt" ]; then
     "${run[@]}" "${configure[@]}" -S "dsp/juce_apps/$what" -B "$out"
-    "${run[@]}" cmake --build "$out" -j"$(nproc)"
+    "${run[@]}" tools/jobserver.sh cmake --build "$out" -j"$(nproc)"
     if [ $arch = aarch64 ]; then
         report "$out/${what}_artefacts/Release/$what"
     else
@@ -166,6 +184,6 @@ for kind in "${kinds[@]}"; do
 done
 
 "${run[@]}" "${configure[@]}" -S "$src" -B "$out"
-"${run[@]}" cmake --build "$out" -j"$(nproc)" --target "${targets[@]}"
+"${run[@]}" tools/jobserver.sh cmake --build "$out" -j"$(nproc)" --target "${targets[@]}"
 for t in "${targets[@]}"; do report "$out/${t%_LV2}_artefacts/Release/LV2/${t%_LV2}.lv2"; done
 check_home_lv2

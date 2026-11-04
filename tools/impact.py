@@ -7,7 +7,8 @@
 The files changed are those that differ from REF in the working tree, untracked files
 included. REF defaults to the merge base with develop, or to HEAD on develop itself. A rule's
 optional "by_hand" is advice: a command its checks leave out, to run by hand after some edits
-(the Engine's rule). It is said once per rule, with the rule's files that changed.
+(the Engine's rule), or the only thing to run (ampScope's: no check builds it). It is said once
+per rule, with the rule's files that changed.
 """
 
 import fnmatch

@@ -5,8 +5,11 @@
 #
 #     tools/container.sh                  # a shell in this checkout's container
 #     tools/container.sh <command...>     # run a command in it, from the current directory
-#     tools/container.sh --status         # the image and the container
+#     tools/container.sh --status         # the image and the container, and every other builder
+#                                         # image and container, with what --prune would remove
 #     tools/container.sh --stop           # remove this checkout's container
+#     tools/container.sh --prune [--dry-run]   # remove the stopped containers of checkouts that
+#                                         # are gone, then the builder images no container uses
 #
 # tools/build.sh, tools/test.sh, tools/pw-inspect.sh and tests/vpair/vpair.sh source this
 # file and move into the container themselves (container_or_native), so they are used the
@@ -20,12 +23,24 @@
 #
 # Each checkout, and each git worktree, has its own long-running container named after its
 # path. What runs in it, such as the virtual pair, survives between commands and cannot
-# collide with another worktree's. The image is rebuilt when the Containerfile changes, and
-# the container is recreated on the new image.
+# collide with another worktree's. The image is tagged by its Containerfile's content,
+# localhost/bpi-amp-builder:bookworm-<the first 16 hex digits of its sha256> (the label
+# bpi.containerfile says the same), so checkouts with different Containerfiles each have their
+# own image, and never rebuild one tag in turn and recreate each other's containers. An image
+# built from this Containerfile under another tag (localhost/bpi-amp-builder:bookworm, the one
+# tag there was before, or none) is tagged rather than built again. A checkout's container is
+# recreated only when it does not run its checkout's image (after an edit of the Containerfile).
+#
+# Old images stay until --prune: it removes the stopped bpi-dev containers whose checkout no
+# longer exists, then every builder image (one with the label bpi.containerfile) that no
+# container uses and that is not the image of a Containerfile in a worktree of this repository.
+# It never touches a running container, nor an image a container uses: --stop a checkout's
+# container first to let its image go.
 
 CONTAINER_CHECKOUT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONTAINER_IMAGE="localhost/bpi-amp-builder:bookworm"
 CONTAINER_FILE="$CONTAINER_CHECKOUT/dsp/juce_plugins/tools/Containerfile"
+CONTAINER_REPOSITORY="localhost/bpi-amp-builder"
+CONTAINER_OLD_TAG="$CONTAINER_REPOSITORY:bookworm"   # the one tag before the image was tagged by its Containerfile
 CONTAINER_NAME="bpi-dev-$(printf %s "$CONTAINER_CHECKOUT" | sha256sum | cut -c1-10)"
 
 # The main checkout: the one holding the git directory and the JUCE install, shared by its
@@ -50,15 +65,29 @@ container_wanted() {
     esac
 }
 
-# The hash that labels an image built from the current Containerfile. build-podman.sh
-# computes the same, so either script rebuilds an image that predates an edit.
-containerfile_hash() { sha256sum "$CONTAINER_FILE" | cut -c1-16; }
+# The hash that labels and tags an image built from a Containerfile (this checkout's by default).
+# dsp/juce_plugins/tools/build-podman.sh computes the same, and uses the same tag.
+containerfile_hash() { sha256sum "${1:-$CONTAINER_FILE}" | cut -c1-16; }
+CONTAINER_IMAGE="$CONTAINER_REPOSITORY:bookworm-$(containerfile_hash 2> /dev/null || true)"
+
+image_label() { podman image inspect --format '{{ index .Labels "bpi.containerfile" }}' "$1" 2> /dev/null || true; }
 
 ensure_image() {
-    local want have
+    local want id
     want="$(containerfile_hash)"
-    have="$(podman image inspect --format '{{ index .Labels "bpi.containerfile" }}' "$CONTAINER_IMAGE" 2> /dev/null || true)"
-    [ "$want" = "$have" ] && return 0
+    [ "$(image_label "$CONTAINER_IMAGE")" = "$want" ] && return 0
+    # Built already, under the old tag or another: the old tag first (the image its containers
+    # run), then the newest.
+    if [ "$(image_label "$CONTAINER_OLD_TAG")" = "$want" ]; then
+        id="$(podman image inspect --format '{{.Id}}' "$CONTAINER_OLD_TAG")"
+    else
+        id="$(podman images --no-trunc --filter "label=bpi.containerfile=$want" --format '{{.ID}}' | head -1)"
+    fi
+    if [ -n "$id" ]; then
+        echo ">>> tagging the image ${id#sha256:} as $CONTAINER_IMAGE: it was built from this Containerfile" >&2
+        podman tag "$id" "$CONTAINER_IMAGE" >&2
+        return
+    fi
     echo ">>> building the image $CONTAINER_IMAGE from the Containerfile (several minutes the first time)" >&2
     podman build --label "bpi.containerfile=$want" -t "$CONTAINER_IMAGE" - < "$CONTAINER_FILE" >&2
 }
@@ -175,18 +204,86 @@ ccache_env() {
     fi
 }
 
+# What --prune keeps and removes, one line each, tab-separated:
+#     container <name> <keep|remove> <state> <checkout>
+#     image <id> <keep|remove> <label> <tags, comma-separated or none> <containers using it>
+# A container is removed when it is a bpi-dev container (label bpi.checkout), not running, and its
+# checkout is gone; an image (label bpi.containerfile) when no container that stays uses it and
+# its label is the hash of no Containerfile in a worktree of this repository.
+prune_plan() {
+    local name state checkout image id label tags users wanted=" " wt
+    local -A uses=()
+    while IFS=$'\t' read -r name state checkout image; do
+        if [ "$state" != running ] && [ ! -d "$checkout" ]; then
+            printf 'container\t%s\tremove\t%s\t%s\n' "$name" "$state" "$checkout"
+        else
+            printf 'container\t%s\tkeep\t%s\t%s\n' "$name" "$state" "$checkout"
+            uses[$image]+="$name,"
+        fi
+    done < <(podman ps -a --no-trunc --filter label=bpi.checkout \
+                 --format $'{{.Names}}\t{{.State}}\t{{ index .Labels "bpi.checkout" }}\t{{.ImageID}}')
+    while read -r wt; do
+        [ -f "$wt/dsp/juce_plugins/tools/Containerfile" ] && wanted+="$(containerfile_hash "$wt/dsp/juce_plugins/tools/Containerfile") "
+    done < <(git -C "$CONTAINER_CHECKOUT" worktree list --porcelain 2> /dev/null | sed -n 's/^worktree //p'; echo "$CONTAINER_CHECKOUT")
+    while read -r id; do
+        label="$(image_label "$id")"
+        tags="$(podman image inspect --format '{{range .RepoTags}}{{.}},{{end}}' "$id" 2> /dev/null || true)"
+        tags="${tags%,}"
+        users="${uses[sha256:$id]:-${uses[$id]:-}}"
+        users="${users%,}"
+        if [ -z "$users" ] && [[ "$wanted" != *" $label "* ]]; then
+            printf 'image\t%s\tremove\t%s\t%s\t%s\n' "${id:0:12}" "$label" "${tags:-none}" "none"
+        else
+            printf 'image\t%s\tkeep\t%s\t%s\t%s\n' "${id:0:12}" "$label" "${tags:-none}" "${users:-none}"
+        fi
+    done < <(podman images --no-trunc --filter label=bpi.containerfile --format '{{.ID}}' | sed 's/^sha256://' | sort -u)
+}
+
 container_status() {
-    local have
-    have="$(podman image inspect --format '{{ index .Labels "bpi.containerfile" }}' "$CONTAINER_IMAGE" 2> /dev/null || true)"
-    if [ -z "$have" ]; then
-        echo "image:     $CONTAINER_IMAGE not built yet (the first command builds it)"
+    local have kind what verdict a b c
+    have="$(image_label "$CONTAINER_IMAGE")"
+    if [ -z "$have" ] && [ -n "$(podman images -q --filter "label=bpi.containerfile=$(containerfile_hash)")" ]; then
+        echo "image:     $CONTAINER_IMAGE not tagged yet (the next command tags the image of this Containerfile there is)"
+    elif [ -z "$have" ]; then
+        echo "image:     $CONTAINER_IMAGE not built yet (the next command builds it)"
     elif [ "$have" = "$(containerfile_hash)" ]; then
         echo "image:     $CONTAINER_IMAGE, current"
     else
-        echo "image:     $CONTAINER_IMAGE, older than the Containerfile (the next command rebuilds it)"
+        echo "image:     $CONTAINER_IMAGE, labelled $have, not this Containerfile's (the next command tags or builds it)"
     fi
     echo "container: $CONTAINER_NAME, $(podman container inspect --format '{{.State.Status}} since {{.State.StartedAt}}' "$CONTAINER_NAME" 2> /dev/null || echo 'not running')"
     echo "checkout:  $CONTAINER_CHECKOUT"
+    echo "every builder image and bpi-dev container (--prune removes those marked remove):"
+    while IFS=$'\t' read -r kind what verdict a b c; do
+        if [ "$kind" = container ]; then
+            printf '  %-6s container %s, %s, for %s\n' "$verdict" "$what" "$a" "$b"
+        else
+            printf '  %-6s image %s (%s), tags %s, used by %s\n' "$verdict" "$what" "$a" "$b" "$c"
+        fi
+    done < <(prune_plan)
+}
+
+# Removes what prune_plan marks remove (--dry-run: only says it).
+container_prune() {
+    local dry="${1:-}" line kind what verdict a b c tag doing=removing
+    local -a plan
+    [ -z "$dry" ] || doing="would remove"
+    mapfile -t plan < <(prune_plan)
+    for line in "${plan[@]}"; do
+        IFS=$'\t' read -r kind what verdict a b c <<< "$line"
+        [ "$verdict" = remove ] || continue
+        if [ "$kind" = container ]; then
+            echo "$doing the container $what ($a, its checkout $b is gone)"
+            [ -n "$dry" ] || podman rm "$what" > /dev/null
+        else
+            echo "$doing the image $what ($a, tags $b): no container uses it"
+            [ -n "$dry" ] && continue
+            # By each tag (removing the last one removes the image), or by its id when it has none.
+            if [ "$b" = none ]; then podman rmi "$what" > /dev/null; else
+                for tag in ${b//,/ }; do podman rmi "$tag" > /dev/null; done
+            fi
+        fi
+    done
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
@@ -195,6 +292,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     case "${1:-}" in
         --status) container_status ;;
         --stop) podman rm -f "$CONTAINER_NAME" > /dev/null 2>&1 || true; echo "$CONTAINER_NAME: removed" ;;
+        --prune) case "${2:-}" in "") container_prune ;; --dry-run) container_prune dry ;;
+                     *) echo "usage: $0 --prune [--dry-run]" >&2; exit 2 ;; esac ;;
         "") container_exec bash ;;
         *) container_exec "$@" ;;
     esac
