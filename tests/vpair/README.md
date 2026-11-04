@@ -29,9 +29,10 @@ python3 tests/vpair/pool.py --jobs 12 --note note.txt test_knob_latency test_gra
 ```
 
 `tools/test.sh` runs the modules on a pool of workers, each on its own virtual pair (`pool.py`,
-"The pool" below), whenever it has more than one job: the checks and the levels alike (`--jobs N`,
-by default half the processors). `--jobs 1`, and CI (where `CI` is set the default is one job), run
-them one after another in one process.
+"The pool" below), whenever it has more than one job: the checks and the levels alike (`--jobs N`
+or `BPI_TEST_JOBS`, 1 to 64; by default half the processors, at least 1 and at most 16, because
+the container's tasks bound it: "The pool" below). `--jobs 1`, and CI (where `CI` is set the
+default is one job), run them one after another in one process.
 
 `tools/test.sh vpair` records `vpair: pass` or `fail` in the test status, with a note
 (`vpair_note`) of how many tests ran, which failed, and which were skipped and why. A skipped
@@ -83,9 +84,10 @@ python3 tests/vpair/pool.py --jobs N --note FILE [MODULE...]     # from the repo
 ```
 
 `tools/test.sh` calls it for every run with more than one job, the checks and the levels, in the
-development container (from outside it moves there itself). `--jobs` takes 1 to 64. A MODULE is
-`test_<name>` (`test_<name>.<Class>` is one unit); none is every module of this folder, as
-`unittest discover` finds them. What it does:
+development container (from outside it moves there itself). `--jobs` takes 1 to 64 and has no
+default (`tools/test.sh`'s is half the processors, from 1 to 16: the end of this section). A
+MODULE is `test_<name>` (`test_<name>.<Class>` is one unit); none is every module of this folder,
+as `unittest discover` finds them. What it does:
 
 1. **The prebuild.** Every module that builds says so in `POOL_BUILDS`, everything its `built()`
    calls need, also through the harness's classes (`Speakerd`, `render` and `SpeakerPair` need
@@ -117,10 +119,13 @@ development container (from outside it moves there itself). `--jobs` takes 1 to 
    looks for collide with another worker's: `VPAIR_DIR=/tmp/vpool<k>`, `VPAIR_ADDRESS_BASE=127.77.<k>`
    (the left speaker's ampd on `.1`, the right's on `.2`, another on `.3`, with the protocol's
    ports), `VPAIR_PLUGIN_HOST=vpairPlugHost<k>` (the stand-in plugin host the installers and
-   `speakerd-run` look for by name, in `TEST_ENV`), an X display, `VPAIR_DISPLAY=<100 + k>` with
-   `DISPLAY` pointing at it (where `VirtualDisplay` runs its Xvfb: a JUCE program without
-   `DISPLAY` opens `:0.0`, so every speakerd in the container would otherwise use the first
-   worker's display, or plugin-check's, and exit when it stops), and
+   `speakerd-run` look for by name, in `TEST_ENV`), an X display, `VPAIR_DISPLAY=<100 + k>`
+   (`:100` to `:199`) with `DISPLAY` pointing at it (where `VirtualDisplay` runs its Xvfb: a JUCE
+   program without `DISPLAY` opens `:0.0`, so every speakerd in the container would otherwise use
+   the first worker's display, which `-displayfd` alone puts on the first free number, `:0`, or
+   the controller's own tests' (`test_controller.py`'s Xvfb takes the first free number too), and
+   exit when it stops; plugin-check's Xvfb takes `:200` to `:299` and the controller's screenshot
+   run `:96`, never `:0`), and
    `VPAIR_PREBUILT=<checkout>/build`. A worker takes its slot `k`, one of 100, with a lock
    (`/tmp/vpool<k>.lock`: `pool_selftest.py`'s pools beside a real one, or native pools of two
    checkouts, take different ones), and first brings down a pair an interrupted run left in its
@@ -169,8 +174,9 @@ length of `test_monitor_fanout`, its longest unit) and then `test_chain_cost` al
 with `VPAIR_CHAIN_COST_QUICK=1` (on one worker: 591 s). The checks' modules alone: `speakerd` 16 s,
 `ampd` 26 s, `pair` 65 s, `installers` 22 s, `chain` 29 s (13 s quick). A run peaks at about 790 to
 840 tasks of the container's 2048 (`pids.max`), under 3 GiB, and no `/dev/shm`: 65 to 75
-tasks a busy worker, so the container's tasks bound `--jobs` long before its 64 (the pool warns past
-80 % of `pids.max`, about 23 such workers).
+tasks a busy worker, so the container's tasks bound `--jobs` long before its 64: the pool warns past
+80 % of `pids.max`, about 23 such workers. That is why `tools/test.sh`'s default, half the
+processors, stops at 16 (and is at least 1); an explicit `--jobs` still takes 1 to 64.
 
 ## Files
 
@@ -517,9 +523,13 @@ real-controller part the controller's `buffer-size` commands. Against older ones
 - **A recording often starts with a quantum or two of zeros**, before the first buffer reaches
   the recorder. The recorder is linked before anything is played, so a capture misses nothing.
 - **A JUCE program without `DISPLAY` opens `:0.0`**, speakerd included: it connects to whatever
-  X server has that number in the container (`VirtualDisplay`'s Xvfb, plugin-check's), and exits
-  with status 1 ("X connection to :0.0 broken") when that server stops. The pool gives each worker
-  a display of its own (`DISPLAY`, `VPAIR_DISPLAY`) for that reason.
+  X server has that number in the container, and exits with status 1 ("X connection to :0.0
+  broken") when that server stops. In a serial run (`--jobs 1`, CI) `:0` can be `VirtualDisplay`'s
+  Xvfb (without `VPAIR_DISPLAY` it takes the first free number, `-displayfd`) or, with the
+  controller's own tests running in the same container, theirs (`test_controller.py`'s, the same
+  way). plugin-check's Xvfb never is: it takes `:200` to `:299`; nor the controller's screenshot
+  run's (`dsp/juce_apps/controller/tests/run.sh --screenshot`, a fixed `:96`). The pool gives each
+  worker a display of its own (`DISPLAY`, `VPAIR_DISPLAY`, `:100` to `:199`) for that reason.
 
 ## Next
 
