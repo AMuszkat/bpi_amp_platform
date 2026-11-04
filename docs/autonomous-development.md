@@ -193,7 +193,9 @@ the checks are made to take a minute or two after an edit:
   `chain_cost` and parts of `speakerd_installed`, `buffer_size` and `ampd_protocol`),
   `POOL_ALONE` for what must run with no other test beside it (`True`, or the classes and tests
   it names: one at a time, last; `chain_cost`, which measures CPU, and `knob_latency`'s
-  `test_at_quantum_128`, whose 3 ms settle bound failed 5 runs of 12 beside the other quiet units),
+  `test_at_quantum_128`, whose 3 ms settle bound failed 5 runs of 12 beside the other quiet units,
+  "not at its new level 3 ms after it began" with no xrun recorded, a cause still open, not shown
+  to be the harness's: running it alone avoids the condition, it does not explain it),
   and `POOL_SPLIT` or `POOL_WHOLE` to run its tests as a unit each, or the module as one, instead
   of a unit per test class; the README of [`tests/vpair/`](../tests/vpair/README.md) ("The
   pool") has the details. `--jobs 1` is the serial runner, one module after another in one
@@ -251,8 +253,10 @@ flowchart LR
     p1 -- "every step ended" --> p2 -- "every other test ended" --> p3
 ```
 
-The pool's prebuild takes both build slots, then the block FIR's build, plugin-check's and the
-aarch64 build identity's take them two at a time (never more than two LTO trees at once). A
+The pool's prebuild takes both build slots, its trees together (one `tools/build.sh` each, all at
+once: `speakerd` and the headless plugins; a no-op in a warm run, or one where only plugin-check's
+trees are cold), then the block FIR's build, plugin-check's and the aarch64 build identity's take
+them two at a time: at most two heavy steps at once, not two LTO trees. A
 failed step stops nothing that does not need it; one that does is skipped, saying so (the
 controller's own tests after its failed build; the `controller` check's end to end after
 either). The pool does not need its prebuild to pass: it runs on the prebuild's report, the
@@ -262,7 +266,11 @@ whole when it ends and kept in `build/test-steps/`; what the steps tell each oth
 the results, the pool's note) is the run's own, in a temporary folder; a table ends the run; one
 schedule runs at a time per checkout (`build/test-run.lock`). A SIGINT, SIGTERM or SIGHUP stops
 every step; a schedule killed outright leaves its steps to end on their own, and the pool,
-waiting at its gate, stops waiting once the schedule is gone. `test_controller_end_to_end` runs
+waiting at its gate, stops waiting once the schedule is gone. The controller's own `@alone` tests
+(a bound on a time or a rate) run after its parallel batch but, in a schedule, beside the pool's
+main units and the `tools` check, not behind the gate (measured: 10 full runs and 4 `controller`
+checks, all passing with wide margins, rates and 250 ms ticks against 12 to 122 ms); the vpair
+quiet units are the ones that wait for the gate. `test_controller_end_to_end` runs
 once: level 1's controller step is its build and its own tests, level 2 runs the end to end.
 
 The levels keep LTO and `chain_cost`'s full window wherever they run, and use the schedule like

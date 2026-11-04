@@ -180,7 +180,7 @@ class Taken(unittest.TestCase):
         self.assertTrue(plan[0].startswith("prebuild heavy slots=2 "), plan)       # first of the heavy steps
         heavy = [line.split()[0] for line in plan if line.split()[1] == "heavy"]
         lto = [f"plugin-lto-{p}" for p in plugins_with_targets()]
-        # Every LTO build heavy (two LTO trees at most at once): the block FIR first after the
+        # Every LTO build heavy (two heavy steps at most at once, the prebuild taking both): the block FIR first after the
         # prebuild, the aarch64 build identity last.
         self.assertEqual(heavy, ["prebuild", "blockfir", *lto, "buildinfo-aarch64"], plan)
         light = [line.split()[0] for line in plan if line.split()[1] == "light"]

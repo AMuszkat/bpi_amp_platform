@@ -22,7 +22,7 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
    SIGHUP during the prebuild kills its builds (each one's whole session: cmake, ninja and the
    compilers too, so that none goes on holding its tree's lock) and reaps them, then ends the pool
    by that signal (no unit runs, no note). --prebuild-only does that alone and exits, no unit run:
-   1 when a build that a unit requires failed, else 0; --built REPORT gets what it built and what
+   1 when a build that a unit requires failed or REPORT could not be written, else 0; --built REPORT gets what it built and what
    failed (JSON, written atomically), and its note (with --note) is written only when a required
    build failed: the units that need it, failed. --prebuilt REPORT makes a pool build nothing and
    take that report instead (tools/test.sh's schedule runs the prebuild among the builds, and the
@@ -110,7 +110,9 @@ LOCK = (FILES or ROOT / "build") / "vpair-pool.lock"
 # on (24 threads, 12 workers; the first runs were seeded with the investigation's timings of each class).
 SEED = {
     "test_monitor_fanout.MonitorFanout": 32.5, "test_controller_end_to_end.ControllerEndToEnd": 34.3,
-    "test_knob_latency.KnobLatency": 32.8, "test_ampd_protocol.Protocol.test_monitor_relay": 25.6,
+    "test_knob_latency.KnobLatency.test_at_quantum_128": 16.7,
+    "test_knob_latency.KnobLatency.test_at_the_boards_quantum_1024": 17.0,
+    "test_ampd_protocol.Protocol.test_monitor_relay": 25.6,
     "test_graph_edit.GraphEdit": 23.8, "test_firmware_speakerd_install.Install.test_smoke_reports_the_timing": 20.8,
     "test_ampd_persistence.AmpdPersistence": 19.6, "test_firmware_ampd_install.AmpdInstall": 18.2,
     "test_speakerd_installed.Installed": 17.9, "test_meter_values.MeterValues": 16.7,
@@ -457,6 +459,8 @@ def kill_build(process):
     """SIGKILL to a build's whole session (the prebuild starts each in its own, so that cmake, ninja
     and the compilers go with tools/build.sh, none left holding the tree's lock), or to the process
     alone when it leads no group of its own."""
+    if process.poll() is not None:               # reaped already: its pid may be another's now
+        return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         if os.getpgid(process.pid) == process.pid:
             os.killpg(process.pid, signal.SIGKILL)
@@ -563,8 +567,13 @@ def write_report(path, built, broken):
     """--built REPORT: what the prebuild built and what failed, for --prebuilt."""
     path = Path(path)
     tmp = path.with_name(f".{path.name}.{os.getpid()}")
-    tmp.write_text(json.dumps({"built": sorted(built), "failed": dict(sorted(broken.items()))}, indent=1) + "\n")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps({"built": sorted(built), "failed": dict(sorted(broken.items()))}, indent=1) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def read_report(path):
@@ -1194,14 +1203,19 @@ def main():
     if args.prebuild_only:
         # The logs of the last pool are kept: no unit runs here.
         built, broken = build_now()
+        reported = True
         if args.built is not None:
-            write_report(args.built, built, broken)
+            try:
+                write_report(args.built, built, broken)
+            except OSError as error:            # its run's folder gone (a schedule that was killed)
+                out(f"pool: the prebuild's report could not be written to {args.built}: {describe(error)}")
+                reported = False
         cannot = unbuildable(units, built, broken)
         if cannot:
             out(f"pool: --prebuild-only: a build failed: {len(cannot)} of the {len(units)} unit(s) cannot run")
             return finish(cannot, status=1)
         out(f"pool: --prebuild-only: built what the {len(units)} unit(s) need, no unit run")
-        return 0
+        return 0 if reported else 1
 
     if LOGS.exists():
         for old in list(LOGS.glob("*.log")) + list(LOGS.glob("*.events")):

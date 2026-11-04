@@ -38,7 +38,7 @@ be read), and --results gets "NAME RESULT" a line (passed, failed, skipped, inte
 second waits, saying which run holds it (--what) once and then every 60 s; SIGINT, SIGTERM or
 SIGHUP while it waits ends it, nothing run.
 
-Exit status: 0 when every step passed, 1 otherwise, 2 for a plan it cannot run or a lock it cannot
+Exit status: 0 when every step passed (and --results was written), 1 otherwise, 2 for a plan it cannot run or a lock it cannot
 open (--results is then not written). SIGINT, SIGTERM or SIGHUP (a closed terminal) passes the signal to every running
 step's session, starts nothing more, waits for them (SIGKILL after 60 s), prints their blocks and
 the table, and ends the schedule by that signal.
@@ -424,7 +424,11 @@ def main(argv=None):
     ok = schedule.run()
     print(schedule.summary(), flush=True)
     if args.results:
-        Path(args.results).write_text("".join(f"{s.name} {s.result}\n" for s in steps))
+        try:
+            Path(args.results).write_text("".join(f"{s.name} {s.result}\n" for s in steps))
+        except OSError as error:                 # the run's folder gone (test.sh's EXIT trap, a kill)
+            print(f"schedule: the results could not be written to {args.results}: {error}", flush=True)
+            ok = False
     if caught:
         for s in previous:
             signal.signal(s, signal.SIG_DFL)
