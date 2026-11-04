@@ -53,19 +53,30 @@ inherited && exec "$@"
 gnu_make || exec "$@"
 command -v python3 > /dev/null || exec "$@"
 
-# The pipe, then the command in place of python, with the environment it was given and MAKEFLAGS.
-# PYTHONCOERCECLOCALE=0, put back as it was: under the C locale (the container's) python would
-# otherwise export LC_CTYPE=C.UTF-8 (PEP 538), and the compilers' messages would change. A command
-# that cannot be run fails as bash would fail it (127 not found, 126 not executable).
+# The signals this script was given ignored (/proc's SigIgn, a hexadecimal mask; empty without /proc).
+ignored="$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$$/status" 2> /dev/null || true)"
+
+# The pipe, then the command in place of python, with the environment it was given and MAKEFLAGS,
+# and the process state python changes put back as it was:
+#   - PYTHONCOERCECLOCALE=0, then put back: under the C locale (the container's) python would
+#     otherwise export LC_CTYPE=C.UTF-8 (PEP 538), and the compilers' messages would change;
+#   - SIGPIPE and SIGXFSZ, which python ignores at its start and an exec keeps ignored: back to
+#     their default (a write to a closed pipe kills the writer, as the build's tools expect), unless
+#     this script was given them ignored. Its SIGINT handler an exec resets; it blocks no signal.
+# A command that cannot be run fails as bash would fail it (127 not found, 126 not executable).
 PYTHONCOERCECLOCALE=0 exec python3 -S -c '
 import sys
 sys.path = [p for p in sys.path if p]   # no module from the current directory
-import fcntl, os
-was_set, was, tokens, command = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:]
+import fcntl, os, signal
+was_set, was, ignored, tokens, command = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5:]
 if was_set:
     os.environ["PYTHONCOERCECLOCALE"] = was
 else:
     os.environ.pop("PYTHONCOERCECLOCALE", None)
+ignored = int(ignored, 16) if ignored else 0
+for s in (signal.SIGPIPE, signal.SIGXFSZ):
+    if not ignored & (1 << (s - 1)):
+        signal.signal(s, signal.SIG_DFL)
 r, w = os.pipe()
 os.write(w, b"+" * (tokens - 1))
 fcntl.fcntl(r, fcntl.F_SETFL, fcntl.fcntl(r, fcntl.F_GETFL) | os.O_NONBLOCK)
@@ -78,4 +89,4 @@ try:
 except OSError as e:
     print(f"tools/jobserver.sh: {command[0]}: {e.strerror}", file=sys.stderr)
     sys.exit(127 if isinstance(e, FileNotFoundError) else 126)
-' "${PYTHONCOERCECLOCALE+set}" "${PYTHONCOERCECLOCALE-}" "$(nproc)" "$@"
+' "${PYTHONCOERCECLOCALE+set}" "${PYTHONCOERCECLOCALE-}" "$ignored" "$(nproc)" "$@"
