@@ -46,7 +46,11 @@ what they read (`EXPECT` lines), which `run.sh` passes to the checker above as
 
 Exit status 0 means every check passed; the report (in-process checks first) is in
 `<BUILD_DIR>/<plugin>-report.txt`, the builds in `<BUILD_DIR>/<plugin>-builds/` (the bundles in
-`<plugin>-builds/plugin/<target>_artefacts/Release/LV2/<target>.lv2`).
+`<plugin>-builds/plugin/<target>_artefacts/Release/LV2/<target>.lv2`). JUCE's copy step copies
+each bundle into the tree's own `<plugin>-builds/copied/lv2` and `copied/vst3`, never into
+`~/.lv2`, where it raced with `tools/build.sh`'s copy of the same bundle
+([cmake-reference.md](../../docs/juce-knowledge/build-system/cmake-reference.md)); the checks run
+with `HOME` an empty `<BUILD_DIR>/home`, so they see only the bundles they are given.
 The audio check uses the parameter values in `juce_plugins/<plugin>/plugin-check.probes`, so it
 exercises the DSP rather than a flat setting.
 
@@ -73,6 +77,15 @@ check, runs without LTO, in `build-check-nolto`; `tools/test.sh plugins` and lev
 (`tools/test.sh unit`) run with it, in `build-check`, so the levels check what ships. The no-LTO
 builds' report reads as the LTO builds' does (loudness: line for line), but their binaries are
 not the ones that ship.
+
+The plugin's `cmake --build` runs under a make jobserver (`tools/jobserver.sh` at the repository
+root), from which GCC's `-flto=auto` takes the LTRANS jobs of the links running at once, instead
+of each link starting one per core; the checker's build has no LTO and runs as it is. Measured
+for loudness with LTO after a one-line edit (a comment) of `PluginProcessor.cpp`, through
+ccache, the build alone, with other builds loading the machine (load 16 to 85, 2026-11-04):
+63.5, 48.2 and 49.4 s without the jobserver, 46.7, 49.2 and 44.2 s with it; on a quiet machine,
+crossover's 50.1 against 45.9 s
+([cmake-reference.md](../../docs/juce-knowledge/build-system/cmake-reference.md)).
 
 The two trees are kept apart because `SPEAKER_LTO` changes every compile command: a tree switched
 from one to the other rebuilds everything. An explicit `BUILD_DIR` is configured the way

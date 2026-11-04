@@ -328,7 +328,10 @@ repository: its bundles say `unknown`.
 `cmake/SourceId.cmake` is the one implementation, used by the build and by
 `plugin-versions.sh`. The build recomputes it at every build, without a reconfigure (a custom
 target, `<plugin>_build_info`), and rewrites the generated header only when it changes, so an
-unchanged identity recompiles nothing. Where it ends up:
+unchanged identity recompiles nothing. A version bump recompiles only the format wrappers'
+sources, not the JUCE modules: JUCE gives the version to every compile of a plugin, and
+`speaker_add_plugin()` moves it to the wrappers, the only code that reads it
+([cmake-reference.md](../docs/juce-knowledge/build-system/cmake-reference.md)). Where it ends up:
 
 | Where | What |
 |---|---|
@@ -348,7 +351,8 @@ unchanged identity recompiles nothing. Where it ends up:
 The subject is the target's own LV2 URI (`.../loudness_headless` for the headless build), the
 `bpi:` namespace is `SPEAKER_LV2_URI_BASE` with `#`. The file is written by a `POST_BUILD` step
 after JUCE's `juce_lv2_helper` has written the bundle's `.ttl` files and before JUCE copies the
-bundle (into `~/.lv2`, or a cross build's `copied/lv2`), so the copy has it too
+bundle (into the build tree's own `copied/lv2` for `tools/build.sh` and plugin-check, into
+`~/.lv2` for a build that sets no copy directory), so the copy has it too
 ([cmake-reference.md](../docs/juce-knowledge/build-system/cmake-reference.md)).
 
 The manifest does not name `buildinfo.ttl` (no `rdfs:seeAlso`), on purpose: the file is
@@ -366,10 +370,9 @@ Level 1 (`tools/test.sh unit`) runs it on the x86_64 bundles plugin-check builds
 (`tools/build.sh loudness aarch64 headless`: what the board installer deploys, and the cheapest
 target to cross-build). That copy proves the copy step's order (the copy is why
 `speaker_add_plugin()` writes `buildinfo.ttl` before it), because only that build tree writes
-`copied/lv2`. Level 1 does not check the copies in `~/.lv2`: any other build in the same HOME
-(`tools/build.sh` of another tree, `build-podman.sh`'s local debug loop, whose bundles say
-`unknown`) may have written them since, and JUCE copies a bundle again only when it links the
-binary. The controller, which compiles `loudness_control`'s sources in
+its `copied/lv2`. Level 1 does not check what is in `~/.lv2`: no build of `tools/build.sh` or
+plugin-check copies there, and what is (`build-podman.sh`'s local debug loop, whose bundles say
+`unknown`) is not what level 1 built. The controller, which compiles `loudness_control`'s sources in
 (`../juce_apps/controller/ControlPlugins.cmake`), does not compile the generated source and
 carries no plugin identity.
 

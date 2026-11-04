@@ -7,12 +7,12 @@
 # --arch, that the binary is code for that machine. Part of level 1 (tools/test.sh unit): on the
 # x86_64 bundles plugin-check builds, and on one aarch64 bundle of tools/build.sh and its copy
 # in the build's copied/lv2, which only that build tree writes: the copy proves that JUCE's copy
-# step runs after buildinfo.ttl is written. Not on the copies in ~/.lv2, which any other build
-# in the same HOME may have written since.
+# step runs after buildinfo.ttl is written. Not on what is in ~/.lv2, which no build of
+# tools/build.sh or plugin-check writes.
 #
 #     dsp/juce_plugins/tests/buildinfo/check.sh [--arch x86_64|aarch64] <plugin> <bundle.lv2>...
 #
-# Any bundle can be checked, a copy included (~/.lv2/<target>.lv2 after a build of this tree).
+# Any bundle can be checked, a copy included (<build tree>/copied/lv2/<target>.lv2).
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../tools" && pwd)/common.sh"
 usage="usage: $0 [--arch x86_64|aarch64] <plugin> <bundle.lv2>..."

@@ -62,7 +62,10 @@ echo "=== Building $PLUGIN: complete, control, headless, and the in-process chec
 cmake -S "$HERE/in-process" -B "$PLUGIN_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DPLUGIN_DIR="$SRC" -DCMAKE_PREFIX_PATH="$JUCE_INSTALL_DIR" -DSPEAKER_LTO=$LTO "${LAUNCHER[@]}" \
       > "$BUILD_DIR/$PLUGIN-configure.log"
-cmake --build "$PLUGIN_BUILD" -j"$(nproc)" \
+# Under a make jobserver (tools/jobserver.sh at the repository root): GCC's -flto=auto then
+# takes the LTRANS jobs of the six links from one pool of nproc tokens, instead of nproc jobs
+# for each link running at once. The checker below has no LTO, so it gains nothing from one.
+"$ROOT/../tools/jobserver.sh" cmake --build "$PLUGIN_BUILD" -j"$(nproc)" \
       --target "${PLUGIN}_LV2" "${PLUGIN}_control_LV2" "${PLUGIN}_headless_LV2" \
                "${PLUGIN}_in_process" "${PLUGIN}_control_in_process" "${PLUGIN}_headless_in_process"
 
@@ -91,8 +94,8 @@ if [ -f "$SRC/plugin-check.probes" ]; then
 fi
 args+=("${probes[@]}")
 
-# An empty home, so the LV2 host sees only the bundles named above, not the copies the build
-# put in ~/.lv2 (which may be stale or from another branch).
+# An empty home, so the LV2 host sees only the bundles named above, not what other builds put
+# in ~/.lv2 (which may be stale or from another branch; this tree copies into its own copied/).
 export HOME="$BUILD_DIR/home"
 mkdir -p "$HOME"
 
