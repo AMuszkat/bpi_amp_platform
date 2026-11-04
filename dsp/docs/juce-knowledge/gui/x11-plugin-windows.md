@@ -2,8 +2,9 @@
 
 Editor-window behaviour found while developing the `loudness` and `ampScope` editors in the
 JUCE AudioPluginHost (the `-debug-linux` flow; setting that up is in
-[`../hosting/audiopluginhost-linux.md`](../hosting/audiopluginhost-linux.md)). All of this was
-verified against JUCE 8.0.12 sources and measured on a GNOME/X11 desktop at 2x scale.
+[`../hosting/audiopluginhost-linux.md`](../hosting/audiopluginhost-linux.md)). Sections 1 to 3
+were verified against JUCE 8.0.12 sources and measured on a GNOME/X11 desktop at 2x scale;
+section 4 says where it was checked.
 
 ## 1. A fixed-size plugin window can still be maximised — and then the editor stretches
 
