@@ -52,9 +52,10 @@ whose binary is up to date copies nothing, and a copy that another build tree wr
 `~/.lv2` afterwards stays there. `copyDir.cmake`'s `file(INSTALL)` keeps the files' contents and
 times (to the second), so a copy whose binary differs from this build's artefact came from
 another build, which is how `tools/test.sh` tells them apart (two Release trees of the same
-sources and identity, `build/loudness` and plugin-check's, linked byte-identical binaries, so the
-test cannot tell those two apart, and need not). Removing the artefact's `.so` makes the next
-build link, and so copy, again.
+sources and identity, `build/loudness` and plugin-check's `build-check`, linked byte-identical
+binaries, so the test cannot tell those two apart, and need not; plugin-check's
+`build-check-nolto`, without LTO, links other ones, and copies them into `~/.lv2` too). Removing
+the artefact's `.so` makes the next build link, and so copy, again.
 
 **Do not name an extra file in `manifest.ttl`.** The helper rewrites the manifest whenever the
 plugin is linked, so a line added to it would have to be added again after every helper run;
@@ -88,11 +89,27 @@ the directory that included it first: a second plugin added to the same build (t
 adds plugins with `add_subdirectory`) would see none of them. `SpeakerPlugin.cmake` uses
 `include_guard(DIRECTORY)`.
 
-## `-flto=auto` instead of `juce_recommended_lto_flags`
+## `-flto=auto` instead of `juce_recommended_lto_flags`, and `SPEAKER_LTO`
 
 For GCC/Clang `juce::juce_recommended_lto_flags` passes a bare `-flto`, which runs the LTO
 link phase (LTRANS) single-threaded, the slowest step of the build. The wrapper adds
-`-flto=auto` for Release instead: same binary, one LTRANS job per core.
+`-flto=auto` for Release instead: same binary, one LTRANS job per core. It is
+`speaker_add_lto_flags(<target>)`, which every plugin target gets and the block FIR test
+(`juce_plugins/tests/blockfir`) calls too; the flags are `PUBLIC`, so whatever links a plugin's
+shared-code target (its format wrappers, plugin-check's in-process checkers) is linked with LTO
+as well.
+
+The cache option `SPEAKER_LTO` (`ON` unless a configure passes `OFF`) turns it off: no LTO flag
+at all, for GCC/Clang and MSVC (`-GL`/`-LTCG`) alike. Every build that does not pass it keeps
+LTO: `tools/build.sh` (so the virtual pair, the chain check and `chain_cost`), `build-podman.sh`,
+the block FIR test, plugin-check with LTO (`PLUGIN_CHECK_LTO=1`, its default: `tools/test.sh
+plugins` and level 1). Only plugin-check with `PLUGIN_CHECK_LTO=0` (the focused `tools/test.sh
+plugin <name>`, in its own tree `build-check-nolto`) passes `OFF`, because a plugin's LTO links
+are most of a check after an edit (loudness, one line of `PluginProcessor.cpp`: 54 s with LTO,
+9 to 12.5 s without; [plugin-check's README](../../../juce_apps/plugin-check/README.md)). The
+option changes every compile command, so a tree switched between the two rebuilds everything:
+hence one tree each. Without LTO the plugins' outputs in plugin-check were the same (loudness:
+the same report, line for line), but the binaries differ, and only the LTO ones ship.
 
 ## JUCE is consumed as an installed package, built once
 
