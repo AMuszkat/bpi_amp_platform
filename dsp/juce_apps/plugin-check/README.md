@@ -106,10 +106,13 @@ The editor check needs an X display. Without `DISPLAY` the script starts `Xvfb` 
 they are installed (a window manager is needed: without one, opening an LV2 editor fails with an
 X `BadAtom` error) and skips the check otherwise. Xvfb runs on the first free display number
 from `:200` up (to `:299`), never on `:0` and the low numbers: a JUCE program with no `DISPLAY`
-opens `:0.0`, the plugins `speakerd` hosts included, and exits when that X server stops
-([`tests/vpair/README.md`](../../../tests/vpair/README.md)), and an Xvfb given `-displayfd`
-alone takes the first free number from `:0`. The numbers between are others' in the same
-container: `:96` the controller's screenshot run's, `:100` to `:199` the vpair pool's workers'.
+opens `:0.0` (a build's `juce_lv2_helper`, this check's own editor host) and exits when that X
+server stops, and an Xvfb given `-displayfd` alone takes the first free number from `:0`.
+`speakerd` (0.3.3 on) is not one of them: it runs with a `DISPLAY` Xlib cannot parse, so neither
+it nor the plugins it hosts connect to any X server
+([`speakerd`'s README](../speakerd/README.md#no-x-display)). The other numbers are others' in
+the same container: `:96` the controller's screenshot run's, `:100` to `:199` the vpair pool's
+workers' (and `VirtualDisplay`'s in a serial run), `:300` up the controller's own tests'.
 Given a number with `-displayfd`, Xvfb writes it once it accepts connections, and exits at once
 (in a few milliseconds) when an X server already listens there; it keeps no lock file then, so
 its socket alone decides

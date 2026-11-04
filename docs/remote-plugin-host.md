@@ -910,7 +910,8 @@ build, without a reconfigure, and rewrites the generated `SpeakerBuildInfo.h` on
 identity changes. The version and the identity are readable in three places: in the binary,
 as the string `bpi-build-info: <URI> version <version> source <source-id>` of every LV2 and
 VST3 `.so`; in every LV2 bundle, as `buildinfo.ttl` next to `manifest.ttl`, written before JUCE
-copies the bundle into `~/.lv2`:
+copies the bundle into the build tree's own `copied/lv2` (`~/.lv2` only in `build-podman.sh`'s
+builds):
 
 ```turtle
 @prefix bpi: <https://github.com/AMuszkat/bpi_amp_dsp_tuning#> .
@@ -942,8 +943,8 @@ any git or parse error. Level 1 tests both commands on a scratch repository
 (`dsp/juce_plugins/tests/plugin-versions`), and checks the identity in the bundles plugin-check
 builds and in `loudness_headless` cross-built for aarch64 with its copy in the build's own
 `copied/lv2`, which proves that JUCE's copy step runs after `buildinfo.ttl` is written
-(`dsp/juce_plugins/tests/buildinfo`; not the copies in `~/.lv2`, which another build in the
-same HOME may have written).
+(`dsp/juce_plugins/tests/buildinfo`; not what is in `~/.lv2`, which no build of `tools/build.sh`
+or plugin-check writes).
 
 Step 4's catalogue carries both for every build a speaker has, and the hub will only apply a
 graph when the controller's control build of each plugin agrees with the speakers' headless

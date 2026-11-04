@@ -118,9 +118,11 @@ read_display() { read -r display_number < "$BUILD_DIR/$PLUGIN-xvfb.display" && [
 
 # Xvfb on the first free display number from :200 up, within 10 s (into pids and
 # $display_number). Not the first free one from :0, which Xvfb's -displayfd alone would take: a
-# JUCE program with no DISPLAY opens :0.0, the plugins speakerd hosts included, and exits when
-# that X server stops (tests/vpair/README.md); :96 is the controller's screenshot run's, :100 to
-# :199 the vpair pool's workers' (tests/vpair/pool.py). Given a number, Xvfb writes it to fd 3
+# JUCE program with no DISPLAY (a build's juce_lv2_helper, this check's editor host) opens :0.0
+# and exits when that X server stops; speakerd (0.3.3 on) and its plugins connect to none
+# (speakerd/NoDisplay.h). :96 is the controller's screenshot run's, :100 to :199 the vpair pool's
+# workers' and VirtualDisplay's in a serial run (tests/vpair/pool.py, harness.py), :300 up the
+# controller's own tests' (controller/tests/display.py). Given a number, Xvfb writes it to fd 3
 # (-displayfd) once it accepts connections, and exits at once, writing nothing, when an X server
 # already listens there (it keeps no lock file with -displayfd: the socket decides), so that
 # checks running at once each take the next number. Each try's output goes to the log.
