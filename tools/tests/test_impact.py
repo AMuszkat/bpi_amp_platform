@@ -181,13 +181,31 @@ class TheMap(unittest.TestCase):
                 self.assertEqual(impact.main(["HEAD"]), 0)
             return stdout.getvalue().splitlines(), stderr.getvalue().splitlines()
 
+        # `tools/test.sh changed` says the advice again after the checks, picking it out of that
+        # stderr with a grep in run_changed: the pattern it greps for, read out of tools/test.sh
+        # and run through grep itself, must take the advice and nothing else, or the repeat would
+        # go silently if either side's wording drifted.
+        test_sh = (ROOT / "tools" / "test.sh").read_text()
+        body = re.search(r"^run_changed\(\) \{\n(.*?)^\}$", test_sh, re.S | re.M)
+        self.assertIsNotNone(body, "tools/test.sh has no run_changed")
+        patterns = re.findall(r"""grep '([^']*)' <<< "\$said\"""", body.group(1))
+        self.assertEqual(len(patterns), 1, f"run_changed greps impact.py's stderr ($said) {len(patterns)} times, not once")
+
+        def repeated(err):
+            picked = subprocess.run(["grep", "--", patterns[0]], input="".join(f"{line}\n" for line in err),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertIn(picked.returncode, (0, 1), picked.stderr)
+            return picked.stdout.splitlines()
+
         out, err = said(engine, header, "tools/build.sh")
         self.assertEqual(out, ["speakerd"])
         self.assertEqual(err, ["no check covers tools/build.sh: the levels do (tools/test.sh all)",
                                f"by hand, for {engine}, {header}: {advice}",
                                "3 file(s) changed since HEAD"])
+        self.assertEqual(repeated(err), [err[1]])   # the advice, as impact.py printed it
         out, err = said(f"{SPEAKERD}/Render.cpp")
         self.assertEqual((out, err), (["speakerd"], ["1 file(s) changed since HEAD"]))
+        self.assertEqual(repeated(err), [])
 
     def test_several_speakerd_files_run_what_each_needs_once(self):
         self.assertEqual(checks(f"{SPEAKERD}/Engine.cpp", f"{SPEAKERD}/GraphBuilder.cpp", f"{SPEAKERD}/GraphDocument.cpp",
