@@ -313,12 +313,29 @@ extern \"C\" SPEAKER_KEEP const char speaker_build_info[] =
     juce_enable_copy_plugin_step(${name})
 endfunction()
 
-# Link-time optimisation, parallelised, the way every plugin target gets it (also used by the
-# tests that build plugin code, so that they test what ships). This replaces
+# Link-time optimisation, parallelised, the way every plugin target gets it, and every other
+# target that calls this function (the block FIR test, tests/blockfir). This replaces
 # juce::juce_recommended_lto_flags: for GCC/Clang that passes a bare `-flto`, which runs the
 # LTO link phase (LTRANS) single-threaded -- the slowest part of the build. `-flto=auto`
 # produces the same binary with one LTRANS job per core. MSVC keeps the usual -GL/-LTCG.
+#
+# SPEAKER_LTO OFF (a cache option, per build tree) adds no LTO flags at all, for GCC/Clang and
+# MSVC alike. It is ON unless a configure says otherwise, so what ships has LTO, and so has
+# what tests it: the builds of the repository root's tools/build.sh (and so the virtual pair,
+# the chain check and chain_cost), tools/build-podman.sh, plugin-check with LTO
+# (juce_apps/plugin-check/run.sh, PLUGIN_CHECK_LTO=1, its default: the `plugins` check and
+# level 1, `tools/test.sh unit`), and the block FIR test. Only the focused check after an edit,
+# `tools/test.sh plugin <name>`, builds without it (PLUGIN_CHECK_LTO=0, in plugin-check's
+# build-check-nolto tree), for speed: the plugin's six LTO links are most of its time.
+option(SPEAKER_LTO "Link-time optimisation of the plugin targets (OFF: none, not what ships)" ON)
+if(NOT SPEAKER_LTO)
+    message(STATUS "SPEAKER_LTO is OFF: ${CMAKE_CURRENT_SOURCE_DIR} builds without link-time optimisation, unlike what ships")
+endif()
+
 function(speaker_add_lto_flags name)
+    if(NOT SPEAKER_LTO)
+        return()
+    endif()
     if(MSVC)
         target_compile_options(${name} PUBLIC $<$<CONFIG:Release>:-GL>)
         target_link_options(${name} PUBLIC $<$<CONFIG:Release>:-LTCG>)
