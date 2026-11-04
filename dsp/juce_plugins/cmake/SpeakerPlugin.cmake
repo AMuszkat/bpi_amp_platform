@@ -220,9 +220,11 @@ endfunction()
 
 # One juce_add_plugin() target. `kind` is complete, control or headless.
 function(_speaker_add_plugin_target name code kind sources modules sharedDirs buildInfoTarget buildInfoHeader)
-    # The copy into ~/.lv2 and ~/.vst3 (or a cross build's copy directories) is enabled at the
-    # end, by juce_enable_copy_plugin_step(), not by COPY_PLUGIN_AFTER_BUILD: POST_BUILD steps
-    # run in the order they are added, and the copy must come after buildinfo.ttl is written.
+    # The copy into JUCE_LV2_COPY_DIR and JUCE_VST3_COPY_DIR (~/.lv2 and ~/.vst3 by default;
+    # tools/build.sh's and plugin-check's trees set their own copied/lv2 and copied/vst3) is
+    # enabled at the end, by juce_enable_copy_plugin_step(), not by COPY_PLUGIN_AFTER_BUILD:
+    # POST_BUILD steps run in the order they are added, and the copy must come after
+    # buildinfo.ttl is written.
     juce_add_plugin(${name}
         COPY_PLUGIN_AFTER_BUILD FALSE
         PLUGIN_MANUFACTURER_CODE Juce          # may be shared by all plugins
@@ -231,6 +233,8 @@ function(_speaker_add_plugin_target name code kind sources modules sharedDirs bu
         PRODUCT_NAME "${name}"
         LV2URI "${SPEAKER_LV2_URI_BASE}/${name}"
         LV2_SHARED_LIBRARY_NAME ${name})
+
+    _speaker_version_on_wrappers_only(${name})
 
     juce_generate_juce_header(${name})
 
@@ -311,6 +315,51 @@ extern \"C\" SPEAKER_KEEP const char speaker_build_info[] =
         VERBATIM)
 
     juce_enable_copy_plugin_step(${name})
+endfunction()
+
+# The plugin's version only where it is read. juce_add_plugin() puts JucePlugin_Version,
+# JucePlugin_VersionString and JucePlugin_VersionCode among the PUBLIC definitions of the
+# shared-code target (_juce_configure_plugin_targets in JUCEUtils.cmake), so on every compile of
+# it, every JUCE module included: a version bump, which every change of a plugin's sources has,
+# recompiled all of them in every target, ccache missing (the command line changed). On Linux
+# only the format wrappers' sources (juce_audio_plugin_client_LV2.cpp, _VST3.cpp, ...) and the
+# VST3 manifest helper read them; elsewhere only iOS's audio device and ARA, neither built here,
+# and no plugin source does. So they are taken off the shared-code target and given, the same,
+# to its wrappers and its VST3 helper, which link the same bytes as before. The one other
+# definition JUCE derives from the version, JucePlugin_ARAFactoryID ("<bundle id>.arafactory.
+# <version>" by default, _juce_set_fallback_properties), is read by ARA's document controller
+# alone, and no plugin here is an ARA effect (JucePlugin_Enable_ARA=0): it loses the version.
+function(_speaker_version_on_wrappers_only name)
+    get_target_property(bundleId ${name} JUCE_BUNDLE_ID)
+    set_target_properties(${name} PROPERTIES JUCE_ARA_FACTORY_ID "\"${bundleId}.arafactory\"")
+    set(versionDefs "")
+    foreach(property IN ITEMS COMPILE_DEFINITIONS INTERFACE_COMPILE_DEFINITIONS)
+        get_target_property(defs ${name} ${property})
+        if(NOT defs)
+            continue()
+        endif()
+        set(kept "")
+        foreach(def IN LISTS defs)
+            if(def MATCHES "^JucePlugin_Version(String|Code)?=")
+                list(APPEND versionDefs "${def}")
+            else()
+                list(APPEND kept "${def}")
+            endif()
+        endforeach()
+        set_property(TARGET ${name} PROPERTY ${property} "${kept}")
+    endforeach()
+    list(REMOVE_DUPLICATES versionDefs)
+    list(LENGTH versionDefs found)
+    if(NOT found EQUAL 3)
+        message(FATAL_ERROR "speaker_add_plugin(${name}): JUCE's version definitions are not "
+                            "where SpeakerPlugin.cmake expects them (found: ${versionDefs})")
+    endif()
+    get_target_property(wrappers ${name} JUCE_ACTIVE_PLUGIN_TARGETS)
+    foreach(target IN LISTS wrappers ITEMS ${name}_vst3_helper)
+        if(TARGET ${target})
+            target_compile_definitions(${target} PRIVATE ${versionDefs})
+        endif()
+    endforeach()
 endfunction()
 
 # Link-time optimisation, parallelised, the way every plugin target gets it, and every other

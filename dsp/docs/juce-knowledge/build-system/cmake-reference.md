@@ -35,8 +35,8 @@ in which they were added (`extras/Build/CMake/JUCEUtils.cmake`):
    `juce_audio_plugin_client_LV2.cpp`).
 2. At its very end, if `COPY_PLUGIN_AFTER_BUILD` is set, it calls
    `juce_enable_copy_plugin_step()`, which adds the copy of the whole bundle into
-   `JUCE_LV2_COPY_DIR` (`~/.lv2`, or a cross build's `copied/lv2`, `tools/build.sh`) with
-   `copyDir.cmake` (remove the old copy, then install the bundle).
+   `JUCE_LV2_COPY_DIR` (JUCE's default `~/.lv2`) with `copyDir.cmake` (remove the old copy,
+   then install the bundle). Our build trees set it to a directory of their own, below.
 
 A step added after `juce_add_plugin()` returns would run after the copy, and the copy would lack
 the file. So `speaker_add_plugin()` passes `COPY_PLUGIN_AFTER_BUILD FALSE`, adds its step, and
@@ -48,14 +48,18 @@ shared-code target). The VST3 manifest step is unaffected: it is added during
 step that is already there.
 
 The copy is a `POST_BUILD` step too, so it runs only when the format target links: a build
-whose binary is up to date copies nothing, and a copy that another build tree wrote into the same
-`~/.lv2` afterwards stays there. `copyDir.cmake`'s `file(INSTALL)` keeps the files' contents and
-times (to the second), so a copy whose binary differs from this build's artefact came from
-another build, which is how `tools/test.sh` tells them apart (two Release trees of the same
-sources and identity, `build/loudness` and plugin-check's `build-check`, linked byte-identical
-binaries, so the test cannot tell those two apart, and need not; plugin-check's
-`build-check-nolto`, without LTO, links other ones, and copies them into `~/.lv2` too). Removing
-the artefact's `.so` makes the next build link, and so copy, again.
+whose binary is up to date copies nothing. Into one shared `~/.lv2`, two trees building the
+same plugin at once (plugin-check's and `tools/build.sh`'s `build/<plugin>`) raced: one removed
+the bundle while the other installed it. So no build of `tools/build.sh` or plugin-check copies
+there: each tree sets `JUCE_LV2_COPY_DIR` and `JUCE_VST3_COPY_DIR` to its own `copied/lv2` and
+`copied/vst3`, as directory properties that the plugin's targets inherit (target, then its
+directory and the parents, then the global default JUCE sets in `_juce_set_default_properties`):
+`tools/build.sh` with a `CMAKE_PROJECT_INCLUDE` (`build/<what>/copy-dirs.cmake`), plugin-check in
+`in-process/CMakeLists.txt` before it adds the plugin, the bypass test's previous versions like
+`tools/build.sh`. A fixed directory, not a HOME per build: the destination is part of the link
+step's command, so a varying one relinks every time. `copyDir.cmake`'s `file(INSTALL)` keeps the
+files' contents and times (to the second). Removing the artefact's `.so` makes the next build
+link, and so copy, again.
 
 **Do not name an extra file in `manifest.ttl`.** The helper rewrites the manifest whenever the
 plugin is linked, so a line added to it would have to be added again after every helper run;
@@ -97,7 +101,13 @@ link phase (LTRANS) single-threaded, the slowest step of the build. The wrapper 
 `speaker_add_lto_flags(<target>)`, which every plugin target gets and the block FIR test
 (`juce_plugins/tests/blockfir`) calls too; the flags are `PUBLIC`, so whatever links a plugin's
 shared-code target (its format wrappers, plugin-check's in-process checkers) is linked with LTO
-as well.
+as well. `-flto=auto` takes its LTRANS jobs from a GNU make jobserver when it finds one
+(`MAKEFLAGS`), and `tools/build.sh` and plugin-check run `cmake --build` under one
+(`tools/jobserver.sh`, `nproc` tokens), so the links running at once share one pool instead of
+each starting a job per core (crossover after a one-line edit, six links: 50.1 to 45.9 s,
+the link phase 44.1 to 41.0 s; Ninja itself neither serves nor takes the tokens). `-flto=N`,
+`-flto=jobserver`, mold, precompiled headers and Ninja link pools measured no better than
+that (test-speed-2, 2026-11-04, three runs each).
 
 The cache option `SPEAKER_LTO` (`ON` unless a configure passes `OFF`) turns it off: no LTO flag
 at all, for GCC/Clang and MSVC (`-GL`/`-LTCG`) alike. Every build that does not pass it keeps
@@ -110,6 +120,27 @@ are most of a check after an edit (loudness, one line of `PluginProcessor.cpp`: 
 option changes every compile command, so a tree switched between the two rebuilds everything:
 hence one tree each. Without LTO the plugins' outputs in plugin-check were the same (loudness:
 the same report, line for line), but the binaries differ, and only the LTO ones ship.
+
+## A version bump recompiles the wrappers only
+
+`juce_add_plugin()` puts `JucePlugin_Version`, `JucePlugin_VersionString` and
+`JucePlugin_VersionCode` among the `PUBLIC` definitions of the shared-code target
+(`_juce_configure_plugin_targets`), and derives `JucePlugin_ARAFactoryID` from the version too
+(`"<bundle id>.arafactory.<version>"`, `_juce_set_fallback_properties`). So every compile of
+the plugin, each JUCE module of each target, had the version on its command line: a version
+bump (which every change of a plugin's sources has) recompiled all of them, ccache missing,
+97 compiles for loudness's three targets. On Linux only the format wrappers
+(`juce_audio_plugin_client_LV2.cpp`, `_VST3.cpp`: the LV2 `doap:revision` and
+`lv2:minorVersion`/`microVersion`, the VST3 version) and the VST3 manifest helper (which copies
+the shared-code target's `COMPILE_DEFINITIONS`) read the three; the ARA id is read by ARA's
+document controller only, and our plugins are no ARA effects. So `speaker_add_plugin()`
+(`_speaker_version_on_wrappers_only`) takes the three off the shared-code target and gives them
+to its wrappers and VST3 helper, and sets the ARA id without the version. A bump of loudness
+then compiled 27 wrapper sources (9 per target, most of them empty on Linux) and relinked; the
+bundles were the same byte for byte (the compile time JUCE embeds and the build-id masked), and
+the plugin-check report line for line. The controller reads the control target's
+`INTERFACE_COMPILE_DEFINITIONS` (`ControlPlugins.cmake`): it no longer gets the version, which
+no plugin source reads.
 
 ## JUCE is consumed as an installed package, built once
 

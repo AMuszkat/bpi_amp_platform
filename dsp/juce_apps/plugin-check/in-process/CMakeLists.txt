@@ -16,6 +16,15 @@ if(NOT PLUGIN_DIR OR NOT EXISTS "${PLUGIN_DIR}/CMakeLists.txt")
 endif()
 get_filename_component(PLUGIN "${PLUGIN_DIR}" NAME)
 
+# JUCE's copy step (SpeakerPlugin.cmake) copies each bundle into this tree's own copied/lv2 and
+# copied/vst3, never into ~/.lv2 and ~/.vst3: there it removes and reinstalls the bundle, and
+# two trees building the same plugin at once (this one and tools/build.sh's) raced on it. A
+# fixed directory, set before the plugin's targets exist, which inherit it; not a HOME per
+# build, which would change every link command and relink.
+set_directory_properties(PROPERTIES
+    JUCE_LV2_COPY_DIR  "${CMAKE_BINARY_DIR}/copied/lv2"
+    JUCE_VST3_COPY_DIR "${CMAKE_BINARY_DIR}/copied/vst3")
+
 # The plugin's targets land in <dir>/plugin, so its bundles are
 # <dir>/plugin/<target>_artefacts/Release/LV2/<target>.lv2.
 add_subdirectory("${PLUGIN_DIR}" plugin)

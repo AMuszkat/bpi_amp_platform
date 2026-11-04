@@ -80,9 +80,13 @@ load_local_config
 
 SELF="$0"
 CONTAINERFILE="$TOOLS_DIR/Containerfile"
-# The same image is the development container of the whole repository (the root
-# tools/container.sh), so the two scripts name it alike and label it alike.
-IMAGE="localhost/bpi-amp-builder:bookworm"
+# The image carries the hash of the Containerfile it was built from, in its tag and in its
+# label, so an image that predates an edit of the Containerfile is rebuilt rather than used, and
+# checkouts on different Containerfiles each keep their own image. The same image is the
+# development container of the whole repository (the root tools/container.sh), so the two
+# scripts name it alike and label it alike.
+containerfile_hash() { sha256sum "$CONTAINERFILE" | cut -c1-16; }
+IMAGE="localhost/bpi-amp-builder:bookworm-$(containerfile_hash)"
 
 # juce_plugins/ is bind-mounted at /work, so the container sees every path below as /work/...
 C_ROOT="/work"
@@ -254,10 +258,6 @@ require_podman() {
         exit 1
     fi
 }
-
-# The image carries the hash of the Containerfile it was built from, so an image that
-# predates an edit of the Containerfile is rebuilt rather than used.
-containerfile_hash() { sha256sum "$CONTAINERFILE" | cut -c1-16; }
 
 build_image() {
     require_podman
