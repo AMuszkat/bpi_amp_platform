@@ -16,7 +16,8 @@ Rules:
 - Every parameter change and graph edit leaves through the bridge; the controller never
   pushes its own stale state onto the speakers, it loads the hub's state on connect.
 - GUI checks run on a virtual display of their own: `Xvfb` on a number nothing else uses (never
-  `:0`, nor the pool's `:100`-`:199`), started with `-displayfd`, and `openbox` waited for, as
+  `:0`, nor `:100`-`:299`, the pool's and plugin-check's; the own tests' runner takes `:300` up,
+  `tests/display.py`), started with `-displayfd`, and `openbox` waited for, as
   `plugin-check/run.sh` does (no fixed sleeps);
   screenshot what you changed and look at the screenshot.
 - The wire protocol to the hub is shared with `host-dev` and `board-dev`; a change to it

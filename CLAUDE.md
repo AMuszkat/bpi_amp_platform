@@ -65,8 +65,12 @@ The rules in the `CLAUDE.md` files and everything in `.claude/` stay the person'
 **Checks while working, the levels before a push.** While working, an agent runs the check
 that covers its change (`tools/test.sh speakerd`, `plugin <name>`, `installers`, ..., or
 `tools/test.sh changed` for whatever changed; seconds to two minutes each); no hook runs tests
-at the end of a turn. Several checks in one command run as one, their scenarios `--jobs N` at a
-time (default half the processors, at most 16; 1 where `CI` is set). `plugin <name>` builds
+at the end of a turn. Several checks in one command, like the levels, run as one schedule
+(`tools/schedule.py`): the builds first, at most two heavy steps at once at nice 19, then the
+tests, and the timing scenarios (`POOL_QUIET`) last, behind a gate, on at most 12 workers, with
+`chain_cost` and knob_latency's quantum-128 test alone after them; the scenarios run `--jobs N`
+at a time (default two thirds of the processors, at most 16; 1 where `CI` is set, which runs
+everything one after another as before). `plugin <name>` builds
 without LTO; `plugins`, the levels and CI keep it. The levels, end to end (`tools/test.sh all`: level 1 `unit`, level 2 `vpair`), run
 once on the finished branch before it is pushed, and again only if code changed since; CI
 repeats them on the pull request. Level 3 is a board (`/board smoke`).
@@ -100,7 +104,9 @@ repeats them on the pull request. Level 3 is a board (`/board smoke`).
 Everything below runs on a Linux x86_64 machine with no boards attached, and needs only
 **Podman** and git: the builds and both test levels run in the **development container**,
 the builder image of `dsp/juce_plugins/tools/Containerfile` (Debian bookworm, so PipeWire
-0.3.65 and WirePlumber 0.4.13, the versions the boards run).
+0.3.65 and WirePlumber 0.4.13, the versions the boards run). The image is tagged
+`localhost/bpi-amp-builder:bookworm-<hash of the Containerfile>`; `tools/container.sh --status`
+lists images and containers, `--prune` removes unused ones.
 
 ```sh
 git clone --recurse-submodules <this repository>
@@ -115,7 +121,9 @@ in `build/juce-install`, which takes a few minutes; later runs start at once. Ea
 and each git worktree has its own long-running container, with the checkout mounted at its
 own path, so worktrees can run the virtual pair at the same time. Builds go through ccache,
 one cache in the main checkout's `build/ccache` for it and its worktrees (`BPI_CCACHE=0` turns
-it off; it is off where `CI` is set), and one test pool runs at a time per checkout.
+it off; it is off where `CI` is set), and one test pool or serial run, and one schedule, run at
+a time per checkout. `tools/build.sh` and plugin-check never write a `~/.lv2`: JUCE's copies go
+to the build tree's `copied/`.
 `BPI_CONTAINER=0` runs the same scripts natively instead, where Podman is missing (cloud
 sessions) or the packages are installed (CI): the package list is the one in
 `.github/workflows/ci.yml`.

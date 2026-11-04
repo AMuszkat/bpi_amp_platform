@@ -20,10 +20,12 @@ through ccache in the container. A tree's build holds `<tree>/.build.lock`, and 
 build makes. Plugins without `TARGETS` build only their complete target (`all` is then just
 `complete`; `control` or `headless` is an error).
 
-**x86_64.** The LV2 bundle lands in
-`build/<plugin>/<target>_artefacts/Release/LV2/<target>.lv2`, and a copy in `~/.lv2` and
-`~/.vst3` of wherever it was built: in the container that is the container's own home, which
-is where `speakerd` and plugin hosts running in the container look.
+**x86_64.** The LV2 bundle lands in `build/<plugin>/<target>_artefacts/Release/LV2/<target>.lv2`,
+and JUCE's copy of it in `build/<plugin>/copied/lv2/` (`copied/vst3/`), never in a `~/.lv2` or
+`~/.vst3`: two builds at once never write one folder, and no host finds a bundle it was not
+given. Give `speakerd` or a plugin host the bundle with `--lv2-bundle`. `cmake --build` runs
+under a make jobserver (`tools/jobserver.sh`), so the LTO links that run at once share one pool
+of `$(nproc)` LTRANS jobs.
 
 **aarch64**, for the board (Debian bookworm). The same layout under `build/aarch64/`:
 
@@ -34,8 +36,8 @@ It cross-compiles with the native JUCE install (its `juceaide` runs here), the t
 `dsp/juce_plugins/tools/toolchain-aarch64-linux.cmake`, the image's `:arm64` libraries through
 pkg-config (`PKG_CONFIG_LIBDIR`) and `qemu-aarch64-static` for the LV2 manifest helper. It never
 copies an aarch64 bundle into a `~/.lv2`, where an x86_64 host would load it under the URI of
-its own build: the copy directories are pinned into the build tree (`copy-dirs.cmake`, kept in
-its CMake cache), the build runs with `HOME=build/aarch64/home`, and the script fails if it
+its own build: like every build of the script, it copies into the build tree's `copied/`
+(`copy-dirs.cmake`, kept in its CMake cache), the build runs with `HOME=build/aarch64/home`, and the script fails if it
 finds an aarch64 binary in `~/.lv2`. It checks that what it built is aarch64 code. The
 libraries the binaries need on the board are in `dsp/juce_apps/speakerd/README.md`. To run an
 aarch64 binary here: `qemu-aarch64-static <binary>` (the image's multiarch libraries are

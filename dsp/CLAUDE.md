@@ -85,7 +85,10 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
 - **Plugin CMake:** each `CMakeLists.txt` is one `speaker_add_plugin()` call
   (`juce_plugins/cmake/SpeakerPlugin.cmake`). The folder name must equal the target name.
   The build script discovers plugins by that call and reads `INPUTS`/`OUTPUTS` and the LV2
-  URI from it. Plugin-specific extras go after the call.
+  URI from it. Plugin-specific extras go after the call. No `JucePlugin_Version*` reaches a
+  plugin's sources (`speaker_add_plugin()` gives them to the format wrappers only, so a version
+  bump does not recompile JUCE): a source that needs the version reads `SPEAKER_PLUGIN_VERSION`
+  from the generated `SpeakerBuildInfo.h`, included in one `.cpp` (it changes with every edit).
 - **Identity must stay unique and stable:** `CODE` differs per plugin (Cros, Fcnv, Loud,
   Ascp), and the LV2 URI is `SPEAKER_LV2_URI_BASE/<name>`. Changing the base orphans every
   saved host session.
@@ -130,7 +133,8 @@ Measurement data goes in `python_dsp_tools/data/` (ignored). Only the small samp
   Editor-window gotchas (fixed-size windows maximised by JUCE's X11 size-hint bug, patched
   for the host via `juce_plugins/patches/`; floating panels from an embedded editor; Debug
   repaint cost; with no `DISPLAY` a JUCE program opens `:0.0`, so a headless check's Xvfb
-  must not take it): `docs/juce-knowledge/gui/x11-plugin-windows.md`.
+  must not take it; every JUCE LV2 plugin instance, headless too, opens a display, which
+  speakerd stops with a `DISPLAY` Xlib cannot parse): `docs/juce-knowledge/gui/x11-plugin-windows.md`.
 - `juce_plugins/ampScope/build-podman/plot-check/` is a gitignored off-tree render harness
   (builds the editor without a host, drives it from the Demo source, asserts on PNGs).
   Configure it in the container with `-DCMAKE_PREFIX_PATH=/work/build-podman/juce-install`.

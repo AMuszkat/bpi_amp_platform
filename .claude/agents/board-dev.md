@@ -19,9 +19,12 @@ Rules:
   `firmware/local.mk` and placeholders (`bpi-amp.local`, `user`) go in docs and examples.
 - Every scenario in `tests/vpair/` is a pytest/unittest module named after
   `docs/autonomous-development.md` section 4, with that section's pass criterion as its
-  assertion. Never weaken a criterion to pass. Every new module declares `POOL_BUILDS`, and
-  `POOL_ALONE = True` if it measures CPU. After touching `pool.py` or the harness's pool guard,
-  run `python3 tests/vpair/pool_selftest.py`.
+  assertion. Never weaken a criterion to pass. Every new module declares `POOL_BUILDS`;
+  `POOL_QUIET` when a pass criterion is a time, a rate, a CPU share or an xrun count (`True`,
+  or the classes and tests it names); and `POOL_ALONE` (`True`, or names) if it measures CPU or
+  fails beside the quiet units. After touching `pool.py`, the harness's pool guard or
+  `tools/schedule.py`, run `python3 tests/vpair/pool_selftest.py` and
+  `python3 tools/tests/test_schedule.py`.
 - You never run anything on a real board: that is `board-ops`, through the `/board` skill
   (`tools/board.sh`).
 - You do not touch plugins, `speakerd` or the controller.
