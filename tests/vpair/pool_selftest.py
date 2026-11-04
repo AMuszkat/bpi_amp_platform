@@ -29,6 +29,17 @@ checkout is not disturbed), all at once, and checked for:
 - the checkout's lock: a second pool on the same files waits for the first, naming it, and starts
   when it ends; the first keeps every result; a third and a fourth, sent SIGTERM and SIGINT while
   they wait, end by that signal there and then, their notes failing their unit, which never started;
+- the serial runner's side of it (pool.py --hold-checkout, then tools/test.sh's VPAIR_RUNNER): it
+  waits for a pool, naming it, and a pool for it; SIGTERM while it waits ends it, nothing run; a
+  child it leaves running (a shell's background sleep) does not hold the lock;
+- the phases: main units first, then the quiet ones (POOL_QUIET True, a class, a test of a split
+  module) on min(--jobs, 12) workers or --quiet-jobs, then those alone, each after the one before
+  ended; the table's phase column; a POOL_QUIET that cannot be (not True or names, a test of a class
+  that runs whole, no such class) failing the run; --quiet-jobs outside 1 to 64;
+- the gate: nothing quiet or alone (nor what --after-gate names) starts before FILE exists; its
+  leave-out line leaves a unit out of the run and the note, the table saying why; another line is
+  said; (its "still waiting" line every 60 s is not tested: it would take a minute);
+- --prebuild-only: built, 0 and no note, no unit; failed, 1 and the note of a failed prebuild;
 - the pool's last resorts: fewer free worker slots than it needs, and a fault of its own while it
   handles a unit (work()'s "the pool failed while handling it"): each failed under the unit's name,
   saying why, the pool going on with the next unit. These two, the prebuild's waiting line and the
@@ -79,6 +90,23 @@ except ImportError:
 sys.path.insert(0, str(HERE))
 import harness  # noqa: E402
 import pool  # noqa: E402  (its prebuild's reader, read_build, tested here in this process)
+
+# A synthetic module's head: stamp(test), its unit's start and end, for the phases' order.
+STAMP = """
+        import os
+        import time
+        import unittest
+        from pathlib import Path
+
+
+        def stamp(test, sleep=0.2):
+            # The unit's start and end, by its name, in ST_STAMPS (a class unit by its class).
+            name = test.id() if os.environ.get("ST_BY_TEST") else f"{type(test).__module__}.{type(test).__name__}"
+            stamps = Path(os.environ["ST_STAMPS"])
+            (stamps / f"{name}.start").write_text(repr(time.time()))
+            time.sleep(sleep)
+            (stamps / f"{name}.end").write_text(repr(time.time()))
+"""
 
 MODULES = {
     "test_st_results.py": '''
@@ -245,6 +273,113 @@ MODULES = {
             def test_takes_a_while(self):
                 take_a_while()
     ''',
+    # The phases: units neither quiet nor alone (main), quiet ones by each form of POOL_QUIET, one
+    # alone (and quiet too, as test_chain_cost is), each stamping its start and end.
+    "test_st_main.py": STAMP + '''
+
+        class MainA(unittest.TestCase):
+            def test_it(self):
+                stamp(self)
+
+
+        class MainB(unittest.TestCase):
+            def test_it(self):
+                stamp(self)
+    ''',
+    "test_st_quiet.py": STAMP + '''
+        POOL_QUIET = True
+
+
+        class QuietA(unittest.TestCase):
+            def test_it(self):
+                stamp(self)
+
+
+        class QuietB(unittest.TestCase):
+            def test_it(self):
+                stamp(self)
+    ''',
+    "test_st_split.py": STAMP + '''
+        POOL_SPLIT = True
+        POOL_QUIET = ("Mixed.test_quiet", "AllQuiet")
+
+
+        class Mixed(unittest.TestCase):
+            def test_quiet(self):
+                stamp(self)
+
+            def test_loud(self):
+                stamp(self)
+
+
+        class AllQuiet(unittest.TestCase):
+            def test_one(self):
+                stamp(self)
+    ''',
+    "test_st_lonely.py": STAMP + '''
+        POOL_ALONE = True
+        POOL_QUIET = True
+
+
+        class Lonely(unittest.TestCase):
+            def test_it(self):
+                stamp(self)
+    ''',
+    # Thirteen quiet units: the quiet phase's default width stops at 12.
+    "test_st_many.py": '''
+        import unittest
+
+        POOL_QUIET = True
+        for i in range(13):
+            globals()[f"Many{i:02d}"] = type(f"Many{i:02d}", (unittest.TestCase,), {"test_it": lambda self: None})
+    ''',
+    # POOL_QUIET that cannot be: not True or names; a test of a class that runs as one unit; no such class.
+    "test_st_badquiet_a.py": '''
+        import unittest
+
+        POOL_QUIET = "yes"
+
+
+        class A(unittest.TestCase):
+            def test_it(self):
+                pass
+    ''',
+    "test_st_badquiet_b.py": '''
+        import unittest
+
+        POOL_QUIET = ("Whole.test_x",)
+
+
+        class Whole(unittest.TestCase):
+            def test_x(self):
+                pass
+
+            def test_y(self):
+                pass
+    ''',
+    "test_st_badquiet_c.py": '''
+        import unittest
+
+        POOL_QUIET = ("Nothing",)
+
+
+        class C(unittest.TestCase):
+            def test_it(self):
+                pass
+    ''',
+    # Run by tools/test.sh's serial runner under pool.py --hold-checkout: the lock's descriptor is not
+    # passed on (the runner took VPAIR_CHECKOUT_LOCK_FD and made it non-inheritable), so a child left
+    # running (a shell's background sleep: os.system passes inheritable descriptors on) does not keep
+    # the checkout's lock after the runner ends.
+    "test_st_serial.py": STAMP + '''
+
+        class Serial(unittest.TestCase):
+            def test_its_children_do_not_hold_the_lock(self):
+                self.assertNotIn("VPAIR_CHECKOUT_LOCK_FD", os.environ)
+                child = Path(os.environ["ST_STAMPS"]) / "child"
+                os.system(f"sleep 60 > /dev/null 2>&1 & echo $! > {child}")
+                stamp(self)
+    ''',
 }
 
 # What VPAIR_RUNNER writes for test_st_results and test_st_blocks, and so the pool.
@@ -322,13 +457,17 @@ RUNS = {}
 SETUP_ERRORS = {}
 FIRST_RAN_ON = {}                           # pool name -> whether the first still ran when it ended
 SEEN_WHILE_BUILDING = {}                    # "prebuild" -> whether its stand-in still ran when the line came
+GATE_SEEN = {}                              # "started before" -> the units stamped before the gate was written
+SERIAL_SEEN = {}                            # what had started while the other side held the checkout
 
 
 class Run:
     """pool.py on the synthetic modules, in the background: its own files folder (and so its own
-    lock) unless given another's; `patch`, Python run in the pool's process before its main()."""
+    lock) unless given another's; `patch`, Python run in the pool's process before its main().
+    `serial`: tools/test.sh's serial runner instead, as it runs it (pool.py --hold-checkout, then
+    VPAIR_RUNNER from TMP, which finds the modules in tests/vpair there), `args` its modules."""
 
-    def __init__(self, name, args, files=None, patch=None, **env):
+    def __init__(self, name, args, files=None, patch=None, serial=False, **env):
         self.name, self.files = name, files or TMP / f"files-{name}"
         self.files.mkdir(parents=True, exist_ok=True)
         self.stamps = TMP / f"stamps-{name}"
@@ -337,11 +476,15 @@ class Run:
         self.out_path = TMP / f"out-{name}.txt"
         environment = dict(os.environ, VPAIR_POOL_TESTS=str(TESTS), VPAIR_POOL_FILES=str(self.files),
                            ST_STAMPS=str(self.stamps), **env)
-        command = [sys.executable, "-c", WRAPPER, str(HERE), patch] if patch else [sys.executable, str(POOL)]
+        if serial:
+            command = [sys.executable, str(POOL), "--hold-checkout", "--what", " ".join(args), "--",
+                       sys.executable, "-c", vpair_runner(), str(self.note_path), *args]
+        else:
+            command = [*([sys.executable, "-c", WRAPPER, str(HERE), patch] if patch else [sys.executable, str(POOL)]),
+                       "--note", str(self.note_path), *args]
         with open(self.out_path, "wb") as out:
-            self.process = subprocess.Popen([*command, "--note", str(self.note_path), *args],
-                                            cwd=ROOT, env=environment, stdin=subprocess.DEVNULL, stdout=out,
-                                            stderr=subprocess.STDOUT)
+            self.process = subprocess.Popen(command, cwd=TMP if serial else ROOT, env=environment,
+                                            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
         self.pid = self.process.pid
 
     def wait(self, timeout=120):
@@ -410,6 +553,36 @@ def kill_if_running(pid):
         os.kill(pid, signal.SIGKILL)
 
 
+def stamps(run):
+    """{unit: (start, end)} of the stamping modules' units a run ran."""
+    found = {}
+    for path in run.stamps.glob("*.start"):
+        name = path.name[:-len(".start")]
+        end = run.stamps / f"{name}.end"
+        found[name] = (float(path.read_text()), float(end.read_text()) if end.exists() else None)
+    return found
+
+
+def table_phase(output, unit):
+    """The phase the pool's table gives a unit."""
+    found = re.search(rf"(?m)^{re.escape(unit)}\s+(main|quiet|alone)\s", output)
+    if not found:
+        raise AssertionError(f"no row of {unit} with a phase in the table:\n{output}")
+    return found.group(1)
+
+
+def lock_is_free(files):
+    """Whether this process can take the checkout's lock in `files` at once (and gives it back)."""
+    import fcntl
+    with open(files / "vpair-pool.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        return True
+
+
 def stop(process):
     if process.poll() is None:
         process.kill()
@@ -444,6 +617,21 @@ def setUpModule():
                              ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_FAIL="1")
     RUNS["jobs0"] = Run("jobs0", ["--jobs", "0", "test_st_guard"])
     RUNS["jobs65"] = Run("jobs65", ["--jobs", "65", "test_st_guard"])
+    RUNS["quietjobs0"] = Run("quietjobs0", ["--jobs", "2", "--quiet-jobs", "0", "test_st_guard"])
+    RUNS["quietjobs65"] = Run("quietjobs65", ["--jobs", "2", "--quiet-jobs", "65", "test_st_guard"])
+    # The phases, without a gate: main on 3 workers, quiet on min(3, 12), alone last.
+    RUNS["phases"] = Run("phases", ["--jobs", "3", "test_st_main", "test_st_quiet", "test_st_split", "test_st_lonely"],
+                         ST_BY_TEST="1")
+    RUNS["many"] = Run("many", ["--jobs", "20", "test_st_many"])
+    RUNS["fewquiet"] = Run("fewquiet", ["--jobs", "20", "--quiet-jobs", "2", "test_st_many"])
+    RUNS["badquiet"] = Run("badquiet", ["--jobs", "2", "test_st_badquiet_a", "test_st_badquiet_b", "test_st_badquiet_c"])
+    released = TMP / "released"
+    released.touch()
+    RUNS["prebuildonly"] = Run("prebuildonly", ["--jobs", "1", "--prebuild-only", "test_st_builds"], patch=STAND_IN_BUILD,
+                               ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_RELEASE=str(released),
+                               ST_BUILD_END=str(TMP / "build-end-prebuildonly"))
+    RUNS["prebuildonlyfails"] = Run("prebuildonlyfails", ["--jobs", "1", "--prebuild-only", "test_st_builds"],
+                                    patch=STAND_IN_BUILD, ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_FAIL="1")
     # The serial runner on the same modules, from TMP (it reads tests/vpair from where it runs).
     with open(TMP / "out-runner.txt", "wb") as out:
         RUNS["runner"] = subprocess.Popen([sys.executable, "-c", vpair_runner(), str(TMP / "note-runner.txt"),
@@ -492,6 +680,55 @@ def setUpModule():
         finally:
             release.touch()
 
+    # The gate: its quiet and alone units (MainB too, by --after-gate) wait until the test writes it,
+    # leaving QuietB out; the test looks first that nothing waiting for it started.
+    def gate():
+        gate_file = TMP / "the-gate"
+        try:
+            run = RUNS["gate"] = Run("gate", ["--jobs", "2", "--gate", str(gate_file), "--after-gate", "test_st_main.MainB",
+                                              "test_st_main", "test_st_quiet", "test_st_lonely"])
+            run.wait_for_output("wait for the gate")
+            time.sleep(0.5)               # time for a unit that would not wait to start (none must)
+            GATE_SEEN["started before"] = sorted(stamps(run))
+            tmp = gate_file.with_name(".the-gate.tmp")
+            tmp.write_text("leave-out test_st_quiet.QuietB: the controller's own tests failed\n"
+                           "not a line of the gate's\n")
+            os.replace(tmp, gate_file)
+        finally:
+            if not gate_file.exists():
+                gate_file.touch()
+
+    # The serial runner and a pool exclude each other: the runner waits for a pool (and a second
+    # runner, sent SIGTERM while it waits, ends there); a pool waits for a runner.
+    def serial():
+        release = TMP / "release-serial-holder"
+        try:
+            holder = RUNS["serial-holder"] = Run("serial-holder", ["--jobs", "1", "test_st_slow.Slow"],
+                                                 ST_RELEASE=str(release))
+            holder.wait_for(holder.stamps / "start")
+            runner = RUNS["serial"] = Run("serial", ["test_st_serial"], files=holder.files, serial=True)
+            term = RUNS["serial-term"] = Run("serial-term", ["test_st_serial"], files=holder.files, serial=True)
+            for run in (runner, term):
+                run.wait_for_output("; waiting for it to end")
+            term.process.send_signal(signal.SIGTERM)
+            term.wait()
+            SERIAL_SEEN["started while held"] = sorted(stamps(runner))
+        finally:
+            release.touch()
+
+    def serial_holds():
+        release = TMP / "release-serial-runner"
+        try:
+            runner = RUNS["serial-runner"] = Run("serial-runner", ["test_st_slow.Slow"], serial=True,
+                                                 ST_RELEASE=str(release))
+            runner.wait_for(runner.stamps / "start")
+            waiting = RUNS["pool-after-serial"] = Run("pool-after-serial", ["--jobs", "1", "test_st_slow.AlsoSlow"],
+                                                      files=runner.files, ST_SLEEP="0.1")
+            waiting.wait_for_output("; waiting for it to end")
+            SERIAL_SEEN["pool started while held"] = (waiting.stamps / "start").exists()
+        finally:
+            release.touch()
+
     def keeping(name, f):
         def run():
             try:
@@ -501,7 +738,8 @@ def setUpModule():
         return run
 
     threads = [threading.Thread(target=keeping(name, f))
-               for name, f in (("lock", lock), ("term", term), ("prebuild", waiting))]
+               for name, f in (("lock", lock), ("term", term), ("prebuild", waiting), ("gate", gate),
+                               ("serial", serial), ("serial_holds", serial_holds))]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -558,10 +796,11 @@ class TheNote(unittest.TestCase):
         run = RUNS["results"]
         run.wait()
         output = run.output
-        self.assertRegex(output, r"(?m)^test_st_results\.Outcomes\s+\d+\s+[\d.]+\s+FAILED \(3 of 5 tests\)$")
-        self.assertRegex(output, r"(?m)^test_st_results\.SkippedInSetUpClass\s+\d+\s+[\d.]+\s+"
+        self.assertRegex(output, r"(?m)^unit\s+phase\s+worker\s+seconds\s+result$")
+        self.assertRegex(output, r"(?m)^test_st_results\.Outcomes\s+main\s+\d+\s+[\d.]+\s+FAILED \(3 of 5 tests\)$")
+        self.assertRegex(output, r"(?m)^test_st_results\.SkippedInSetUpClass\s+main\s+\d+\s+[\d.]+\s+"
                                  r"passed \(0 tests, 1 skipped\)$")
-        self.assertRegex(output, r"(?m)^test_st_blocks\.Alpha\s+\d+\s+[\d.]+\s+passed \(1 test\)$")
+        self.assertRegex(output, r"(?m)^test_st_blocks\.Alpha\s+main\s+\d+\s+[\d.]+\s+passed \(1 test\)$")
         self.assertIn("pool: failed: test_st_results.Outcomes\n", output)
 
 
@@ -588,7 +827,7 @@ class BrokenUnits(unittest.TestCase):
         self.assertIn("FAILED: its process was killed by signal 9 =====", lines[0], self.output)
         self.assertIsNotNone(end, self.output)
         self.assertTrue(any("test_b_dies: SIGKILL to itself" in line for line in lines), self.output)
-        self.assertRegex(self.output, r"(?m)^test_st_killed\.Killed\s+\d+\s+[\d.]+\s+"
+        self.assertRegex(self.output, r"(?m)^test_st_killed\.Killed\s+main\s+\d+\s+[\d.]+\s+"
                                       r"FAILED: its process was killed by signal 9$")
 
     def test_past_its_timeout(self):
@@ -838,10 +1077,10 @@ class TheCheckoutsLock(unittest.TestCase):
         self.assertEqual(second.wait(), 0, second.output)
         self.assertEqual(first.note, "1 tests, 0 skipped", first.output)          # its result kept
         self.assertEqual(second.note, "1 tests, 0 skipped", second.output)
-        self.assertRegex(second.output, rf"pool: another pool runs in this checkout: pool\.py pid {first.pid} "
+        self.assertRegex(second.output, rf"pool: another run holds this checkout: pool\.py pid {first.pid} "
                                         r"\((in|outside) the container\), since [\d:]+( \S+)?, "
                                         r"--jobs 1 test_st_slow\.Slow; waiting for it to end", second.output)
-        self.assertRegex(second.output, r"pool: the other pool ended; this one starts after waiting [\d.]+ s")
+        self.assertRegex(second.output, r"pool: the other run ended; this one starts after waiting [\d.]+ s")
         said = second.output
         self.assertLess(said.index("waiting for it to end"), said.index("pool: 1 unit(s) on 1 worker(s)"), said)
         first_end = float((first.stamps / "end").read_text())
@@ -860,7 +1099,7 @@ class TheCheckoutsLock(unittest.TestCase):
                 run = RUNS[name]
                 self.assertEqual(run.wait(), -signum, run.output)         # SIG_DFL again, and itself killed
                 self.assertTrue(FIRST_RAN_ON[name], f"the {name} pool waited for the first to end:\n{run.output}")
-                self.assertRegex(run.output, rf"pool: another pool runs in this checkout: pool\.py pid {first.pid} "
+                self.assertRegex(run.output, rf"pool: another run holds this checkout: pool\.py pid {first.pid} "
                                              r".*; waiting for it to end", run.output)
                 self.assertIn(f"pool: {signal.Signals(signum).name} while waiting: none of the 1 unit(s) ran\n",
                               run.output)
@@ -897,7 +1136,7 @@ class ThePoolsLastResorts(unittest.TestCase):
         self.assertIsNotNone(end, run.output)
         self.assertTrue(any(line.startswith("Traceback") for line in lines), run.output)
         self.assertEqual(lines[-2], "RuntimeError: a fault of the pool's own, injected", run.output)
-        self.assertRegex(run.output, r"(?m)^test_st_slow\.Slow\s+\d+\s+[\d.]+\s+FAILED: " + re.escape(why) + "$")
+        self.assertRegex(run.output, r"(?m)^test_st_slow\.Slow\s+main\s+\d+\s+[\d.]+\s+FAILED: " + re.escape(why) + "$")
         # The pool went on: the next unit, on the same worker, ran and passed; the note has both.
         self.assertRegex(run.output, r"(?m)^===== test_st_slow\.AlsoSlow \(worker \d+, [\d.]+ s\): passed \(1 test\) =====$")
         self.assertLess(run.output.index("===== test_st_slow.Slow ("), run.output.index("===== test_st_slow.AlsoSlow ("),
@@ -907,6 +1146,175 @@ class ThePoolsLastResorts(unittest.TestCase):
         self.assertEqual(run.note, "1 tests, 1 failed: test_st_slow.Slow, 0 skipped", run.output)
         self.assertNotIn("Exception in thread", run.output)
 
+
+
+class ThePhases(unittest.TestCase):
+    """Main units first, on --jobs workers; then the quiet ones (POOL_QUIET True, a class, a test of a
+    module split by test), on min(--jobs, 12) or --quiet-jobs; then those alone; each phase after the
+    one before has ended; the table says each unit's phase."""
+
+    def test_the_order_and_the_table(self):
+        run = RUNS["phases"]
+        self.assertEqual(run.wait(), 0, run.output)
+        phases = {
+            "test_st_main.MainA.test_it": "main", "test_st_main.MainB.test_it": "main",
+            "test_st_split.Mixed.test_loud": "main",
+            "test_st_quiet.QuietA.test_it": "quiet", "test_st_quiet.QuietB.test_it": "quiet",
+            "test_st_split.Mixed.test_quiet": "quiet", "test_st_split.AllQuiet.test_one": "quiet",
+            "test_st_lonely.Lonely.test_it": "alone",
+        }
+        units = {"test_st_main.MainA.test_it": "test_st_main.MainA", "test_st_main.MainB.test_it": "test_st_main.MainB",
+                 "test_st_quiet.QuietA.test_it": "test_st_quiet.QuietA",
+                 "test_st_quiet.QuietB.test_it": "test_st_quiet.QuietB",
+                 "test_st_lonely.Lonely.test_it": "test_st_lonely.Lonely"}
+        for test, phase in phases.items():
+            with self.subTest(test):
+                self.assertEqual(table_phase(run.output, units.get(test, test)), phase)
+        times = stamps(run)
+        self.assertEqual(sorted(times), sorted(phases), run.output)
+        ends = {phase: max(times[t][1] for t, ph in phases.items() if ph == phase) for phase in ("main", "quiet")}
+        starts = {phase: min(times[t][0] for t, ph in phases.items() if ph == phase) for phase in ("quiet", "alone")}
+        self.assertGreaterEqual(starts["quiet"], ends["main"], "a quiet unit started before the main phase ended")
+        self.assertGreaterEqual(starts["alone"], ends["quiet"], "the unit alone started before the quiet phase ended")
+        self.assertIn("pool: 3 unit(s) on 3 worker(s), then 4 quiet on 3 worker(s), then 1 alone: "
+                      "test_st_lonely.Lonely\n", run.output)
+        self.assertRegex(run.output, r"pool: 8 unit\(s\), 3 worker\(s\), 3 quiet, [\d.]+ s \(main [\d.]+ s, "
+                                     r"quiet [\d.]+ s, alone [\d.]+ s\)")
+        self.assertEqual(run.note, "8 tests, 0 skipped", run.output)
+        self.assertNotIn("gate", run.output)              # none asked for: none waited for
+
+    def test_the_quiet_width(self):
+        many = RUNS["many"]
+        self.assertEqual(many.wait(), 0, many.output)
+        self.assertIn("pool: 0 unit(s) on 1 worker(s), then 13 quiet on 12 worker(s)\n", many.output)
+        few = RUNS["fewquiet"]
+        self.assertEqual(few.wait(), 0, few.output)
+        self.assertIn("pool: 0 unit(s) on 1 worker(s), then 13 quiet on 2 worker(s)\n", few.output)
+        workers = set(re.findall(r"(?m)^test_st_many\.Many\d\d\s+quiet\s+(\d+)\s", few.output))
+        self.assertEqual(len(workers), 2, few.output)
+        for name in ("quietjobs0", "quietjobs65"):
+            run = RUNS[name]
+            self.assertEqual(run.wait(), 2, run.output)
+            self.assertIn("--quiet-jobs: 1 to 64", run.output)
+            self.assertIsNone(run.note)
+
+    def test_a_marker_that_cannot_be(self):
+        run = RUNS["badquiet"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertIn("pool: test_st_badquiet_a.POOL_QUIET: 'yes' is not True or a tuple of names", run.output)
+        self.assertIn("pool: test_st_badquiet_b.POOL_QUIET: 'Whole.test_x' is a test of a class that runs as one "
+                      "unit (no POOL_SPLIT): list the class, 'Whole'", run.output)
+        self.assertIn("pool: test_st_badquiet_c.POOL_QUIET: 'Nothing' names no test class or test of the module",
+                      run.output)
+        # As for POOL_BUILDS: every unit failed, none run, and each marker under its name.
+        self.assertEqual(run.note, "0 tests, 6 failed: test_st_badquiet_a.A, test_st_badquiet_b.Whole, test_st_badquiet_c.C, "
+                                   "test_st_badquiet_a.POOL_QUIET, test_st_badquiet_b.POOL_QUIET, "
+                                   "test_st_badquiet_c.POOL_QUIET, 0 skipped", run.output)
+        self.assertNotIn("unit(s) on", run.output)
+
+
+class TheGate(unittest.TestCase):
+    """--gate FILE: the quiet and alone phases (and what --after-gate names) wait until FILE exists,
+    saying so; its "leave-out NAME: why" lines leave units out, not run and not in the note, the
+    table saying why; another line is said and ignored."""
+
+    def test_the_wait_and_what_it_leaves_out(self):
+        if "gate" in SETUP_ERRORS:
+            raise SETUP_ERRORS["gate"]
+        run = RUNS["gate"]
+        self.assertEqual(run.wait(), 0, run.output)
+        self.assertEqual(GATE_SEEN["started before"], ["test_st_main.MainA"], run.output)
+        self.assertIn("pool: 1 unit(s) on 1 worker(s), then 3 quiet on 2 worker(s) after the gate, then 1 alone: "
+                      "test_st_lonely.Lonely\n", run.output)
+        self.assertRegex(run.output, r"pool: the quiet units \(3\) and the units alone \(1\) wait for the gate, "
+                                     r"\S*the-gate \(tools/schedule\.py creates it")
+        self.assertRegex(run.output, r"pool: the gate opened after [\d.]+ s\n")
+        self.assertIn("pool: test_st_quiet.QuietB left out by the gate: the controller's own tests failed\n", run.output)
+        self.assertIn("pool: the gate ", run.output)
+        odd = "not a line of the gate's"
+        self.assertIn(f"has a line that is not \"leave-out NAME: why\": {odd!r}\n", run.output)
+        self.assertEqual(sorted(stamps(run)), ["test_st_lonely.Lonely", "test_st_main.MainA", "test_st_main.MainB",
+                                               "test_st_quiet.QuietA"], run.output)
+        self.assertEqual(table_phase(run.output, "test_st_main.MainB"), "quiet")         # by --after-gate
+        self.assertRegex(run.output, r"(?m)^test_st_quiet\.QuietB\s+quiet\s+left out: the controller's own tests "
+                                     r"failed$")
+        self.assertEqual(run.note, "4 tests, 0 skipped", run.output)
+        self.assertNotIn("pool: failed:", run.output)
+
+
+class PrebuildOnly(unittest.TestCase):
+    """--prebuild-only builds what the units need and exits, no unit run: 0 and no note when it built,
+    1 and the note of a pool whose prebuild failed when it did not."""
+
+    def test_built(self):
+        run = RUNS["prebuildonly"]
+        self.assertEqual(run.wait(), 0, run.output)
+        self.assertRegex(run.output, r"prebuild: tools/build\.sh st_app: built in [\d.]+ s")
+        self.assertIn("pool: --prebuild-only: built what the 1 unit(s) need, no unit run\n", run.output)
+        self.assertNotIn("<<Builds>>", run.output)
+        self.assertNotIn("unit(s) on", run.output)
+        self.assertIsNone(run.note, run.output)
+
+    def test_failed(self):
+        run = RUNS["prebuildonlyfails"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertIn("prebuild: tools/build.sh st_app FAILED (exit 2)", run.output)
+        self.assertIn("pool: --prebuild-only: the prebuild failed: none of the 1 unit(s) can run\n", run.output)
+        self.assertEqual(run.note, "0 tests, 1 failed: test_st_builds.Builds, 0 skipped", run.output)
+        self.assertNotIn("<<Builds>>", run.output)
+
+
+class TheSerialRunnersLock(unittest.TestCase):
+    """tools/test.sh's serial runner (pool.py --hold-checkout, then VPAIR_RUNNER) holds the checkout's
+    lock as a pool does: it waits for a pool, naming it, a pool waits for it, naming it; SIGTERM while
+    it waits ends it there, nothing run; what it leaves running does not keep the lock."""
+
+    def test_it_waits_for_a_pool(self):
+        if "serial" in SETUP_ERRORS:
+            raise SETUP_ERRORS["serial"]
+        holder, runner = RUNS["serial-holder"], RUNS["serial"]
+        self.assertEqual(holder.wait(), 0, holder.output)
+        self.assertEqual(runner.wait(), 0, runner.output)
+        self.assertEqual(SERIAL_SEEN["started while held"], [], runner.output)
+        self.assertRegex(runner.output, rf"serial runner: another run holds this checkout: pool\.py pid {holder.pid} "
+                                        r".*--jobs 1 test_st_slow\.Slow; waiting for it to end")
+        self.assertRegex(runner.output, r"serial runner: the other run ended; this one starts after waiting [\d.]+ s")
+        self.assertEqual(runner.note, "1 tests, 0 skipped", runner.output)
+        start = stamps(runner)["test_st_serial.Serial"][0]
+        self.assertGreaterEqual(start, float((holder.stamps / "end").read_text()))
+
+    def test_what_it_leaves_running_does_not_hold_the_lock(self):
+        if "serial" in SETUP_ERRORS:
+            raise SETUP_ERRORS["serial"]
+        runner = RUNS["serial"]
+        runner.wait()
+        child = int((runner.stamps / "child").read_text())
+        self.addCleanup(kill_if_running, child)
+        self.assertFalse(gone(child), "the runner's background child already ended: nothing proven")
+        self.assertTrue(lock_is_free(runner.files), "the serial runner's child still holds the checkout's lock")
+
+    def test_sigterm_while_it_waits(self):
+        if "serial" in SETUP_ERRORS:
+            raise SETUP_ERRORS["serial"]
+        term = RUNS["serial-term"]
+        self.assertEqual(term.wait(), -signal.SIGTERM, term.output)
+        self.assertIn("serial runner: SIGTERM while waiting: nothing ran\n", term.output)
+        self.assertEqual(stamps(term), {}, term.output)
+        self.assertIsNone(term.note, term.output)
+
+    def test_a_pool_waits_for_it(self):
+        if "serial_holds" in SETUP_ERRORS:
+            raise SETUP_ERRORS["serial_holds"]
+        runner, pool_run = RUNS["serial-runner"], RUNS["pool-after-serial"]
+        self.assertEqual(runner.wait(), 0, runner.output)
+        self.assertEqual(pool_run.wait(), 0, pool_run.output)
+        self.assertFalse(SERIAL_SEEN["pool started while held"], pool_run.output)
+        self.assertRegex(pool_run.output, rf"pool: another run holds this checkout: the serial runner, pid {runner.pid} "
+                                          r"\((in|outside) the container\), since [\d:]+( \S+)?, --jobs 1 "
+                                          r"test_st_slow\.Slow; waiting for it to end")
+        self.assertGreaterEqual(float((pool_run.stamps / "start").read_text()),
+                                float((runner.stamps / "end").read_text()))
+        self.assertEqual(runner.note, "1 tests, 0 skipped", runner.output)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
