@@ -13,29 +13,35 @@ FILE has one step a line (blank lines and lines beginning with # aside), split a
 
 - KIND heavy: phase 1, at most --heavy-slots (2) at once, `slots` of them each (1; the pool's
   prebuild takes 2), started in the plan's order (one waits for the slots rather than be overtaken),
-  at nice --nice (19): plugin-check with LTO, `plugin <name>`, the pool's prebuild.
-- KIND light: phase 1, beside them, not niced: tools, plugin-versions, the controller's build...
-- KIND test: phase 2, once every phase-1 step has ended: the pool, the controller's own tests.
+  at nice --nice (19): every build with LTO (plugin-check's, the block FIR's, the aarch64 build
+  identity's), `plugin <name>`, the pool's prebuild.
+- KIND light: phase 1, beside them, not niced: plugin-versions, the controller's build.
+- KIND test: phase 2, once every phase-1 step has ended: the pool, the controller's own tests,
+  the `tools` check (which builds nothing).
 - needs: steps of earlier lines it waits for; one of them not passed, it is skipped, saying why
   (the controller's own tests after its failed build). A failed step stops nothing else.
 - gated: the step the gate is for (the pool, with --gate FILE). The gate, FILE, is created
   (atomically) once every phase-2 step but the gated ones has ended; a step that `guards` UNIT and
-  did not pass puts "leave-out UNIT: why" in it (tests/vpair/pool.py, "the gate").
+  ended without passing puts "leave-out UNIT: why" in it (tests/vpair/pool.py, "the gate"). A
+  gated step guards nothing (the plan is refused).
 
 Each step runs in a session of its own, its stdin /dev/null, its stdout and stderr in
-DIR/<NAME>.log (DIR is the schedule's own: emptied of files as it starts); its whole output is
+DIR/<NAME>.log (DIR is the schedule's own: emptied of files as it starts), TEST_SCHEDULE_PID (this
+process's ID) in its environment: the pool's --gate-owner, so that a pool waiting at the gate of a
+schedule that is gone (SIGKILL) stops waiting. Its whole output is
 printed as one block when it ends, between "=== /test TITLE: RESULT (...)" and "=== end of TITLE". While steps run, a line says when each starts, and every
 60 s which still run. At the end: a table (phase, step, start, seconds, result), the container's
 peak tasks and memory over the run (its cgroup's pids.current and memory.current, where they can
 be read), and --results gets "NAME RESULT" a line (passed, failed, skipped, interrupted).
 
 --lock FILE: one schedule at a time per checkout (tools/test.sh gives build/test-run.lock): a
-second waits, saying which run holds it (--what) once and then every 60 s; SIGINT or SIGTERM while
-it waits ends it, nothing run.
+second waits, saying which run holds it (--what) once and then every 60 s; SIGINT, SIGTERM or
+SIGHUP while it waits ends it, nothing run.
 
-Exit status: 0 when every step passed, 1 otherwise, 2 for a plan it cannot run. SIGINT or SIGTERM
-passes the signal to every running step's session, starts nothing more, waits for them (SIGKILL
-after 60 s), prints their blocks and the table, and ends the schedule by that signal.
+Exit status: 0 when every step passed, 1 otherwise, 2 for a plan it cannot run or a lock it cannot
+open (--results is then not written). SIGINT, SIGTERM or SIGHUP (a closed terminal) passes the signal to every running
+step's session, starts nothing more, waits for them (SIGKILL after 60 s), prints their blocks and
+the table, and ends the schedule by that signal.
 tools/tests/test_schedule.py tests it on synthetic steps.
 """
 
@@ -52,6 +58,7 @@ from pathlib import Path
 KINDS = {"heavy": 1, "light": 1, "test": 2}
 TICK = 60.0                 # seconds between the lines that say what still runs
 STOP_GRACE = 60.0           # after a signal, seconds before the steps still running are killed
+STOPPING = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)   # what stops the schedule, passed on to the steps
 
 
 class PlanError(Exception):
@@ -116,6 +123,9 @@ def read_plan(text):
                 raise PlanError(f"line {number}: {name} (phase {step.phase}) needs {need}, a later phase's")
         if step.gated and step.phase != 2:
             raise PlanError(f"line {number}: {name}: only a test step is gated")
+        if step.gated and step.guards:
+            raise PlanError(f"line {number}: {name}: a gated step guards nothing (it has not ended when the gate "
+                            f"opens)")
         if step.slots > 1 and kind != "heavy":
             raise PlanError(f"line {number}: {name}: slots are a heavy step's")
         names[name] = step
@@ -187,7 +197,8 @@ class Schedule:
         with open(step.log, "wb") as log:
             try:
                 step.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
-                                                stderr=subprocess.STDOUT, start_new_session=True)
+                                                stderr=subprocess.STDOUT, start_new_session=True,
+                                                env=dict(os.environ, TEST_SCHEDULE_PID=str(os.getpid())))
             except OSError as error:
                 log.write(f"schedule: {command[0]} could not be run: {error}\n".encode())
                 step.start = step.end = self.now()
@@ -238,7 +249,7 @@ class Schedule:
         if any(s.phase == 2 and not s.gated and not s.ended for s in self.steps):
             return
         lines = [f"leave-out {unit}: {s.title} did not pass ({s.result}{': ' + s.why if s.why else ''})"
-                 for s in self.steps if s.result != "passed" for unit in s.guards]
+                 for s in self.steps if s.ended and s.result != "passed" for unit in s.guards]
         tmp = self.gate.with_name(f".{self.gate.name}.{os.getpid()}")
         tmp.write_text("".join(line + "\n" for line in lines))
         os.replace(tmp, self.gate)
@@ -393,10 +404,14 @@ def main(argv=None):
     def on_signal(signum, _frame):
         caught.append(signum)
 
-    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    previous = {s: signal.signal(s, on_signal) for s in STOPPING}
     lock = None
     if args.lock:
-        lock = hold_lock(Path(args.lock), args.what, lambda text: print(text, flush=True), lambda: bool(caught))
+        try:
+            lock = hold_lock(Path(args.lock), args.what, lambda text: print(text, flush=True), lambda: bool(caught))
+        except OSError as error:
+            print(f"schedule: the lock {args.lock}: {error}: nothing ran", file=sys.stderr, flush=True)
+            return 2
         if lock is None:
             print(f"schedule: {signal.Signals(caught[0]).name} while waiting: nothing ran", flush=True)
             signal.signal(caught[0], signal.SIG_DFL)

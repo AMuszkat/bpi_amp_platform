@@ -2,9 +2,9 @@
 """The virtual pair's modules on a pool of workers, each worker on a virtual pair of its own
 (README.md, "The pool").
 
-    python3 tests/vpair/pool.py --jobs N [--quiet-jobs M] [--gate FILE] [--after-gate NAME]...
-                                --note FILE [MODULE...]
-    python3 tests/vpair/pool.py --jobs N --prebuild-only [--note FILE] [MODULE...]
+    python3 tests/vpair/pool.py --jobs N [--quiet-jobs M] [--prebuilt REPORT] [--gate FILE
+                                [--gate-owner PID]] [--after-gate NAME]... --note FILE [MODULE...]
+    python3 tests/vpair/pool.py --jobs N --prebuild-only [--built REPORT] [--note FILE] [MODULE...]
     python3 tests/vpair/pool.py --hold-checkout [--what TEXT] -- COMMAND...
 
 From the repository root, in the development container (tools/test.sh calls it there; from
@@ -14,17 +14,20 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
 1. The prebuild. Every module says what its built() calls need, also through the harness's
    classes, in POOL_BUILDS ("speakerd", "loudness:headless"; "controller?" for one a test skips
    without). The pool builds all of them first, once, with tools/build.sh: one call per build tree
-   with every kind it needs, the trees at once. A build's output is kept and printed only if it
-   fails, which fails the run before any test (one marked "?" fails only the built() that asks for
-   it, as it would have); tools/build.sh's line that it waits for another build in its tree
-   ("tools/build.sh: waiting for build/speakerd: ...") is printed as it comes. A SIGINT during the
-   prebuild kills its builds and reaps them before it ends the pool (no unit runs, no note; SIGTERM
-   there ends it at once, its builds left to end on their own). --prebuild-only does that alone
-   and exits, 0 or 1, no unit run; its note (with --note) is written only when the prebuild fails,
-   the note a pool whose prebuild failed writes (tools/test.sh's schedule runs the prebuild among
-   the builds, and the units later).
-   Under the pool built() builds nothing (VPAIR_PREBUILT) and refuses what the module's POOL_BUILDS
-   does not name: build/ may hold a stale one.
+   with every kind it needs, the trees at once, each in a session of its own. A build's output is
+   kept and printed only if it fails; a failed build fails the units that require it, not run,
+   under their names, and the others run (one marked "?" fails only the built() that asks for it,
+   as it would have); tools/build.sh's line that it waits for another build in its tree
+   ("tools/build.sh: waiting for build/speakerd: ...") is printed as it comes. A SIGINT, SIGTERM or
+   SIGHUP during the prebuild kills its builds (each one's whole session: cmake, ninja and the
+   compilers too, so that none goes on holding its tree's lock) and reaps them, then ends the pool
+   by that signal (no unit runs, no note). --prebuild-only does that alone and exits, no unit run:
+   1 when a build that a unit requires failed, else 0; --built REPORT gets what it built and what
+   failed (JSON, written atomically), and its note (with --note) is written only when a required
+   build failed: the units that need it, failed. --prebuilt REPORT makes a pool build nothing and
+   take that report instead (tools/test.sh's schedule runs the prebuild among the builds, and the
+   units later, beside no build). Under the pool built() builds nothing (VPAIR_PREBUILT) and
+   refuses what the module's POOL_BUILDS does not name: build/ may hold a stale one.
 2. The units: each test class the unittest loader finds in a module (a module with POOL_WHOLE =
    True is one unit; one with POOL_SPLIT = True, whose tests are independent, a unit per test),
    each in a process of its own (setUpModule and setUpClass run once per unit), in three phases:
@@ -34,8 +37,9 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
      those, names relative to the module, a unit being quiet when its name or its class is listed),
      and those --after-gate names, on M workers (--quiet-jobs, default min(N, 12)), after the main
      phase and, with --gate, once FILE exists;
-   - alone: a module with POOL_ALONE = True (it measures CPU: test_chain_cost) runs last, alone,
-     after the gate too.
+   - alone: the units that must run with no other test beside them, which the module marks as
+     for POOL_QUIET (POOL_ALONE = True: all of its units, test_chain_cost, which measures CPU; or
+     the names of some), one at a time, last, after the gate too.
    In each phase the longest first: durations learned from earlier runs
    (build/vpair-pool-durations.json of the main checkout, merged and written atomically after each
    run), seeded (SEED) for units never timed; a unit known to neither counts as long. Each worker
@@ -49,7 +53,9 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
    (tools/schedule.py creates FILE when they have ended). A line "leave-out NAME: why" in it
    leaves out the units of NAME (a module, a class or a test, as named): not run, not in the note
    (tools/test.sh's controller check: test_controller_end_to_end after a failed build or own test
-   of the controller, which --after-gate holds for the gate).
+   of the controller, which --after-gate holds for the gate). --gate-owner PID: the process that
+   creates FILE (tools/test.sh gives the schedule's); if it ends before FILE exists (killed), the
+   pool stops waiting, the units held for the gate fail, not run, and the pool ends.
 4. Each unit's whole output, stdout and stderr, is printed as one block when it ends and kept in
    build/vpair-pool/<unit>.log; then a table (unit, phase, worker, seconds, result), the failed
    units and the container's peak use (tasks against pids.max, memory, /dev/shm).
@@ -58,8 +64,9 @@ names one unit); none is every module of tests/vpair, as `unittest discover` fin
    its timeout: 4 times its learned duration, at least 300 s; 900 s unknown) is failed under its
    unit name, with what it said before; so is one the pool could not run, clean up after or read
    the log of, with what went wrong, its block printed all the same.
-6. Exit status 0 when every test passed (skips allowed), 1 otherwise. SIGINT or SIGTERM stops the
-   workers, brings their pairs down, writes the note so far, and ends the pool by that signal.
+6. Exit status 0 when every test passed (skips allowed), 1 otherwise. SIGINT, SIGTERM or SIGHUP
+   stops the workers, brings their pairs down, writes the note so far, and ends the pool by that
+   signal.
 
 One pool at a time per checkout: build/vpair-pool/ and the prebuild's build trees are this
 checkout's, so a second pool waits for the first (build/vpair-pool.lock), saying which one it is.
@@ -79,6 +86,7 @@ import fcntl
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -182,6 +190,7 @@ SEED = {
     "test_firmware_speakerd_install.Remote.test_the_board_script": 0.4,
     "test_ampd_protocol.Protocol.test_the_authentication_vector": 0.3,
 }
+STOPPING = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)   # what ends the pool (SIGHUP: a closed terminal)
 UNKNOWN = 600.0               # a unit never timed: scheduled as a long one
 TIMEOUT_FACTOR, TIMEOUT_MIN, TIMEOUT_UNKNOWN = 4.0, 300.0, 900.0
 KINDS = ("complete", "control", "headless")
@@ -310,7 +319,7 @@ def module_names(names):
 def find_units(names, after_gate=()):
     """The units of the modules named, in the order the unittest loader runs them, and errors (what
     could not be read). A unit is quiet when its module's POOL_QUIET says so, or when `after_gate`
-    names it (its module, class or test)."""
+    names it (its module, class or test); alone when its module's POOL_ALONE does."""
     loader = unittest.TestLoader()
     units, errors = [], []
     for name in module_names(names):
@@ -320,30 +329,35 @@ def find_units(names, after_gate=()):
         except Exception:                        # noqa: BLE001  (the unit's own run says what)
             count = 1
         module = sys.modules.get(module_name)
-        marker = quiet_marker(module, errors)
+        quiet, lonely = marker(module, "POOL_QUIET", errors), marker(module, "POOL_ALONE", errors)
         if "." in name:                          # test_x.Class: that unit alone
-            units.append(Unit(name, module_name, count, declared(module, errors), alone(module),
-                              is_quiet(marker, name.partition(".")[2])))
+            relative = name.partition(".")[2]
+            units.append(Unit(name, module_name, count, declared(module, errors), is_marked(lonely, relative),
+                              is_marked(quiet, relative)))
             continue
         if module is None or getattr(module, "POOL_WHOLE", False) or hasattr(module, "load_tests"):
             # Not importable (its unit's run reproduces the error), or to stay whole.
-            if marker not in (True, False):
-                errors.append(f"{module_name}.POOL_QUIET: {marker!r} names units of a module that runs as one unit "
-                              f"(POOL_WHOLE, load_tests): POOL_QUIET = True or nothing")
-            units.append(Unit(name, name, count, declared(module, errors), alone(module), marker is True))
+            for attr, value in (("POOL_QUIET", quiet), ("POOL_ALONE", lonely)):
+                if value not in (True, False):
+                    errors.append(f"{module_name}.{attr}: {value!r} names units of a module that runs as one unit "
+                                  f"(POOL_WHOLE, load_tests): {attr} = True or nothing")
+            units.append(Unit(name, name, count, declared(module, errors), lonely is True, quiet is True))
             continue
-        builds, lonely, split = declared(module, errors), alone(module), getattr(module, "POOL_SPLIT", False)
+        builds, split = declared(module, errors), getattr(module, "POOL_SPLIT", False)
         found = []
         for attr in dir(module):                 # as loadTestsFromModule finds the classes
             obj = getattr(module, attr)
             if isinstance(obj, type) and issubclass(obj, unittest.TestCase):
                 tests = list(loader.loadTestsFromTestCase(obj))
                 if split:                        # its tests are independent: one unit each
-                    found += [Unit(f"{name}.{attr}.{t._testMethodName}", name, 1, builds, lonely,
-                                   is_quiet(marker, f"{attr}.{t._testMethodName}")) for t in tests]
+                    found += [Unit(f"{name}.{attr}.{t._testMethodName}", name, 1, builds,
+                                   is_marked(lonely, f"{attr}.{t._testMethodName}"),
+                                   is_marked(quiet, f"{attr}.{t._testMethodName}")) for t in tests]
                 elif tests:                      # a base class without tests yields nothing
-                    found.append(Unit(f"{name}.{attr}", name, len(tests), builds, lonely, is_quiet(marker, attr)))
-        check_quiet(name, marker, found, errors)
+                    found.append(Unit(f"{name}.{attr}", name, len(tests), builds, is_marked(lonely, attr),
+                                      is_marked(quiet, attr)))
+        check_marked(name, "POOL_QUIET", quiet, found, errors)
+        check_marked(name, "POOL_ALONE", lonely, found, errors)
         units += found
     for unit in units:
         if any(names_unit(held, unit) for held in after_gate):
@@ -357,22 +371,22 @@ def names_unit(name, unit):
     return unit.name == name or unit.name.startswith(name + ".")
 
 
-def quiet_marker(module, errors):
-    """A module's POOL_QUIET, checked: True, False, or a tuple of names relative to the module
-    ("Class", "Class.test_x")."""
-    value = getattr(module, "POOL_QUIET", False) if module is not None else False
+def marker(module, attr, errors):
+    """A module's POOL_QUIET or POOL_ALONE (`attr`), checked: True, False, or a tuple of names
+    relative to the module ("Class", "Class.test_x")."""
+    value = getattr(module, attr, False) if module is not None else False
     if isinstance(value, bool):
         return value
     if isinstance(value, (tuple, list)) and value and all(
             isinstance(v, str) and re.fullmatch(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)?", v) for v in value):
         return tuple(value)
-    errors.append(f"{module.__name__}.POOL_QUIET: {value!r} is not True or a tuple of names relative to the module "
+    errors.append(f"{module.__name__}.{attr}: {value!r} is not True or a tuple of names relative to the module "
                   f"(\"Class\", \"Class.test_x\")")
     return False
 
 
-def is_quiet(marker, relative):
-    """Whether the unit `relative` to its module ("Class" or "Class.test_x") is quiet: its name or its
+def is_marked(marker, relative):
+    """Whether the unit `relative` to its module ("Class" or "Class.test_x") is marked: its name or its
     class is listed (or the whole module is)."""
     if marker is True:
         return True
@@ -381,9 +395,10 @@ def is_quiet(marker, relative):
     return relative in marker or relative.split(".")[0] in marker
 
 
-def check_quiet(module_name, marker, units, errors):
-    """Every name a POOL_QUIET tuple lists must be one of the module's units or the class of some: a
-    test of a class that runs as one unit would otherwise quietly stay in the main phase."""
+def check_marked(module_name, attr, marker, units, errors):
+    """Every name a POOL_QUIET or POOL_ALONE tuple lists must be one of the module's units or the
+    class of some: a test of a class that runs as one unit would otherwise quietly stay in the main
+    phase."""
     if marker in (True, False):
         return
     relative = {u.name[len(module_name) + 1:] for u in units}
@@ -392,10 +407,10 @@ def check_quiet(module_name, marker, units, errors):
         if entry in relative or entry in classes:
             continue
         if entry.split(".")[0] in classes:
-            errors.append(f"{module_name}.POOL_QUIET: {entry!r} is a test of a class that runs as one unit "
+            errors.append(f"{module_name}.{attr}: {entry!r} is a test of a class that runs as one unit "
                           f"(no POOL_SPLIT): list the class, {entry.split('.')[0]!r}")
         else:
-            errors.append(f"{module_name}.POOL_QUIET: {entry!r} names no test class or test of the module")
+            errors.append(f"{module_name}.{attr}: {entry!r} names no test class or test of the module")
 
 
 def declared(module, errors):
@@ -407,10 +422,6 @@ def declared(module, errors):
             errors.append(f"{module.__name__}.POOL_BUILDS: {entry!r} is not an application or plugin:kind "
                           f"(kinds: {', '.join(KINDS)}; '?' after one a test skips without)")
     return builds
-
-
-def alone(module):
-    return bool(getattr(module, "POOL_ALONE", False))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -435,41 +446,69 @@ def read_build(process, lines, ended, out):
                 if line.startswith(harness.BUILD_WAITING):
                     out(line.rstrip("\n"))
     except BaseException:
-        process.kill()
+        kill_build(process)
         raise
     finally:
         process.wait()
         ended.append(time.monotonic())
 
 
+def kill_build(process):
+    """SIGKILL to a build's whole session (the prebuild starts each in its own, so that cmake, ninja
+    and the compilers go with tools/build.sh, none left holding the tree's lock), or to the process
+    alone when it leads no group of its own."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if os.getpgid(process.pid) == process.pid:
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+
+
+class Stopped(BaseException):
+    """A SIGINT, SIGTERM or SIGHUP during the prebuild (raised in the main thread)."""
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def stop_prebuild(signum, _frame):
+    for s in STOPPING:                           # the cleanup runs to its end: a second signal waits
+        signal.signal(s, signal.SIG_IGN)
+    raise Stopped(signum)
+
+
 def prebuild(units, out):
-    """Builds what the units' modules declare, one tools/build.sh per build tree, the trees at once.
-    Returns (the names built, the optional names that failed, whether a required one failed)."""
-    trees = {}            # what -> {"kinds": [...], "required": bool, "names": set, "modules": set}
+    """Builds what the units' modules declare, one tools/build.sh per build tree, the trees at once,
+    each in a session of its own. Returns (the names built, {name: the tools/build.sh call} of those
+    whose build failed)."""
+    trees = {}            # what -> {"kinds": [...], "required": set of modules, "names": set, "modules": set}
     for unit in units:
         for entry in unit.builds:
             optional = entry.endswith("?")
             name = entry.rstrip("?")
             what, _, kind = name.partition(":")
-            tree = trees.setdefault(what, {"kinds": [], "required": False, "names": set(), "modules": set()})
+            tree = trees.setdefault(what, {"kinds": [], "required": set(), "names": set(), "modules": set()})
             if kind and kind not in tree["kinds"]:
                 tree["kinds"].append(kind)
-            tree["required"] |= not optional
+            if not optional:
+                tree["required"].add(unit.module)
             tree["names"].add(name)
             tree["modules"].add(unit.module)
     if not trees:
-        return set(), set(), False
+        return set(), {}
     started = time.monotonic()
     running = []
     try:
         for what, tree in trees.items():
             process = subprocess.Popen(build_command(what, tree["kinds"]), cwd=ROOT, stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                                       start_new_session=True)
             lines, ended = [], []
             reader = threading.Thread(target=read_build, args=(process, lines, ended, out), daemon=True)
             running.append((what, tree, process, reader, lines, ended, time.monotonic()))
             reader.start()
-        built, unbuilt, failed = set(), set(), False
+        built, broken = set(), {}
         for what, tree, process, reader, lines, ended, t0 in running:
             reader.join()
             output = "".join(lines)
@@ -479,26 +518,62 @@ def prebuild(units, out):
                 built |= tree["names"]
                 out(f"prebuild: {shown}: built in {took:.1f} s")
                 continue
-            for_whom = ", ".join(sorted(tree["modules"]))
+            broken.update({name: shown for name in tree["names"]})
             if tree["required"]:
-                failed = True
-                out(f"prebuild: {shown} FAILED (exit {process.returncode}) after {took:.1f} s, for {for_whom}:\n"
+                out(f"prebuild: {shown} FAILED (exit {process.returncode}) after {took:.1f} s, required by "
+                    f"{', '.join(sorted(tree['required']))}, whose units fail, not run:\n"
                     + output.rstrip() + f"\nprebuild: end of {shown}")
             else:
-                unbuilt |= tree["names"]
-                out(f"prebuild: {shown} failed (exit {process.returncode}), optional for {for_whom}: its built() "
-                    f"fails as the build would\n" + "\n".join(output.rstrip().splitlines()[-40:]))
+                out(f"prebuild: {shown} failed (exit {process.returncode}), optional for "
+                    f"{', '.join(sorted(tree['modules']))}: its built() fails as the build would\n"
+                    + "\n".join(output.rstrip().splitlines()[-40:]))
     except BaseException:
-        # A KeyboardInterrupt to the pool alone (in a join), a print to a closed stdout: the builds
-        # still running are killed and reaped, as subprocess.run does, rather than left running with
-        # their trees' locks.
+        # A signal to the pool (Stopped, KeyboardInterrupt in a join), a print to a closed stdout:
+        # the builds still running are killed, each with its session, and reaped, as subprocess.run
+        # does, rather than left running with their trees' locks.
         for _, _, process, *_ in running:
-            process.kill()
+            kill_build(process)
         for _, _, process, *_ in running:
             process.wait()
         raise
     out(f"prebuild: {len(trees)} build tree(s) in {time.monotonic() - started:.1f} s")
-    return built, unbuilt, failed
+    return built, broken
+
+
+def unbuildable(units, built, broken, report=None):
+    """Marks the units that cannot run, not run (failed under their names in the note): a build they
+    require failed, or (`report`, a pool on another's prebuild) one of theirs it does not list.
+    Returns them."""
+    found = []
+    for unit in units:
+        names = [entry.rstrip("?") for entry in unit.builds]
+        failed = sorted({broken[entry] for entry in unit.builds if not entry.endswith("?") and entry in broken})
+        missing = [n for n in names if n not in built and n not in broken] if report is not None else []
+        if failed:
+            unit.state = f"not run: its build failed in the prebuild ({'; '.join(failed)})"
+        elif missing:
+            unit.state = f"not run: the prebuild's report {report} has no build of {', '.join(missing)}"
+        else:
+            continue
+        found.append(unit)
+    return found
+
+
+def write_report(path, built, broken):
+    """--built REPORT: what the prebuild built and what failed, for --prebuilt."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(json.dumps({"built": sorted(built), "failed": dict(sorted(broken.items()))}, indent=1) + "\n")
+    os.replace(tmp, path)
+
+
+def read_report(path):
+    """--prebuilt REPORT: (the names built, {name: the call} of those that failed); raises what is
+    wrong with it."""
+    data = json.loads(Path(path).read_text())
+    if not (isinstance(data, dict) and isinstance(data.get("built"), list) and isinstance(data.get("failed"), dict)):
+        raise ValueError("not {\"built\": [...], \"failed\": {...}}")
+    return {str(n) for n in data["built"]}, {str(k): str(v) for k, v in data["failed"].items()}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -869,11 +944,10 @@ def where():
 
 
 def wait_for_checkout(out, who, me="pool"):
-    """hold_checkout(), SIGINT and SIGTERM while it waits ending the wait: (the lock or None, the
-    signal that came or None). The handlers before are put back."""
+    """hold_checkout(), SIGINT, SIGTERM and SIGHUP while it waits ending the wait: (the lock or None,
+    the signal that came or None). The handlers before are put back."""
     waiting_signal = []
-    previous = {s: signal.signal(s, lambda signum, _frame: waiting_signal.append(signum))
-                for s in (signal.SIGINT, signal.SIGTERM)}
+    previous = {s: signal.signal(s, lambda signum, _frame: waiting_signal.append(signum)) for s in STOPPING}
     try:
         checkout = hold_checkout(out, lambda: bool(waiting_signal), who, me)
     finally:
@@ -892,7 +966,8 @@ def hold_and_exec(argv):
     Takes it as a pool does (waiting for a pool or another serial runner, naming it), then execs
     COMMAND with the lock's descriptor inherited, its number in VPAIR_CHECKOUT_LOCK_FD: COMMAND holds
     it until it exits (tools/test.sh's runner makes it non-inheritable again, so that nothing it
-    starts keeps it). SIGINT or SIGTERM while it waits ends it by that signal, COMMAND never run."""
+    starts keeps it). SIGINT, SIGTERM or SIGHUP while it waits ends it by that signal, COMMAND never
+    run."""
     parser = argparse.ArgumentParser(prog="pool.py --hold-checkout",
                                      description="Holds the checkout's lock for COMMAND (tools/test.sh's serial runner).")
     parser.add_argument("--what", default="", help="what COMMAND runs, for a waiting pool to say")
@@ -966,24 +1041,57 @@ def read_gate(path):
     return found
 
 
-def wait_for_gate(gate, out, stopped, what):
-    """Until `gate` exists, saying so once and then every 60 s; False if `stopped()` first."""
+class Owner:
+    """--gate-owner PID, the process that creates the gate (tools/test.sh's schedule), watched from
+    the pool's start through a pidfd (so that another process given its number later is not taken
+    for it; kill(PID, 0) where there is none): gone() once it has ended."""
+
+    def __init__(self, pid):
+        self.pid, self.fd, self.ended = pid, None, False
+        try:
+            self.fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            self.ended = True
+        except (AttributeError, OSError):
+            self.fd = None
+
+    def gone(self):
+        if not self.ended:
+            if self.fd is not None:
+                self.ended = bool(select.select([self.fd], [], [], 0)[0])
+            else:
+                try:
+                    os.kill(self.pid, 0)
+                except ProcessLookupError:
+                    self.ended = True
+                except PermissionError:
+                    pass
+        return self.ended
+
+
+def wait_for_gate(gate, out, stopped, what, owner=None):
+    """Until `gate` exists, saying so once and then every 60 s: "open"; "stopped" if `stopped()`
+    first, "gone" if `owner` (an Owner) has ended first."""
     if gate.exists():
         out(f"pool: the gate is open ({gate}): {what} start now")
-        return True
+        return "open"
     waited = said = time.monotonic()
     out(f"pool: {what} wait for the gate, {gate} (tools/schedule.py creates it once the run's other tests have "
         f"ended)")
     while not gate.exists():
         if stopped():
-            return False
+            return "stopped"
+        if owner is not None and owner.gone() and not gate.exists():
+            out(f"pool: the process that creates the gate (pid {owner.pid}, --gate-owner) ended before it did, after "
+                f"{time.monotonic() - waited:.1f} s: {what} do not run")
+            return "gone"
         now = time.monotonic()
         if now - said >= 60:
             out(f"pool: still waiting for the gate, {gate} ({now - waited:.0f} s)")
             said = now
         time.sleep(0.2)
     out(f"pool: the gate opened after {time.monotonic() - waited:.1f} s")
-    return True
+    return "open"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -996,9 +1104,15 @@ def main():
                         help="workers of the quiet phase (1 to 64; default min(--jobs, 12))")
     parser.add_argument("--gate", default=None,
                         help="the quiet and alone phases wait until this file exists (tools/schedule.py's)")
+    parser.add_argument("--gate-owner", type=int, default=None, metavar="PID",
+                        help="the process that creates the gate: if it ends first, the pool stops waiting")
     parser.add_argument("--after-gate", action="append", default=[], metavar="NAME",
                         help="the units of NAME (a module, class or test) wait for the gate, as quiet ones do")
     parser.add_argument("--prebuild-only", action="store_true", help="build what the units need, and exit: no unit")
+    parser.add_argument("--built", default=None, metavar="REPORT",
+                        help="with --prebuild-only: write what it built and what failed (for --prebuilt)")
+    parser.add_argument("--prebuilt", default=None, metavar="REPORT",
+                        help="build nothing: take --prebuild-only's report of what is built")
     parser.add_argument("--note", default=None, help="the file for tools/test.sh's note")
     parser.add_argument("--unit-timeout", type=float, default=None,
                         help="seconds per unit instead of 4 times its learned duration (at least 300 s; 900 s unknown)")
@@ -1017,6 +1131,13 @@ def main():
         parser.error("--quiet-jobs: 1 to 64")
     if args.note is None and not args.prebuild_only:
         parser.error("--note FILE is needed (but with --prebuild-only)")
+    if args.built is not None and not args.prebuild_only:
+        parser.error("--built REPORT goes with --prebuild-only")
+    if args.prebuilt is not None and args.prebuild_only:
+        parser.error("--prebuilt REPORT is a pool's, not --prebuild-only's")
+    if args.gate_owner is not None and args.gate is None:
+        parser.error("--gate-owner PID goes with --gate FILE")
+    owner = Owner(args.gate_owner) if args.gate_owner is not None else None   # watched from now on
     os.chdir(ROOT)
     started = time.monotonic()
     printing = threading.RLock()        # the signal handler prints too, maybe while the main thread does
@@ -1028,7 +1149,10 @@ def main():
     def finish(units, extra_failed=(), status=None):
         text = note(units, extra_failed)
         if args.note is not None:
-            Path(args.note).write_text(text)
+            try:
+                Path(args.note).write_text(text)
+            except OSError as error:            # its run's folder gone (a schedule that was killed)
+                out(f"pool: the note could not be written to {args.note}: {describe(error)}")
         out(f"note: {text}")
         return status if status is not None else (0 if all(u.state == "ran" and u.successful for u in units
                                                            if u.left_out is None) and not extra_failed else 1)
@@ -1042,7 +1166,7 @@ def main():
         out("pool: no test found")
         return finish(units, status=1)
 
-    # One pool at a time per checkout; SIGINT or SIGTERM while waiting ends this one, no unit run.
+    # One pool at a time per checkout; SIGINT, SIGTERM or SIGHUP while waiting ends this one, no unit run.
     checkout, signum = wait_for_checkout(out, holder_text(args.jobs, args.modules, args.prebuild_only))
     if checkout is None or signum is not None:
         for unit in units:
@@ -1052,14 +1176,30 @@ def main():
         die_by(signum)
         return 1
 
+    def build_now():
+        """The prebuild, a SIGINT, SIGTERM or SIGHUP killing its builds and ending the pool by it."""
+        previous = {s: signal.signal(s, stop_prebuild) for s in STOPPING}
+        stopped = None
+        try:
+            return prebuild(units, out)
+        except Stopped as error:
+            stopped = error.signum
+        finally:
+            for s, handler in previous.items():
+                signal.signal(s, handler)
+        out(f"pool: {signal.Signals(stopped).name} during the prebuild: its builds killed, no unit run")
+        die_by(stopped)
+        sys.exit(1)
+
     if args.prebuild_only:
         # The logs of the last pool are kept: no unit runs here.
-        built, unbuilt, failed = prebuild(units, out)
-        if failed:
-            for unit in units:
-                unit.state = "not run: the prebuild failed"
-            out(f"pool: --prebuild-only: the prebuild failed: none of the {len(units)} unit(s) can run")
-            return finish(units)
+        built, broken = build_now()
+        if args.built is not None:
+            write_report(args.built, built, broken)
+        cannot = unbuildable(units, built, broken)
+        if cannot:
+            out(f"pool: --prebuild-only: a build failed: {len(cannot)} of the {len(units)} unit(s) cannot run")
+            return finish(cannot, status=1)
         out(f"pool: --prebuild-only: built what the {len(units)} unit(s) need, no unit run")
         return 0
 
@@ -1068,21 +1208,36 @@ def main():
             old.unlink(missing_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
 
-    built, unbuilt, failed = prebuild(units, out)
-    if failed:
-        for unit in units:
-            unit.state = "not run: the prebuild failed"
-        out(f"pool: the prebuild failed: none of the {len(units)} unit(s) ran")
-        return finish(units)
+    if args.prebuilt is None:
+        built, broken = build_now()
+        cannot = unbuildable(units, built, broken)
+    else:
+        try:
+            built, broken = read_report(args.prebuilt)
+        except (OSError, ValueError) as error:
+            for unit in units:
+                unit.state = f"not run: the prebuild's report {args.prebuilt} could not be read ({describe(error)})"
+            out(f"pool: --prebuilt {args.prebuilt}: {describe(error)}: none of the {len(units)} unit(s) can run")
+            return finish(units)
+        out(f"pool: the builds of the prebuild before ({args.prebuilt}): {len(built)} built"
+            + (f", failed: {', '.join(sorted(broken))}" if broken else "") + "; nothing built here")
+        cannot = unbuildable(units, built, broken, args.prebuilt)
+    if cannot:
+        out(f"pool: {len(cannot)} of the {len(units)} unit(s) need a build that failed"
+            + (" or that the report does not list" if args.prebuilt is not None else "")
+            + ": they do not run, and fail under their names; the others run")
+    unbuilt = set(broken)
 
     learned = load_durations()
     known = {**SEED, **learned}
 
     def longest_first(phase):
-        return sorted((u for u in units if u.phase == phase), key=lambda u: -known.get(u.name, UNKNOWN))
+        return sorted((u for u in units if u.phase == phase and u.state is None),
+                      key=lambda u: -known.get(u.name, UNKNOWN))
 
     main_units, quiet_units, alone_units = longest_first("main"), longest_first("quiet"), \
-        [u for u in units if u.phase == "alone"]
+        [u for u in units if u.phase == "alone" and u.state is None]
+    held_back = [u for u in units if u.phase != "main"]         # what the gate may leave out, run or not
     jobs = max(1, min(args.jobs, len(main_units)))
     quiet_width = max(1, min(quiet_jobs, len(quiet_units)))
     needed = max(jobs if main_units else 1, quiet_width if quiet_units else 1)
@@ -1111,7 +1266,7 @@ def main():
         caught.append(signum)
         pool.stop()
 
-    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    previous = {s: signal.signal(s, on_signal) for s in STOPPING}
     gate = Path(args.gate) if args.gate else None
     after = (f" after the gate" if gate else "")
     out(f"pool: {len(main_units)} unit(s) on {jobs} worker(s)"
@@ -1122,12 +1277,15 @@ def main():
     t = time.monotonic()
     pool.run(main_units, jobs)
     seconds["main"] = time.monotonic() - t
-    if gate and (quiet_units or alone_units) and not caught:
+    if gate and held_back and not caught:
+        # Also when none of them can run (a build failed): the gate may leave them out.
         t = time.monotonic()
         held = (f"the quiet units ({len(quiet_units)})" if quiet_units else "") \
             + (" and " if quiet_units and alone_units else "") \
-            + (f"the units alone ({len(alone_units)})" if alone_units else "")
-        if wait_for_gate(gate, out, lambda: bool(caught), held):
+            + (f"the units alone ({len(alone_units)})" if alone_units else "") \
+            or f"the {len(held_back)} unit(s) held for it, which cannot run,"
+        opened = wait_for_gate(gate, out, lambda: bool(caught), held, owner)
+        if opened == "open":
             try:
                 lines = read_gate(gate)
             except OSError as error:
@@ -1137,7 +1295,7 @@ def main():
                 if name is None:
                     out(f"pool: the gate {gate} has a line that is not \"leave-out NAME: why\": {why!r}")
                     continue
-                held_units = [u for u in quiet_units + alone_units if names_unit(name, u)]
+                held_units = [u for u in held_back if names_unit(name, u)]
                 for unit in held_units:
                     unit.left_out = why
                     out(f"pool: {unit.name} left out by the gate: {why}")
@@ -1145,6 +1303,10 @@ def main():
                     out(f"pool: the gate leaves out {name}, which no unit waiting for it is ({why})")
             quiet_units = [u for u in quiet_units if u.left_out is None]
             alone_units = [u for u in alone_units if u.left_out is None]
+        elif opened == "gone":
+            for unit in quiet_units + alone_units:
+                unit.state = f"not run: the process that creates the gate (pid {owner.pid}) ended before it did"
+            quiet_units, alone_units = [], []
         seconds["gate"] = time.monotonic() - t
     if quiet_units and not caught:
         t = time.monotonic()

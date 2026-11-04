@@ -15,7 +15,7 @@ checkout is not disturbed), all at once, and checked for:
   in a run of its own, the only one with a short --unit-timeout);
 - each unit's output as one block, never interleaved with another's;
 - the exit status: 0 when every test passed (skips allowed), 1 otherwise, 2 for --jobs outside 1 to
-  64; SIGTERM ends the pool by that signal, with its note;
+  64; SIGTERM, and SIGHUP like it, ends the pool by that signal, with its note;
 - the built() guard (harness._check_pool_build): under the pool a build the module's POOL_BUILDS
   does not name is refused, saying so, and one whose prebuild failed fails as the build would;
 - tools/build.sh's line that it waits for another build in its tree, passed through as it comes,
@@ -25,7 +25,10 @@ checkout is not disturbed), all at once, and checked for:
   tools/build.sh's echo begins, and that line, $out expanded, goes through both readers;
 - a build whose reading stops killed and reaped, as subprocess.run does, not left running with its
   tree's lock: in built() (a print to a closed stderr), in the prebuild's reader (to a closed
-  stdout) and in the prebuild (a SIGINT to the pool alone);
+  stdout) and in the prebuild (a SIGINT, a SIGTERM and a SIGHUP to the pool alone: the stand-in
+  build runs in a session of its own, and its own child, as ninja is tools/build.sh's, goes too);
+- a failed build failing the units that require it, under their names, not run, and the others
+  running;
 - the checkout's lock: a second pool on the same files waits for the first, naming it, and starts
   when it ends; the first keeps every result; a third and a fourth, sent SIGTERM and SIGINT while
   they wait, end by that signal there and then, their notes failing their unit, which never started;
@@ -33,13 +36,17 @@ checkout is not disturbed), all at once, and checked for:
   waits for a pool, naming it, and a pool for it; SIGTERM while it waits ends it, nothing run; a
   child it leaves running (a shell's background sleep) does not hold the lock;
 - the phases: main units first, then the quiet ones (POOL_QUIET True, a class, a test of a split
-  module) on min(--jobs, 12) workers or --quiet-jobs, then those alone, each after the one before
-  ended; the table's phase column; a POOL_QUIET that cannot be (not True or names, a test of a class
+  module) on min(--jobs, 12) workers or --quiet-jobs, then those alone (POOL_ALONE True, a test of
+  a split module, a class), one at a time, each phase after the one before ended; the table's
+  phase column; a POOL_QUIET or POOL_ALONE that cannot be (not True or names, a test of a class
   that runs whole, no such class) failing the run; --quiet-jobs outside 1 to 64;
 - the gate: nothing quiet or alone (nor what --after-gate names) starts before FILE exists; its
   leave-out line leaves a unit out of the run and the note, the table saying why; another line is
-  said; (its "still waiting" line every 60 s is not tested: it would take a minute);
-- --prebuild-only: built, 0 and no note, no unit; failed, 1 and the note of a failed prebuild;
+  said; its owner (--gate-owner) ending first ends the wait, the units held for it failed, not run;
+  (its "still waiting" line every 60 s is not tested: it would take a minute);
+- --prebuild-only: built, 0 and no note, no unit, its report (--built); failed, 1, the note of the
+  units that cannot run and its report; --prebuilt: a report of builds made, failed, without the
+  unit's build, and one that cannot be read, none of them building anything;
 - the pool's last resorts: fewer free worker slots than it needs, and a fault of its own while it
   handles a unit (work()'s "the pool failed while handling it"): each failed under the unit's name,
   saying why, the pool going on with the next unit. These two, the prebuild's waiting line and the
@@ -62,6 +69,7 @@ imports (the container and CI have both).
 """
 
 import io
+import json
 import os
 import re
 import shutil
@@ -302,6 +310,7 @@ MODULES = {
     "test_st_split.py": STAMP + '''
         POOL_SPLIT = True
         POOL_QUIET = ("Mixed.test_quiet", "AllQuiet")
+        POOL_ALONE = ("Mixed.test_alone",)
 
 
         class Mixed(unittest.TestCase):
@@ -309,6 +318,9 @@ MODULES = {
                 stamp(self)
 
             def test_loud(self):
+                stamp(self)
+
+            def test_alone(self):
                 stamp(self)
 
 
@@ -324,6 +336,57 @@ MODULES = {
         class Lonely(unittest.TestCase):
             def test_it(self):
                 stamp(self)
+    ''',
+    # POOL_ALONE naming a class of a module that is not split: that class alone, the other in main.
+    "test_st_apart.py": STAMP + '''
+        POOL_ALONE = ("Apart",)
+
+
+        class Apart(unittest.TestCase):
+            def test_it(self):
+                stamp(self)
+
+
+        class Together(unittest.TestCase):
+            def test_it(self):
+                stamp(self)
+    ''',
+    # POOL_ALONE that cannot be, as POOL_QUIET: not True or names; a test of a class that runs as one
+    # unit and no such class.
+    "test_st_badalone_a.py": '''
+        import unittest
+
+        POOL_ALONE = "yes"
+
+
+        class A(unittest.TestCase):
+            def test_it(self):
+                pass
+    ''',
+    "test_st_badalone_b.py": '''
+        import unittest
+
+        POOL_ALONE = ("Whole.test_x", "Nothing")
+
+
+        class Whole(unittest.TestCase):
+            def test_x(self):
+                pass
+
+            def test_y(self):
+                pass
+    ''',
+    # Needs st_app, which a module beside it does not (test_st_guard): the prebuild's failure of
+    # st_app fails this one alone.
+    "test_st_builds_too.py": '''
+        import unittest
+
+        POOL_BUILDS = ("st_app",)
+
+
+        class BuildsToo(unittest.TestCase):
+            def test_runs_after_its_build(self):
+                print("<<BuildsToo>> ran")
     ''',
     # Thirteen quiet units: the quiet phase's default width stops at 12.
     "test_st_many.py": '''
@@ -422,7 +485,8 @@ STAND_IN_BUILD = """
 import os
 pool.build_command = lambda what, kinds: [sys.executable, os.environ["ST_STAND_IN"], what, *kinds]
 """
-# The stand-in: its process ID in ST_BUILD_PID (if set), a line of the build's own (kept to itself
+# The stand-in: a child of its own (`sleep 60`, its process ID in ST_BUILD_CHILD, if set), its process
+# ID in ST_BUILD_PID (if set), a line of the build's own (kept to itself
 # unless the build fails), tools/build.sh's line when another build holds the tree (WAITING_LINE, from
 # the prefix built() and the prebuild look for, harness.BUILD_WAITING, which
 # TheBuildsWaitingLine.test_the_prefix_is_tools_build_shs checks against tools/build.sh), then, until
@@ -436,6 +500,10 @@ from pathlib import Path
 
 WAITING = ...
 what = sys.argv[1]
+if os.environ.get("ST_BUILD_CHILD"):            # a process of its own, as ninja is tools/build.sh's
+    import subprocess
+    child = subprocess.Popen(["sleep", "60"])
+    Path(os.environ["ST_BUILD_CHILD"]).write_text(str(child.pid))
 if os.environ.get("ST_BUILD_PID"):
     Path(os.environ["ST_BUILD_PID"]).write_text(str(os.getpid()))
 print(f"<<build>> {what}: the build's own output", flush=True)
@@ -458,6 +526,7 @@ SETUP_ERRORS = {}
 FIRST_RAN_ON = {}                           # pool name -> whether the first still ran when it ended
 SEEN_WHILE_BUILDING = {}                    # "prebuild" -> whether its stand-in still ran when the line came
 GATE_SEEN = {}                              # "started before" -> the units stamped before the gate was written
+OWNER_SEEN = {}                             # "started before" -> the units stamped before the gate's owner ended
 SERIAL_SEEN = {}                            # what had started while the other side held the checkout
 
 
@@ -613,25 +682,43 @@ def setUpModule():
                          ST_SLEEP="0")
     RUNS["fault"] = Run("fault", ["--jobs", "1", "test_st_slow.Slow", "test_st_slow.AlsoSlow"], patch=A_FAULT,
                         ST_SLEEP="0")
-    RUNS["buildfails"] = Run("buildfails", ["--jobs", "1", "test_st_builds"], patch=STAND_IN_BUILD,
-                             ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_FAIL="1")
+    # A failed build fails the units that need it, the others run.
+    RUNS["buildfails"] = Run("buildfails", ["--jobs", "2", "test_st_builds", "test_st_builds_too", "test_st_guard"],
+                             patch=STAND_IN_BUILD, ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_FAIL="1")
     RUNS["jobs0"] = Run("jobs0", ["--jobs", "0", "test_st_guard"])
     RUNS["jobs65"] = Run("jobs65", ["--jobs", "65", "test_st_guard"])
     RUNS["quietjobs0"] = Run("quietjobs0", ["--jobs", "2", "--quiet-jobs", "0", "test_st_guard"])
     RUNS["quietjobs65"] = Run("quietjobs65", ["--jobs", "2", "--quiet-jobs", "65", "test_st_guard"])
     # The phases, without a gate: main on 3 workers, quiet on min(3, 12), alone last.
-    RUNS["phases"] = Run("phases", ["--jobs", "3", "test_st_main", "test_st_quiet", "test_st_split", "test_st_lonely"],
-                         ST_BY_TEST="1")
+    RUNS["phases"] = Run("phases", ["--jobs", "3", "test_st_main", "test_st_quiet", "test_st_split", "test_st_lonely",
+                                    "test_st_apart"], ST_BY_TEST="1")
     RUNS["many"] = Run("many", ["--jobs", "20", "test_st_many"])
     RUNS["fewquiet"] = Run("fewquiet", ["--jobs", "20", "--quiet-jobs", "2", "test_st_many"])
     RUNS["badquiet"] = Run("badquiet", ["--jobs", "2", "test_st_badquiet_a", "test_st_badquiet_b", "test_st_badquiet_c"])
+    RUNS["badalone"] = Run("badalone", ["--jobs", "2", "test_st_badalone_a", "test_st_badalone_b"])
     released = TMP / "released"
     released.touch()
-    RUNS["prebuildonly"] = Run("prebuildonly", ["--jobs", "1", "--prebuild-only", "test_st_builds"], patch=STAND_IN_BUILD,
+    RUNS["prebuildonly"] = Run("prebuildonly", ["--jobs", "1", "--prebuild-only", "--built", str(TMP / "report-built"),
+                                                "test_st_builds"], patch=STAND_IN_BUILD,
                                ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_RELEASE=str(released),
                                ST_BUILD_END=str(TMP / "build-end-prebuildonly"))
-    RUNS["prebuildonlyfails"] = Run("prebuildonlyfails", ["--jobs", "1", "--prebuild-only", "test_st_builds"],
+    RUNS["prebuildonlyfails"] = Run("prebuildonlyfails", ["--jobs", "1", "--prebuild-only", "--built",
+                                                          str(TMP / "report-failed"), "test_st_builds", "test_st_guard"],
                                     patch=STAND_IN_BUILD, ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_FAIL="1")
+    RUNS["builtalone"] = Run("builtalone", ["--jobs", "1", "--built", str(TMP / "report-x"), "test_st_guard"])
+    # --prebuilt: a pool that builds nothing (were it to build, its stand-in would fail and say so),
+    # on a report of st_app built; of st_app failed (beside a module that needs nothing); of nothing
+    # (st_app not in it); and on a report that is not there.
+    for name, report in (("ok", {"built": ["st_app"], "failed": {}}),
+                         ("failed", {"built": [], "failed": {"st_app": "tools/build.sh st_app"}}),
+                         ("empty", {"built": [], "failed": {}})):
+        (TMP / f"prebuilt-{name}.json").write_text(json.dumps(report))
+    for name, modules in (("ok", ["test_st_builds"]), ("failed", ["test_st_builds", "test_st_guard"]),
+                          ("empty", ["test_st_builds"]), ("missing", ["test_st_builds", "test_st_guard"])):
+        RUNS[f"prebuilt-{name}"] = Run(f"prebuilt-{name}", ["--jobs", "2", "--prebuilt", str(TMP / f"prebuilt-{name}.json"),
+                                                            *modules], patch=STAND_IN_BUILD,
+                                       ST_STAND_IN=str(TMP / "stand-in-build.py"), ST_BUILD_FAIL="1")
+    RUNS["ownernogate"] = Run("ownernogate", ["--jobs", "1", "--gate-owner", "1", "test_st_guard"])
     # The serial runner on the same modules, from TMP (it reads tests/vpair from where it runs).
     with open(TMP / "out-runner.txt", "wb") as out:
         RUNS["runner"] = subprocess.Popen([sys.executable, "-c", vpair_runner(), str(TMP / "note-runner.txt"),
@@ -663,10 +750,24 @@ def setUpModule():
             release.touch()                 # whatever happened: the first ends, and the second runs
 
     def term():
-        run = RUNS["term"] = Run("term", ["--jobs", "1", "test_st_slow.Slow"], ST_RELEASE=str(TMP / "never"))
-        run.wait_for(run.stamps / "start")
-        time.sleep(0.3)
-        run.process.send_signal(signal.SIGTERM)
+        for name, signum in (("term", signal.SIGTERM), ("hup", signal.SIGHUP)):
+            run = RUNS[name] = Run(name, ["--jobs", "1", "test_st_slow.Slow"], ST_RELEASE=str(TMP / "never"))
+            run.wait_for(run.stamps / "start")
+            time.sleep(0.3)
+            run.process.send_signal(signum)
+
+    # The gate's owner (--gate-owner): a process the test ends once the pool waits at the gate,
+    # which never opens.
+    def owner():
+        process = subprocess.Popen(["sleep", "600"])
+        try:
+            run = RUNS["owner"] = Run("owner", ["--jobs", "2", "--gate", str(TMP / "a-gate-never-made"),
+                                                "--gate-owner", str(process.pid), "test_st_main", "test_st_quiet"])
+            run.wait_for_output("wait for the gate")
+            OWNER_SEEN["started before"] = sorted(stamps(run))
+        finally:
+            process.kill()
+            process.wait()
 
     # The prebuild's waiting line: its stand-in build waits until the line is in the pool's output.
     def waiting():
@@ -738,7 +839,7 @@ def setUpModule():
         return run
 
     threads = [threading.Thread(target=keeping(name, f))
-               for name, f in (("lock", lock), ("term", term), ("prebuild", waiting), ("gate", gate),
+               for name, f in (("lock", lock), ("term", term), ("prebuild", waiting), ("gate", gate), ("owner", owner),
                                ("serial", serial), ("serial_holds", serial_holds))]
     for thread in threads:
         thread.start()
@@ -873,6 +974,15 @@ class ExitStatus(unittest.TestCase):
         self.assertEqual(run.note, "1 tests, 1 failed: test_st_slow.Slow, 0 skipped", run.output)
         self.assertFalse((run.stamps / "end").exists(), "the unit ran on after the pool's SIGTERM")
 
+    def test_sighup_like_sigterm(self):
+        if "term" in SETUP_ERRORS:
+            raise SETUP_ERRORS["term"]
+        run = RUNS["hup"]
+        self.assertEqual(run.wait(), -signal.SIGHUP, run.output)
+        self.assertIn("pool: SIGHUP: stopping the workers", run.output)
+        self.assertEqual(run.note, "1 tests, 1 failed: test_st_slow.Slow, 0 skipped", run.output)
+        self.assertFalse((run.stamps / "end").exists(), "the unit ran on after the pool's SIGHUP")
+
 
 class TheGuard(unittest.TestCase):
     """harness._check_pool_build, which built() calls before it uses anything."""
@@ -929,15 +1039,25 @@ class TheBuildsWaitingLine(unittest.TestCase):
         self.assertEqual(run.note, "1 tests, 0 skipped", run.output)
 
     def test_a_failed_prebuild_shows_the_rest(self):
+        # ... and fails the units that need what failed, under their names, not run; the module
+        # beside them that needs nothing runs (a failed controller build stops only the end to end).
         run = RUNS["buildfails"]
         self.assertEqual(run.wait(), 1, run.output)
         self.assertIn("prebuild: tools/build.sh st_app FAILED (exit 2)", run.output)
+        self.assertIn("required by test_st_builds, test_st_builds_too, whose units fail, not run:\n", run.output)
         failed = run.output[run.output.index("prebuild: tools/build.sh st_app FAILED"):]
         for line in ("<<build>> st_app: the build's own output", WAITING_LINE, "<<build>> st_app: an error of the "
                      "build's own"):
             self.assertIn(line, failed, run.output)
-        self.assertEqual(run.note, "0 tests, 1 failed: test_st_builds.Builds, 0 skipped", run.output)
+        self.assertIn("pool: 2 of the 3 unit(s) need a build that failed: they do not run, and fail under their "
+                      "names; the others run\n", run.output)
+        self.assertEqual(run.note, "2 tests, 2 failed: test_st_builds.Builds, test_st_builds_too.BuildsToo, 1 skipped: "
+                                   "test_st_guard.Guard.test_skipped (a skip, which passes)", run.output)
+        self.assertRegex(run.output, r"(?m)^test_st_builds\.Builds\s+main\s+not run: its build failed in the prebuild "
+                                     r"\(tools/build\.sh st_app\)$")
         self.assertNotIn("<<Builds>>", run.output)
+        self.assertNotIn("<<BuildsToo>>", run.output)
+        self.assertIn("refused: ", run.output)                # test_st_guard ran
 
     def test_through_built(self):
         release, end = TMP / "release-built", TMP / "build-end-built"
@@ -1051,16 +1171,31 @@ class AStoppedRead(unittest.TestCase):
         self.assertTrue(gone(self.pid(pid_file)))
 
     def test_in_the_prebuild(self):
-        pid_file, env = self.stand_in("prebuild-sigint")
-        run = RUNS["prebuild-sigint"] = Run("prebuild-sigint", ["--jobs", "1", "test_st_builds"], patch=STAND_IN_BUILD,
-                                            **env)
-        run.wait_for_output(WAITING_LINE)
-        pid = self.pid(pid_file)
-        run.process.send_signal(signal.SIGINT)            # to the pool alone, not to its build
-        self.assertEqual(run.wait(), -signal.SIGINT, run.output)
-        self.assertTrue(gone(pid), "the pool ended with its build still running (or not reaped):\n" + run.output)
-        self.assertFalse(Path(env["ST_BUILD_END"]).exists(), run.output)
-        self.assertNotIn("<<Builds>>", run.output)       # no unit ran
+        # SIGINT, SIGTERM or SIGHUP to the pool alone (each build runs in a session of its own, which
+        # no signal to the pool's reaches): the build and its own child (as ninja is tools/build.sh's)
+        # are killed, the build reaped, and the pool ends by that signal.
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            name = f"prebuild-{signal.Signals(signum).name.lower()}"
+            with self.subTest(signal=signum.name):
+                pid_file, env = self.stand_in(name)
+                child_file = TMP / f"build-child-{name}"
+                run = RUNS[name] = Run(name, ["--jobs", "1", "test_st_builds"], patch=STAND_IN_BUILD,
+                                       ST_BUILD_CHILD=str(child_file), **env)
+                run.wait_for_output(WAITING_LINE)
+                pid, child = self.pid(pid_file), int(child_file.read_text())
+                self.addCleanup(kill_if_running, child)
+                self.assertFalse(gone(child), "the stand-in's child already ended: nothing proven")
+                run.process.send_signal(signum)
+                self.assertEqual(run.wait(), -signum, run.output)
+                self.assertTrue(gone(pid), "the pool ended with its build still running (or not reaped):\n" + run.output)
+                deadline = time.monotonic() + 30          # its child, orphaned, is reaped by init: at once
+                while not gone(child) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(gone(child), "the build's own child outlived the pool's signal (its session was not "
+                                             "killed):\n" + run.output)
+                self.assertIn(f"pool: {signum.name} during the prebuild: its builds killed, no unit run\n", run.output)
+                self.assertFalse(Path(env["ST_BUILD_END"]).exists(), run.output)
+                self.assertNotIn("<<Builds>>", run.output)       # no unit ran
 
 
 class TheCheckoutsLock(unittest.TestCase):
@@ -1158,15 +1293,18 @@ class ThePhases(unittest.TestCase):
         self.assertEqual(run.wait(), 0, run.output)
         phases = {
             "test_st_main.MainA.test_it": "main", "test_st_main.MainB.test_it": "main",
-            "test_st_split.Mixed.test_loud": "main",
+            "test_st_split.Mixed.test_loud": "main", "test_st_apart.Together.test_it": "main",
             "test_st_quiet.QuietA.test_it": "quiet", "test_st_quiet.QuietB.test_it": "quiet",
             "test_st_split.Mixed.test_quiet": "quiet", "test_st_split.AllQuiet.test_one": "quiet",
-            "test_st_lonely.Lonely.test_it": "alone",
+            "test_st_lonely.Lonely.test_it": "alone", "test_st_split.Mixed.test_alone": "alone",
+            "test_st_apart.Apart.test_it": "alone",
         }
         units = {"test_st_main.MainA.test_it": "test_st_main.MainA", "test_st_main.MainB.test_it": "test_st_main.MainB",
                  "test_st_quiet.QuietA.test_it": "test_st_quiet.QuietA",
                  "test_st_quiet.QuietB.test_it": "test_st_quiet.QuietB",
-                 "test_st_lonely.Lonely.test_it": "test_st_lonely.Lonely"}
+                 "test_st_lonely.Lonely.test_it": "test_st_lonely.Lonely",
+                 "test_st_apart.Apart.test_it": "test_st_apart.Apart",
+                 "test_st_apart.Together.test_it": "test_st_apart.Together"}
         for test, phase in phases.items():
             with self.subTest(test):
                 self.assertEqual(table_phase(run.output, units.get(test, test)), phase)
@@ -1175,12 +1313,15 @@ class ThePhases(unittest.TestCase):
         ends = {phase: max(times[t][1] for t, ph in phases.items() if ph == phase) for phase in ("main", "quiet")}
         starts = {phase: min(times[t][0] for t, ph in phases.items() if ph == phase) for phase in ("quiet", "alone")}
         self.assertGreaterEqual(starts["quiet"], ends["main"], "a quiet unit started before the main phase ended")
-        self.assertGreaterEqual(starts["alone"], ends["quiet"], "the unit alone started before the quiet phase ended")
-        self.assertIn("pool: 3 unit(s) on 3 worker(s), then 4 quiet on 3 worker(s), then 1 alone: "
-                      "test_st_lonely.Lonely\n", run.output)
-        self.assertRegex(run.output, r"pool: 8 unit\(s\), 3 worker\(s\), 3 quiet, [\d.]+ s \(main [\d.]+ s, "
+        self.assertGreaterEqual(starts["alone"], ends["quiet"], "a unit alone started before the quiet phase ended")
+        alone = sorted(times[t] for t, ph in phases.items() if ph == "alone")
+        for before, after in zip(alone, alone[1:]):        # one at a time (POOL_ALONE True, a test, a class)
+            self.assertGreaterEqual(after[0], before[1], f"two units alone ran at once:\n{run.output}")
+        self.assertIn("pool: 4 unit(s) on 3 worker(s), then 4 quiet on 3 worker(s), then 3 alone: "
+                      "test_st_split.Mixed.test_alone, test_st_lonely.Lonely, test_st_apart.Apart\n", run.output)
+        self.assertRegex(run.output, r"pool: 11 unit\(s\), 3 worker\(s\), 3 quiet, [\d.]+ s \(main [\d.]+ s, "
                                      r"quiet [\d.]+ s, alone [\d.]+ s\)")
-        self.assertEqual(run.note, "8 tests, 0 skipped", run.output)
+        self.assertEqual(run.note, "11 tests, 0 skipped", run.output)
         self.assertNotIn("gate", run.output)              # none asked for: none waited for
 
     def test_the_quiet_width(self):
@@ -1210,6 +1351,17 @@ class ThePhases(unittest.TestCase):
         self.assertEqual(run.note, "0 tests, 6 failed: test_st_badquiet_a.A, test_st_badquiet_b.Whole, test_st_badquiet_c.C, "
                                    "test_st_badquiet_a.POOL_QUIET, test_st_badquiet_b.POOL_QUIET, "
                                    "test_st_badquiet_c.POOL_QUIET, 0 skipped", run.output)
+        self.assertNotIn("unit(s) on", run.output)
+        run = RUNS["badalone"]                            # POOL_ALONE, checked as POOL_QUIET is
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertIn("pool: test_st_badalone_a.POOL_ALONE: 'yes' is not True or a tuple of names", run.output)
+        self.assertIn("pool: test_st_badalone_b.POOL_ALONE: 'Whole.test_x' is a test of a class that runs as one "
+                      "unit (no POOL_SPLIT): list the class, 'Whole'", run.output)
+        self.assertIn("pool: test_st_badalone_b.POOL_ALONE: 'Nothing' names no test class or test of the module",
+                      run.output)
+        self.assertEqual(run.note, "0 tests, 5 failed: test_st_badalone_a.A, test_st_badalone_b.Whole, "
+                                   "test_st_badalone_a.POOL_ALONE, test_st_badalone_b.POOL_ALONE, "
+                                   "test_st_badalone_b.POOL_ALONE, 0 skipped", run.output)
         self.assertNotIn("unit(s) on", run.output)
 
 
@@ -1242,9 +1394,29 @@ class TheGate(unittest.TestCase):
         self.assertNotIn("pool: failed:", run.output)
 
 
+    def test_its_owner_gone(self):
+        # --gate-owner: the process that creates the gate ends first (a schedule killed): the pool
+        # stops waiting, the units held for the gate fail, not run, and it ends.
+        if "owner" in SETUP_ERRORS:
+            raise SETUP_ERRORS["owner"]
+        run = RUNS["owner"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertEqual(OWNER_SEEN["started before"], ["test_st_main.MainA", "test_st_main.MainB"], run.output)
+        self.assertRegex(run.output, r"pool: the process that creates the gate \(pid \d+, --gate-owner\) ended before "
+                                     r"it did, after [\d.]+ s: the quiet units \(2\) do not run\n")
+        self.assertEqual(sorted(stamps(run)), ["test_st_main.MainA", "test_st_main.MainB"], run.output)
+        self.assertEqual(run.note, "2 tests, 2 failed: test_st_quiet.QuietA, test_st_quiet.QuietB, 0 skipped", run.output)
+        self.assertRegex(run.output, r"(?m)^test_st_quiet\.QuietA\s+quiet\s+not run: the process that creates the "
+                                     r"gate \(pid \d+\) ended before it did$")
+        nogate = RUNS["ownernogate"]
+        self.assertEqual(nogate.wait(), 2, nogate.output)
+        self.assertIn("--gate-owner PID goes with --gate FILE", nogate.output)
+
+
 class PrebuildOnly(unittest.TestCase):
     """--prebuild-only builds what the units need and exits, no unit run: 0 and no note when it built,
-    1 and the note of a pool whose prebuild failed when it did not."""
+    1 and the note of the units that cannot run when a build they require failed; --built REPORT gets
+    what it built and what failed, which --prebuilt REPORT takes."""
 
     def test_built(self):
         run = RUNS["prebuildonly"]
@@ -1254,14 +1426,65 @@ class PrebuildOnly(unittest.TestCase):
         self.assertNotIn("<<Builds>>", run.output)
         self.assertNotIn("unit(s) on", run.output)
         self.assertIsNone(run.note, run.output)
+        self.assertEqual(json.loads((TMP / "report-built").read_text()), {"built": ["st_app"], "failed": {}})
 
     def test_failed(self):
         run = RUNS["prebuildonlyfails"]
         self.assertEqual(run.wait(), 1, run.output)
         self.assertIn("prebuild: tools/build.sh st_app FAILED (exit 2)", run.output)
-        self.assertIn("pool: --prebuild-only: the prebuild failed: none of the 1 unit(s) can run\n", run.output)
+        self.assertIn("pool: --prebuild-only: a build failed: 1 of the 2 unit(s) cannot run\n", run.output)
         self.assertEqual(run.note, "0 tests, 1 failed: test_st_builds.Builds, 0 skipped", run.output)
         self.assertNotIn("<<Builds>>", run.output)
+        self.assertNotIn("refused: ", run.output)        # no unit ran, test_st_guard's neither
+        self.assertEqual(json.loads((TMP / "report-failed").read_text()),
+                         {"built": [], "failed": {"st_app": "tools/build.sh st_app"}})
+        alone = RUNS["builtalone"]
+        self.assertEqual(alone.wait(), 2, alone.output)
+        self.assertIn("--built REPORT goes with --prebuild-only", alone.output)
+
+
+class Prebuilt(unittest.TestCase):
+    """--prebuilt REPORT: the pool builds nothing (its stand-in build would fail, and say so) and takes
+    the report: the units whose builds it lists as built run, those whose required build failed or
+    which it does not list fail, not run, the others run; a report that cannot be read fails them
+    all."""
+
+    def test_built(self):
+        run = RUNS["prebuilt-ok"]
+        self.assertEqual(run.wait(), 0, run.output)
+        self.assertNotIn("prebuild:", run.output)
+        self.assertIn("pool: the builds of the prebuild before (", run.output)
+        self.assertIn("): 1 built; nothing built here\n", run.output)
+        self.assertIn("<<Builds>> ran", run.output)
+        self.assertEqual(run.note, "1 tests, 0 skipped", run.output)
+
+    def test_failed(self):
+        run = RUNS["prebuilt-failed"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertNotIn("prebuild:", run.output)
+        self.assertIn("): 0 built, failed: st_app; nothing built here\n", run.output)
+        self.assertNotIn("<<Builds>>", run.output)
+        self.assertIn("refused: ", run.output)            # test_st_guard ran
+        self.assertEqual(run.note, "2 tests, 1 failed: test_st_builds.Builds, 1 skipped: test_st_guard.Guard.test_skipped "
+                                   "(a skip, which passes)", run.output)
+
+    def test_not_in_it(self):
+        run = RUNS["prebuilt-empty"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertNotIn("prebuild:", run.output)
+        self.assertRegex(run.output, r"(?m)^test_st_builds\.Builds\s+main\s+not run: the prebuild's report \S+ has no "
+                                     r"build of st_app$")
+        self.assertIn("pool: 1 of the 1 unit(s) need a build that failed or that the report does not list: they do "
+                      "not run, and fail under their names; the others run\n", run.output)
+        self.assertEqual(run.note, "0 tests, 1 failed: test_st_builds.Builds, 0 skipped", run.output)
+
+    def test_unreadable(self):
+        run = RUNS["prebuilt-missing"]
+        self.assertEqual(run.wait(), 1, run.output)
+        self.assertNotIn("prebuild:", run.output)
+        self.assertRegex(run.output, r"pool: --prebuilt \S+prebuilt-missing\.json: FileNotFoundError: .*: none of the 2 "
+                                     r"unit\(s\) can run\n")
+        self.assertEqual(run.note, "0 tests, 2 failed: test_st_builds.Builds, test_st_guard.Guard, 0 skipped", run.output)
 
 
 class TheSerialRunnersLock(unittest.TestCase):
