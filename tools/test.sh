@@ -265,7 +265,7 @@ check_tools() {
 
 SPEAKERD_MODULES="test_audio_path test_speakerd_same_sound test_speakerd_state_layers test_speakerd_start_order
     test_speakerd_restart test_speakerd_second_instance test_speakerd_quantum_change test_passthrough_safety
-    test_speakerd_device_limits test_speakerd_import"
+    test_speakerd_device_limits test_speakerd_import test_speakerd_no_display"
 AMPD_MODULES="test_ampd_protocol test_two_controllers"
 PAIR_MODULES="test_knob_latency test_graph_edit test_hub_down test_drag_during_revision test_ampd_restart
     test_ampd_persistence test_meter_values test_monitor_fanout test_board_cpu test_buffer_size"
