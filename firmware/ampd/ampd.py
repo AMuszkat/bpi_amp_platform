@@ -31,7 +31,7 @@ import struct
 import sys
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PROTOCOL = 1
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
 LINE_LIMIT = 32 * 1024 * 1024          # a longer line closes the connection
@@ -795,6 +795,7 @@ class Speakerd:
         self.pipewire = no_pipewire_fields()   # rate, quantum, quantum_range, quantum_default
         self.pending = {}            # revision -> [futures] of apply answers
         self.ever_connected = False
+        self.unsent = False          # a value was set while the link was down: speakerd lacks it
         self.once = Once()
 
     def send(self, obj):
@@ -805,6 +806,8 @@ class Speakerd:
         # seq 0: speakerd applies whatever its own ampd sends, in order (docs/protocol.md). ampd
         # orders the values itself (an agent by the hub's seq, the hub by arrival); the hub's seq
         # starts again when the hub restarts, which speakerd would take for old values.
+        if self.conn is None:
+            self.unsent = True
         self.send({"op": "param", "node": node, "id": pid, "value": value, "seq": 0, "origin": origin})
 
     def send_apply(self, revision, document):
@@ -948,9 +951,12 @@ class Role:
         """speakerd said hello. When it plays another revision than ampd's (it fell back to an
         older layer, or ampd started on a file speakerd did not load), ampd follows it. When it
         plays ampd's and restarted under a running ampd, it gets the values again (graph.json
-        lags them by up to a second). A fresh ampd sends none: speakerd's are the newest."""
+        lags them by up to a second); so it does when ampd took values while the link was down
+        (an agent the hub caught up before its speakerd link was up). Otherwise a fresh ampd
+        sends none: speakerd's are the newest."""
         core, sd = self.core, self.core.sd
         sd.hello(hello)
+        unsent, sd.unsent = sd.unsent, False
         log(f"speakerd: connected: {sd.version}, layer {sd.layer}, revision {sd.revision}")
         followed = False
         if sd.layer == "current" and sd.revision != core.revision:
@@ -968,7 +974,7 @@ class Role:
             else:
                 log(f"speakerd: plays layer {sd.layer}, revision {sd.revision}, whose document is not in the state "
                     f"directory: keeping revision {core.revision}")
-        elif reconnect:
+        elif reconnect or unsent:
             for (uid, pid), value in core.params.items():
                 sd.send_param(uid, pid, value, "hub" if core.is_hub else core.name)
         core.playing()
@@ -1023,6 +1029,9 @@ class Peer:
         self.token = None            # the OSC token of this connection (a controller's)
         self.pending = {}            # revision -> future of an apply's answer (agents)
         self.get_future = None
+        self.hello = hello
+        self.caught_up = False       # an agent: the hub's catch-up (or a revision since) played there
+        self.settled = set()         # a controller: (node, id)s whose gesture's last value came over control
 
 
 class Hub(Role):
@@ -1160,6 +1169,21 @@ class Hub(Role):
             return
         if not isinstance(origin, str) or not origin:
             origin = source.name if source is not None else "knob"
+        key = (node, pid)
+        if source is not None and source.role == "controller":
+            # A controller sends a drag over OSC and its last value over the control link. An OSC
+            # value of the drag read after that one (UDP and TCP are two sockets, and asyncio reads
+            # a datagram per turn of the loop) is older: until this controller begins another
+            # gesture on the parameter, its OSC values of it are dropped, so the last value wins
+            # (docs/protocol.md, clarification 32).
+            if via == "osc" and key in source.settled:
+                self.bad.say(("settled", source.name, node, pid),
+                             f"knobs: dropped a value of {node}/{pid} from {source.name}: older than its gesture's "
+                             "last value, which came over the control link")
+                return
+            gesture = self.gestures.get(key)
+            if via == "control" and gesture is not None and gesture["origin"] == origin:
+                source.settled.add(key)
         self.seq = ((self.seq + 1) & SEQ_MASK) or 1
         core.set_param((node, pid), value)
         core.sd.send_param(node, pid, value, origin)
@@ -1195,6 +1219,8 @@ class Hub(Role):
             origin = source.name if source is not None else "knob"
         if state == "begin":
             self.gestures[(node, pid)] = {"origin": origin, "deadline": time.monotonic() + GESTURE_TIMEOUT}
+            if source is not None:
+                source.settled.discard((node, pid))     # a new drag: its OSC values count again
         elif (node, pid) in self.gestures and self.gestures[(node, pid)]["origin"] == origin:
             del self.gestures[(node, pid)]
         self.relay_gesture(node, pid, state, origin, via)
@@ -1318,6 +1344,8 @@ class Hub(Role):
             for name in results:
                 if name in self.speakers:
                     self.speakers[name].update(layer="current", revision=revision)
+                if name in self.agents:
+                    self.agents[name].caught_up = True
             log(f"revision {revision}: applied on {', '.join(sorted(results)) or 'no speaker'}: current")
             controller.conn.send({"op": "applied", "revision": revision})
             self.broadcast_graph(base)
@@ -1348,26 +1376,34 @@ class Hub(Role):
                 log(f"agent {peer.name}: applying revision {core.revision} ({why})")
                 ok, reason = await self.apply_on(peer, core.revision, core.document(), core.rev_time, core.rev_origin)
                 if ok:
+                    peer.caught_up = True
                     self.speakers.get(peer.name, {}).update(layer="current", revision=core.revision)
                     self.all_params(peer)
                 else:
                     log(f"agent {peer.name}: revision {core.revision} failed: {reason}")
             self.broadcast_state()
 
-    async def sync_agent(self, peer, hello):
-        """An agent (re)connected: catch it up, or adopt its revision when it is newer."""
+    async def sync_agent(self, peer, hello, again=False):
+        """An agent (re)connected: catch it up, or adopt its revision when it is newer. `again`:
+        its speakerd came up after a catch-up that did not play there (the agent said hello
+        before its speakerd link was up): the hub's revision and values again."""
         core = self.core
         async with self.lock:
-            if peer.conn.closed:
+            if peer.conn.closed or self.agents.get(peer.name) is not peer or (again and peer.caught_up):
                 return
             a_rev = hello.get("revision") if good_int(hello.get("revision"), 0, BIG) else 0
             a_time = valid_time(hello.get("time"))
             a_origin = hello.get("origin") if isinstance(hello.get("origin"), str) else ""
-            if (a_time, a_origin) > (core.rev_time, core.rev_origin) and await self.adopt(peer, a_rev):
+            if not again and (a_time, a_origin) > (core.rev_time, core.rev_origin) and await self.adopt(peer, a_rev):
+                peer.caught_up = True
                 return
-            if (a_rev, a_time, a_origin) != (core.revision, core.rev_time, core.rev_origin):
-                log(f"agent {peer.name}: plays revision {a_rev}, not revision {core.revision}: sending revision "
-                    f"{core.revision} and {len(core.params)} parameter(s)")
+            if again:
+                log(f"agent {peer.name}: its speakerd is up, the catch-up did not play there: sending revision "
+                    f"{core.revision} and {len(core.params)} parameter(s) again")
+            if again or (a_rev, a_time, a_origin) != (core.revision, core.rev_time, core.rev_origin):
+                if not again:
+                    log(f"agent {peer.name}: plays revision {a_rev}, not revision {core.revision}: sending revision "
+                        f"{core.revision} and {len(core.params)} parameter(s)")
                 ok, why = await self.apply_on(peer, core.revision, core.document(), core.rev_time, core.rev_origin)
                 if not ok:
                     log(f"agent {peer.name}: revision {core.revision} failed there: {why}")
@@ -1378,6 +1414,7 @@ class Hub(Role):
                 self.speakers.get(peer.name, {}).update(layer="current", revision=core.revision)
             else:
                 log(f"agent {peer.name}: plays revision {core.revision}: sending {len(core.params)} parameter(s)")
+            peer.caught_up = True
             self.warn_no_quantum_range(peer.name)
             self.all_params(peer)
             self.broadcast_state()
@@ -1538,10 +1575,15 @@ class Hub(Role):
             entry = self.speakers[peer.name]
             if any(entry.get(k) != v for k, v in news.items()):
                 newly = (entry.get("speakerd"), entry.get("quantum_range")) != (news["speakerd"], news["quantum_range"])
+                came_up = entry.get("speakerd") is None and news["speakerd"] is not None
                 entry.update(news)
                 if newly:
                     self.warn_no_quantum_range(peer.name)
                 self.broadcast_state()
+                if came_up and not peer.caught_up:
+                    # The catch-up reached the agent before its speakerd link was up and did not
+                    # play there (docs/protocol.md, clarification 31).
+                    background(self.sync_agent(peer, peer.hello, again=True), f"the catch-up of {peer.name}")
         elif op == "error":
             self.bad.say(("agent-error", peer.name),
                          f"agent {peer.name}: error: {msg.get('about', '?')}: {msg.get('reason', '?')}")

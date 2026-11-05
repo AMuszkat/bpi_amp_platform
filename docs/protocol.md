@@ -68,8 +68,9 @@ that parameter is active.
 | knobs (OSC) | `/bpi/param` `,isfiss`: node, id, value, seq, origin, token (see Authentication) |
 
 - The controller sends a moving knob over OSC, at most 50 messages a second per parameter, and
-  **the last value of every gesture over the control link** (UDP may lose it). With no gesture
-  (a typed value, a preset), it sends over the control link only.
+  **the last value of every gesture over the control link** (UDP may lose it, or bring a value of
+  the drag after it: the hub drops those, clarification 32). With no gesture (a typed value, a
+  preset), it sends over the control link only.
 - The hub accepts a change it can address (the node exists in the current revision and has
   that parameter; a `mon_` ID never), stamps `seq`, updates its state, applies it to its own
   `speakerd` (local), sends it to every agent over the control link (agents take no OSC)
@@ -138,7 +139,9 @@ anything else (the handshake is in "Authentication" below; these show the other 
   and builds its graph from it; it never pushes its own older copy (rule 3 of section 8). The hub
   sends OSC echoes, stamped with the controller's token, to its address and `osc_port`.
 - **An agent** whose revision is older than the hub's gets `apply` of the hub's revision and
-  then every parameter (control). One whose revision is newer (it changed while the hub was
+  then every parameter (control). One whose link to its `speakerd` is not up yet fails that
+  `apply` (`speakerd is not running`); the hub sends it again, with every parameter, once the
+  agent's `status` says its `speakerd` connected (clarification 31). One whose revision is newer (it changed while the hub was
   off, and revisions compare by `time`, then by origin name) is asked
   `{"op":"get"}`, answers `{"op":"graph",...}` with its revision, and the hub adopts it and
   applies it everywhere.
@@ -443,6 +446,29 @@ These settle what version 1 left open; every implementation follows them.
     only after `applied` and the `graph` message (clarification 4); its revision changes while a
     proposal waits only when its own `speakerd` reconnects playing an older layer, which the hub
     follows (the `graph` message, then `state`).
+31. **A catch-up before the agent's `speakerd` link.** An agent can say hello to the hub before
+    its link to `speakerd` is up (its `ampd` restarted and has not connected yet, or `speakerd`
+    is restarting): the hub's catch-up `apply` then fails there (`speakerd is not running`), and
+    values the hub sends reach that `ampd` but not `speakerd`. So: when an agent's `status` says
+    its `speakerd` connected (`speakerd` from null to a version) and nothing has played there
+    since its hello (no catch-up, adoption or revision of the hub's applied there), the hub
+    catches it up again, the current revision and then every parameter
+    (`agent <name>: its speakerd is up, the catch-up did not play there: sending revision <n> and
+    <k> parameter(s) again`). And an `ampd` (either role) that took values while its local link
+    was down gives `speakerd` every value when the link comes up, a freshly started one too
+    (the `speakerd` that runs there has older ones).
+32. **The last value of a gesture wins.** The hub can read OSC values of a drag after the drag's
+    last value, which came over the control link: they are two sockets, and a hub that falls
+    behind reads one datagram per turn of its loop while one turn reads every line the control
+    link holds (this kept a drag's 5.0 over its last 6.0 on a loaded runner). A value over the
+    control link from a controller, on a parameter that controller is dragging (its `begin` came
+    and its `end` not yet), is that gesture's last: from then until the same controller begins
+    another gesture on that parameter, the hub drops every OSC value of it from that controller
+    (`knobs: dropped a value of <node>/<id> from <name>: older than its gesture's last value,
+    which came over the control link`, at most every 10 s), and the last value is what the
+    speakers, `graph.json` and every controller keep. A controller sends a parameter over OSC
+    only during a gesture ("Parameters", above), and its `begin` over the control link
+    (clarification 8).
 
 ## Authentication
 

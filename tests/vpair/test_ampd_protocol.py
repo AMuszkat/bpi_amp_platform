@@ -19,12 +19,23 @@ Pass when:
   hub sends it the current revision again;
 - an offline speaker: while the right agent is down the hub applies on the left alone and says
   the right is offline; when it comes back it gets the current revision and the current values,
-  and writes them to its graph.json;
+  and writes them to its graph.json; when it comes back before its link to speakerd is up (another
+  client holds the socket: "speakerd: busy"), the hub's catch-up fails there ("speakerd is not
+  running") and reaches no speakerd, and once the link is up the hub sends it again: its speakerd
+  gets revision 4 and the value, its graph.json has both, and the controllers get a state with the
+  right online on revision 4, layer current (docs/protocol.md, clarification 31); with no new
+  revision, the values it took with the link down (in its graph.json, not in its speakerd) reach its
+  speakerd when the link comes up;
 - a newer revision on the agent (by time) is fetched with get and adopted by the hub, applied on
   its own speakerd and sent to the controllers;
 - gestures: a begin reaches the other controllers (control and OSC), a controller that connects
   mid-drag finds it in the state, an end removes it, and a gesture with no end ends by itself
   after 5 s (not before 4.5 s), sent to every controller with the dragger's origin;
+- the last value of a gesture wins (docs/protocol.md, clarification 32): with the hub held
+  (SIGSTOP) while a controller drags over OSC (1 to 5) and sends its last value (6) over the
+  control link and the end, the last value each speakerd gets, both controllers' values, a new
+  controller's state and both graph.json are 6, once a datagram sent after them has reached both
+  speakerds; a new gesture's OSC values are taken again;
 - the local link: a speakerd that is busy with another client is tried again every second; a
   speakerd that restarts under ampd gets every value again; a speakerd that comes back on
   another layer and revision is followed (ampd takes that layer's document and says so); a
@@ -131,6 +142,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import socket
 import tempfile
 import threading
@@ -187,6 +199,41 @@ def speakers_of(state):
 
 def pipewire_of(entry):
     return {key: entry.get(key, "missing") for key in STAND_IN_PIPEWIRE}
+
+
+def hold_socket(sd, timeout=10):
+    """Connects to the stand-in speakerd `sd` as its one client, once the client before (an ampd
+    that stopped) is gone, and returns the socket: ampd then finds speakerd busy until it closes."""
+    deadline = time.monotonic() + timeout
+    while True:
+        squatter = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        squatter.settimeout(2)
+        try:
+            squatter.connect(str(sd.socket))
+            first = json.loads(squatter.makefile("rb").readline() or b"null")
+        except (OSError, ValueError):
+            first = None
+        if isinstance(first, dict) and first.get("op") == "hello":
+            return squatter
+        squatter.close()
+        if time.monotonic() > deadline:
+            raise AssertionError(f"the stand-in speakerd's socket could not be held within {timeout} s: {first}")
+        time.sleep(0.05)
+
+
+def wait_graph(state, predicate, timeout=5):
+    """The graph.json of `state` once `predicate` holds for it."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            graph = json.loads((state / "graph.json").read_text())
+        except (OSError, ValueError):
+            graph = None
+        if graph is not None and predicate(graph):
+            return graph
+        if time.monotonic() > deadline:
+            raise AssertionError(f"graph.json in {state} is not as expected within {timeout} s: {graph}")
+        time.sleep(0.05)
 
 
 class Protocol(unittest.TestCase):
@@ -317,6 +364,57 @@ class Protocol(unittest.TestCase):
             self.assertEqual(graph["nodes"][0]["params"]["s0_e0_gain"], -3.5)
             a.wait(lambda m: m["op"] == "state" and m["speakers"][1]["online"], what="a state with right online again")
 
+    def test_an_offline_speaker_is_caught_up_when_its_speakerd_comes_late(self):
+        # The window the test above can fall into: the restarted agent says hello to the hub before
+        # its link to speakerd is up. Held open here (another client holds the right's speakerd
+        # socket, so the agent's speakerd is "busy") until the hub's catch-up has failed there.
+        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:
+            pair.ampd["right"].stop()
+            pair.ampd["left"].wait_for("agent right disconnected: offline")
+            self.assertEqual(a.propose(with_node(DOCUMENT))["op"], "applied")
+            a.param(16, "s0_e0_gain", -3.5)
+            pair.sd["left"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == -3.5, what="the value")
+            squatter = hold_socket(pair.sd["right"])
+            try:
+                mark = pair.ampd["left"].mark()
+                pair.start_ampd("right")
+                pair.ampd["right"].wait_for("speakerd: busy")
+                pair.ampd["left"].wait_for("agent right: revision 4 failed there: speakerd is not running", after=mark)
+                self.assertEqual(pair.sd["right"].events("apply", "in"), [])
+            finally:
+                squatter.close()
+            pair.ampd["right"].wait_for("speakerd: connected")
+            pair.sd["right"].wait_event(lambda e: e.get("op") == "apply" and e["revision"] == 4, what="revision 4")
+            pair.sd["right"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == -3.5, what="the value")
+            graph = wait_graph(pair.state["right"], lambda g: g.get("revision") == 4
+                               and g["nodes"][0]["params"]["s0_e0_gain"] == -3.5)
+            self.assertEqual((graph["revision"], graph["nodes"][0]["params"]["s0_e0_gain"]), (4, -3.5))
+            a.wait(lambda m: m["op"] == "state" and speakers_of(m)["right"]["online"]
+                   and speakers_of(m)["right"]["revision"] == 4 and speakers_of(m)["right"]["layer"] == "current",
+                   what="a state with right online on revision 4")
+
+    def test_values_an_agent_takes_before_its_speakerd_link_reach_speakerd(self):
+        # The same window with no new revision: the hub's values reach the agent while its link to
+        # speakerd is down. The speakerd that runs there plays the values of its graph.json from
+        # before, so the agent gives it the newer ones when the link comes up.
+        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:
+            pair.ampd["right"].stop()
+            pair.ampd["left"].wait_for("agent right disconnected: offline")
+            a.param(16, "s0_e0_gain", -2.5)
+            pair.sd["left"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == -2.5, what="the value")
+            squatter = hold_socket(pair.sd["right"])
+            try:
+                pair.start_ampd("right")
+                pair.ampd["right"].wait_for("speakerd: busy")
+                pair.ampd["left"].wait_for("agent right: plays revision 3: sending")
+                # The agent has the value (it writes it to graph.json); its speakerd does not.
+                wait_graph(pair.state["right"], lambda g: g["nodes"][0]["params"]["s0_e0_gain"] == -2.5)
+                self.assertEqual(params_seen(pair.sd["right"], -2.5), [])
+            finally:
+                squatter.close()
+            pair.ampd["right"].wait_for("speakerd: connected")
+            pair.sd["right"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == -2.5, what="the value")
+
     def test_the_hub_adopts_a_newer_revision(self):
         newer = revision_document(with_node(DOCUMENT), 9, origin="ctl-old", rev_time="2026-06-01T12:00:00Z")
         with StandInPair(self.tmp, documents(3, right=newer)) as pair, Controller("ctl-a") as a:
@@ -360,6 +458,55 @@ class Protocol(unittest.TestCase):
             self.assertEqual(end["origin"], "ctl-a")
             self.assertGreaterEqual(end["arrived"] - refreshed, 4.5)
             self.assertLess(end["arrived"] - refreshed, 6.0)
+
+    def test_the_last_value_of_a_gesture_wins(self):
+        # A drag's last value comes over the control link; its OSC values before it may be read
+        # after it (UDP and TCP are two sockets; a busy hub reads them as they come). Held here:
+        # the hub is stopped (SIGSTOP) while the controller drags, so all of it waits in the
+        # hub's sockets at once.
+        with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a, Controller("ctl-b") as b:
+            a.gesture(16, "s0_e0_gain", "begin")
+            b.wait(lambda m: m["op"] == "gesture" and m["state"] == "begin" and m["via"] == "control", what="the begin")
+            pair.ampd["left"].signal(signal.SIGSTOP)
+            try:
+                for value in (1.0, 2.0, 3.0, 4.0, 5.0):
+                    a.osc_param(16, "s0_e0_gain", value)
+                    time.sleep(0.02)
+                a.param(16, "s0_e0_gain", 6.0)
+                a.gesture(16, "s0_e0_gain", "end")
+                time.sleep(0.05)
+                # Behind them in the hub's knob socket: once it reached both speakerds, so did
+                # (or not) every datagram before it.
+                b.osc_param(16, "s0_e1_gain", -1.25)
+                time.sleep(0.25)
+            finally:
+                pair.ampd["left"].signal(signal.SIGCONT)
+            b.wait(lambda m: m["op"] == "gesture" and m["state"] == "end" and m["via"] == "control", what="the end")
+            for name in ("left", "right"):
+                pair.sd[name].wait_event(lambda e: e.get("op") == "param" and e.get("value") == -1.25,
+                                         what="the datagram sent after the drag")
+            for name in ("left", "right"):
+                values = [e["value"] for e in pair.sd[name].events("param", "in") if e.get("id") == "s0_e0_gain"]
+                self.assertTrue(values, f"no value reached {name}")
+                self.assertEqual(values[-1], 6.0, f"{name}'s speakerd got {values}")
+            for who in (a, b):
+                who.wait(lambda m: m["op"] == "param" and m.get("value") == -1.25, what="the echo of the datagram after it")
+                self.assertEqual(who.values()[(16, "s0_e0_gain")], 6.0, who.name)
+            with Controller("ctl-c") as c:
+                self.assertEqual(c.values()[(16, "s0_e0_gain")], 6.0)
+            wait_graph(pair.state["left"], lambda g: g["nodes"][0]["params"]["s0_e0_gain"] == 6.0)
+            time.sleep(1.2)     # graph.json follows values at most once a second
+            for name in ("left", "right"):
+                graph = json.loads((pair.state[name] / "graph.json").read_text())
+                self.assertEqual(graph["nodes"][0]["params"]["s0_e0_gain"], 6.0, name)
+
+            # A new gesture takes OSC values again.
+            mark = b.mark()
+            a.gesture(16, "s0_e0_gain", "begin")
+            b.wait(lambda m: m["op"] == "gesture" and m["state"] == "begin" and m["via"] == "control",
+                   after=mark, what="the second begin")
+            a.osc_param(16, "s0_e0_gain", 7.0)
+            pair.sd["right"].wait_event(lambda e: e.get("op") == "param" and e.get("value") == 7.0, what="7.0")
 
     def test_the_local_link(self):
         with StandInPair(self.tmp, documents()) as pair, Controller("ctl-a") as a:

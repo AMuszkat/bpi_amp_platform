@@ -1494,7 +1494,13 @@ and is rolled back like any failed apply. Every entry of `state.speakers` carrie
 `rate`, `quantum`, `quantum_range` and `quantum_default`, from its `speakerd`'s hello and
 status, and the hub sends every controller the whole state again when any of them changes
 ([protocol.md](protocol.md)). A speaker that was offline catches up when its agent reconnects: the hub
-sends it the current revision and its values.
+sends it the current revision and its values, and sends them again when the agent's `speakerd`
+connects after a catch-up that could not play there (the agent said hello before its local link
+was up); an `ampd` that took values with its local link down gives them to `speakerd` when it
+connects (protocol.md, clarification 31). The last value of a drag wins: once a controller's
+value over the control link ends its gesture, the hub drops that controller's OSC values of the
+parameter, which a busy hub can read after it, until the controller's next gesture on it
+(clarification 32).
 
 ### 10.5 The controller: UI, model, bridge
 
@@ -1563,7 +1569,7 @@ per step; the virtual pair's `test_controller_end_to_end` and the controller's o
 | Boundary | Transport | Who opens it, and retries | What crosses it | When the far side is gone |
 |---|---|---|---|---|
 | controller to hub, **control** | TCP 7450, JSON lines, both ends prove the secret | the controller, every second | `hello`/`welcome`, `state`; `param` (`seq` 0, the controller's `origin`), `gesture` `begin`/`end`, `graph` proposals; back: `applied`/`rejected`, echoes of `param`, `graph` and `state` of other controllers | edits are undone at once; the next connection takes the hub's `state`, pushes nothing |
-| controller to hub, **knobs** | UDP 7451, OSC `/bpi/param` `,isfiss`, the session's token last | the controller's socket, bound to the control link's local address | one datagram per value while a slider is held, at most 50 a second per parameter; echoes back to the controller's `osc_port` | a lost datagram is nothing: the gesture's last value goes over TCP |
+| controller to hub, **knobs** | UDP 7451, OSC `/bpi/param` `,isfiss`, the session's token last | the controller's socket, bound to the control link's local address | one datagram per value while a slider is held, at most 50 a second per parameter; echoes back to the controller's `osc_port` | a lost datagram is nothing: the gesture's last value goes over TCP; a datagram read after that last value is dropped (protocol.md, clarification 32) |
 | controller to each speaker, **monitor** | TCP 7452, JSON lines, the speaker proves its name | the controller, one link per speaker, every second | `subscribe`/`unsubscribe` by stream name and rate; `value` with `t` and `v` | the speakers panel says so; the plugin windows keep their last values |
 | hub to agent | TCP 7450, the same link as a controller's, `role` agent, no OSC | the agent, every second | `param` stamped with the hub's `seq`, `apply` of a revision; back: the speaker's `hello`, layer, revision, rate and quantum (running, range, default), `applied`/`failed` | the hub marks the speaker offline; revisions apply among the speakers that are up; the agent catches up on reconnection |
 | `ampd` to `speakerd`, **the local link** | Unix socket `$XDG_RUNTIME_DIR/speakerd/control.sock`, mode 0600, JSON lines, one client | `ampd`, every second; `speakerd` listens | `hello`, `status` (also unasked when the running quantum or rate changes; both with `rate`, `quantum`, `quantum_range`, `quantum_default`); `param`, `apply`, `subscribe`; back: `applied`, `failed`, `value`, `error` | `ampd` gone: `speakerd` plays on, unchanged. `speakerd` gone: `ampd` reconnects and, on the hello, follows the revision it plays or re-sends the values |
