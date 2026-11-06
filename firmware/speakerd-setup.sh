@@ -25,7 +25,8 @@
 #       sink stays after uninstall (a null sink: what plays into it is silent)
 #
 # A version also holds ampd (bin/ampd), which ampd-setup.sh runs as its own service; status,
-# smoke, rollback and uninstall include it when it is installed.
+# smoke, rollback and uninstall include it when it is installed, and an install that changes
+# ampd's program (or finds an ampd that runs another one) restarts ampd.
 #
 # An install keeps device.json's limits; a first install writes none (output at 0 dB, tweeter
 # on). The limits action sets them.
@@ -331,6 +332,40 @@ ampd_setup() {
     [ "$NO_SYSTEMD" -eq 0 ] || hooks+=(--no-systemd)
     [ -z "$HOME_OVERRIDE" ] || hooks+=(--home "$H")
     bash "$FIRMWARE_DIR/ampd-setup.sh" "$@" "${hooks[@]}"
+}
+
+# The version a bin/ampd (or ampd.py) says, read from the file: VERSION = "<v>".
+ampd_file_version() { sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$1" 2> /dev/null | head -n 1; }
+
+# ampd's program is the version's bin/ampd: after current moves to a version whose ampd differs
+# ($1, why), or when the ampd that runs is not the program ($1 empty: ampd-setup.sh restart
+# --if-stale), a running ampd is restarted and must say it listens; --dry-run and --no-restart
+# say so instead. Only when ampd's unit is installed.
+ampd_restart() {
+    [ -f "$AMPD_UNIT" ] || return 0
+    local args=(restart)
+    if [ -n "$1" ]; then args+=(--why "$1"); else args+=(--if-stale); fi
+    if dry; then args+=(--dry-run); fi
+    [ "$NO_RESTART" -eq 0 ] || args+=(--no-restart)
+    ampd_setup "${args[@]}" || die "ampd did not come back after its restart (see above): the speaker plays, but nothing controls it (journalctl --user-unit ampd -b)"
+}
+
+# What ampd's link to speakerd says (ampd's $XDG_RUNTIME_DIR/ampd/status.json, while its process
+# runs): "layer <l>, revision <n>, <version>" when connected, else nothing. speakerd's local link
+# takes one client, so while ampd holds it nothing else may ask speakerd (it would refuse a
+# second client: busy).
+ampd_link() {
+    local file="$XDG_RUNTIME_DIR/ampd/status.json"
+    [ -f "$file" ] || return 1
+    python3 - "$file" <<'PY' 2> /dev/null
+import json, os, sys
+s = json.load(open(sys.argv[1]))
+sd = s.get("speakerd") or {}
+os.kill(int(s["pid"]), 0)
+if not sd.get("connected"):
+    sys.exit(1)
+print(f"layer {sd.get('layer')}, revision {sd.get('revision')}, speakerd {sd.get('version')}")
+PY
 }
 
 # systemctl --user, unless --no-systemd.
@@ -1063,7 +1098,13 @@ do_install() {
     local unit_changed=0
     if install_file "$UNIT_SOURCE" "$UNIT"; then unit_changed=1; fi
 
-    local old; old="$(link_target "$LIB/current")"
+    local old ampd_why=""; old="$(link_target "$LIB/current")"
+    # ampd's program comes with the version: when current moves to one whose bin/ampd differs,
+    # the ampd that runs must restart (otherwise it runs the old program until something restarts it).
+    if [ -f "$AMPD_UNIT" ] && [ "$old" != "$BUNDLE_ID" ] && ! cmp -s "$FIRMWARE_DIR/ampd/ampd.py" "$LIB/$old/bin/ampd"; then
+        ampd_why="its program changed with the version (ampd $(ampd_file_version "$LIB/$old/bin/ampd" || true) -> ampd $(ampd_file_version "$FIRMWARE_DIR/ampd/ampd.py"))"
+        ampd_why="${ampd_why//ampd  ->/a version without ampd ->}"
+    fi
     if [ "$old" != "$BUNDLE_ID" ]; then
         if dry; then info "(dry-run) would make $BUNDLE_ID current${old:+, $old previous}"
         else
@@ -1074,7 +1115,7 @@ do_install() {
     fi
     prune_versions
 
-    if dry; then ok "Dry run: nothing changed"; return 0; fi
+    if dry; then ampd_restart "$ampd_why"; ok "Dry run: nothing changed"; return 0; fi
     [ "$unit_changed" -eq 0 ] || sc daemon-reload
     sc enable speakerd.service > /dev/null 2>&1 || warn "could not enable speakerd.service"
     if [ "$NO_RESTART" -eq 1 ]; then
@@ -1088,6 +1129,8 @@ do_install() {
     else
         ok "Nothing changed: speakerd keeps running"
     fi
+    # After speakerd: ampd connects to it.
+    ampd_restart "$ampd_why"
     if [ "$NO_SYSTEMD" -eq 0 ] && ! test_mode; then
         [ "$(loginctl show-user "$AUDIO_USER" --property=Linger --value 2> /dev/null)" = yes ] \
             || loginctl enable-linger "$AUDIO_USER" 2> /dev/null \
@@ -1151,6 +1194,11 @@ do_status() {
         lacking=""; [ ! -d "$LIB/current/lv2" ] || lacking="$(lacking_plugins "$STATE/$id" "$LIB/current/lv2" | tr '\n' ' ')"
         echo "  $id: $out${lacking:+ *** names plugins the current version lacks: ${lacking% }: speakerd plays the next layer ***}"
     done
+    # The pipewire.conf: the board's own, or the repository's, and then whether it is this
+    # version's (an older copy keeps an older quantum range, say).
+    pipewire_conf_state "$MAIN_CONF" "$FIRMWARE_DIR/pipewire/pipewire.conf"
+    if [ "$CONF_STATE" = outdated ]; then echo "  pipewire.conf: *** $CONF_WHAT ***"
+    else echo "  pipewire.conf: $CONF_WHAT"; fi
     if repository_conf; then echo "  sink: $MAIN_CONF (the repository's pipewire.conf)$([ ! -f "$DROPIN" ] || echo "; *** and $DROPIN: two speakerd nodes (speakerd-setup.sh sink removes it) ***")"
     elif [ -f "$DROPIN" ]; then echo "  sink: $DROPIN"; else echo "  sink: not configured ($DROPIN)"; fi
     read_live_sink
@@ -1194,10 +1242,10 @@ do_rollback() {
         sc restart speakerd.service || die "could not restart speakerd"
         ok "speakerd restarted"
         check_started "$restarted"
-        # ampd is the version's too.
-        if [ -f "$AMPD_UNIT" ]; then
-            if sc restart ampd.service; then ok "ampd restarted"; else warn "could not restart ampd"; fi
-        fi
+        # ampd is the version's too: rolled back with it.
+        ampd_restart "rolled back with the version (ampd $(ampd_file_version "$LIB/current/bin/ampd"))"
+    else
+        info "Not restarting speakerd (--no-restart)"; ampd_restart "rolled back with the version"
     fi
 }
 
@@ -1372,6 +1420,25 @@ speakerd_log() {   # everything speakerd and speakerd-run said since boot
     fi
 }
 
+# Whether the journal still reaches back to the running speakerd's start. A board's journal is
+# small and volatile (/run/log/journal), and speakerd logs a timing line a minute, so after
+# hours its start-up lines are gone: then the journal holds nothing of this boot from before the
+# moment systemd says speakerd.service became active. Returns 1 only then (and sets STARTED,
+# when that was, UTC); 0 when the start can be in the journal, or it cannot be told (no systemd,
+# the service not active, a time that does not read).
+journal_holds_start() {
+    STARTED=""
+    [ "$NO_SYSTEMD" -eq 0 ] || return 0
+    local entered t
+    # In UTC, which date -d reads whatever the board's time zone is called.
+    entered="$(TZ=UTC systemctl --user show speakerd.service -p ActiveEnterTimestamp --value 2> /dev/null)"
+    [[ "$entered" =~ ^[A-Z][a-z]{2}\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9:]{8}\ UTC$ ]] || return 0
+    t="$(date -u -d "$entered" +%s 2> /dev/null)" || return 0
+    [ -n "$(journalctl -b --until "@$t" -n 1 -q -o short-unix --no-pager 2> /dev/null)" ] && return 0
+    STARTED="$entered"
+    return 1
+}
+
 do_smoke() {
     set +e
     local log since t0 lines0 restarts0="" pid0="" amp="" woofer="" tweeter="" device="{}" line
@@ -1395,9 +1462,24 @@ do_smoke() {
     since="$(awk '/^speakerd-run: starting speakerd/ { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' <<< "$log")"
     lines0="$(wc -l <<< "$log")"
     t0="$(date +%s)"
+    # speakerd's start-up lines are checked only while the journal holds its start: a speakerd
+    # that has run for hours on a small volatile journal has lost them, and is not failed for it.
+    # When the start is in the journal (or it cannot be told), the lines must be there.
+    local start_gone=0 sd_link=""
+    sd_link="$(ampd_link)"
+    if [ -n "$log" ] && ! grep -q '^speakerd-run: starting speakerd' <<< "$log" && ! journal_holds_start; then
+        start_gone=1
+        noted "the journal no longer holds speakerd's start (active since $STARTED; nothing of this boot in the journal is older): its start-up lines ('playing:', the layer, 'device: limits:') are NOT checked. To check them: systemctl --user restart speakerd, then smoke again"
+        said "a board's journal is small and volatile, and speakerd logs a timing line a minute: to keep more, a person may raise RuntimeMaxUse= (a journal in /run/log/journal; SystemMaxUse= for /var/log/journal) in a drop-in of /etc/systemd/journald.conf.d/ (journalctl --disk-usage says what it holds now)"
+    fi
     if line="$(grep -m1 '^speakerd: playing: ' <<< "$since")"; then pass "it plays: ${line#speakerd: playing: }"
+    elif [ "$start_gone" -eq 1 ]; then
+        if [ -n "$sd_link" ]; then said "speakerd plays (ampd's link to it says): $sd_link"
+        else said "what speakerd plays is not known: its 'playing:' line is no longer in the journal, and ampd is not connected to it"; fi
     else failed "speakerd has not said 'playing:' since its last start"; fi
-    if line="$(grep -m1 '^speakerd: using layer ' <<< "$since")"; then
+    if [ "$start_gone" -eq 1 ] && ! grep -q '^speakerd: using layer ' <<< "$since"; then
+        :   # said above
+    elif line="$(grep -m1 '^speakerd: using layer ' <<< "$since")"; then
         case "$line" in
             *passthrough*) noted "PASSTHROUGH: no layer loaded (${line#speakerd: using layer })" ;;
             *) said "layer: ${line#speakerd: using layer }" ;;
@@ -1427,9 +1509,20 @@ do_smoke() {
         else
             pass "device.json's limits: output at $gain dB, tweeter $tweeter_on"
         fi
+    elif [ "$start_gone" -eq 1 ]; then
+        local wanted="no limits"
+        [ -z "$want_gain" ] || wanted="output at $want_gain dB, tweeter $want_tweeter"
+        noted "the limits speakerd enforces are NOT checked: its 'device: limits:' line is no longer in the journal (device.json says $wanted)"
     else
         failed "speakerd did not say which limits it enforces ('device: limits: ...'): a speakerd without the limits must not play on a board"
     fi
+
+    # The pipewire.conf: an older copy of the repository's keeps an older buffer size range.
+    pipewire_conf_state "$MAIN_CONF" "$FIRMWARE_DIR/pipewire/pipewire.conf"
+    case "$CONF_STATE" in
+        outdated) noted "pipewire.conf: $CONF_WHAT" ;;
+        *)        said "pipewire.conf: $CONF_WHAT" ;;
+    esac
 
     # The sink: the drop-in's, live, and the default.
     read_live_sink
@@ -1514,9 +1607,12 @@ do_smoke() {
     fi
 
     # A while without a restart, an xrun or a lost PipeWire. speakerd's timing counters before
-    # it, when its local link is free (ampd holds it when it runs: then its log says).
-    local socket="$RUNTIME/control.sock"
-    helper status "$socket" > "$WORK/timing-before.json" 2> /dev/null || : > "$WORK/timing-before.json"
+    # it, when its local link is free. While ampd holds it, smoke does not ask (speakerd would
+    # refuse a second client, and log it): its log says the timing.
+    local socket="$RUNTIME/control.sock" probe=1
+    if [ -n "$sd_link" ]; then probe=0; said "speakerd's local link is ampd's (it takes one client): the timing comes from speakerd's log"; fi
+    if [ "$probe" -eq 1 ]; then helper status "$socket" > "$WORK/timing-before.json" 2> /dev/null || : > "$WORK/timing-before.json"
+    else : > "$WORK/timing-before.json"; fi
     said "watching for ${WINDOW} s"
     sleep "$WINDOW"
     # speakerd's per-second timing line and its status come up to a second after the second.
@@ -1540,7 +1636,8 @@ do_smoke() {
 
     # What the audio thread spends: per node, the graph, the cycle; late cycles, position jumps.
     local kind text
-    helper status "$socket" > "$WORK/timing-after.json" 2> /dev/null || : > "$WORK/timing-after.json"
+    if [ "$probe" -eq 1 ]; then helper status "$socket" > "$WORK/timing-after.json" 2> /dev/null || : > "$WORK/timing-after.json"
+    else : > "$WORK/timing-after.json"; fi
     printf '%s\n' "$after" > "$WORK/timing-window.log"
     printf '%s\n' "$since" > "$WORK/timing-start.log"
     while read -r kind text; do

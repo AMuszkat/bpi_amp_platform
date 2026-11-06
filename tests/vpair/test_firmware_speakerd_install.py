@@ -92,7 +92,17 @@ Pass when:
   it reads the passthrough minute line (no node: it begins with the graph); it prints speakerd's
   start-up `timing: a clock read costs <x> ns` in the timing line and warns, never fails, above
   150 ns ("clock reads are system calls on this kernel ...: per-node timing costs about 6×812 ns
-  = 4.9 us per cycle" with one node);
+  = 4.9 us per cycle" with one node); while ampd's status.json says it holds the link, smoke
+  never connects to it and takes the log's line;
+- status says whether ~/.config/pipewire/pipewire.conf is this version's
+  firmware/pipewire/pipewire.conf at the rate it was installed at (also --rate 44100), marks an
+  older copy (min-quantum = max-quantum = 512) with ***, its quantum and this version's, and the
+  command that updates it (setup.sh --only pipewire --base-conf --rate 44100), which smoke
+  warns with; the board's own and none are said as such;
+- under (stand-in) systemd, smoke on a journal that holds nothing from before speakerd.service
+  became active (its start rotated out: only timing lines left) warns that the start-up lines
+  and the limits are not checked, and fails on neither; with the journal reaching back that far
+  their absence fails ('playing:', the limits), and the whole start passes;
 - snapcast-setup.sh --route speakerd refuses while no PipeWire config defines the speakerd
   sink, and after `speakerd-setup.sh sink` routes snapclient (and shairport-sync and an
   AudioPluginHost) into "speakerd", keeping the routing there was; uninstall puts that routing
@@ -204,7 +214,9 @@ PERSONS_ROUTING = ('# a person\'s own routing\nstream.rules = [ { matches = [ { 
 
 # Stand-ins for systemctl, journalctl and loginctl (by the name they are called), for the
 # installers' systemd path: each call is recorded in $FAKE_SYSTEMD/calls; is-active answers
-# $FAKE_SYSTEMD/active (default active); journalctl prints $FAKE_SYSTEMD/journal, except with
+# $FAKE_SYSTEMD/active (default active); `show -p X` prints $FAKE_SYSTEMD/show-X (default 0);
+# journalctl prints $FAKE_SYSTEMD/journal, except with --until, which prints
+# $FAKE_SYSTEMD/until (what the journal holds from before that time), and with
 # --user, which finds no journal file, as on a board (a volatile journal, not split per user:
 # only --user-unit reads the user units' lines); a call whose arguments contain a line of
 # $FAKE_SYSTEMD/fail fails. At a restart of pipewire.service it notes whether a process called
@@ -214,7 +226,10 @@ name="$(basename "$0")"; d="${FAKE_SYSTEMD:?}"
 echo "$name $*" >> "$d/calls"
 case "$name" in
     journalctl)
-        case " $* " in *" --user "*) echo "No journal files were found." >&2; echo "-- No entries --"; exit 0 ;; esac
+        case " $* " in
+            *" --user "*) echo "No journal files were found." >&2; echo "-- No entries --"; exit 0 ;;
+            *" --until "*) cat "$d/until" 2> /dev/null; exit 0 ;;
+        esac
         cat "$d/before" "$d/journal" 2> /dev/null; exit 0 ;;
     loginctl) echo yes; exit 0 ;;
 esac
@@ -222,6 +237,9 @@ if [ -f "$d/fail" ]; then
     while read -r bad; do [ -n "$bad" ] && [[ "$*" == *"$bad"* ]] && exit 1; done < "$d/fail"
 fi
 case " $* " in
+    *" show "*" -p "*)
+        a="$*"; p="${a##* -p }"; p="${p%% *}"
+        if [ -f "$d/show-$p" ]; then cat "$d/show-$p"; else echo 0; fi; exit 0 ;;
     *" restart "*speakerd.service*)
         # A speakerd that runs ($d/running) ends first: its ExecStopPost line comes before the
         # new start, in the same journal window.
@@ -1023,6 +1041,58 @@ class Install(Setup):
         self.assertIn("FAIL device.json cannot be read", result.stdout)
         self.assertRegex(result.stdout, r"smoke: \d+ failed")
 
+    def test_status_and_smoke_say_an_old_pipewire_conf(self):
+        """status and smoke compare ~/.config/pipewire/pipewire.conf with this version's
+        firmware/pipewire/pipewire.conf, at the rate it was installed at: the repository's (also
+        at --rate 44100) is said; an older copy (the board measured's: min-quantum = max-quantum
+        = 512) is marked, with the command that updates it (smoke warns); the board's own is
+        said as such."""
+        home = self.fresh_home("old-pipewire-conf")
+        self.install(home, "--role", "left")
+        conf = home / ".config/pipewire/pipewire.conf"
+        log = self.tmp / "old-pipewire-conf.log"
+        log.write_text("speakerd-run: starting speakerd x from layer current (test)\n" + LIMITS + "\n")
+        repo = (FIRMWARE / "pipewire/pipewire.conf").read_text()
+
+        def both():
+            status = firmware("speakerd-setup.sh", "status", "--home", home, "--no-systemd", env=self.env).stdout
+            smoke = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                             "--window", "0", env=self.env, check=False).stdout
+            return status, smoke
+
+        firmware("setup.sh", "--home", home, "--only", "pipewire", "--route", "plugin-host", "--base-conf",
+                 "--no-restart", "--no-systemd", env=self.env)
+        status, smoke = both()
+        self.assertIn(f"pipewire.conf: {conf}, the repository's (quantum 512, 64 to 2048)", status)
+        self.assertIn(f"info pipewire.conf: {conf}, the repository's (quantum 512, 64 to 2048)", smoke)
+        firmware("setup.sh", "--home", home, "--only", "pipewire", "--route", "plugin-host", "--base-conf",
+                 "--rate", "44100", "--no-restart", "--no-systemd", env=self.env)
+        status, _ = both()
+        self.assertIn(f"pipewire.conf: {conf}, the repository's at --rate 44100 (quantum 512, 64 to 2048)", status)
+
+        # The copy from before the range (min-quantum = max-quantum = 512), at 44100.
+        old = re.sub(r"(?m)^(\s*default\.clock\.min-quantum\s*=\s*)64$", r"\g<1>512", conf.read_text())
+        old = re.sub(r"(?m)^(\s*default\.clock\.max-quantum\s*=\s*)2048$", r"\g<1>512", old)
+        self.assertNotEqual(old, conf.read_text())
+        conf.write_text(old)
+        status, smoke = both()
+        print("\n  " + next(line for line in status.splitlines() if "pipewire.conf:" in line))
+        said = (f"{conf} is an older (or edited) copy of the repository's: quantum 512, 512 to 512, where this "
+                "version's has quantum 512, 64 to 2048 (2 line(s) differ). Update it: setup.sh --only pipewire "
+                "--base-conf --rate 44100 (from the development machine: firmware/setup.sh --mode target-remote "
+                "--only pipewire --base-conf --rate 44100)")
+        self.assertIn(f"pipewire.conf: *** {said} ***", status)
+        self.assertIn(f"warn pipewire.conf: {said}", smoke)
+
+        conf.write_text("# the board's own\ncontext.properties = {\n    default.clock.min-quantum = 512\n}\n")
+        status, _ = both()
+        self.assertIn(f"pipewire.conf: {conf}, the board's own (quantum ?, 512 to ?)", status)
+        self.assertNotIn("***", next(line for line in status.splitlines() if "pipewire.conf:" in line))
+        conf.unlink()
+        status, _ = both()
+        self.assertIn(f"pipewire.conf: none ({conf}): PipeWire's own configuration", status)
+        self.assertEqual(repo, (FIRMWARE / "pipewire/pipewire.conf").read_text())
+
     def test_smoke_finds_snapclient_by_its_application_name(self):
         """snapclient 0.34.0's stream has no node.name (pw-link lists its ports under an empty
         name): smoke finds it by application.name in pw-dump and reads its links there."""
@@ -1163,7 +1233,7 @@ class Install(Setup):
         runtime = self.tmp / "timing-runtime"
         (runtime / "speakerd").mkdir(parents=True, exist_ok=True)
         path = runtime / "speakerd/control.sock"
-        answers = []
+        answers, accepted = [], []
 
         def serve(server):
             while True:
@@ -1171,6 +1241,7 @@ class Install(Setup):
                     conn, _ = server.accept()
                 except OSError:
                     return
+                accepted.append(1)
                 with conn:
                     if not answers:
                         conn.sendall(b'{"op":"error","reason":"busy"}\n')
@@ -1202,6 +1273,19 @@ class Install(Setup):
             # Busy (ampd holds the link): the log's minute line instead.
             answers[:] = []
             out = smoke([start, LIMITS, minute(3.6)], env=env)
+            self.assertIn("pass the graph's longest cycle took 3.6 % of its cycle (speakerd's log", out)
+            # ampd holds the link (its status.json, its process alive, says it is connected):
+            # smoke does not knock (speakerd would log "refused a second client: busy").
+            (runtime / "ampd").mkdir(exist_ok=True)
+            (runtime / "ampd/status.json").write_text(json.dumps(
+                {"ampd": "0.3.2", "pid": os.getpid(), "speakerd": {"connected": True, "layer": "current", "revision": 3,
+                                                                    "version": "0.3.3 (test)"}}))
+            accepted.clear()
+            answers[:] = [timing, timing]
+            out = smoke([start, LIMITS, minute(3.6)], env=env)
+            self.assertEqual(accepted, [], out)
+            self.assertIn("info speakerd's local link is ampd's (it takes one client): the timing comes from "
+                          "speakerd's log", out)
             self.assertIn("pass the graph's longest cycle took 3.6 % of its cycle (speakerd's log", out)
         finally:
             server.close()
@@ -1775,6 +1859,50 @@ class Systemd(Setup):
                                  result.stdout)
                 self.assertIn("Nothing changed: speakerd keeps running", result.stdout)
                 self.assertEqual(snapshot(home), before)
+
+    def test_smoke_when_the_journal_lost_speakerds_start(self):
+        """A speakerd that has run for hours on a board's small volatile journal: its start-up
+        lines are gone (only timing lines are left). When nothing in the journal is older than the
+        service's start (ActiveEnterTimestamp), smoke warns that it cannot check them, never fails
+        on them; when the journal does reach back that far, their absence still fails."""
+        home = self.fresh_home("home-journal-lost")
+        self.install(home, "--role", "left")
+        minute = ("speakerd: timing: last 60 s: graph mean 1.3 % max 3.6 %; cycle mean 1.5 % max 3.9 %; "
+                  "2813 cycles, 0 late, 0 position jump(s)")
+        start = "speakerd-run: starting speakerd x from layer current (test)"
+        gone_said = "the journal no longer holds speakerd's start (active since Thu 2026-11-05 08:00:00 UTC"
+        playing_failed = "FAIL speakerd has not said 'playing:' since its last start"
+        limits_failed = "FAIL speakerd did not say which limits it enforces"
+        for name, journal, until, gone in (
+                ("rotated", [minute], "", True),
+                ("there but silent", [minute], "Nov 05 07:59:58 board systemd[1]: Started something.\n", False),
+                ("whole", [start, "speakerd: playing: current", LIMITS, minute], "", False)):
+            with self.subTest(name):
+                d, env = self.systemd(f"journal-{name.replace(' ', '-')}", journal)
+                (d / "show-ActiveEnterTimestamp").write_text("Thu 2026-11-05 08:00:00 UTC\n")
+                (d / "until").write_text(until)
+                result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--window", "0", env=env, check=False)
+                out = result.stdout
+                print(f"\n  {name}:\n" + "".join(f"  {line}\n" for line in out.splitlines()
+                                                if "journal" in line or "limits" in line or "plays" in line))
+                self.assertRegex(out, r"smoke: \d+ failed, \d+ warning\(s\)")
+                if gone:
+                    self.assertIn(f"warn {gone_said}", out)
+                    self.assertIn("warn the limits speakerd enforces are NOT checked: its 'device: limits:' line is no "
+                                  "longer in the journal (device.json says output at 0.0 dB, tweeter on)", out)
+                    self.assertIn("raise RuntimeMaxUse=", out)
+                    self.assertNotIn(playing_failed, out)
+                    self.assertNotIn(limits_failed, out)
+                    # It asked the journal for what is older than the start, in UTC.
+                    self.assertIn("journalctl -b --until @1793865600 -n 1", (d / "calls").read_text())
+                else:
+                    self.assertNotIn(gone_said, out)
+                    if name == "whole":
+                        self.assertIn("pass it plays: current", out)
+                        self.assertNotIn(limits_failed, out)
+                    else:
+                        self.assertIn(playing_failed, out)
+                        self.assertIn(limits_failed, out)
 
     def test_setup_stops_on_a_failed_pipewire_restart(self):
         d, env = self.systemd("restart-fails", fail=["restart pipewire.service"])

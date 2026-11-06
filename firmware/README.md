@@ -27,7 +27,7 @@ any, and builds nothing. Each component also has its own installer:
 |---|---|
 | [`setup.sh`](setup.sh) | Everything below, component by component; `--only` and `--skip` choose |
 | [`speakerd-setup.sh`](speakerd-setup.sh) | `speakerd`: its versions under `~/.local/lib/speakerd` (each with the plugins' **headless** builds, the only builds a speaker runs), its systemd unit, the sink drop-in, `device.json` and `factory.json` (on a first install [`speakerd/factory.json`](speakerd/factory.json), the board's chain over the headless builds; `--factory` replaces it). Also `status`, `smoke`, `limits`, `rollback` and `uninstall` |
-| [`ampd-setup.sh`](ampd-setup.sh) | `ampd`: `ampd.json` and its unit, as the hub on the left speaker or the agent on the right |
+| [`ampd-setup.sh`](ampd-setup.sh) | `ampd`: `ampd.json` and its unit, as the hub on the left speaker or the agent on the right. Its program comes with `speakerd`'s version, so an install of `speakerd` that changes it restarts `ampd`; `status` and `smoke` say when the `ampd` that runs is not the installed program |
 | [`snapcast-setup.sh`](snapcast-setup.sh) | Synchronized network audio: Snapcast over PipeWire, server on the host and client on the board |
 
 `snapclient` finds the snapserver by name: `snapcast-setup.sh --server` (or its old name

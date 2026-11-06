@@ -318,18 +318,8 @@ prepare_base_conf() {
     [ -f "$src" ] || die "no $src"
     BASE_FILE="$(mktemp)"
     trap 'rm -f "$BASE_FILE"' EXIT
-    if [ -n "$RATE" ]; then
-        awk -v rate="$RATE" '
-            /^[[:space:]]*#/ { print; next }
-            /\{[[:space:]]*factory[[:space:]]*=/ { alsa = 0 }
-            /^[[:space:]]*factory\.name[[:space:]]*=[[:space:]]*"?api\.alsa\.pcm\.sink/ { alsa = 1 }
-            /^[[:space:]]*default\.clock\.rate[[:space:]]*=/ { sub(/=[[:space:]]*[0-9]+/, "= " rate) }
-            /^[[:space:]]*default\.clock\.allowed-rates[[:space:]]*=/ { sub(/=[[:space:]]*\[[^]]*\]/, "= [ " rate " ]") }
-            alsa && /^[[:space:]]*audio\.rate[[:space:]]*=/ { sub(/=[[:space:]]*[0-9]+/, "= " rate) }
-            { print }' "$src" > "$BASE_FILE"
-    else
-        cp "$src" "$BASE_FILE"
-    fi
+    # install-lib.sh's: status and smoke compare the installed file with the same rewrite.
+    repository_conf_at_rate "$src" "$RATE" "$BASE_FILE"
     rates="$(conf_rates "$BASE_FILE")"
     BASE_RATE="$(awk '$1 == "graph" { r = $2 } END { print r }' <<< "$rates")"
     [ -n "$BASE_RATE" ] || die "$src sets no default.clock.rate: the graph's rate would be PipeWire's default, not the file's. Nothing was changed."

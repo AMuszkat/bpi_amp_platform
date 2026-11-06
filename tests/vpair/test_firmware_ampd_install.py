@@ -27,8 +27,14 @@ Pass when:
 - under (stand-in) systemd, install fails unless ampd says it listens after its start;
 - setup.sh: a whole run (--dry-run) for the right speaker with no --hub-address is refused before
   anything changes; the whole run installs ampd after speakerd; --only ampd changes ampd.json;
-- run from the installed unit on stand-in speakerds: smoke passes on the hub (it runs, connected
-  to speakerd) and on the agent (also connected to the hub); with the hub stopped, the agent's
+- a speakerd install that moves current to a version whose bin/ampd differs restarts ampd, saying
+  why with both versions (with --dry-run it says it would, with --no-restart that it does not); one
+  that finds ampd running another program (status.json's "ampd" version, or its "program" file,
+  with other contents) restarts it too, as does ampd-setup.sh install; otherwise ampd keeps
+  running; status shows the version that runs beside the program's and marks a difference with
+  ***, and smoke fails on it;
+- run from the installed unit on stand-in speakerds: smoke passes on the hub (it runs the program,
+  connected to speakerd) and on the agent (also connected to the hub); with the hub stopped, the agent's
   smoke fails, saying it is not connected to the hub, and the hub's says ampd does not run;
   speakerd-setup.sh status shows ampd's; rollback restarts ampd too; uninstall of speakerd
   removes ampd's unit and keeps ampd.json.
@@ -272,6 +278,84 @@ class AmpdInstall(unittest.TestCase):
                 self.assertIn("ampd did not say it listens", result.stdout)
             self.assertIn("systemctl --user restart ampd.service", (d / "calls").read_text())
 
+    def test_a_deploy_restarts_ampd_and_status_says_what_runs(self):
+        """ampd's program is the version's bin/ampd: an install that moves current to a version
+        whose ampd differs restarts ampd (said, with both versions; not with --no-restart, said;
+        the dry run says it would); one that finds an ampd running another program (status.json's
+        "ampd", or its "program" file) restarts it too; otherwise ampd keeps running. status shows
+        the version that runs beside the program's and marks a difference, smoke fails on it."""
+        folder = self.prepare("deploy-restart", "left")
+        self.ampd_setup(folder, "install")
+        lib = folder / ".local/lib/speakerd"
+        old = (lib / "current/bin/ampd").resolve()
+        # The version installed first had another ampd (as the board measured: 0.1.1).
+        old.write_text(re.sub(r'(?m)^VERSION = ".*"$', 'VERSION = "0.1.1"', AMPD.read_text()))
+        want = re.search(r'(?m)^VERSION = "(.*)"$', AMPD.read_text()).group(1)
+        restart = "(no systemd) systemctl --user restart ampd.service"
+
+        def install(*extra, runtime=None):
+            env = dict(self.env, XDG_RUNTIME_DIR=str(runtime)) if runtime else self.env
+            return firmware("speakerd-setup.sh", "install", "--bundle", self.bundle2, "--home", folder, "--no-systemd",
+                            "--amplifier", "amplifier", *extra, env=env).stdout
+
+        why = f"its program changed with the version (ampd 0.1.1 -> ampd {want})"
+        out = install("--dry-run")
+        self.assertIn(f"(dry-run) would restart ampd: {why}", out)
+        self.assertNotIn(restart, out)
+        out = install("--no-restart")
+        self.assertIn(f"not restarting ampd (--no-restart): {why}", out)
+        self.assertNotIn(restart, out)
+        # current moved with --no-restart: back to the first version, then forward again.
+        firmware("speakerd-setup.sh", "rollback", "--home", folder, "--no-systemd", "--no-restart", env=self.env)
+        out = install()
+        self.assertIn(restart, out)
+        self.assertIn(f"ampd restarted: {why}", out)
+        # The same bundle again, ampd's program unchanged and nothing says it runs another: kept.
+        out = install()
+        self.assertIn("ampd runs its program: not restarted", out)
+        self.assertNotIn(restart, out)
+
+        # An ampd that runs another program than current's (a deploy before this one did not
+        # restart it): its status.json, its process alive (this one stands in for it).
+        runtime = self.tmp / "deploy-restart-runtime"
+        (runtime / "ampd").mkdir(parents=True, exist_ok=True)
+        status_file = runtime / "ampd/status.json"
+        program = str(old)
+
+        def runs(version, file=None):
+            status_file.write_text(json.dumps({
+                "ampd": version, "program": file, "pid": os.getpid(), "name": "left", "role": "hub", "revision": 1,
+                "speakerd": {"connected": True, "version": "0.3.3 (test)", "layer": "current", "revision": 1},
+                "agents": [], "controllers": []}))
+
+        env = dict(self.env, XDG_RUNTIME_DIR=str(runtime))
+        for version, file, stale in (("0.1.1", None, f"it runs ampd 0.1.1 (pid {os.getpid()}), the program is ampd {want}"),
+                                     (want, program, f"it runs {program}, not the program "
+                                                     f"{(lib / 'current/bin/ampd').resolve()}"),
+                                     (want, str((lib / "current/bin/ampd").resolve()), None)):
+            with self.subTest(version=version, file=file):
+                runs(version, file)
+                status = self.ampd_setup(folder, "status", env=env).stdout
+                smoke = self.ampd_setup(folder, "smoke", "--wait", "0", env=env, check=False)
+                self.assertIn(f"runs: pid {os.getpid()}, ampd {version}, left as the hub", status)
+                self.assertIn(f"program: {lib}/current/bin/ampd (ampd {want} (protocol 1))", status)
+                if stale:
+                    print(f"\n  {stale}")
+                    self.assertIn(f"*** the ampd that runs is not the program: {stale}", status)
+                    self.assertIn(f"FAIL the ampd that runs is not the program: {stale}", smoke.stdout)
+                    self.assertNotEqual(smoke.returncode, 0, smoke.stdout)
+                    out = install(runtime=runtime)
+                    self.assertIn(f"ampd restarted: {stale}", out)
+                    out = self.ampd_setup(folder, "install", env=env).stdout
+                    self.assertIn(f"Restarting ampd: {stale}", out)
+                    self.assertIn(restart, out)
+                else:
+                    self.assertNotIn("***", status)
+                    self.assertIn(f"pass it runs the program: ampd {want}", smoke.stdout)
+                    self.assertEqual(smoke.returncode, 0, smoke.stdout)
+                    self.assertNotIn(restart, install(runtime=runtime))
+                    self.assertIn("Nothing changed: ampd keeps running", self.ampd_setup(folder, "install", env=env).stdout)
+
     def test_status_and_smoke_from_the_installed_unit(self):
         folders = {"left": self.prepare("run-left", "left"), "right": self.prepare("run-right", "right")}
         self.ampd_setup(folders["left"], "install", "--listen", ADDRESS["left"])
@@ -296,6 +380,8 @@ class AmpdInstall(unittest.TestCase):
                 print(f"\n  {name}: smoke\n" + smoke.stdout)
                 self.assertEqual(smoke.returncode, 0, smoke.stdout)
                 self.assertIn("connected to speakerd", smoke.stdout)
+                # The ampd the unit started says the file it runs: current's bin/ampd.
+                self.assertIn("pass it runs the program: ampd ", smoke.stdout)
             self.assertIn(f"connected to the hub at {ADDRESS['left']} (left)", smoke.stdout)
             status = firmware("speakerd-setup.sh", "status", "--home", folders["left"], "--no-systemd", env=envs["left"]).stdout
             self.assertIn("speakerd: connected (0.3.0 (stand-in), layer current, revision 2)", status)

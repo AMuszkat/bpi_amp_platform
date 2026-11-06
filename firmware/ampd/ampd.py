@@ -31,7 +31,9 @@ import struct
 import sys
 import time
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
+# The file this process runs, symlinks resolved (status.json's "program").
+PROGRAM = os.path.realpath(__file__)
 PROTOCOL = 1
 CONTROL_PORT, KNOB_PORT, MONITOR_PORT = 7450, 7451, 7452
 LINE_LIMIT = 32 * 1024 * 1024          # a longer line closes the connection
@@ -753,7 +755,9 @@ class Core:
 
     def status(self):
         sd = self.sd
-        out = {"ampd": VERSION, "pid": os.getpid(), "name": self.name, "role": "hub" if self.is_hub else "agent",
+        # "program": the file this process runs, the versioned one (current/ resolved), so that
+        # ampd-setup.sh status can tell a process a deploy did not restart from the program.
+        out = {"ampd": VERSION, "program": PROGRAM, "pid": os.getpid(), "name": self.name, "role": "hub" if self.is_hub else "agent",
                "revision": self.revision, "time": self.rev_time, "origin": self.rev_origin,
                "speakerd": {"connected": sd.connected, "version": sd.version, "layer": sd.layer,
                             "revision": sd.revision, "socket": self.socket_path, **sd.pipewire},

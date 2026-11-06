@@ -9,7 +9,9 @@
 #                      installed_setup: an installer's installed copy, for the hints
 #   the remote mode    remote_run: copy one bundle to the board, run an installer there
 #   pipewire.conf      is_repository_conf: whether a pipewire.conf is the repository's, which
-#                      defines the speakerd sink itself
+#                      defines the speakerd sink itself; repository_conf_at_rate: the file
+#                      --base-conf installs; pipewire_conf_state: whether the installed one is
+#                      this version's (status and smoke)
 #
 # The bundle is a folder:
 #
@@ -48,6 +50,67 @@ shown() { printf '%q ' "$@"; }
 # beside it: two speakerd nodes otherwise.
 is_repository_conf() { [ -f "$1" ] && grep -qF "The BPI AMP Platform's PipeWire configuration (firmware/pipewire/pipewire.conf)" "$1"; }
 REPO_CONF_HAS=(20-resample.conf 60-speakerd-sink.conf)
+
+# The repository's pipewire.conf ($1) as setup.sh --base-conf installs it at the rate $2 (empty:
+# the file's own) into $3: the rate in default.clock.rate, in default.clock.allowed-rates when it
+# is set, and in the amplifier's (each api.alsa.pcm.sink object's) audio.rate; nothing else.
+repository_conf_at_rate() {   # $1 = source, $2 = rate or "", $3 = output
+    if [ -z "$2" ]; then cp "$1" "$3"; return; fi
+    awk -v rate="$2" '
+        /^[[:space:]]*#/ { print; next }
+        /\{[[:space:]]*factory[[:space:]]*=/ { alsa = 0 }
+        /^[[:space:]]*factory\.name[[:space:]]*=[[:space:]]*"?api\.alsa\.pcm\.sink/ { alsa = 1 }
+        /^[[:space:]]*default\.clock\.rate[[:space:]]*=/ { sub(/=[[:space:]]*[0-9]+/, "= " rate) }
+        /^[[:space:]]*default\.clock\.allowed-rates[[:space:]]*=/ { sub(/=[[:space:]]*\[[^]]*\]/, "= [ " rate " ]") }
+        alsa && /^[[:space:]]*audio\.rate[[:space:]]*=/ { sub(/=[[:space:]]*[0-9]+/, "= " rate) }
+        { print }' "$1" > "$3"
+}
+
+# A key of a pipewire.conf's context.properties, uncommented, the first time it is set
+# (default.clock.rate, default.clock.min-quantum ...), or nothing.
+conf_value() {   # $1 = file, $2 = key
+    awk -v key="$2" '
+        /^[[:space:]]*#/ { next }
+        { line = $0; sub(/^[[:space:]]+/, "", line) }
+        index(line, key) == 1 && substr(line, length(key) + 1) ~ /^[[:space:]]*=/ {
+            sub(/^[^=]*=[[:space:]]*/, "", line); sub(/[[:space:]#].*$/, "", line); print line; exit
+        }' "$1" 2> /dev/null
+}
+
+# "quantum <default>, <min> to <max>" of a pipewire.conf, for the messages; "?" for a key the
+# file does not set (PipeWire's default then).
+conf_quantum() {   # $1 = file
+    local q mn mx
+    q="$(conf_value "$1" default.clock.quantum)"; mn="$(conf_value "$1" default.clock.min-quantum)"
+    mx="$(conf_value "$1" default.clock.max-quantum)"
+    printf 'quantum %s, %s to %s' "${q:-?}" "${mn:-?}" "${mx:-?}"
+}
+
+# Whether the user's pipewire.conf ($1) is this version's repository file ($2, the
+# firmware/pipewire/pipewire.conf beside the running installer), at the rate it was installed
+# at. Sets CONF_STATE: none (no file: PipeWire's own), own (the board's own), current (the
+# repository's, as setup.sh --base-conf would install it now) or outdated (the repository's
+# header, other content: an older copy, or one edited by hand); and CONF_WHAT, what to say of it.
+pipewire_conf_state() {   # $1 = the installed pipewire.conf, $2 = the repository's
+    local rate expected lines
+    CONF_STATE="" CONF_WHAT=""
+    if [ ! -f "$1" ]; then CONF_STATE=none; CONF_WHAT="none ($1): PipeWire's own configuration"; return 0; fi
+    if ! is_repository_conf "$1"; then CONF_STATE=own; CONF_WHAT="$1, the board's own ($(conf_quantum "$1"))"; return 0; fi
+    rate="$(conf_value "$1" default.clock.rate)"
+    [ "$rate" != "$(conf_value "$2" default.clock.rate)" ] || rate=""
+    expected="$(mktemp)"
+    repository_conf_at_rate "$2" "$rate" "$expected"
+    if cmp -s "$1" "$expected"; then
+        CONF_STATE=current
+        CONF_WHAT="$1, the repository's${rate:+ at --rate $rate} ($(conf_quantum "$1"))"
+    else
+        CONF_STATE=outdated
+        # A changed line is one "<" and one ">": count the larger side.
+        lines="$({ diff "$expected" "$1" 2> /dev/null || true; } | awk '/^</ { a++ } /^>/ { b++ } END { print (a > b ? a : b) + 0 }')"
+        CONF_WHAT="$1 is an older (or edited) copy of the repository's: $(conf_quantum "$1"), where this version's has $(conf_quantum "$2") (${lines:-some} line(s) differ). Update it: setup.sh --only pipewire --base-conf${rate:+ --rate $rate} (from the development machine: firmware/setup.sh --mode target-remote --only pipewire --base-conf${rate:+ --rate $rate})"
+    fi
+    rm -f "$expected"
+}
 
 # ---------------------------------------------------------------------------------------------
 # The board: [user@]host, never written into a tracked file

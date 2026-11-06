@@ -17,6 +17,7 @@
 # Usage:
 #   ./ampd-setup.sh install [--name NAME] [--hub | --agent --hub-address ADDR] [--listen ADDR]
 #   ./ampd-setup.sh status | smoke | check | uninstall
+#   ./ampd-setup.sh restart [--why TEXT | --if-stale]
 #
 # Run `./ampd-setup.sh --help` for the full option list.
 
@@ -43,6 +44,8 @@ NO_RESTART=0
 HOME_OVERRIDE=""
 WAIT=10
 BUNDLE_DIR=""
+WHY=""
+IF_STALE=0
 
 usage() {
     awk 'NR>1 { if ($0 ~ /^#/) { sub(/^# ?/, ""); print } else exit }' "$SELF"
@@ -50,8 +53,13 @@ usage() {
 
 Actions:
   install     write ampd.json and the unit, then (re)start ampd and check that it listens
-  status      ampd.json, the unit, the service, and what ampd says it is connected to
-  smoke       pass only if ampd runs, is connected to speakerd and, on an agent, to the hub
+              (also when the ampd that runs is not the program: a deploy did not restart it)
+  restart     restart a running ampd and check that it listens: speakerd-setup.sh install and
+              rollback call it when they change the version, whose bin/ampd is ampd's program
+  status      ampd.json, the program, the unit, the service, what ampd says it is connected
+              to, and whether the ampd that runs is the program
+  smoke       pass only if ampd runs, runs the program, is connected to speakerd and, on an
+              agent, to the hub
   check       what install would refuse, without changing anything
   uninstall   stop and remove the unit (ampd.json stays unless --purge)
 
@@ -74,6 +82,9 @@ Options:
   --speakerd-too          check and a dry run: speakerd is installed in the same run (setup.sh),
                           so bin/ampd is not there yet
   --wait <seconds>        smoke: how long to wait for the connections (default $WAIT)
+  --why <text>            restart: why (for the message); restarts whatever ampd runs
+  --if-stale              restart: only when the ampd that runs is not the program (another
+                          version, or another file: status.json's "ampd" and "program")
   --purge                 uninstall: also remove ampd.json
   --dry-run               say what would change, change nothing
   --no-restart            write the files, but do not (re)start ampd
@@ -87,7 +98,7 @@ EOF
 [ $# -gt 0 ] || { usage; exit 2; }
 case "$1" in
     -h | -help | --help) usage; exit 0 ;;
-    install | status | smoke | check | uninstall) ACTION="$1"; shift ;;
+    install | restart | status | smoke | check | uninstall) ACTION="$1"; shift ;;
     *) die "unknown action '$1' (try --help)" ;;
 esac
 while [ $# -gt 0 ]; do
@@ -101,6 +112,8 @@ while [ $# -gt 0 ]; do
         --listen)        LISTEN="${2:?}"; shift 2 ;;
         --speakerd-too)  SPEAKERD_TOO=1; shift ;;
         --wait)          WAIT="${2:?}"; shift 2 ;;
+        --why)           WHY="${2:?}"; shift 2 ;;
+        --if-stale)      IF_STALE=1; shift ;;
         --purge)         PURGE=1; shift ;;
         --dry-run)       DRY_RUN=1; shift ;;
         --no-restart)    NO_RESTART=1; shift ;;
@@ -275,6 +288,7 @@ do_install() {
     if dry; then ok "Dry run: nothing changed"; return 0; fi
     sc enable ampd.service > /dev/null 2>&1 || warn "could not enable ampd.service"
     if [ "$NO_RESTART" -eq 1 ]; then info "Not (re)starting ampd (--no-restart)"; return 0; fi
+    if [ "$changed" -eq 0 ] && stale; then info "Restarting ampd: $STALE"; changed=1; fi
     if [ "$changed" -eq 1 ] || ! { [ "$NO_SYSTEMD" -eq 1 ] || systemctl --user is-active --quiet ampd.service; }; then
         local restarted; restarted="$(date +%s)"
         sc restart ampd.service || die "could not start ampd: journalctl --user-unit ampd -b"
@@ -300,6 +314,55 @@ read_status() {
     STATUS="$STATUS_FILE"
 }
 
+# The program's version (bin/ampd --version: "ampd <version> (protocol <n>)"), or nothing.
+program_version() { [ -x "$PROGRAM" ] && "$PROGRAM" --version 2> /dev/null | awk '{ print $2; exit }'; }
+
+# Whether the ampd that runs is not the program: another version (status.json's "ampd"), or,
+# from ampd 0.3.2, which says the file it runs ("program"), another file with other contents (a
+# version a deploy replaced without restarting ampd; the old version's folder may be gone).
+# Sets STALE to the reason. An ampd that does not run, or says neither, is not stale.
+stale() {
+    STALE=""
+    read_status || return 1
+    local running want file
+    running="$(json_value "$STATUS" 'd.get("ampd")')"
+    want="$(program_version)"
+    file="$(json_value "$STATUS" 'd.get("program")')"
+    if [ -n "$running" ] && [ -n "$want" ] && [ "$running" != "$want" ]; then
+        STALE="it runs ampd $running (pid $(json_value "$STATUS" 'd.get("pid")')), the program is ampd $want"
+    elif [ -n "$file" ] && [ -x "$PROGRAM" ] && ! cmp -s "$file" "$PROGRAM"; then
+        STALE="it runs $file$([ -e "$file" ] || echo " (gone)"), not the program $(readlink -f "$PROGRAM")"
+    fi
+    [ -n "$STALE" ]
+}
+
+# restart: speakerd-setup.sh install and rollback, when they change the version (its bin/ampd is
+# ampd's program), restart a running ampd and check that it listens. --if-stale: only when the
+# ampd that runs is not the program. An ampd.service that does not run is left to systemd (it
+# restarts a failed ampd every second) and to install, which starts it.
+do_restart() {
+    if [ ! -f "$UNIT" ]; then info "ampd is not installed ($UNIT): nothing to restart"; return 0; fi
+    local why="$WHY"
+    if [ "$NO_SYSTEMD" -eq 0 ] && ! systemctl --user is-active --quiet ampd.service; then
+        info "ampd.service is $(systemctl --user is-active ampd.service 2> /dev/null || true): not started here ($(installed_setup ampd-setup.sh) install starts it)"
+        return 0
+    fi
+    if [ "$IF_STALE" -eq 1 ]; then
+        if stale; then why="$STALE"
+        else ok "ampd runs its program: not restarted"; return 0; fi
+    fi
+    : "${why:=asked}"
+    if dry; then info "(dry-run) would restart ampd: $why"; return 0; fi
+    if [ "$NO_RESTART" -eq 1 ]; then
+        warn "not restarting ampd (--no-restart): $why. It runs its old program until: systemctl --user restart ampd"
+        return 0
+    fi
+    local restarted; restarted="$(date +%s)"
+    sc restart ampd.service || die "could not restart ampd: journalctl --user-unit ampd -b"
+    check_started "$restarted"
+    ok "ampd restarted: $why"
+}
+
 do_status() {
     echo "ampd on $(id -un)@$(hostname) (home $H)"
     if [ -f "$CONFIG" ]; then
@@ -317,7 +380,7 @@ do_status() {
 import json, sys
 s = json.load(open(sys.argv[1]))
 sd = s.get("speakerd", {})
-print(f"  runs: pid {s.get('pid')}, {s.get('name')} as the {s.get('role')}, revision {s.get('revision')}"
+print(f"  runs: pid {s.get('pid')}, ampd {s.get('ampd') or '(says no version)'}, {s.get('name')} as the {s.get('role')}, revision {s.get('revision')}"
       + (f" ({s.get('time')}, {s.get('origin')})" if s.get("time") else ""))
 print("  speakerd: " + (f"connected ({sd.get('version')}, layer {sd.get('layer')}, revision {sd.get('revision')})"
                         if sd.get("connected") else f"NOT connected ({sd.get('socket')})"))
@@ -329,6 +392,10 @@ if "agents" in s:
         print(f"  agent {a.get('name')}: {'online' if a.get('online') else 'offline'}, layer {a.get('layer')}, revision {a.get('revision')}")
     print(f"  controllers: {', '.join(s.get('controllers', [])) or 'none'}")
 PY
+        if stale; then
+            echo "  *** the ampd that runs is not the program: $STALE (a deploy that did not restart it)."
+            echo "      Restart it: systemctl --user restart ampd, or $(installed_setup ampd-setup.sh) restart ***"
+        fi
     else
         echo "  runs: no ($STATUS_FILE is missing or its process is gone)"
     fi
@@ -366,6 +433,10 @@ do_smoke() {
         failed "ampd does not run ($STATUS_FILE is missing or its process is gone)"
     else
         pass "ampd runs: pid $(json_value "$STATUS" 'd.get("pid")'), the $role"
+        # A failure, not a warning: what runs is not what was deployed (on the board measured, an
+        # ampd 0.1.1 beside 0.3.1's program dropped speakerd's buffer size range).
+        if stale; then failed "the ampd that runs is not the program: $STALE. Restart it: systemctl --user restart ampd"
+        else pass "it runs the program: ampd $(json_value "$STATUS" 'd.get("ampd")')"; fi
         if [ "$sd" = true ]; then
             pass "connected to speakerd: $(json_value "$STATUS" 'd["speakerd"].get("version")'), layer $(json_value "$STATUS" 'd["speakerd"].get("layer")'), revision $(json_value "$STATUS" 'd["speakerd"].get("revision")')"
         else
@@ -394,6 +465,7 @@ do_uninstall() {
 
 case "$ACTION" in
     install)   do_install ;;
+    restart)   do_restart ;;
     status)    do_status ;;
     smoke)     do_smoke ;;
     check)     do_check ;;
