@@ -502,7 +502,7 @@ def current_graph_summary(lines):
     said = (f"its last 'timing: last' line covers the graph revision {revision} replaced ({old['seconds']} s: graph "
             f"max {100 * old['graph']['max']:.1f} %)" if old is not None else "it has logged no 'timing: last' line")
     return None, (f"speakerd applied revision {revision} and {said}: speakerd 0.3.4 logs the old graph's summary at "
-                  "the change and the new graph's first a minute after it, so smoke again in a minute")
+                  "the change and the new graph's first at most a minute after it, so smoke again in a minute")
 
 
 def minute_from_log(line):
