@@ -741,7 +741,7 @@ microsecond), which is kept as a named exception to the no-syscall rule (`dsp/CL
 the `speakerd/timing` stream, the `timing` of `status` (the last minute) and a log summary of
 the cycles since the previous one (the first a minute after start, then every 10 minutes while
 nothing happens, at most a minute after a late cycle or a position jump, and at once when the
-graph changes: from 0.3.4; once a minute until then), so the journal has the numbers without a
+graph changes, passthrough to a graph included: from 0.3.4; once a minute until then), so the journal has the numbers without a
 controller and the summaries do not push a board's small journal's start-up lines out.
 
 **What a plugin declares.** A plugin's monitors are parameters whose IDs start with `mon_`

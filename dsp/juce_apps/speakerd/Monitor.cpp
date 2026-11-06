@@ -264,19 +264,19 @@ namespace speakerd
                 namesSerial = r.graphSerial;
             }
 
-            // A new graph: the summary of the old one's cycles is due now, before this cycle.
-            if (r.graphRan)
+            // A new graph: the summary of what ran before is due now, before this cycle. What ran
+            // is the last graph that ran (passthrough is one, of its own serial), or, until the
+            // first one, none: the first graph after start is a change too. A cycle in which no
+            // graph ran (the message thread held it during an install, or a re-prepare) changes
+            // nothing: it counts in the period it falls in, so an install logs one line, not two.
+            if (r.graphRan && (! summarySerialKnown || r.graphSerial != summarySerial))
             {
-                if (summarySerialKnown && r.graphSerial != summarySerial)
-                {
-                    if (timingSinceSummary.cycles > 0)
-                        logSummary (now);
-
-                    graphChanged = true;
-                }
+                if (timingSinceSummary.cycles > 0)
+                    logSummary (now);
 
                 summarySerial = r.graphSerial;
                 summarySerialKnown = true;
+                graphChanged = true;
             }
 
             const auto* known = r.graphRan && namesKnown && r.graphSerial == namesSerial ? &names : nullptr;
@@ -291,9 +291,10 @@ namespace speakerd
             jumpsTotal += r.positionJump ? 1 : 0;
         });
 
-        // The new graph's first summary comes on the busy cadence, as after a late second.
+        // The new graph's first summary comes at most a minute later, as after a late second; a
+        // summary due sooner stays due.
         if (graphChanged)
-            summaryDue = now + std::chrono::seconds (timingBusySummarySeconds);
+            summaryDue = juce::jmin (summaryDue, now + std::chrono::seconds (timingBusySummarySeconds));
 
         if (now - secondStarted < std::chrono::seconds (1))
             return;
