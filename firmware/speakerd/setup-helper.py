@@ -449,6 +449,62 @@ TIMING_SECOND = re.compile(r"^(?:speakerd: )?timing: in the last second (\d+) la
                            r"([\d.]+) % of its cycle; (\d+) position jump\(s\)$")
 
 
+# speakerd's lines for an apply (its README, "Log lines"): the message thread starts building a
+# revision, then, once the new graph plays, says it applied it (or that it FAILED: nothing changed).
+APPLY_BUILDING = re.compile(r"^(?:speakerd: )?apply: revision (\d+): building$")
+APPLY_DONE = re.compile(r"^(?:speakerd: )?apply: revision (\d+): (applied, |FAILED)")
+# speakerd 0.3.4 schedules a summary at least 60 s after the one before (a minute after its start,
+# 10 minutes while nothing happens, a minute after a late second or a graph change): only the line
+# it logs at once when the graph changes, for the old graph's cycles, may cover less.
+TIMING_SCHEDULED_SECONDS = 60
+
+
+def current_graph_summary(lines):
+    """The last `timing: last <n> s:` line of `lines` (speakerd's log since its start) that covers
+    the graph that plays now: (summary, None), or (None, why) when there is none yet.
+
+    The graph changes when a revision is applied: between its `apply: revision <r>: building` and
+    a few cycles before its `applied` line. From speakerd 0.3.4 the summary is logged at once then,
+    for the old graph's cycles (up to about 50 ms after `applied`), and the new graph's first one a
+    minute later. So the old graph's are: every summary between `building` and `applied`, and the
+    first one after `applied` when none came before it (speakerd 0.3.3 and older, and a change
+    from passthrough, log none at the change: that first one then mixes both graphs) or when it
+    covers less than 60 s (none of the scheduled ones does: it is the change's). The rest are the
+    new graph's."""
+    summaries, change, building = [], None, {}
+    for i, line in enumerate(lines):
+        summary = minute_from_log(line)
+        if summary is not None:
+            summaries.append((i, summary))
+            continue
+        m = APPLY_BUILDING.match(line)
+        if m:
+            building[m.group(1)] = i
+            continue
+        m = APPLY_DONE.match(line)
+        if m and m.group(2).startswith("applied") and m.group(1) in building:
+            change = (building[m.group(1)], i, int(m.group(1)))
+    if change is None:
+        return (summaries[-1][1], None) if summaries else (None, None)
+    built, applied, revision = change
+    old, new, before_applied, flush_taken = None, None, False, False
+    for i, summary in summaries:
+        if i < built:
+            old = summary
+        elif i < applied:
+            old, before_applied = summary, True
+        elif not flush_taken and (summary["seconds"] < TIMING_SCHEDULED_SECONDS or not before_applied):
+            old, flush_taken = summary, True
+        else:
+            new, flush_taken = summary, True
+    if new is not None:
+        return new, None
+    said = (f"its last 'timing: last' line covers the graph revision {revision} replaced ({old['seconds']} s: graph "
+            f"max {100 * old['graph']['max']:.1f} %)" if old is not None else "it has logged no 'timing: last' line")
+    return None, (f"speakerd applied revision {revision} and {said}: speakerd 0.3.4 logs the old graph's summary at "
+                  "the change and the new graph's first a minute after it, so smoke again in a minute")
+
+
 def minute_from_log(line):
     """A `timing: last <n> s: ...` line as status's timing object (fractions, not percent)."""
     m = TIMING_MINUTE.match(line)
@@ -487,7 +543,8 @@ def read_lines(path):
 def cmd_timing(args):
     """smoke's timing check (firmware/CLAUDE.md, "smoke"): what speakerd's audio thread spends, per
     node, for the graph and the cycle, from its status (the last minute, read after the window) or
-    else its log's last `timing: last <n> s:` line since it started; the late cycles and position
+    else its log's last `timing: last <n> s:` line since it started that covers the graph that plays
+    (current_graph_summary: none, and a warning, for a minute after an apply); the late cycles and position
     jumps in the window from the status before and after it (late_total, jumps_total) and from
     the log's `timing: in the last second` lines in the window (it names every second with one).
     FAIL when the graph's longest cycle is above --limit of its cycle, or a cycle was late in the
@@ -512,16 +569,17 @@ def cmd_timing(args):
     clock_said = (f"; a clock read costs {clock:g} ns" if clock is not None
                   else "; speakerd did not say what a clock read costs")
 
-    summary, source = after, None
+    summary, source, changed = after, None, None
     if summary is not None:
         source = f"speakerd's status, the last {summary.get('seconds', '?')} s"
     else:
-        for line in reversed(start_lines + window_lines):
-            summary = minute_from_log(line)
-            if summary is not None:
-                source = f"speakerd's log, the {summary['seconds']} s before its last 'timing: last' line"
-                break
-    if summary is None:
+        summary, changed = current_graph_summary(start_lines + window_lines)
+        if summary is not None:
+            source = f"speakerd's log, the {summary['seconds']} s before its last 'timing: last' line"
+    if changed is not None:
+        print(f"warn the current graph's timing is NOT measured yet: {changed} (the timing comes from speakerd's "
+              "log: its local link is ampd's, or busy)")
+    elif summary is None:
         print("warn the graph's timing was NOT measured: speakerd's local link is busy (ampd holds it) or did not "
               "answer, and speakerd has logged no 'timing: last <n> s' line since it started (it logs one a "
               "minute after its start, then every minute up to speakerd 0.3.3 and every 10 minutes from 0.3.4 while "

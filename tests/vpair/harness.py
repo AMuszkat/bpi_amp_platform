@@ -1125,6 +1125,28 @@ def stub_plugin_host(folder):
         time.sleep(0.01)
 
 
+class StubAmpd:
+    """A stand-in for a running ampd, for a `with` block: a copy of sleep called `ampd` in
+    `folder`, so that its /proc/<pid>/cmdline names an ampd as the installers check it
+    (install-lib.sh's ampd_pid) before they believe a status.json's pid. `pid` is its pid."""
+
+    def __init__(self, folder):
+        fake = Path(folder) / "ampd"
+        fake.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy("/bin/sleep", fake.with_name("ampd.new"))
+        os.replace(fake.with_name("ampd.new"), fake)
+        self.fake = fake
+
+    def __enter__(self):
+        self.process = subprocess.Popen([str(self.fake), "600"])
+        self.pid = self.process.pid
+        return self
+
+    def __exit__(self, *exc):
+        self.process.kill()
+        self.process.wait()
+
+
 def stub_speakerd():
     """tests/vpair/stub_speakerd.c, compiled once per test process: an ELF stand-in for speakerd
     that does what its STUB_DIR/fate file says (see the file)."""

@@ -310,7 +310,7 @@ read_status() {
     STATUS=""
     [ -f "$STATUS_FILE" ] || return 1
     local pid; pid="$(json_value "$STATUS_FILE" 'd.get("pid")')"
-    [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null || return 1
+    ampd_pid "$pid" || return 1   # alive, and an ampd (install-lib.sh)
     STATUS="$STATUS_FILE"
 }
 
