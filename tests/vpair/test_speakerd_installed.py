@@ -31,7 +31,7 @@ Pass when:
   the next start loads it from the previous version's folder; speakerd's HOME is still empty
   after it ran;
 - firmware/speakerd-setup.sh smoke, with a stream playing, passes every check: it plays, it plays
-  device.json's limits, the live speakerd sink has the drop-in's properties and is the default sink, it is
+  device.json's limits (by its start-up line and by what it reports in its status, speakerd 0.3.4), the live speakerd sink has the drop-in's properties and is the default sink, it is
   linked from the sink to the amplifier and nothing else feeds the amplifier, no AudioPluginHost
   runs, the amplifier drives, no restart or xrun in 3 s, and speakerd's timing (its status,
   read through the local link) shows the graph's longest cycle within half its cycle and no
@@ -278,6 +278,10 @@ class Installed(unittest.TestCase):
             self.assertIn(check, result.stdout)
         self.assertRegex(result.stdout, r"info timing: node \d+ \(loudness_headless\) mean [\d.]+ % max [\d.]+ % of the cycle")
         self.assertEqual(result.returncode, 0, result.stdout)
+        # The limits from both sources: the start-up line and what speakerd reports (0.3.4).
+        line = next((line for line in result.stdout.splitlines() if "device.json's limits" in line), "")
+        self.assertIn("(its start-up line and its status)", line,
+                      "smoke did not compare the limits speakerd reports (needs speakerd 0.3.4: no limits in its hello)")
 
     def test_smoke_fails_when_the_amplifier_is_the_default_sink(self):
         speaker = self.pair["left"]

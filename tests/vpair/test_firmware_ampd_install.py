@@ -36,7 +36,7 @@ Pass when:
 - run from the installed unit on stand-in speakerds: smoke passes on the hub (it runs the program,
   connected to speakerd) and on the agent (also connected to the hub); with the hub stopped, the agent's
   smoke fails, saying it is not connected to the hub, and the hub's says ampd does not run;
-  speakerd-setup.sh status shows ampd's; rollback restarts ampd too; uninstall of speakerd
+  speakerd-setup.sh status shows ampd's (its speakerd line with the limits speakerd reports); rollback restarts ampd too; uninstall of speakerd
   removes ampd's unit and keeps ampd.json.
 
     python3 -m unittest -v tests.vpair.test_firmware_ampd_install
@@ -384,7 +384,9 @@ class AmpdInstall(unittest.TestCase):
                 self.assertIn("pass it runs the program: ampd ", smoke.stdout)
             self.assertIn(f"connected to the hub at {ADDRESS['left']} (left)", smoke.stdout)
             status = firmware("speakerd-setup.sh", "status", "--home", folders["left"], "--no-systemd", env=envs["left"]).stdout
-            self.assertIn("speakerd: connected (0.3.0 (stand-in), layer current, revision 2)", status)
+            # With the limits speakerd reports (the stand-in, from device.json), through ampd's status.json.
+            self.assertIn("speakerd: connected (0.3.0 (stand-in), layer current, revision 2, limits output at 0 dB, "
+                          "tweeter on)", status)
             self.assertIn("agent right: online", status)
 
             runs["left"].signal(signal.SIGTERM)

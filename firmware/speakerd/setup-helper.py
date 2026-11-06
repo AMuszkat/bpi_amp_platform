@@ -20,6 +20,9 @@ library only (the board's python3). See firmware/CLAUDE.md, "speakerd on a board
     setup-helper.py timing --limit F [--before FILE] [--after FILE] [--window-log FILE]
                            [--start-log FILE] [--window S]
                                                    smoke's timing check: lines "pass|FAIL|warn|info <text>"
+    setup-helper.py limits --device FILE [--line TEXT] [--start-gone 0|1]
+                           [--ampd-status FILE | --speakerd-status FILE [--unread TEXT]]
+                                                   smoke's limits check: the same kind of lines
 
 Each prints shell-readable `key=value` lines or a message, and exits 1 with the reason on
 stderr when it cannot do what it was asked.
@@ -434,7 +437,9 @@ def cmd_status(args):
         sock.close()
 
 
-# The once-a-minute line and the per-second line of speakerd's log (its README, "Log lines").
+# The summary line and the per-second line of speakerd's log (its README, "Log lines"). The
+# summary covers <n> s: up to 60 until 0.3.3; from 0.3.4 the first 60 s after the start, then up
+# to 600 s while nothing is late and nothing changed, and at most 60 s again after a late cycle.
 TIMING_MINUTE = re.compile(r"^(?:speakerd: )?timing: last (\d+) s: (?:(.*); )?graph mean ([\d.]+) % max ([\d.]+) %; "
                            r"cycle mean ([\d.]+) % max ([\d.]+) %; (\d+) cycles, (\d+) late, (\d+) position jump\(s\)$")
 TIMING_MINUTE_NODE = re.compile(r"^node (\d+) \((.*)\) mean ([\d.]+) % max ([\d.]+) %$")
@@ -518,8 +523,9 @@ def cmd_timing(args):
                 break
     if summary is None:
         print("warn the graph's timing was NOT measured: speakerd's local link is busy (ampd holds it) or did not "
-              "answer, and speakerd has logged no 'timing: last <n> s' line since it started (it does once a "
-              "minute; a speakerd older than its timing never does)")
+              "answer, and speakerd has logged no 'timing: last <n> s' line since it started (it logs one a "
+              "minute after its start, then every minute up to speakerd 0.3.3 and every 10 minutes from 0.3.4 while "
+              "nothing is late; a speakerd older than its timing never does)")
     else:
         for node in summary.get("nodes") or []:
             print(f"info timing: node {node.get('uid')} ({node.get('name')}) mean {100 * node.get('mean', 0):.1f} % "
@@ -576,6 +582,145 @@ def cmd_timing(args):
         print(f"warn {summary['late']} late cycle(s) before the window ({source})")
 
 
+# speakerd's start-up line for the limits it plays, exactly (speakerd-setup.sh's LIMITS_LINE);
+# with the fail-safe it adds a suffix, which this does not match.
+LIMITS_LINE = re.compile(r"^speakerd: device: limits: output at (-?[0-9.]+(e[-+]?[0-9]+)?) dB, tweeter (muted|on)$")
+
+
+def reported_limits(opts):
+    """What speakerd reports it enforces (its hello and status, from speakerd 0.3.4): (limits,
+    where, why). limits is {"gain_db", "tweeter", "fail_safe"} or None; where names the source;
+    why says why there is none (an older speakerd or ampd, a status that could not be read).
+    `bad` in why's place (limits None, why starting "BAD ") is a report smoke cannot read."""
+    if opts["--ampd-status"]:
+        where = "its status, through ampd's link"
+        try:
+            with open(opts["--ampd-status"]) as f:
+                status = json.load(f)
+        except (OSError, ValueError) as e:
+            return None, where, f"ampd's status.json could not be read: {e}"
+        sd = status.get("speakerd") if isinstance(status, dict) else None
+        sd = sd if isinstance(sd, dict) else {}
+        if "limits" not in sd:
+            return None, where, f"ampd {status.get('ampd', '?')} does not pass them on (ampd 0.3.3 and later do)"
+        limits = sd["limits"]
+        if limits is None:
+            return None, where, f"speakerd {sd.get('version') or '?'} does not report them (speakerd 0.3.4 and later do)"
+    else:
+        where = "its status"
+        text = ""
+        try:
+            with open(opts["--speakerd-status"]) as f:
+                text = f.read().strip()
+        except (OSError, TypeError):
+            pass
+        if not text:
+            return None, where, opts["--unread"] or "speakerd's status was not read"
+        try:
+            status = json.loads(text)
+        except ValueError:
+            return None, where, "speakerd's status is not JSON"
+        if not isinstance(status, dict) or "limits" not in status:
+            return None, where, "this speakerd does not report them (speakerd 0.3.4 and later do)"
+        limits = status["limits"]
+    gain = limits.get("gain_db") if isinstance(limits, dict) else None
+    if not (isinstance(limits, dict) and isinstance(gain, (int, float)) and not isinstance(gain, bool)
+            and limits.get("tweeter") in TWEETER_LIMITS
+            and (limits.get("fail_safe") is None or isinstance(limits.get("fail_safe"), str))):
+        return None, where, "BAD " + json.dumps(limits)[:200]
+    return limits, where, None
+
+
+def cmd_limits(args):
+    """smoke's limits check (firmware/CLAUDE.md, "smoke"): the limits speakerd enforces against
+    device.json's, from two sources: its start-up line `device: limits: ...` (--line, the
+    journal's first since its start; gone when the journal rotated it out) and what it reports on
+    its local link (from speakerd 0.3.4: read by smoke when the link is free, --speakerd-status,
+    or by ampd when ampd holds it, --ampd-status, its status.json). Each source there must say
+    device.json's limits (gain within 0.001 dB, the tweeter the same) and not the fail-safe; both
+    there must agree. FAIL also on device.json without limits, and on neither source while the
+    journal holds the start; a warning when the start rotated out and speakerd reports nothing."""
+    opts = {"--device": "", "--line": "", "--start-gone": "0", "--ampd-status": "", "--speakerd-status": "",
+            "--unread": ""}
+    while args:
+        if args[0] not in opts or len(args) < 2:
+            fail(f"limits: unknown or incomplete option {args[0]}")
+        opts[args[0]] = args[1]
+        args = args[2:]
+    try:
+        with open(opts["--device"]) as f:
+            device = json.load(f)
+    except (OSError, ValueError):
+        device = {}
+    want = device.get("limits") if isinstance(device, dict) else None
+    want = want if isinstance(want, dict) and isinstance(want.get("gain_db"), (int, float)) else None
+    wanted = f"output at {want['gain_db']} dB, tweeter {want.get('tweeter')}" if want else "no limits"
+
+    def same(gain, tweeter):
+        return want is not None and abs(gain - want["gain_db"]) < 0.001 and tweeter == want.get("tweeter")
+
+    failures = []
+    line = opts["--line"]
+    said = None                          # (gain text, gain, tweeter) of an exact start-up line
+    if line:
+        m = LIMITS_LINE.match(line)
+        try:
+            said = (m.group(1), float(m.group(1)), m.group(3)) if m else None
+        except ValueError:
+            said = None
+        text = line[len("speakerd: "):] if line.startswith("speakerd: ") else line
+        if said is None:
+            failures.append(f"speakerd does not play device.json's limits: '{text}'")
+        elif want is None:
+            failures.append(f"device.json has no limits (speakerd then plays with its fail-safe ones; say them "
+                            f"explicitly): {text}")
+        elif not same(said[1], said[2]):
+            failures.append(f"speakerd says '{text}'; device.json says {wanted}")
+
+    limits, where, why = reported_limits(opts)
+    if why and why.startswith("BAD "):
+        failures.append(f"speakerd reports limits smoke cannot read ({where}): {why[4:]}")
+        why = None
+    if limits is not None:
+        gain, tweeter, fail_safe = limits["gain_db"], limits["tweeter"], limits.get("fail_safe")
+        reported = f"output at {gain:g} dB, tweeter {tweeter}"
+        if fail_safe is not None:
+            failures.append(f"speakerd reports its fail-safe limits ({fail_safe}): {reported} ({where}); "
+                            f"device.json says {wanted}")
+        elif want is None:
+            failures.append(f"device.json has no limits (speakerd then plays with its fail-safe ones; say them "
+                            f"explicitly): speakerd reports {reported} ({where})")
+        elif not same(gain, tweeter):
+            failures.append(f"speakerd reports {reported} ({where}); device.json says {wanted}")
+        if said is not None and not (abs(said[1] - gain) < 0.001 and said[2] == tweeter):
+            failures.append(f"speakerd's start-up line says 'output at {said[0]} dB, tweeter {said[2]}' but it "
+                            f"reports {reported} ({where})")
+
+    for failure in failures:
+        print(f"FAIL {failure}")
+    if not line and limits is None:
+        if failures:
+            return
+        if opts["--start-gone"] == "1":
+            print(f"warn the limits speakerd enforces are NOT checked: its 'device: limits:' line is no longer in "
+                  f"the journal (device.json says {wanted}), and {why}")
+        else:
+            print("FAIL speakerd did not say which limits it enforces ('device: limits: ...'): a speakerd without "
+                  "the limits must not play on a board")
+        return
+    if not line and opts["--start-gone"] != "1":
+        print("warn speakerd's start-up line 'device: limits:' is not in its log since its start, though it "
+              f"reports its limits ({where})")
+    if line and limits is None and why:
+        print(f"info the limits come from speakerd's start-up line only: {why}")
+    if not failures:
+        shown = said[0] if said is not None else f"{limits['gain_db']:g}"
+        tweeter = said[2] if said is not None else limits["tweeter"]
+        sources = " and ".join(s for s in ("its start-up line" if said is not None else "",
+                                            where if limits is not None else "") if s)
+        print(f"pass device.json's limits: output at {shown} dB, tweeter {tweeter} ({sources})")
+
+
 def cmd_plugins(args):
     """The plugin identifiers of a chain document, each once, in the order of its nodes; with
     LV2 manifest.ttl files after it, only those that none of them declares as a subject: the
@@ -609,7 +754,8 @@ def cmd_write(args):
 
 COMMANDS = {"amp": (cmd_amp, 1), "node": (cmd_node, 2), "device": (cmd_device, 1), "sink": (cmd_sink, 1),
             "graph": (cmd_graph, 1), "plugins": (cmd_plugins, 1), "write": (cmd_write, 1), "drivers": (cmd_drivers, 2),
-            "stream": (cmd_stream, 2), "status": (cmd_status, 1), "timing": (cmd_timing, 0)}
+            "stream": (cmd_stream, 2), "status": (cmd_status, 1), "timing": (cmd_timing, 0),
+            "limits": (cmd_limits, 0)}
 
 
 def main():

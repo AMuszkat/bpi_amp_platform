@@ -18,7 +18,11 @@ Pass when:
 
 - the bundle holds bin/speakerd, lv2/loudness_headless.lv2, firmware/speakerd/factory.json (the
   repository's chain document, byte for byte) and a VERSION whose id is the commit, "-dirty" if
-  the tree is, and the hash of its contents; the default plugins are the headless builds of
+  the tree is, and the hash of its contents (bin/, lv2/ and firmware/: contents=bin lv2 firmware);
+  a bundle that differs only in firmware/ampd/ampd.py has another hash, and at the same commit
+  installs as a new version with that ampd, not "installed already"; a bundle from before
+  contents= (its hash over bin/ and lv2/) still installs; one whose firmware/ changed after it was
+  made is refused, nothing installed; the default plugins are the headless builds of
   loudness, crossover and firConv (DEFAULT_PLUGINS), and a bundle of them carries exactly those;
 - the repository's chain document names only the three headless URIs, with firConv's gain at
   -12 dB, and wires the board's chain: Mine into firConv, then the crossover, its low band through
@@ -79,6 +83,14 @@ Pass when:
   device.json has those limits (any limits: there is no cap), and reports, each as a failure: a `device.json: FAILED` line,
   the limits line with either fail-safe suffix (or any other), speakerd's `NO INPUT SINK
   CONFIGURED` line, and no limits line at all;
+- smoke also compares the limits speakerd reports on its local link (speakerd 0.3.4; here a
+  stand-in link), from its status while the link is free and from ampd's status.json while ampd
+  holds it (never connecting then): device.json's own passes (from both sources, within 0.001 dB),
+  a gain or a tweeter that differs fails, as does a start-up line that disagrees with the report,
+  a reported fail_safe ("no limits in device.json", "device.json not read") and a device.json
+  without limits; the report alone passes (warning that the start-up line is missing); no field
+  (speakerd 0.3.3, or ampd 0.3.2 that does not pass it on) leaves the start-up line's check as it
+  was, saying why;
 - smoke finds snapclient's stream by its application.name in pw-dump (snapclient 0.34.0's has no
   node.name, so pw-link lists its ports under an empty name) and reads its links there: into the
   speakerd sink passes, into another node (the amplifier) or into nothing warns, none is said; an
@@ -101,8 +113,10 @@ Pass when:
   warns with; the board's own and none are said as such;
 - under (stand-in) systemd, smoke on a journal that holds nothing from before speakerd.service
   became active (its start rotated out: only timing lines left) warns that the start-up lines
-  and the limits are not checked, and fails on neither; with the journal reaching back that far
-  their absence fails ('playing:', the limits), and the whole start passes;
+  and the limits are not checked (with no report: why), and fails on neither; with the journal
+  reaching back that far their absence fails ('playing:', the limits), and the whole start
+  passes; with the start rotated out and speakerd reporting its limits, they are checked: device.json's
+  passes, others and the fail-safe fail, and no "NOT checked" is said;
 - snapcast-setup.sh --route speakerd refuses while no PipeWire config defines the speakerd
   sink, and after `speakerd-setup.sh sink` routes snapclient (and shairport-sync and an
   AudioPluginHost) into "speakerd", keeping the routing there was; uninstall puts that routing
@@ -445,6 +459,45 @@ def firmware_at(repo, script, *args, env):
                           stderr=subprocess.STDOUT, text=True, timeout=120)
 
 
+class FakeLink:
+    """A stand-in for speakerd's local link at <runtime>/speakerd/control.sock, for a `with` block:
+    it says hello and answers each status with `limits` (from speakerd 0.3.4: its enforced limits;
+    None leaves the field out, as speakerd 0.3.3 and older). `accepted` counts the clients."""
+
+    def __init__(self, runtime, limits):
+        (Path(runtime) / "speakerd").mkdir(parents=True, exist_ok=True)
+        self.path, self.limits, self.accepted = Path(runtime) / "speakerd/control.sock", limits, 0
+        self.path.unlink(missing_ok=True)
+
+    def __enter__(self):
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(str(self.path))
+        self.server.listen(4)
+        threading.Thread(target=self.serve, daemon=True).start()
+        return self
+
+    def serve(self):
+        said = {} if self.limits is None else {"limits": self.limits}
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            self.accepted += 1
+            with conn:
+                try:
+                    conn.sendall(json.dumps(dict(op="hello", role="speakerd", protocol=1, version="0.3.4 (test)",
+                                                 **said)).encode() + b"\n")
+                    conn.recv(4096)
+                    conn.sendall(json.dumps(dict(op="status", **said)).encode() + b"\n")
+                except OSError:
+                    pass
+
+    def __exit__(self, *exc):
+        self.server.close()
+        self.path.unlink(missing_ok=True)
+
+
 def write_script(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -528,6 +581,78 @@ class Install(Setup):
         self.assertEqual(version["dirty"], "yes" if dirty else "no")
         self.assertRegex(version["id"], rf"^{commit[:12]}{'-dirty' if dirty else ''}-[0-9a-f]{{8}}$")
         self.assertNotEqual(version_file(self.bundle / "VERSION")["id"], version_file(self.bundle2 / "VERSION")["id"])
+
+    def test_the_bundles_id_covers_ampd_and_the_installers(self):
+        """The id hashes firmware/ as well as bin/ and lv2/ (VERSION says contents=bin lv2
+        firmware): a bundle that differs only in firmware/ampd/ampd.py (a dirty tree at one commit)
+        has another id and installs as a new version with that ampd, never "installed already"; a
+        bundle from before the line (its id over bin/ and lv2/ only) still installs; a bundle whose
+        firmware/ changed after it was made is refused."""
+        def scratch_firmware(name, change=None):
+            repo = self.tmp / name
+            shutil.rmtree(repo, ignore_errors=True)
+            (repo / "firmware").mkdir(parents=True)
+            for script in ("setup.sh", "install-lib.sh", "speakerd-setup.sh", "snapcast-setup.sh", "ampd-setup.sh"):
+                shutil.copy2(FIRMWARE / script, repo / "firmware" / script)
+            for folder in ("speakerd", "ampd", "pipewire"):
+                shutil.copytree(FIRMWARE / folder, repo / "firmware" / folder)
+            if change:
+                with (repo / "firmware/ampd/ampd.py").open("a") as f:
+                    f.write(change)
+            out = self.tmp / f"bundle-{name}"
+            shutil.rmtree(out, ignore_errors=True)
+            firmware_at(repo, "speakerd-setup.sh", "bundle", "--arch", "native", "--out", out,
+                        "--plugin", "loudness:headless", env={"BUILD_ROOT": str(self.root)})
+            return out
+
+        def suffix(bundle):
+            return version_file(bundle / "VERSION")["id"].rsplit("-", 1)[1]
+
+        mark = "\n# changed ampd (test)\n"
+        same, changed = scratch_firmware("ampd-same"), scratch_firmware("ampd-changed", mark)
+        self.assertEqual(version_file(self.bundle / "VERSION")["contents"], "bin lv2 firmware")
+        self.assertEqual(suffix(same), suffix(self.bundle), "the same contents, another id")
+        self.assertNotEqual(suffix(changed), suffix(self.bundle), "a bundle whose ampd differs has the same id")
+        # At one commit (one id prefix), only ampd.py changed: a new version, with that ampd.
+        prefix = version_file(self.bundle / "VERSION")["id"].rsplit("-", 1)[0]
+        text = (changed / "VERSION").read_text()
+        (changed / "VERSION").write_text(re.sub(r"(?m)^id=.*$", f"id={prefix}-{suffix(changed)}", text))
+        home = self.fresh_home("ampd-id")
+        self.install(home, "--role", "left")
+        result = firmware_at(changed, "speakerd-setup.sh", "install", "--bundle", changed, "--home", home,
+                             "--no-systemd", "--amplifier", "amplifier", env=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("installed already", result.stdout)
+        self.assertIn(f"Installed version {prefix}-{suffix(changed)}", result.stdout)
+        current = home / ".local/lib/speakerd/current"
+        self.assertEqual(os.readlink(current), f"{prefix}-{suffix(changed)}")
+        self.assertTrue((current / "bin/ampd").read_text().endswith(mark))
+
+        # A bundle from before contents=: its id over bin/ and lv2/, and so it is checked.
+        old = self.tmp / "bundle-before-contents"
+        shutil.rmtree(old, ignore_errors=True)
+        shutil.copytree(self.bundle, old, symlinks=True)
+        old_hash = subprocess.run(["bash", "-c", "cd \"$1\" && find bin lv2 -type f -print0 | LC_ALL=C sort -z | "
+                                   "xargs -0 -r sha256sum | sha256sum | cut -c1-8", "-", str(old)],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        lines = [line for line in (old / "VERSION").read_text().splitlines() if not line.startswith("contents=")]
+        (old / "VERSION").write_text("".join((f"id={prefix}-{old_hash}" if line.startswith("id=") else line) + "\n"
+                                             for line in lines))
+        result = self.install(self.fresh_home("before-contents"), "--role", "left", bundle=old, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"Installed version {prefix}-{old_hash}", result.stdout)
+
+        # firmware/ changed after the bundle was made: refused.
+        tampered = self.tmp / "bundle-tampered"
+        shutil.rmtree(tampered, ignore_errors=True)
+        shutil.copytree(self.bundle, tampered, symlinks=True)
+        with (tampered / "firmware/ampd/ampd.py").open("a") as f:
+            f.write(mark)
+        home = self.fresh_home("tampered")
+        result = self.install(home, "--role", "left", bundle=tampered, check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("the bundle's contents (bin lv2 firmware) do not match its VERSION", result.stdout)
+        self.assertFalse((home / ".local/lib/speakerd").exists(), tree(home))
 
     def test_refuses_a_speakerd_that_ignores_the_limits(self):
         home = self.fresh_home("old-speakerd")
@@ -1040,6 +1165,99 @@ class Install(Setup):
                           "--window", "0", env=self.env, check=False)
         self.assertIn("FAIL device.json cannot be read", result.stdout)
         self.assertRegex(result.stdout, r"smoke: \d+ failed")
+
+    def test_smoke_checks_the_limits_speakerd_reports(self):
+        """From speakerd 0.3.4 smoke also compares the limits speakerd reports on its local link
+        (its status, read by smoke while the link is free; ampd's status.json while ampd holds it)
+        with device.json's: the same rules as the start-up line's, and both there must agree."""
+        home = self.fresh_home("smoke-reported")
+        self.install(home, "--role", "left")
+        device_json = home / ".local/state/speakerd/device.json"
+        device_json.write_text(json.dumps(dict(json.loads(device_json.read_text()), limits=CAPPED)))
+        start = "speakerd-run: starting speakerd x from layer current (test)"
+        runtime = self.tmp / "reported-runtime"
+        env = dict(self.env, XDG_RUNTIME_DIR=str(runtime))
+        capped = {"gain_db": -20.0, "tweeter": "muted", "fail_safe": None}
+        passed = "pass device.json's limits: output at -20 dB, tweeter muted"
+        # Every failure of the limits check begins with one of these.
+        limits_fails = ["FAIL speakerd reports", "FAIL speakerd says", "FAIL speakerd's start-up line",
+                        "FAIL speakerd did not say which limits", "FAIL device.json has no limits",
+                        "FAIL speakerd does not play"]
+        cases = {
+            # name: (the log, what speakerd reports (None: no field), what must be said, what must not)
+            "both agree": ([start, LIMITS], capped,
+                           [passed + " (its start-up line and its status)"], limits_fails),
+            "within 0.001 dB": ([start, LIMITS], dict(capped, gain_db=-20.0004), [passed], limits_fails),
+            "gain differs": ([start, LIMITS], dict(capped, gain_db=-19.0),
+                             ["FAIL speakerd reports output at -19 dB, tweeter muted (its status); device.json says "
+                              "output at -20.0 dB, tweeter muted",
+                              "FAIL speakerd's start-up line says 'output at -20 dB, tweeter muted' but it reports "
+                              "output at -19 dB, tweeter muted (its status)"], [passed]),
+            "tweeter differs": ([start, LIMITS], dict(capped, tweeter="on"),
+                                ["FAIL speakerd reports output at -20 dB, tweeter on (its status); device.json says "
+                                 "output at -20.0 dB, tweeter muted"], [passed]),
+            "fail-safe": ([start, LIMITS], dict(capped, fail_safe="no limits in device.json"),
+                          ["FAIL speakerd reports its fail-safe limits (no limits in device.json): output at -20 dB, "
+                           "tweeter muted (its status)"], [passed]),
+            "not read": ([start], dict(capped, fail_safe="device.json not read"),
+                         ["FAIL speakerd reports its fail-safe limits (device.json not read)"], [passed]),
+            "reported only": ([start], capped,
+                              [passed + " (its status)",
+                               "warn speakerd's start-up line 'device: limits:' is not in its log since its start"],
+                              ["FAIL speakerd did not say which limits"]),
+            "no field": ([start, LIMITS], None,
+                         [passed + " (its start-up line)", "info the limits come from speakerd's start-up line only: "
+                          "this speakerd does not report them (speakerd 0.3.4 and later do)"], limits_fails),
+            "no field, no line": ([start], None, ["FAIL speakerd did not say which limits it enforces"], [passed]),
+        }
+        for name, (lines, limits, said, unsaid) in cases.items():
+            with self.subTest(name), FakeLink(runtime, limits) as link:
+                log = self.tmp / "smoke-reported.log"
+                log.write_text("\n".join(lines) + "\n")
+                result = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                                  "--window", "0", env=env, check=False)
+                out = result.stdout
+                print(f"\n  {name}:\n" + "".join(f"  {line}\n" for line in out.splitlines() if "limits" in line))
+                self.assertGreater(link.accepted, 0, out)
+                for text in said:
+                    self.assertIn(text, out, name)
+                for text in unsaid:
+                    self.assertNotIn(text, out, name)
+        # device.json without limits fails, whatever speakerd reports.
+        device_json.write_text(json.dumps({k: v for k, v in json.loads(device_json.read_text()).items() if k != "limits"}))
+        with FakeLink(runtime, dict(capped, fail_safe="no limits in device.json")):
+            log.write_text(start + "\n")
+            out = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                           "--window", "0", env=env, check=False).stdout
+        self.assertIn("FAIL speakerd reports its fail-safe limits (no limits in device.json): output at -20 dB, "
+                      "tweeter muted (its status); device.json says no limits", out)
+        device_json.write_text(json.dumps(dict(json.loads(device_json.read_text()), limits=CAPPED)))
+
+        # ampd holds the link: smoke does not knock, it reads ampd's status.json (its process
+        # alive, connected): the limits there, or why there are none.
+        (runtime / "ampd").mkdir(parents=True, exist_ok=True)
+        ampd_says = {"ampd": "0.3.3", "pid": os.getpid(),
+                     "speakerd": {"connected": True, "layer": "current", "revision": 3, "version": "0.3.4 (test)"}}
+        for name, speakerd, said in (
+                ("ampd's", {"limits": capped}, passed + " (its start-up line and its status, through ampd's link)"),
+                ("ampd's, it differs", {"limits": dict(capped, tweeter="on")},
+                 "FAIL speakerd reports output at -20 dB, tweeter on (its status, through ampd's link)"),
+                ("speakerd 0.3.3", {"limits": None, "version": "0.3.3 (test)"},
+                 "info the limits come from speakerd's start-up line only: speakerd 0.3.3 (test) does not report "
+                 "them (speakerd 0.3.4 and later do)"),
+                ("ampd 0.3.2", {}, "info the limits come from speakerd's start-up line only: ampd 0.3.2 does not pass "
+                                   "them on (ampd 0.3.3 and later do)")):
+            with self.subTest(name), FakeLink(runtime, capped) as link:
+                status = dict(ampd_says, speakerd=dict(ampd_says["speakerd"], **speakerd))
+                if name == "ampd 0.3.2":
+                    status["ampd"] = "0.3.2"
+                (runtime / "ampd/status.json").write_text(json.dumps(status))
+                log.write_text("\n".join([start, LIMITS]) + "\n")
+                out = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                               "--window", "0", env=env, check=False).stdout
+                self.assertEqual(link.accepted, 0, out)
+                self.assertIn(said, out)
+        (runtime / "ampd/status.json").unlink()
 
     def test_status_and_smoke_say_an_old_pipewire_conf(self):
         """status and smoke compare ~/.config/pipewire/pipewire.conf with this version's
@@ -1890,6 +2108,8 @@ class Systemd(Setup):
                     self.assertIn(f"warn {gone_said}", out)
                     self.assertIn("warn the limits speakerd enforces are NOT checked: its 'device: limits:' line is no "
                                   "longer in the journal (device.json says output at 0.0 dB, tweeter on)", out)
+                    self.assertIn("(device.json says output at 0.0 dB, tweeter on), and speakerd's status could not "
+                                  "be read (", out)
                     self.assertIn("raise RuntimeMaxUse=", out)
                     self.assertNotIn(playing_failed, out)
                     self.assertNotIn(limits_failed, out)
@@ -1903,6 +2123,29 @@ class Systemd(Setup):
                     else:
                         self.assertIn(playing_failed, out)
                         self.assertIn(limits_failed, out)
+        # The start rotated out, and speakerd reports its limits (0.3.4): they are checked all the same.
+        runtime = self.tmp / "journal-lost-runtime"
+        reported = dict(OPEN, fail_safe=None)
+        for name, limits, said in (
+                ("reported", reported, "pass device.json's limits: output at 0 dB, tweeter on (its status)"),
+                ("reported, another", dict(reported, gain_db=-6.0),
+                 "FAIL speakerd reports output at -6 dB, tweeter on (its status); device.json says output at 0.0 dB, "
+                 "tweeter on"),
+                ("reported, the fail-safe", dict(reported, gain_db=-20.0, tweeter="muted", fail_safe="device.json not read"),
+                 "FAIL speakerd reports its fail-safe limits (device.json not read)")):
+            with self.subTest(name):
+                d, env = self.systemd(f"journal-{name.replace(' ', '-').replace(',', '')}", [minute])
+                (d / "show-ActiveEnterTimestamp").write_text("Thu 2026-11-05 08:00:00 UTC\n")
+                (d / "until").write_text("")
+                with FakeLink(runtime, limits):
+                    out = firmware("speakerd-setup.sh", "smoke", "--home", home, "--window", "0",
+                                   env=dict(env, XDG_RUNTIME_DIR=str(runtime)), check=False).stdout
+                print(f"\n  {name}:\n" + "".join(f"  {line}\n" for line in out.splitlines() if "limits" in line))
+                self.assertIn(f"warn {gone_said}", out)
+                self.assertIn(said, out)
+                self.assertNotIn("the limits speakerd enforces are NOT checked", out)
+                self.assertNotIn("is not in its log since its start", out)
+                self.assertNotIn(limits_failed, out)
 
     def test_setup_stops_on_a_failed_pipewire_restart(self):
         d, env = self.systemd("restart-fails", fail=["restart pipewire.service"])

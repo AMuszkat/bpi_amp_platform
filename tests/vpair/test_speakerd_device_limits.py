@@ -28,10 +28,17 @@ Pass when:
   limits in device.json: the fail-safe)`; one with a misspelt `"limts"`, one that is not valid
   JSON and a missing one each say `device.json: FAILED` and `... tweeter muted (device.json not
   read: the fail-safe)`; and each plays the boost document at -1 dBFS with the tweeter at exact
-  zeros and the woofer at no more than -20 dBFS (and above -30 dBFS: it plays).
+  zeros and the woofer at no more than -20 dBFS (and above -30 dBFS: it plays);
+- speakerd reports the limits it enforces on its local link, in its hello and in its answer to
+  `status`, the same in both: `"limits": {"gain_db": 0, "tweeter": "on", "fail_safe": null}` and
+  `{-20, "muted", null}` for those two device.json (gain within 0.001 dB), `{-20, "muted", "no
+  limits in device.json"}` for the file without limits, and `{-20, "muted", "device.json not
+  read"}` for the misspelt, the broken and the missing one (what firmware/speakerd-setup.sh smoke
+  compares with device.json once a board's journal has lost speakerd's start-up line).
 
 These need speakerd 0.2.0, which came after commit 2cb3278: against an older speakerd they
-fail, and say so.
+fail, and say so. The reported limits need speakerd 0.3.4: against an older one those
+assertions fail with "needs speakerd 0.3.4: no limits in its hello".
 
     python3 -m unittest -v tests.vpair.test_speakerd_device_limits
 """
@@ -41,8 +48,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import (NO_LIMITS, Pair, Speakerd, active, built, graph_document, lv2_uri, peak_dbfs, render,
-                     rms_dbfs, state_dir, steady, tone)
+from harness import (NO_LIMITS, Pair, Speakerd, SpeakerdLink, active, built, graph_document, lv2_uri, peak_dbfs,
+                     render, rms_dbfs, state_dir, steady, tone)
 
 import numpy as np
 
@@ -65,6 +72,7 @@ LIMITS = "speakerd: device: limits: output at {} dB, tweeter {}"
 NO_LIMITS_IN_FILE = LIMITS.format(-20, "muted") + " (no limits in device.json: the fail-safe)"
 NOT_READ = LIMITS.format(-20, "muted") + " (device.json not read: the fail-safe)"
 FAILED = "speakerd: device.json: FAILED"
+REPORTED_HINT = "needs speakerd 0.3.4: no limits in its hello"
 HINT = ("\n  (this needs speakerd's fail-closed device.json limits, which came after 2cb3278: an older "
         "speakerd ignores them)")
 
@@ -93,8 +101,23 @@ class DeviceLimits(unittest.TestCase):
         with Speakerd(self.speaker, state, bundles=[self.headless] if bundles is None else bundles) as sd:
             captures = [self.speaker.play_and_record(x, target="speakerd", record_target=amplifier, fmt="f32")
                         for x in samples]
+            # What it reports it enforces, on its local link (speakerd 0.3.4): hello and status.
+            with SpeakerdLink(self.speaker) as link:
+                self.reported = (link.hello, link.status())
             log = sd.log()
         return log, captures
+
+    def check_reported(self, what, gain_db, tweeter, fail_safe):
+        """The last live() speakerd's hello and status both said these limits."""
+        for name, message in zip(("hello", "status"), self.reported):
+            said = message.get("limits", "missing")
+            print(f"\n  {what}: its {name} says limits {said}")
+            if name == "hello":
+                self.assertIn("limits", message, f"{what}: {REPORTED_HINT}: {message}")
+            self.assertIsInstance(said, dict, f"{what}: its {name}'s limits: {said} ({REPORTED_HINT})")
+            self.assertEqual(set(said), {"gain_db", "tweeter", "fail_safe"}, f"{what}: its {name}: {said}")
+            self.assertAlmostEqual(said["gain_db"], gain_db, delta=0.001, msg=f"{what}: its {name}: {said}")
+            self.assertEqual((said["tweeter"], said["fail_safe"]), (tweeter, fail_safe), f"{what}: its {name}: {said}")
 
     def check_capped(self, what, capture, ceiling_dbfs=-20.0, floor_dbfs=None):
         woofer, tweeter = capture[:, 0], capture[:, 1]
@@ -112,6 +135,7 @@ class DeviceLimits(unittest.TestCase):
         unlimited = state_dir(self.tmp / "unlimited", current=DOCUMENT, limits=NO_LIMITS)
         limited = state_dir(self.tmp / "limited", current=DOCUMENT, limits=CAP)
         open_log, (open_capture,) = self.live(unlimited, [TONE])
+        open_reported = self.reported
         log, (capture, hot) = self.live(limited, [TONE, HOT])
         self.assertIn(LIMITS.format(0, "on"), open_log.splitlines(), HINT)
         self.assertIn(LIMITS.format(-20, "muted"), log.splitlines(), HINT)
@@ -121,6 +145,9 @@ class DeviceLimits(unittest.TestCase):
         self.assertEqual(np.count_nonzero(capture[:, 1]), 0, f"the tweeter is not muted: {summary}{HINT}")
         self.assertAlmostEqual(capped, reference - 20.0, delta=TOLERANCE_DB, msg=summary + HINT)
         self.check_capped("live, +6 dBFS in", hot)
+        self.check_reported("limited", -20, "muted", None)
+        self.reported = open_reported
+        self.check_reported("unlimited", 0, "on", None)
 
         rendered_open, _ = render(unlimited, TONE, bundles=[self.headless])
         rendered, _ = render(limited, TONE, bundles=[self.headless])
@@ -154,12 +181,13 @@ class DeviceLimits(unittest.TestCase):
     def test_fail_safe(self):
         good = {"version": 1, "role": "left", "amplifier": {"node": "amplifier"}}
         cases = [
-            ("no limits", good, "amplifier", [NO_LIMITS_IN_FILE]),
-            ("misspelt limts", dict(good, limts=NO_LIMITS), DEFAULT_AMPLIFIER, [FAILED, NOT_READ]),
-            ("not JSON", '{"version": 1, "role": "left", "limits": {', DEFAULT_AMPLIFIER, [FAILED, NOT_READ]),
-            ("missing", False, DEFAULT_AMPLIFIER, [FAILED, NOT_READ]),
+            ("no limits", good, "amplifier", [NO_LIMITS_IN_FILE], "no limits in device.json"),
+            ("misspelt limts", dict(good, limts=NO_LIMITS), DEFAULT_AMPLIFIER, [FAILED, NOT_READ], "device.json not read"),
+            ("not JSON", '{"version": 1, "role": "left", "limits": {', DEFAULT_AMPLIFIER, [FAILED, NOT_READ],
+             "device.json not read"),
+            ("missing", False, DEFAULT_AMPLIFIER, [FAILED, NOT_READ], "device.json not read"),
         ]
-        for name, device, amplifier, said in cases:
+        for name, device, amplifier, said, fail_safe in cases:
             with self.subTest(name):
                 state = state_dir(self.tmp / f"fail-safe-{name.replace(' ', '-')}", current=BOOST, device=device)
                 log, (capture,) = self.live(state, [LOUD], amplifier=amplifier)
@@ -169,6 +197,7 @@ class DeviceLimits(unittest.TestCase):
                     found = any(have.startswith(line) for have in lines) if line == FAILED else line in lines
                     self.assertTrue(found, f"{name}: speakerd did not say {line!r}; it said {device_lines}{HINT}")
                 self.check_capped(f"{name}, into {amplifier}", capture, floor_dbfs=-30.0)
+                self.check_reported(name, -20, "muted", fail_safe)
 
 
 if __name__ == "__main__":
