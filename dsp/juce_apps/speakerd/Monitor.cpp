@@ -240,9 +240,19 @@ namespace speakerd
         return v;
     }
 
+    void Monitor::logSummary (Clock::time_point now)
+    {
+        // The seconds the line covers, whole: at least 1, for the part of a second a graph played.
+        const auto seconds = juce::jmax (1, juce::roundToInt (std::chrono::duration<double> (now - lastSummary).count()));
+        log ("timing: last " + juce::String (seconds) + " s: " + timingSinceSummary.describe());
+        timingSinceSummary = {};
+        lastSummary = now;
+    }
+
     void Monitor::drainTiming (Clock::time_point now)
     {
         const bool watched = streams.count (timingStream) > 0;
+        bool graphChanged = false;
 
         engine.drainTiming ([&] (const TimingRecord& r)
         {
@@ -254,8 +264,24 @@ namespace speakerd
                 namesSerial = r.graphSerial;
             }
 
+            // A new graph: the summary of the old one's cycles is due now, before this cycle.
+            if (r.graphRan)
+            {
+                if (summarySerialKnown && r.graphSerial != summarySerial)
+                {
+                    if (timingSinceSummary.cycles > 0)
+                        logSummary (now);
+
+                    graphChanged = true;
+                }
+
+                summarySerial = r.graphSerial;
+                summarySerialKnown = true;
+            }
+
             const auto* known = r.graphRan && namesKnown && r.graphSerial == namesSerial ? &names : nullptr;
             timingThisSecond.add (r, known);
+            timingSinceSummary.add (r, known);
 
             if (watched)
                 timingSinceValue.add (r, known);
@@ -265,6 +291,10 @@ namespace speakerd
             jumpsTotal += r.positionJump ? 1 : 0;
         });
 
+        // The new graph's first summary comes on the busy cadence, as after a late second.
+        if (graphChanged)
+            summaryDue = now + std::chrono::seconds (timingBusySummarySeconds);
+
         if (now - secondStarted < std::chrono::seconds (1))
             return;
 
@@ -272,9 +302,14 @@ namespace speakerd
         const auto& second = timingThisSecond;
 
         if (second.late > 0 || second.jumps > 0)
+        {
             log ("timing: in the last second " + juce::String (second.late) + " late cycle(s), the longest at "
                  + juce::String (100.0 * second.cycle.max, 1) + " % of its cycle; " + juce::String (second.jumps)
                  + " position jump(s)");
+
+            // While something happens, a summary at least once a minute.
+            summaryDue = juce::jmin (summaryDue, now + std::chrono::seconds (timingBusySummarySeconds));
+        }
 
         lastMinute.push_back (second);
 
@@ -284,15 +319,10 @@ namespace speakerd
         timingThisSecond = {};
         secondStarted = now;
 
-        if (now - lastSummary >= std::chrono::seconds (timingLogSeconds))
+        if (now >= summaryDue)
         {
-            TimingStats minute;
-
-            for (const auto& s : lastMinute)
-                minute.merge (s);
-
-            log ("timing: last " + juce::String ((int) lastMinute.size()) + " s: " + minute.describe());
-            lastSummary = now;
+            logSummary (now);
+            summaryDue = now + std::chrono::seconds (timingQuietSummarySeconds);
         }
     }
 
@@ -315,6 +345,7 @@ namespace speakerd
 
         std::unique_lock<std::mutex> guard (lock);
         secondStarted = lastSummary = Clock::now();
+        summaryDue = lastSummary + std::chrono::seconds (timingFirstSummarySeconds);
 
         while (! stopping)
         {

@@ -254,23 +254,46 @@ namespace speakerd
         }
     }
 
-    juce::String DeviceConfig::Limits::describe() const
+    juce::String DeviceConfig::Limits::gainText() const
     {
         char gain[32];
         std::snprintf (gain, sizeof gain, "%g", gainDb);
-        return "output at " + juce::String (gain) + " dB, tweeter " + (tweeterMuted ? "muted" : "on");
+        return gain;
+    }
+
+    juce::String DeviceConfig::Limits::describe() const
+    {
+        return "output at " + gainText() + " dB, tweeter " + (tweeterMuted ? "muted" : "on");
+    }
+
+    juce::String DeviceConfig::failSafeReason() const
+    {
+        switch (limitsFrom)
+        {
+            case LimitsFrom::file:        return {};
+            case LimitsFrom::notInFile:   return "no limits in device.json";
+            case LimitsFrom::fileNotRead: return "device.json not read";
+        }
+
+        return {};
     }
 
     juce::String DeviceConfig::describeLimits() const
     {
-        switch (limitsFrom)
-        {
-            case LimitsFrom::file:        return limits.describe();
-            case LimitsFrom::notInFile:   return limits.describe() + " (no limits in device.json: the fail-safe)";
-            case LimitsFrom::fileNotRead: return limits.describe() + " (device.json not read: the fail-safe)";
-        }
+        const auto reason = failSafeReason();
+        return limits.describe() + (reason.isEmpty() ? juce::String() : " (" + reason + ": the fail-safe)");
+    }
 
-        return limits.describe();
+    juce::var DeviceConfig::limitsObject() const
+    {
+        auto* o = new juce::DynamicObject();
+        const auto reason = failSafeReason();
+
+        // The gain the log line prints, read back: the same number, to the digits it shows.
+        o->setProperty ("gain_db", limits.gainText().getDoubleValue());
+        o->setProperty ("tweeter", limits.tweeterMuted ? "muted" : "on");
+        o->setProperty ("fail_safe", reason.isEmpty() ? juce::var() : juce::var (reason));
+        return juce::var (o);
     }
 
     juce::Result DeviceConfig::parse (const juce::String& text, DeviceConfig& out)

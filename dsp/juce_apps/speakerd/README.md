@@ -20,7 +20,10 @@ build each plugin node runs ([Which build it is](#command-line)). 0.3.2 knows th
 buffer size, its top-level `quantum` ([Rate and block size](#in-pipewire)): it refuses an apply
 whose size its PipeWire does not allow, forces the size of the document in force as PipeWire's
 `clock.force-quantum`, and reports the rate and the quantum it runs at to `ampd`. 0.3.3 connects
-to no X server, nor do its plugins ([No X display](#no-x-display)).
+to no X server, nor do its plugins ([No X display](#no-x-display)). 0.3.4 reports the output
+limits it enforces in the local link's hello and status ([What speakerd sends](#what-speakerd-sends)),
+and logs its [timing](#timing) summary every 10 minutes while nothing happens instead of once a
+minute.
 
 ## Command line
 
@@ -593,7 +596,7 @@ version 1; this is what speakerd does with it. A Unix stream socket, by default
 
 | Message | When |
 |---|---|
-| `{"op":"hello","role":"speakerd","version":"0.3.2 (<commit>)","revision":8,"layer":"current","protocol":1,"rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512}` | first, on every connection, also after a reconnect |
+| `{"op":"hello","role":"speakerd","version":"0.3.4 (<commit>)","revision":8,"layer":"current","protocol":1,"rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512,"limits":{"gain_db":-20,"tweeter":"muted","fail_safe":null}}` | first, on every connection, also after a reconnect |
 | the same fields with `"op":"status"`, and `"timing"` | the answer to `{"op":"status"}`; `timing` is the last minute's ([Timing](#timing)) |
 | the hello's fields with `"op":"status"`, no `timing` | unasked, whenever the rate or the quantum the cycles run at changes (from the message thread's 20 ms timer, never the audio thread); also once the first cycle has run, when `quantum` stops being `null`; never before that connection's hello, which is queued first |
 | `{"op":"applied","revision":8}` | an `apply` built, swapped in, and the audio thread has run a cycle of it (or 200 ms went by with no cycle: nothing is linked) |
@@ -606,7 +609,14 @@ version 1; this is what speakerd does with it. A Unix stream socket, by default
 for passthrough. `rate` is the rate the graph runs at, `quantum` the size of the cycles now
 (`null` before the first cycle), `quantum_range` the sizes a document's `quantum` may take here
 (`[lo, hi]`, powers of two, [Rate and block size](#in-pipewire)) and `quantum_default`
-PipeWire's `default.clock.quantum`, the size of a document without one (from 0.3.2). `layer` is the state layer it came from at boot (`current`, `last-known-good`,
+PipeWire's `default.clock.quantum`, the size of a document without one (from 0.3.2). `limits`
+(from 0.3.4) are the [output limits](#devicejson) the audio thread applies, read from
+`device.json` once at start, so the same in every hello and status of the process, and exactly
+what the `device: limits:` start line says ([Log lines](#log-lines)): `gain_db` the gain it
+prints (`-20`, `-6.5`, `0`), `tweeter` `"muted"` or `"on"`, and `fail_safe` `null` when they are
+`device.json`'s `limits`, or the reason they are the fail-safe, the words of the line's suffix:
+`"no limits in device.json"` or `"device.json not read"` (missing or invalid). A board's journal
+may have lost that line; the status still says it. `layer` is the state layer it came from at boot (`current`, `last-known-good`,
 `factory`, `passthrough`), and `current` once a revision has been applied (`ampd` writes every
 applied revision as `graph.json`, the current layer). `version` is what `--version` prints after
 `speakerd `.
@@ -742,8 +752,15 @@ cycle, and the cycles that took too long.
   - the stream `speakerd/timing`, for a subscriber, each value covering the cycles since the
     previous one;
   - `status`, under `timing`: the last minute (its complete seconds, `seconds`);
-  - the log: once a minute, `timing: last 60 s: ...`; and at most once a second, in a second with
-    a late cycle or a position jump, `timing: in the last second ...` (Log lines).
+  - the log: a summary of every cycle since the previous summary, `timing: last <n> s: ...`
+    (`<n>` the seconds it covers): the first a minute after start, then **every 10 minutes**
+    while nothing happens, **at most a minute after a second with a late cycle or a position
+    jump** (so once a minute while they go on), and **at once when the graph changes** (an
+    applied revision: it covers the old graph's cycles, and the new graph's first one comes a
+    minute later). And at most once a second, in a second with a late cycle or a position jump,
+    `timing: in the last second ...` (Log lines). Until 0.3.3 the summary came once a minute,
+    which on a board (a volatile journal of 20 MB) pushed the start-up lines out within about 12
+    hours.
 
 The object, in `speakerd/timing` values and `status`:
 
@@ -867,7 +884,7 @@ stable.
 
 | Line | When |
 |---|---|
-| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf`; 0.3.0 has the local link, the Mine channel and the monitors; 0.3.1 logs the build of each plugin node it runs (`plugin node` lines); 0.3.2 is the first that knows the document's `quantum` (and reports `rate`, `quantum`, `quantum_range`, `quantum_default`) |
+| `speakerd <version> (<commit>), state dir <dir>` | always, first (not with `--import-filtergraph`). `speakerd --version` prints the same version and commit. 0.2.0 is the first speakerd that knows `limits`; 0.2.1 makes its own sink at `priority.driver = 0` and says so loudly, and asks for a real-time thread through `client-rt.conf`; 0.3.0 has the local link, the Mine channel and the monitors; 0.3.1 logs the build of each plugin node it runs (`plugin node` lines); 0.3.2 is the first that knows the document's `quantum` (and reports `rate`, `quantum`, `quantum_range`, `quantum_default`); 0.3.3 connects to no X server; 0.3.4 reports its `limits` in the hello and status, and logs the timing summary every 10 minutes while nothing happens |
 | `device.json: FAILED: <reason>; using the defaults` | `device.json` missing or invalid, its `limits` included; the defaults are limited (see device.json) |
 | `device: role <role>, amplifier '<node>' (woofer <port>, tweeter <port>)` | always, at start |
 | `device: limits: output at <gain> dB, tweeter <muted\|on>`, followed by ` (no limits in device.json: the fail-safe)` or ` (device.json not read: the fail-safe)` when they are the fail-safe | always, right after the line before. `<gain>` is printed as `%g` does: `-20`, `-6.5`, `0`. No limit at all reads `output at 0 dB, tweeter on` |
@@ -923,7 +940,7 @@ stable.
 | `monitor: the client went: <k> subscription(s) ended` | the connection closed with subscriptions |
 | `timing: a clock read costs <x> ns` | at start: what one read of the monotonic clock costs here: tens of ns is the vDSO, about a microsecond a syscall (a Cortex-A73 with the erratum 858921 workaround) |
 | `timing: in the last second <k> late cycle(s), the longest at <x> % of its cycle; <j> position jump(s)` | at most once a second, in a second with a late cycle or a position jump |
-| `timing: last <n> s: node <uid> (<name>) mean <x> % max <y> %; ...; graph mean ... max ...; cycle mean ... max ...; <c> cycles, <l> late, <j> position jump(s)` | once a minute |
+| `timing: last <n> s: node <uid> (<name>) mean <x> % max <y> %; ...; graph mean ... max ...; cycle mean ... max ...; <c> cycles, <l> late, <j> position jump(s)` | the cycles of the `<n>` seconds since the last one: first a minute after start, then every 10 minutes, at most a minute after a second with a late cycle or a position jump, and at once when the graph changes (the old graph's cycles; at least `1 s`) ([Timing](#timing)). Once a minute until 0.3.3 |
 | `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after another speakerd was found or a sink or filter could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0). Nothing is logged after it; speakerd makes no new link once it has said it, and the output fades out through the links it has |
 | `render: <n> samples at <rate> Hz in blocks of <b>, layer <layer>, written to <path>` | the render is done |
 | `render: <reason>` | the render failed; exit status 4 follows |
