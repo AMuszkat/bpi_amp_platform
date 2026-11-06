@@ -756,8 +756,10 @@ cycle, and the cycles that took too long.
     (`<n>` the seconds it covers): the first a minute after start, then **every 10 minutes**
     while nothing happens, **at most a minute after a second with a late cycle or a position
     jump** (so once a minute while they go on), and **at once when the graph changes** (an
-    applied revision: it covers the old graph's cycles, and the new graph's first one comes a
-    minute later). And at most once a second, in a second with a late cycle or a position jump,
+    applied revision, from passthrough or from another graph, or the first graph after start:
+    it covers what ran before, and the new graph's first one comes at most a minute later; a
+    summary due sooner stays due). A cycle in which no graph ran (during an install or a
+    re-prepare) is no change of its own: it counts in the period it falls in. And at most once a second, in a second with a late cycle or a position jump,
     `timing: in the last second ...` (Log lines). Until 0.3.3 the summary came once a minute,
     which on a board (a volatile journal of 20 MB) pushed the start-up lines out within about 12
     hours.
@@ -940,7 +942,7 @@ stable.
 | `monitor: the client went: <k> subscription(s) ended` | the connection closed with subscriptions |
 | `timing: a clock read costs <x> ns` | at start: what one read of the monotonic clock costs here: tens of ns is the vDSO, about a microsecond a syscall (a Cortex-A73 with the erratum 858921 workaround) |
 | `timing: in the last second <k> late cycle(s), the longest at <x> % of its cycle; <j> position jump(s)` | at most once a second, in a second with a late cycle or a position jump |
-| `timing: last <n> s: node <uid> (<name>) mean <x> % max <y> %; ...; graph mean ... max ...; cycle mean ... max ...; <c> cycles, <l> late, <j> position jump(s)` | the cycles of the `<n>` seconds since the last one: first a minute after start, then every 10 minutes, at most a minute after a second with a late cycle or a position jump, and at once when the graph changes (the old graph's cycles; at least `1 s`) ([Timing](#timing)). Once a minute until 0.3.3 |
+| `timing: last <n> s: node <uid> (<name>) mean <x> % max <y> %; ...; graph mean ... max ...; cycle mean ... max ...; <c> cycles, <l> late, <j> position jump(s)` | the cycles of the `<n>` seconds since the last one: first a minute after start, then every 10 minutes, at most a minute after a second with a late cycle or a position jump, and at once when the graph changes, passthrough to a graph included (the cycles of what ran before; at least `1 s`) ([Timing](#timing)). Once a minute until 0.3.3 |
 | `stopping` | the last line of the live mode, once, whatever the reason: after `lost PipeWire` (exit 3), after another speakerd was found or a sink or filter could not be started (exit 3), or on SIGINT, SIGTERM, SIGHUP at any point (exit 0). Nothing is logged after it; speakerd makes no new link once it has said it, and the output fades out through the links it has |
 | `render: <n> samples at <rate> Hz in blocks of <b>, layer <layer>, written to <path>` | the render is done |
 | `render: <reason>` | the render failed; exit status 4 follows |

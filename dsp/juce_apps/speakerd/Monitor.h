@@ -48,8 +48,9 @@ namespace speakerd
         summary of the cycles since the last one (`timing: last <n> s:`): the first
         timingFirstSummarySeconds after it starts, then every timingQuietSummarySeconds while
         nothing happens, at most timingBusySummarySeconds after a second with a late cycle or a
-        position jump, and at once when the graph changes (covering the old graph's cycles; the
-        next one is due timingBusySummarySeconds later). A board's journal is small: this keeps
+        position jump, and at once when the graph changes (one graph for another, passthrough
+        included, or the first graph after start; covering what ran before; the next one is due
+        at most timingBusySummarySeconds later). A board's journal is small: this keeps
         the summaries from pushing the start-up lines out. Before any of that it measures what a
         clock read costs, and logs it.
 
@@ -129,8 +130,8 @@ namespace speakerd
         Clock::time_point secondStarted;
         TimingStats timingSinceSummary;                     // every cycle since the last summary line
         Clock::time_point lastSummary, summaryDue;
-        juce::uint32 summarySerial = 0;                     // the graph timingSinceSummary's cycles ran
-        bool summarySerialKnown = false;
+        juce::uint32 summarySerial = 0;                     // the last graph that ran
+        bool summarySerialKnown = false;                    // false: no graph has run yet
         juce::uint32 namesSerial = 0;
         bool namesKnown = false;
         TimingStats::NodeNames names;
