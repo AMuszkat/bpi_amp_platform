@@ -181,7 +181,23 @@ BUNDLE_CONTENTS="bin lv2 firmware"
 contents_hash() {   # $1 = bundle folder, $2 = the folders (default BUNDLE_CONTENTS)
     local folders
     read -r -a folders <<< "${2:-$BUNDLE_CONTENTS}"
+    # A folder the bundle lacks hashes nothing (find's error is dropped), which is harmless: the
+    # hash then differs from the bundle's id, and the install refuses the bundle.
     (cd "$1" && find "${folders[@]}" -type f -print0 2> /dev/null | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -c1-8)
+}
+
+# Whether pid $1 is alive and is an ampd: a status.json that an ampd killed with SIGKILL left
+# behind names a pid the kernel may since have given to anything else, so the pid alone does not
+# tell. ampd runs as bin/ampd (its unit) or ampd.py (the virtual pair), directly or through
+# python3: one of the first 4 words of /proc/<pid>/cmdline is a file of either name.
+ampd_pid() {   # $1 = pid
+    local arg n=0
+    [[ "$1" =~ ^[0-9]+$ ]] && kill -0 "$1" 2> /dev/null && [ -r "/proc/$1/cmdline" ] || return 1
+    while IFS= read -r -d '' arg && [ "$n" -lt 4 ]; do
+        case "${arg##*/}" in ampd|ampd.py) return 0 ;; esac
+        n=$((n + 1))
+    done < "/proc/$1/cmdline"
+    return 1
 }
 
 # The folders a bundle's id covers, from its VERSION: BUNDLE_CONTENTS, or "bin lv2" for a

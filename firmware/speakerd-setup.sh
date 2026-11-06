@@ -351,17 +351,19 @@ ampd_restart() {
 }
 
 # What ampd's link to speakerd says (ampd's $XDG_RUNTIME_DIR/ampd/status.json, while its process
-# runs): "layer <l>, revision <n>, <version>" when connected, else nothing. speakerd's local link
-# takes one client, so while ampd holds it nothing else may ask speakerd (it would refuse a
-# second client: busy).
+# runs: the pid it names alive and an ampd, install-lib.sh's ampd_pid, not a pid reused after an
+# ampd killed with SIGKILL left the file behind): "layer <l>, revision <n>, <version>" when
+# connected, else nothing. speakerd's local link takes one client, so while ampd holds it
+# nothing else may ask speakerd (it would refuse a second client: busy).
 ampd_link() {
-    local file="$XDG_RUNTIME_DIR/ampd/status.json"
+    local file="$XDG_RUNTIME_DIR/ampd/status.json" pid
     [ -f "$file" ] || return 1
+    pid="$(python3 -c 'import json, sys; print(int(json.load(open(sys.argv[1]))["pid"]))' "$file" 2> /dev/null)" || return 1
+    ampd_pid "$pid" || return 1
     python3 - "$file" <<'PY' 2> /dev/null
-import json, os, sys
+import json, sys
 s = json.load(open(sys.argv[1]))
 sd = s.get("speakerd") or {}
-os.kill(int(s["pid"]), 0)
 if not sd.get("connected"):
     sys.exit(1)
 print(f"layer {sd.get('layer')}, revision {sd.get('revision')}, speakerd {sd.get('version')}")

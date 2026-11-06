@@ -52,7 +52,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import (ADDRESS, AMPD, FIRMWARE, StandInSpeakerd, UserUnit, built, firmware, graph_document, lv2_uri,
+from harness import (ADDRESS, AMPD, FIRMWARE, StandInSpeakerd, StubAmpd, UserUnit, built, firmware, graph_document, lv2_uri,
                      revision_document, stub_speakerd)
 
 # What this module's built() calls need, also through the harness (Speakerd, render, SpeakerPair,
@@ -321,15 +321,18 @@ class AmpdInstall(unittest.TestCase):
         (runtime / "ampd").mkdir(parents=True, exist_ok=True)
         status_file = runtime / "ampd/status.json"
         program = str(old)
+        # It stands in for the running ampd: a process whose cmdline names an ampd (a pid that is
+        # alive but no ampd is not believed, install-lib.sh's ampd_pid).
+        ampd = self.enterContext(StubAmpd(self.tmp / "deploy-restart-ampd"))
 
         def runs(version, file=None):
             status_file.write_text(json.dumps({
-                "ampd": version, "program": file, "pid": os.getpid(), "name": "left", "role": "hub", "revision": 1,
+                "ampd": version, "program": file, "pid": ampd.pid, "name": "left", "role": "hub", "revision": 1,
                 "speakerd": {"connected": True, "version": "0.3.3 (test)", "layer": "current", "revision": 1},
                 "agents": [], "controllers": []}))
 
         env = dict(self.env, XDG_RUNTIME_DIR=str(runtime))
-        for version, file, stale in (("0.1.1", None, f"it runs ampd 0.1.1 (pid {os.getpid()}), the program is ampd {want}"),
+        for version, file, stale in (("0.1.1", None, f"it runs ampd 0.1.1 (pid {ampd.pid}), the program is ampd {want}"),
                                      (want, program, f"it runs {program}, not the program "
                                                      f"{(lib / 'current/bin/ampd').resolve()}"),
                                      (want, str((lib / "current/bin/ampd").resolve()), None)):
@@ -337,7 +340,7 @@ class AmpdInstall(unittest.TestCase):
                 runs(version, file)
                 status = self.ampd_setup(folder, "status", env=env).stdout
                 smoke = self.ampd_setup(folder, "smoke", "--wait", "0", env=env, check=False)
-                self.assertIn(f"runs: pid {os.getpid()}, ampd {version}, left as the hub", status)
+                self.assertIn(f"runs: pid {ampd.pid}, ampd {version}, left as the hub", status)
                 self.assertIn(f"program: {lib}/current/bin/ampd (ampd {want} (protocol 1))", status)
                 if stale:
                     print(f"\n  {stale}")

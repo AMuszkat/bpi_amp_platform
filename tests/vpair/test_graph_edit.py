@@ -30,13 +30,20 @@ Pass when:
 
 - both captures change by more than 6 dB (the shelf gives about +12 at 200 Hz), with no gap longer
   than 30 ms and nothing above 4 kHz louder than -40 dB under the tone;
+- each speakerd logs a `timing: last <n> s:` line after its `apply: revision 2: building` line and
+  within 2 s of the hub's applied (speakerd 0.3.4: the old graph's summary, at once when the graph
+  changes, for the 1.5 s of tone revision 1 played);
+- each ampd's status.json says the limits its speakerd reports (speakerd 0.3.4, ampd 0.3.3):
+  `speakerd.limits` is device.json's, `{"gain_db": 0, "tweeter": "muted", "fail_safe": null}` (gain
+  within 0.001 dB), so that the real speakerd's hello and the real ampd's status.json agree;
 - the silent right: the hub rejects revision 3 with "right: no answer within 10 s", the left's
   level under revision 3 differs from revision 2's by more than 6 dB and is back within 0.5 dB of
   it after the roll back, and the right ends on revision 2 (its graph.json and the hub's state);
 - the failing right: the hub rejects revision 2 with "right: <the stand-in's reason>", the left
   changes and comes back within 0.5 dB of revision 1's level, and the hub's revision stays 1.
 
-It needs step 3's speakerd (the local socket, 0.3.0): with an older one it fails, saying so.
+It needs step 3's speakerd (the local socket, 0.3.0): with an older one it fails, saying so. The
+summary and the limits need speakerd 0.3.4 and ampd 0.3.3, and fail against older ones, saying so.
 
     python3 -m unittest -v tests.vpair.test_graph_edit
 """
@@ -64,6 +71,9 @@ HEADLESS = lv2_uri("loudness_headless")
 FREQ, LEVEL = 200.0, -20.0
 FLAT = {"mode": "Force 1", "s0_e0_freq": 1000.0, "s0_e0_gain": 0.0, "glide": 1.0}
 DOCUMENT = revision_document(graph_document(HEADLESS, FLAT), 1)
+SUMMARY_WITHIN = 2.0   # s after the hub said applied
+SUMMARY_HINT = "speakerd 0.3.4 logs the old graph's summary at once when the graph changes; an older one does not"
+LIMITS_HINT = "speakerd 0.3.4 reports its limits in its hello and ampd 0.3.3 passes them on; older ones do not"
 
 
 def chained(gain_db):
@@ -115,11 +125,16 @@ class GraphEdit(unittest.TestCase):
             recorders = {name: TimedRecorder(pair[name]).start() for name in ("left", "right")}
             try:
                 time.sleep(1.5)
+                marks = {name: pair.speakerd[name].mark() for name in ("left", "right")}
                 proposed = time.monotonic()
                 answer = ctl.propose(chained(12.0))
                 applied = time.monotonic()
                 self.assertEqual(answer["op"], "applied", answer)
-                time.sleep(2.0)
+                # speakerd 0.3.4 logs the old graph's timing summary at once when the graph changes.
+                summaries = {name: pair.speakerd[name].wait_for(
+                    "timing: last ", after=marks[name], required=False,
+                    timeout=max(0.0, applied + SUMMARY_WITHIN - time.monotonic())) for name in ("left", "right")}
+                time.sleep(max(0.0, applied + 2.0 - time.monotonic()))
                 end = time.monotonic()
 
                 # The right does not answer: SIGSTOP on its ampd.
@@ -144,6 +159,22 @@ class GraphEdit(unittest.TestCase):
                 self.assertGreater(after - before, 6.0, f"{name}: revision 2 did not change the capture")
                 self.assertLessEqual(gap, 30, f"{name}: a gap of {gap} ms, longer than the 30 ms fade")
                 self.assertLess(click, -40.0, f"{name}: a click {click:.1f} dB under the tone (threshold -40 dB)")
+
+            # The timing summary of the graph revision 2 replaced, logged at the change (after the
+            # apply began), and the limits each speakerd reports, as each ampd's status.json says them.
+            for name in ("left", "right"):
+                line = summaries[name]
+                print(f"  {name}: {line or 'no timing summary'}")
+                self.assertIsNotNone(line, f"{name}: speakerd logged no 'timing: last <n> s:' line within "
+                                           f"{SUMMARY_WITHIN} s of applying revision 2 ({SUMMARY_HINT})")
+                after = pair.speakerd[name].log().splitlines()[marks[name]:]
+                self.assertLess(after.index("speakerd: apply: revision 2: building"), after.index(line),
+                                f"{name}: the summary came before revision 2 was built")
+                reported = (pair.ampd[name].status().get("speakerd") or {}).get("limits")
+                print(f"  {name}: status.json's speakerd.limits {reported}")
+                self.assertIsNotNone(reported, f"{name}: no speakerd.limits in ampd's status.json ({LIMITS_HINT})")
+                self.assertEqual((reported["tweeter"], reported["fail_safe"]), (TWEETER_MUTED["tweeter"], None), name)
+                self.assertAlmostEqual(reported["gain_db"], TWEETER_MUTED["gain_db"], delta=0.001, msg=name)
 
             # Revision 3, which the right did not answer.
             print(f"  revision 3: {answer3['op']} after {rejected3 - proposed3:.2f} s: {answer3.get('reason')}")

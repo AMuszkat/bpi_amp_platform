@@ -105,7 +105,15 @@ Pass when:
   start-up `timing: a clock read costs <x> ns` in the timing line and warns, never fails, above
   150 ns ("clock reads are system calls on this kernel ...: per-node timing costs about 6×812 ns
   = 4.9 us per cycle" with one node); while ampd's status.json says it holds the link, smoke
-  never connects to it and takes the log's line;
+  never connects to it and takes the log's line; a status.json whose pid is alive but no ampd (a
+  SIGKILLed ampd's, its pid reused) is not believed: smoke reads speakerd's own status;
+- after a revision applied in the log (`apply: revision 8: building`, then `applied`), the
+  summary speakerd 0.3.4 logs at the change is the old graph's, whether it came before `applied`,
+  after it, or covers a minute or more with none before `applied`: smoke warns "the current
+  graph's timing is NOT measured yet: speakerd applied revision 8 and its last 'timing: last' line
+  covers the graph revision 8 replaced (<n> s: graph max <x> %)", says to smoke again in a minute,
+  and neither passes nor fails the graph; the next summary is the new graph's and is judged (51 %
+  fails); a revision that FAILED changes nothing (the last summary passes);
 - status says whether ~/.config/pipewire/pipewire.conf is this version's
   firmware/pipewire/pipewire.conf at the rate it was installed at (also --rate 44100), marks an
   older copy (min-quantum = max-quantum = 512) with ***, its quantum and this version's, and the
@@ -212,7 +220,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from harness import (FIRMWARE, ROOT, TEST_ENV, TEST_PLUGIN_HOST, Pair, build_name, built, firmware, graph_document,
+from harness import (FIRMWARE, ROOT, TEST_ENV, TEST_PLUGIN_HOST, Pair, StubAmpd, build_name, built, firmware, graph_document,
                      lv2_uri, stub_plugin_host, stub_speakerd)
 
 DOCUMENT = graph_document(lv2_uri("loudness_headless"), {"mode": "Force 1", "s0_e0_gain": 12.0})
@@ -1236,7 +1244,8 @@ class Install(Setup):
         # ampd holds the link: smoke does not knock, it reads ampd's status.json (its process
         # alive, connected): the limits there, or why there are none.
         (runtime / "ampd").mkdir(parents=True, exist_ok=True)
-        ampd_says = {"ampd": "0.3.3", "pid": os.getpid(),
+        ampd = self.enterContext(StubAmpd(self.tmp / "reported-ampd"))
+        ampd_says = {"ampd": "0.3.3", "pid": ampd.pid,
                      "speakerd": {"connected": True, "layer": "current", "revision": 3, "version": "0.3.4 (test)"}}
         for name, speakerd, said in (
                 ("ampd's", {"limits": capped}, passed + " (its start-up line and its status, through ampd's link)"),
@@ -1257,6 +1266,15 @@ class Install(Setup):
                                "--window", "0", env=env, check=False).stdout
                 self.assertEqual(link.accepted, 0, out)
                 self.assertIn(said, out)
+        # A status.json an ampd killed with SIGKILL left behind, its pid since reused by another
+        # process (this one): no ampd holds the link, so smoke reads speakerd's own status.
+        with FakeLink(runtime, dict(capped, tweeter="on")) as link:
+            (runtime / "ampd/status.json").write_text(json.dumps(dict(ampd_says, pid=os.getpid())))
+            out = firmware("speakerd-setup.sh", "smoke", "--home", home, "--no-systemd", "--log", log,
+                           "--window", "0", env=env, check=False).stdout
+            self.assertGreater(link.accepted, 0, out)
+            self.assertNotIn("through ampd's link", out)
+            self.assertIn("FAIL speakerd reports output at -20 dB, tweeter on (its status); device.json says", out)
         (runtime / "ampd/status.json").unlink()
 
     def test_status_and_smoke_say_an_old_pipewire_conf(self):
@@ -1447,6 +1465,53 @@ class Install(Setup):
                       "timing costs about 6\u00d7812 ns = 4.9 us per cycle", out)
         self.assertNotIn("FAIL clock", out)
 
+        # A revision applied after the last summary (ampd holds the link, so the log says the
+        # timing): speakerd 0.3.4 logs the old graph's summary at the change, the new graph's a
+        # minute later. The old graph's never passes for the new one's: not measured yet, a warning.
+        def summary(seconds, graph_max):
+            return minute(graph_max).replace("last 60 s:", f"last {seconds} s:")
+
+        building, applied = "speakerd: apply: revision 8: building", "speakerd: apply: revision 8: applied, 3 plugin node(s)"
+        node = "speakerd: plugin node 16: urn:test, no build identity (bundle not found)"
+        not_yet = "warn the current graph's timing is NOT measured yet: speakerd applied revision 8 and "
+        old_graph = "its last 'timing: last' line covers the graph revision 8 replaced"
+        cases = {
+            # name: (the lines after the start, what must be said, what must not)
+            "applied, no summary since": ([summary(600, 3.6), building, node, applied],
+                                          [not_yet + old_graph + " (600 s: graph max 3.6 %)", "smoke again in a minute"],
+                                          ["pass the graph's longest", "FAIL the graph's longest"]),
+            "the change's summary after applied": ([summary(600, 3.6), building, node, applied, summary(37, 3.7)],
+                                                   [not_yet + old_graph + " (37 s: graph max 3.7 %)"],
+                                                   ["pass the graph's longest", "FAIL the graph's longest"]),
+            "the change's summary before applied": ([summary(600, 3.6), building, node, summary(37, 3.7), applied],
+                                                    [not_yet + old_graph + " (37 s: graph max 3.7 %)"],
+                                                    ["pass the graph's longest", "FAIL the graph's longest"]),
+            # A change's summary that covers a minute or more, after applied with none before it.
+            "a full one after applied": ([summary(600, 3.6), building, applied, summary(600, 3.7)],
+                                         [not_yet + old_graph + " (600 s: graph max 3.7 %)"], ["pass the graph's longest"]),
+            # The new graph's first summary, a minute after the change: it is judged.
+            "the new graph's": ([summary(600, 3.6), building, applied, summary(37, 3.7), summary(60, 51.0)],
+                                ["FAIL the graph's longest cycle took 51.0 % of its cycle (speakerd's log, the 60 s"],
+                                [not_yet]),
+            "the new graph's, the change's before applied": ([summary(600, 3.6), building, summary(37, 3.7), applied,
+                                                              summary(60, 4.2)],
+                                                             ["pass the graph's longest cycle took 4.2 % of its cycle"],
+                                                             [not_yet]),
+            # A revision that failed changed nothing: the last summary stands.
+            "failed": ([summary(600, 3.6), building, "speakerd: apply: revision 8: FAILED: no plugin; current "
+                        "(graph.json), revision 3 plays on"], ["pass the graph's longest cycle took 3.6 % of its cycle"],
+                       [not_yet]),
+        }
+        for name, (lines, said, unsaid) in cases.items():
+            with self.subTest(name):
+                out = smoke([start, LIMITS] + lines)
+                if name == "the change's summary after applied":
+                    print("  " + next(line for line in out.splitlines() if "NOT measured yet" in line))
+                for text in said:
+                    self.assertIn(text, out, name)
+                for text in unsaid:
+                    self.assertNotIn(text, out, name)
+
         # From speakerd's status on its local link, read before and after the window.
         runtime = self.tmp / "timing-runtime"
         (runtime / "speakerd").mkdir(parents=True, exist_ok=True)
@@ -1495,8 +1560,9 @@ class Install(Setup):
             # ampd holds the link (its status.json, its process alive, says it is connected):
             # smoke does not knock (speakerd would log "refused a second client: busy").
             (runtime / "ampd").mkdir(exist_ok=True)
+            ampd = self.enterContext(StubAmpd(self.tmp / "timing-ampd"))
             (runtime / "ampd/status.json").write_text(json.dumps(
-                {"ampd": "0.3.2", "pid": os.getpid(), "speakerd": {"connected": True, "layer": "current", "revision": 3,
+                {"ampd": "0.3.2", "pid": ampd.pid, "speakerd": {"connected": True, "layer": "current", "revision": 3,
                                                                     "version": "0.3.3 (test)"}}))
             accepted.clear()
             answers[:] = [timing, timing]
