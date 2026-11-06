@@ -114,6 +114,16 @@ Pass when:
   covers the graph revision 8 replaced (<n> s: graph max <x> %)", says to smoke again in a minute,
   and neither passes nor fails the graph; the next summary is the new graph's and is judged (51 %
   fails); a revision that FAILED changes nothing (the last summary passes);
+- after a start with no apply, the summary speakerd 0.3.4 logs at once when the first graph is
+  built, before its `playing:` line (`timing: last 1 s: graph mean 0.0 % max 0.0 %; ...; 12
+  cycles, ...` then `playing: layer current (graph.json), revision 32, ...`, the board measured's
+  log), is not the playing graph's: smoke warns "NOT measured yet: speakerd's last 'timing: last'
+  line since its start (1 s: graph max 0.0 %) came at or before its 'playing:' line", neither
+  passing nor failing; an earlier start's summaries do not count; the next, 60 s summary is
+  judged (50.2 % fails); a last summary under 60 s after `playing:` with no apply is a change's
+  and warns the same way; speakerd's status read after the window that holds no cycle, or fewer
+  seconds than the window (speakerd started again during it), warns the same way, and one of 7 s
+  after a 2 s window passes;
 - status says whether ~/.config/pipewire/pipewire.conf is this version's
   firmware/pipewire/pipewire.conf at the rate it was installed at (also --rate 44100), marks an
   older copy (min-quantum = max-quantum = 512) with ***, its quantum and this version's, and the
@@ -1502,6 +1512,35 @@ class Install(Setup):
                         "(graph.json), revision 3 plays on"], ["pass the graph's longest cycle took 3.6 % of its cycle"],
                        [not_yet]),
         }
+        # A start, no apply: speakerd 0.3.4 logs a summary at once when the first graph is built,
+        # for the moments before the chain ran, then its 'playing:' line (exactly what the board
+        # measured logged after a deploy of 0.3.4). It is not the playing graph's.
+        first = ("speakerd: timing: last 1 s: graph mean 0.0 % max 0.0 %; cycle mean 0.1 % max 0.4 %; 12 cycles, "
+                 "0 late, 0 position jump(s)")
+        playing = "speakerd: playing: layer current (graph.json), revision 32, 48000 Hz, quantum 64"
+        at_start = ("warn the current graph's timing is NOT measured yet: speakerd's last 'timing: last' line since "
+                    "its start (1 s: graph max 0.0 %) came at or before its 'playing:' line, so it covers the moments "
+                    "before the graph that plays ran")
+        judged = ["pass the graph's longest", "FAIL the graph's longest"]
+        cases.update({
+            "the first graph's summary at start": ([first, playing], [at_start, "smoke again in a minute"], judged),
+            # Started again: the earlier instance's summaries are no measure of this one's graph.
+            "started again": ([first, playing, summary(60, 4.4), start, first, playing],
+                              [at_start], judged),
+            "the playing graph's first, a minute after start": ([first, playing, summary(60, 4.4)],
+                                                                ["pass the graph's longest cycle took 4.4 % of its cycle"],
+                                                                [not_yet]),
+            "the playing graph's first, above the limit": ([first, playing, summary(60, 50.2)],
+                                                           ["FAIL the graph's longest cycle took 50.2 % of its cycle"],
+                                                           [not_yet]),
+            # Under 60 s, after 'playing:' and with no apply in the log: no scheduled summary covers
+            # that, so it is a change's, for what ran before it.
+            "a short summary with no scheduled one after it": (
+                [playing, summary(60, 4.4), summary(12, 3.1)],
+                ["warn the current graph's timing is NOT measured yet: speakerd's last 'timing: last' line (12 s: "
+                 "graph max 3.1 %) covers under 60 s, which no scheduled summary does", "smoke again in a minute"],
+                judged),
+        })
         for name, (lines, said, unsaid) in cases.items():
             with self.subTest(name):
                 out = smoke([start, LIMITS] + lines)
@@ -1553,6 +1592,20 @@ class Install(Setup):
             self.assertIn("FAIL the graph's longest cycle took 71.0 % of its cycle", out)
             self.assertIn("FAIL 2 late cycle(s) in 0 s", out)
             self.assertIn("warn 1 position jump(s) in 0 s", out)
+            # Right after a start the status covers fewer seconds; read after the window it holds
+            # the window's cycles all the same, unless speakerd (re)started during it: then it is
+            # not the playing graph's measure, neither a pass nor a failure.
+            for seconds, cycles, window in ((0, 0, "0"), (1, 750, "2")):
+                answers[:] = [timing, dict(timing, seconds=seconds, cycles=cycles, graph={"mean": 0.0, "max": 0.0})]
+                out = smoke([start, LIMITS], window=window, env=env)
+                self.assertIn(f"warn the current graph's timing is NOT measured yet: speakerd's status after the window "
+                              f"covers {seconds} s and {cycles} cycle(s): speakerd started, or started again, during "
+                              f"the {window} s window", out)
+                self.assertIn("(from speakerd's status on its local link)", out)
+                self.assertNotIn("the graph's longest cycle took", out)
+            answers[:] = [timing, dict(timing, seconds=7)]
+            out = smoke([start, LIMITS], window="2", env=env)
+            self.assertIn("pass the graph's longest cycle took 0.3 % of its cycle (speakerd's status, the last 7 s", out)
             # Busy (ampd holds the link): the log's minute line instead.
             answers[:] = []
             out = smoke([start, LIMITS, minute(3.6)], env=env)

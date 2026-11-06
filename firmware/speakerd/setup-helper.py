@@ -457,6 +457,9 @@ APPLY_DONE = re.compile(r"^(?:speakerd: )?apply: revision (\d+): (applied, |FAIL
 # 10 minutes while nothing happens, a minute after a late second or a graph change): only the line
 # it logs at once when the graph changes, for the old graph's cycles, may cover less.
 TIMING_SCHEDULED_SECONDS = 60
+# speakerd-run's line at each start, and speakerd's once a graph is linked and heard (its README).
+START_LINE = re.compile(r"^speakerd-run: starting speakerd")
+PLAYING_LINE = re.compile(r"^(?:speakerd: )?playing: ")
 
 
 def current_graph_summary(lines):
@@ -470,12 +473,24 @@ def current_graph_summary(lines):
     first one after `applied` when none came before it (speakerd 0.3.3 and older, and a change
     from passthrough, log none at the change: that first one then mixes both graphs) or when it
     covers less than 60 s (none of the scheduled ones does: it is the change's). The rest are the
-    new graph's."""
-    summaries, change, building = [], None, {}
+    new graph's.
+
+    The first graph after a start is a change too: speakerd 0.3.4 logs a summary at once when it
+    is built, for the moments before it ran, then its `playing:` line. So a summary at or before
+    the first `playing:` line since the last `speakerd-run: starting speakerd` is not the playing
+    graph's; nor, generally, is a last summary that covers less than 60 s (no scheduled one does:
+    it is a change's, for what ran before it)."""
+    summaries, change, building, started, playing = [], None, {}, 0, None
     for i, line in enumerate(lines):
+        if START_LINE.match(line):
+            started, playing = i, None
+            continue
         summary = minute_from_log(line)
         if summary is not None:
             summaries.append((i, summary))
+            continue
+        if playing is None and PLAYING_LINE.match(line):
+            playing = i
             continue
         m = APPLY_BUILDING.match(line)
         if m:
@@ -484,25 +499,46 @@ def current_graph_summary(lines):
         m = APPLY_DONE.match(line)
         if m and m.group(2).startswith("applied") and m.group(1) in building:
             change = (building[m.group(1)], i, int(m.group(1)))
+    summaries = [(i, summary) for i, summary in summaries if i >= started]
+    if change is not None and change[0] < started:
+        change = None
     if change is None:
-        return (summaries[-1][1], None) if summaries else (None, None)
-    built, applied, revision = change
-    old, new, before_applied, flush_taken = None, None, False, False
-    for i, summary in summaries:
-        if i < built:
-            old = summary
-        elif i < applied:
-            old, before_applied = summary, True
-        elif not flush_taken and (summary["seconds"] < TIMING_SCHEDULED_SECONDS or not before_applied):
-            old, flush_taken = summary, True
-        else:
-            new, flush_taken = summary, True
-    if new is not None:
-        return new, None
-    said = (f"its last 'timing: last' line covers the graph revision {revision} replaced ({old['seconds']} s: graph "
-            f"max {100 * old['graph']['max']:.1f} %)" if old is not None else "it has logged no 'timing: last' line")
-    return None, (f"speakerd applied revision {revision} and {said}: speakerd 0.3.4 logs the old graph's summary at "
-                  "the change and the new graph's first at most a minute after it, so smoke again in a minute")
+        new = summaries[-1] if summaries else None
+        if new is None:
+            return None, None
+    else:
+        built, applied, revision = change
+        old, new, before_applied, flush_taken = None, None, False, False
+        for i, summary in summaries:
+            if i < built:
+                old = (i, summary)
+            elif i < applied:
+                old, before_applied = (i, summary), True
+            elif not flush_taken and (summary["seconds"] < TIMING_SCHEDULED_SECONDS or not before_applied):
+                old, flush_taken = (i, summary), True
+            else:
+                new, flush_taken = (i, summary), True
+        if new is None:
+            old = old[1] if old is not None else None
+            said = (f"its last 'timing: last' line covers the graph revision {revision} replaced ({old['seconds']} s: "
+                    f"graph max {100 * old['graph']['max']:.1f} %)" if old is not None
+                    else "it has logged no 'timing: last' line")
+            return None, (f"speakerd applied revision {revision} and {said}: speakerd 0.3.4 logs the old graph's "
+                          "summary at the change and the new graph's first at most a minute after it, so smoke again "
+                          "in a minute")
+    i, summary = new
+    figure = f"{summary['seconds']} s: graph max {100 * summary['graph']['max']:.1f} %"
+    if playing is not None and i <= playing:
+        return None, (f"speakerd's last 'timing: last' line since its start ({figure}) came at or before its 'playing:' line, "
+                      "so it covers the moments before the graph that plays ran: speakerd 0.3.4 logs that summary "
+                      "when the first graph is built and the playing graph's first at most a minute after it, so "
+                      "smoke again in a minute")
+    if summary["seconds"] < TIMING_SCHEDULED_SECONDS:
+        return None, (f"speakerd's last 'timing: last' line ({figure}) covers under {TIMING_SCHEDULED_SECONDS} s, which no "
+                      "scheduled summary does: it is the one speakerd 0.3.4 logs when the graph changes, for what ran "
+                      "before it, and the playing graph's first comes at most a minute after it, so smoke again in a "
+                      "minute")
+    return summary, None
 
 
 def minute_from_log(line):
@@ -544,7 +580,7 @@ def cmd_timing(args):
     """smoke's timing check (firmware/CLAUDE.md, "smoke"): what speakerd's audio thread spends, per
     node, for the graph and the cycle, from its status (the last minute, read after the window) or
     else its log's last `timing: last <n> s:` line since it started that covers the graph that plays
-    (current_graph_summary: none, and a warning, for a minute after an apply); the late cycles and position
+    (current_graph_summary: none, and a warning, for a minute after an apply or a start); the late cycles and position
     jumps in the window from the status before and after it (late_total, jumps_total) and from
     the log's `timing: in the last second` lines in the window (it names every second with one).
     FAIL when the graph's longest cycle is above --limit of its cycle, or a cycle was late in the
@@ -570,15 +606,26 @@ def cmd_timing(args):
                   else "; speakerd did not say what a clock read costs")
 
     summary, source, changed = after, None, None
+    via = "(the timing comes from speakerd's log: its local link is ampd's, or busy)"
     if summary is not None:
+        # status covers the last minute's complete seconds, fewer just after a start: read after the
+        # window, it holds the window's cycles of the graph that plays (smoke needs its 'playing:'
+        # first), and the moments before the chain ran add only cycles of no graph. Unless it holds
+        # fewer seconds than the window or no cycle: speakerd (re)started during it.
         source = f"speakerd's status, the last {summary.get('seconds', '?')} s"
+        seconds, window = summary.get("seconds"), opts["--window"]
+        short = isinstance(seconds, int) and window.isdigit() and seconds < int(window)
+        if summary.get("cycles") == 0 or short:
+            changed = (f"speakerd's status after the window covers {seconds if seconds is not None else '?'} s and "
+                       f"{summary.get('cycles', '?')} cycle(s): speakerd started, or started again, during the "
+                       f"{window} s window, so smoke again in a minute")
+            via, summary = "(from speakerd's status on its local link)", None
     else:
         summary, changed = current_graph_summary(start_lines + window_lines)
         if summary is not None:
             source = f"speakerd's log, the {summary['seconds']} s before its last 'timing: last' line"
     if changed is not None:
-        print(f"warn the current graph's timing is NOT measured yet: {changed} (the timing comes from speakerd's "
-              "log: its local link is ampd's, or busy)")
+        print(f"warn the current graph's timing is NOT measured yet: {changed} {via}")
     elif summary is None:
         print("warn the graph's timing was NOT measured: speakerd's local link is busy (ampd holds it) or did not "
               "answer, and speakerd has logged no 'timing: last <n> s' line since it started (it logs one a "
