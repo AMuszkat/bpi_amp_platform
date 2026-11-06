@@ -26,6 +26,7 @@ namespace speakerd
             double gainDb = -20.0;      // at most 0
             bool tweeterMuted = true;
 
+            juce::String gainText() const;   // the gain as the log prints it, by %g: "-20", "-6.5", "0"
             juce::String describe() const;   // "output at -20 dB, tweeter muted"
         };
 
@@ -54,6 +55,15 @@ namespace speakerd
         /** "output at -20 dB, tweeter muted", and why, when they are the fail-safe:
             " (no limits in device.json: the fail-safe)", " (device.json not read: the fail-safe)". */
         juce::String describeLimits() const;
+
+        /** Why the limits are the fail-safe, in describeLimits()'s words: "no limits in
+            device.json" or "device.json not read"; empty when they are device.json's. */
+        juce::String failSafeReason() const;
+
+        /** The limits as the local link reports them (hello, status; README, "The local link"):
+            {"gain_db": <describeLimits()'s gain, as a number>, "tweeter": "muted" | "on",
+             "fail_safe": null | failSafeReason()}. */
+        juce::var limitsObject() const;
 
         /** Reads device.json. On failure (a missing file, or anything in it invalid: an unknown
             or repeated key, an invalid "limits", the woofer and the tweeter on one port)

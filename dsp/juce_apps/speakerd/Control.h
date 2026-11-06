@@ -27,7 +27,7 @@ namespace speakerd
           {"op":"failed","revision":N,"reason":...} with the old graph still playing. An apply
           that arrives while another is being built waits for it (at most maxWaitingApplies;
           beyond that it fails at once).
-        - `status`: answered with the hello's fields; also sent unasked (notifyStatus()) when the
+        - `status`: answered with the hello's fields (the limits among them); also sent unasked (notifyStatus()) when the
           rate or the quantum the cycles run at changes.
         - the document's `quantum`: an apply whose quantum this speaker's PipeWire does not allow
           fails before anything is built; once a document is in force (the boot layer, an
@@ -60,6 +60,10 @@ namespace speakerd
         };
 
         void setQuantumSettings (QuantumSettings q)  { quantumSettings = std::move (q); }
+
+        /** The output limits the engine applies (DeviceConfig::limitsObject), for the hello and
+            every status: constants. Set once, before the link starts; none set, none sent. */
+        void setLimits (juce::var l)                 { limits = std::move (l); }
 
         /** Message thread: sends the connected client, if it has been sent its hello, an unasked
             `status` with the hello's fields. The live mode's timer calls it when the rate or the running quantum
@@ -162,6 +166,7 @@ namespace speakerd
         LocalLink* link = nullptr;
         Monitor* monitor = nullptr;
         QuantumSettings quantumSettings;
+        juce::var limits;                                // set before the link starts, then only read
 
         mutable std::mutex lock;
         Tables tables;

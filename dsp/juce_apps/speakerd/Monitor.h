@@ -44,8 +44,14 @@ namespace speakerd
 
         The timing is kept whether or not anybody subscribes: the thread drains the Engine's
         timing ring at least every timingDrainSeconds, keeps the last minute second by second (for
-        `status`), logs a summary once a minute, and logs a line in a second with a late cycle or
-        a position jump. Before any of that it measures what a clock read costs, and logs it.
+        `status`), logs a line in a second with a late cycle or a position jump, and logs a
+        summary of the cycles since the last one (`timing: last <n> s:`): the first
+        timingFirstSummarySeconds after it starts, then every timingQuietSummarySeconds while
+        nothing happens, at most timingBusySummarySeconds after a second with a late cycle or a
+        position jump, and at once when the graph changes (covering the old graph's cycles; the
+        next one is due timingBusySummarySeconds later). A board's journal is small: this keeps
+        the summaries from pushing the start-up lines out. Before any of that it measures what a
+        clock read costs, and logs it.
 
         `t` is speakerd's monotonic clock (CLOCK_MONOTONIC), in seconds. Subscriptions belong to
         the connection that made them, and end with it. */
@@ -57,7 +63,10 @@ namespace speakerd
         static constexpr double maxRateHz = 60.0;    // above is refused
         static constexpr double levelDrainSeconds = 0.05;
         static constexpr double timingDrainSeconds = 0.05;
-        static constexpr int timingLogSeconds = 60;
+        static constexpr int timingLogSeconds = 60;              // the seconds `status` covers
+        static constexpr int timingFirstSummarySeconds = 60;
+        static constexpr int timingQuietSummarySeconds = 600;
+        static constexpr int timingBusySummarySeconds = 60;
         static constexpr double floorDb = -120.0;
 
         Monitor (Engine&, Control&, LocalLink&);
@@ -94,6 +103,7 @@ namespace speakerd
 
         void run();
         void drainTiming (Clock::time_point now);          // under the lock
+        void logSummary (Clock::time_point now);           // under the lock: timingSinceSummary, then reset
         juce::var timingValue (const TimingStats&) const;  // a stats object with the totals
         void updateLevelWanted();               // under the lock
         void drainLevels();                     // monitor thread, under the lock
@@ -116,7 +126,11 @@ namespace speakerd
         TimingStats timingSinceValue, timingThisSecond;
         std::deque<TimingStats> lastMinute;                 // complete seconds, newest last
         juce::int64 cyclesTotal = 0, lateTotal = 0, jumpsTotal = 0;
-        Clock::time_point secondStarted, lastSummary;
+        Clock::time_point secondStarted;
+        TimingStats timingSinceSummary;                     // every cycle since the last summary line
+        Clock::time_point lastSummary, summaryDue;
+        juce::uint32 summarySerial = 0;                     // the graph timingSinceSummary's cycles ran
+        bool summarySerialKnown = false;
         juce::uint32 namesSerial = 0;
         bool namesKnown = false;
         TimingStats::NodeNames names;

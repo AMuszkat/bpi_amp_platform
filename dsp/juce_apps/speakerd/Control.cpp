@@ -196,16 +196,22 @@ namespace speakerd
         const auto running = engine.getCycles() > 0 ? juce::var (engine.getLastBlockSize()) : juce::var();
         juce::Array<juce::var> range { quantumSettings.lo, quantumSettings.hi };
 
-        return object ({ { "op", op },
-                         { "role", "speakerd" },
-                         { "version", version },
-                         { "revision", revision },
-                         { "layer", layer },
-                         { "protocol", protocolVersion },
-                         { "rate", juce::roundToInt (engine.getSampleRate()) },
-                         { "quantum", running },
-                         { "quantum_range", range },
-                         { "quantum_default", quantumSettings.defaultQuantum } });
+        auto hello = object ({ { "op", op },
+                               { "role", "speakerd" },
+                               { "version", version },
+                               { "revision", revision },
+                               { "layer", layer },
+                               { "protocol", protocolVersion },
+                               { "rate", juce::roundToInt (engine.getSampleRate()) },
+                               { "quantum", running },
+                               { "quantum_range", range },
+                               { "quantum_default", quantumSettings.defaultQuantum } });
+
+        // The limits in force (device.json's, or the fail-safe's): from 0.3.4.
+        if (! limits.isVoid())
+            hello.getDynamicObject()->setProperty ("limits", limits);
+
+        return hello;
     }
 
     bool Control::timedNodes (juce::uint32 serial, std::vector<std::pair<juce::uint32, juce::String>>& out) const

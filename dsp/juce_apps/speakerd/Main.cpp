@@ -524,6 +524,7 @@ namespace
         const auto [quantumLo, quantumHi] = clock.quantumRange();
         control.setQuantumSettings ({ quantumLo, quantumHi, clock.quantum,
                                       [&node] (int quantum) { return node.setForceQuantum (quantum); } });
+        control.setLimits (device.limitsObject());
         control.installLayer (loadFirstWorkingLayer (options.stateDir, builder, device.role, clock.rate,
                                                      maxBlock, options.firstLayer),
                               clock.rate, maxBlock, clock.quantum);

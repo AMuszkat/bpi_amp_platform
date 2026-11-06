@@ -146,9 +146,10 @@ anything else (the handshake is in "Authentication" below; these show the other 
   `{"op":"get"}`, answers `{"op":"graph",...}` with its revision, and the hub adopts it and
   applies it everywhere.
 - **`speakerd`** greets `ampd` on the local link with
-  `{"op":"hello","role":"speakerd","version":"0.3.2 (<commit>)","revision":8,"layer":"current","protocol":1,"rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512}`
-  (`revision` 0 for passthrough or a document with none; the last four are "The buffer size",
-  below, from speakerd 0.3.2), and answers `{"op":"status"}` with the same fields as `status`.
+  `{"op":"hello","role":"speakerd","version":"0.3.4 (<commit>)","revision":8,"layer":"current","protocol":1,"rate":48000,"quantum":256,"quantum_range":[64,2048],"quantum_default":512,"limits":{"gain_db":-20,"tweeter":"muted","fail_safe":null}}`
+  (`revision` 0 for passthrough or a document with none; `rate` to `quantum_default` are "The
+  buffer size", below, from speakerd 0.3.2; `limits`, from speakerd 0.3.4, are the output limits
+  it enforces, clarification 20), and answers `{"op":"status"}` with the same fields as `status`.
   It also sends that `status` unasked whenever the rate or the quantum its cycles run at changes
   (clarification 20).
 
@@ -413,7 +414,13 @@ These settle what version 1 left open; every implementation follows them.
     it unasked, whenever the rate or the quantum its cycles run at changes (and once the first
     cycle has run), and on a connection it never sends it before that connection's `hello`;
     `ampd` takes either as an update of those fields only: it applies nothing and
-    sends `speakerd` no value again for it, whatever its revision and layer say.
+    sends `speakerd` no value again for it, whatever its revision and layer say. From speakerd
+    0.3.4 the `hello` and every `status` (asked and unasked) carry
+    `"limits":{"gain_db":<number>,"tweeter":"muted"|"on","fail_safe":null|"no limits in device.json"|"device.json not read"}`:
+    the output limits it applies, read from `device.json` once at start and constant for the
+    process; exactly what its `device: limits:` start line says (`gain_db` the number it prints,
+    and `fail_safe` the reason its suffix gives, or `null` when they are `device.json`'s
+    `limits`). No `limits`: an older `speakerd`.
 21. **Files.** `speakerd` writes no state file; it creates and removes its socket.
 22. **The agent's `hello`** also carries `layer`, `speakerd` (its version), `device_role`, `rate`,
     `quantum`, `quantum_range`, `quantum_default` ("The buffer size") and
