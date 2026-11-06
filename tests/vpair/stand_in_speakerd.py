@@ -36,6 +36,12 @@ speakerd that does exactly what it is told, including failing.
   stream, or one in the control file's "refuse_streams", is answered with an error. After each
   output/level value it writes the control file's "also" (lines of text, each as it is, with a
   newline): lines ampd must not relay to a monitor client.
+- From speakerd 0.3.4 the hello and every status also say the limits it enforces, which never
+  change during a process: {"gain_db", "tweeter", "fail_safe"}, read at start from DIR's
+  device.json (its limits and fail_safe null; without limits -20 dB, muted, "no limits in
+  device.json"; a file that is not JSON -20 dB, muted, "device.json not read"). The control
+  file's "limits" replaces them (an object), or leaves them out (null: a speakerd 0.3.3 or older),
+  as "older" does too.
 - `status` is answered with the hello's fields.
 - Every line it reads and the hellos it sends go to the events file, one JSON object per line
   with "dir" ("in" or "out") and "t" (time.monotonic()), for the test to read.
@@ -73,10 +79,27 @@ def first_layer(state):
     return "passthrough", {"revision": 0, "nodes": [], "connections": []}
 
 
+def device_limits(state):
+    """The limits speakerd would enforce from DIR's device.json, as speakerd 0.3.4 reports them
+    (a stand-in's reading: speakerd checks the file more strictly)."""
+    fail_safe = {"gain_db": -20.0, "tweeter": "muted"}
+    try:
+        with open(os.path.join(state, "device.json")) as f:
+            device = json.load(f)
+    except (OSError, ValueError):
+        return dict(fail_safe, fail_safe="device.json not read")
+    limits = device.get("limits") if isinstance(device, dict) else None
+    if not isinstance(limits, dict) or not isinstance(limits.get("gain_db"), (int, float)) \
+            or limits.get("tweeter") not in ("muted", "on"):
+        return dict(fail_safe, fail_safe="no limits in device.json")
+    return {"gain_db": float(limits["gain_db"]), "tweeter": limits["tweeter"], "fail_safe": None}
+
+
 class StandIn:
     def __init__(self, args):
         self.args = args
         self.layer, self.doc = first_layer(args.state_dir)
+        self.limits = device_limits(args.state_dir)
         self.busy = False
         self.events = open(args.events, "a", buffering=1)
 
@@ -116,8 +139,11 @@ class StandIn:
                 and isinstance(low_high, list) and len(low_high) == 2 and low_high[0] <= q <= low_high[1])
 
     def hello(self, op="hello"):
+        control = self.control()
+        limits = control.get("limits", self.limits)
+        said = {} if control.get("older") or limits is None else {"limits": limits}
         return {"op": op, "role": "speakerd", "version": self.args.version, "revision": self.doc.get("revision", 0),
-                "layer": self.layer, "protocol": 1, **self.pipewire()}
+                "layer": self.layer, "protocol": 1, **self.pipewire(), **said}
 
     async def client(self, reader, writer):
         def send(obj):

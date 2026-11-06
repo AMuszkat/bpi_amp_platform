@@ -107,6 +107,10 @@ Pass when:
   revision: in the graph sent to the controllers, both graph.json, every controller's values, and
   given again to both speakerds when they restart;
 - a line that is not JSON closes the connection; an unknown op is ignored;
+- status.json's speakerd.limits is what speakerd's hello says it enforces (the stand-in, from
+  device.json: -6.5 dB muted with fail_safe null; without limits and broken the fail-safe -20 dB
+  muted, "no limits in device.json" and "device.json not read"), unchanged by an unasked status,
+  and null when speakerd says none (0.3.3 and older) or is down;
 - the buffer size (docs/protocol.md, "The buffer size"): every speaker of the state carries its
   speakerd's rate, quantum, quantum_range and quantum_default (the stand-in's 48000, 1024, [64, 2048],
   1024), all null while its speakerd is down; a proposal with quantum 256 reaches both speakerds,
@@ -554,6 +558,41 @@ class Protocol(unittest.TestCase):
                 hub.wait_for("speakerd: plays revision 2 of the current layer, not revision 3: applying revision 3")
                 sd.wait_event(lambda e: e.get("op") == "apply" and e["revision"] == 3, what="revision 3")
                 hub.wait_for("revision 3: applied")
+
+    def test_status_json_says_speakerds_limits(self):
+        """status.json's speakerd.limits is what speakerd's hello says it enforces (speakerd 0.3.4,
+        here the stand-in reading device.json), null while speakerd is down and when it says none
+        (0.3.3 and older); speakerd-setup.sh smoke reads it while ampd holds the link."""
+        run = self.tmp / "run-limits"
+        run.mkdir()
+        env = dict(os.environ, XDG_RUNTIME_DIR=str(run))
+        connected = (lambda s: (s.get("speakerd") or {}).get("connected"))
+        cases = (("device.json's", {"version": 1, "role": "left", "amplifier": {"node": "amplifier"},
+                                    "limits": {"gain_db": -6.5, "tweeter": "muted"}}, {},
+                  {"gain_db": -6.5, "tweeter": "muted", "fail_safe": None}),
+                 ("no limits", {"version": 1, "role": "left", "amplifier": {"node": "amplifier"}}, {},
+                  {"gain_db": -20.0, "tweeter": "muted", "fail_safe": "no limits in device.json"}),
+                 ("not read", "{ broken", {},
+                  {"gain_db": -20.0, "tweeter": "muted", "fail_safe": "device.json not read"}),
+                 ("older speakerd", {"version": 1, "role": "left", "amplifier": {"node": "amplifier"},
+                                     "limits": TWEETER_MUTED}, {"limits": None}, None))
+        for name, device, control, want in cases:
+            with self.subTest(name):
+                state = state_dir(self.tmp / f"state-limits-{name.replace(' ', '-')}", device=device)
+                with StandInSpeakerd(env, state, control) as sd, Ampd(env, state, "left") as hub:
+                    status = hub.wait_status(connected, what="connected to speakerd")
+                    print(f"\n  {name}: speakerd.limits {json.dumps(status['speakerd'].get('limits', 'missing'))}")
+                    self.assertEqual(status["ampd"], _ampd_module().VERSION)
+                    self.assertIn("limits", status["speakerd"])
+                    self.assertEqual(status["speakerd"]["limits"], want)
+                    # A status asked or unasked carries them again: the same.
+                    sd.set_control(dict(control, quantum=512))
+                    status = hub.wait_status(lambda s: (s.get("speakerd") or {}).get("quantum") == 512,
+                                             what="the unasked status")
+                    self.assertEqual(status["speakerd"]["limits"], want)
+                    sd.stop()
+                    status = hub.wait_status(lambda s: not connected(s), what="speakerd gone")
+                    self.assertIsNone(status["speakerd"]["limits"])
 
     def test_monitoring(self):
         with StandInPair(self.tmp, documents()) as pair:

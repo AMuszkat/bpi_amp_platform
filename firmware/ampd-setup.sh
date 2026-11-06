@@ -382,7 +382,11 @@ s = json.load(open(sys.argv[1]))
 sd = s.get("speakerd", {})
 print(f"  runs: pid {s.get('pid')}, ampd {s.get('ampd') or '(says no version)'}, {s.get('name')} as the {s.get('role')}, revision {s.get('revision')}"
       + (f" ({s.get('time')}, {s.get('origin')})" if s.get("time") else ""))
-print("  speakerd: " + (f"connected ({sd.get('version')}, layer {sd.get('layer')}, revision {sd.get('revision')})"
+# The limits speakerd says it enforces (ampd 0.3.3 and speakerd 0.3.4 and later; none from older).
+lim = sd.get("limits") if isinstance(sd.get("limits"), dict) else None
+limits = (f", limits output at {lim.get('gain_db'):g} dB, tweeter {lim.get('tweeter')}"
+          + (f" (*** the fail-safe: {lim['fail_safe']} ***)" if lim.get("fail_safe") else "")) if lim else ""
+print("  speakerd: " + (f"connected ({sd.get('version')}, layer {sd.get('layer')}, revision {sd.get('revision')}{limits})"
                         if sd.get("connected") else f"NOT connected ({sd.get('socket')})"))
 if "hub" in s:
     hub = s["hub"]

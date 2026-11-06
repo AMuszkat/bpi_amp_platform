@@ -31,7 +31,7 @@ import struct
 import sys
 import time
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 # The file this process runs, symlinks resolved (status.json's "program").
 PROGRAM = os.path.realpath(__file__)
 PROTOCOL = 1
@@ -407,6 +407,21 @@ def pipewire_fields(msg):
             "quantum_default": default if good_int(default, 1, 1 << 20) else None}
 
 
+def limits_field(msg):
+    """speakerd's "limits" from a hello or status: {"gain_db", "tweeter", "fail_safe"} as it said
+    them, or None when it says none (a speakerd older than 0.3.4) or something that is not that
+    shape. status.json carries it for speakerd-setup.sh smoke, which compares it with device.json
+    (the journal's start line rotates out on a board); ampd itself does nothing with it."""
+    limits = msg.get("limits") if isinstance(msg, dict) else None
+    if not isinstance(limits, dict):
+        return None
+    gain, tweeter, fail_safe = limits.get("gain_db"), limits.get("tweeter"), limits.get("fail_safe")
+    if not (isinstance(gain, (int, float)) and not isinstance(gain, bool) and math.isfinite(gain)) \
+            or tweeter not in ("muted", "on") or not (fail_safe is None or isinstance(fail_safe, str)):
+        return None
+    return {"gain_db": gain, "tweeter": tweeter, "fail_safe": None if fail_safe is None else fail_safe[:200]}
+
+
 def no_pipewire_fields():
     return dict.fromkeys(PIPEWIRE_FIELDS)
 
@@ -760,7 +775,9 @@ class Core:
         out = {"ampd": VERSION, "program": PROGRAM, "pid": os.getpid(), "name": self.name, "role": "hub" if self.is_hub else "agent",
                "revision": self.revision, "time": self.rev_time, "origin": self.rev_origin,
                "speakerd": {"connected": sd.connected, "version": sd.version, "layer": sd.layer,
-                            "revision": sd.revision, "socket": self.socket_path, **sd.pipewire},
+                            "revision": sd.revision, "socket": self.socket_path, **sd.pipewire,
+                            # What speakerd says it enforces (null: speakerd down, or older than 0.3.4).
+                            "limits": sd.limits},
                "updated": now_iso()}
         out.update(self.role.status())
         return out
@@ -797,6 +814,7 @@ class Speakerd:
         self.connected = False
         self.version = self.layer = self.revision = None
         self.pipewire = no_pipewire_fields()   # rate, quantum, quantum_range, quantum_default
+        self.limits = None           # what speakerd says it enforces (limits_field), from 0.3.4
         self.pending = {}            # revision -> [futures] of apply answers
         self.ever_connected = False
         self.unsent = False          # a value was set while the link was down: speakerd lacks it
@@ -891,6 +909,7 @@ class Speakerd:
                 conn.close()
                 self.conn, self.connected = None, False
                 self.pipewire = no_pipewire_fields()
+                self.limits = None
                 self.core.monitor.on_speakerd_lost()
                 for futures in list(self.pending.values()):
                     for future in futures:
@@ -909,6 +928,7 @@ class Speakerd:
         revision = hello.get("revision")
         self.revision = revision if good_int(revision, 0, BIG) else 0
         self.pipewire = pipewire_fields(hello)
+        self.limits = limits_field(hello)
 
     def dispatch(self, obj, line):
         """One message from speakerd; `line` is it as it came (a monitor value is relayed so)."""

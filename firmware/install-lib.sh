@@ -172,9 +172,26 @@ build_command() {   # $1 = native|aarch64, $2 = speakerd or <plugin>:<build>
     else echo "tools/build.sh $plugin${kind:+ $kind}"; fi
 }
 
-# The id of a bundle's contents: a hash of every file under bin/ and lv2/, names included.
-contents_hash() {   # $1 = bundle folder
-    (cd "$1" && find bin lv2 -type f -print0 2> /dev/null | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -c1-8)
+# The id of a bundle's contents: a hash of every file under the folders it covers, names
+# included. A bundle covers bin/, lv2/ and firmware/ (the installers, and what a version
+# installs from them: bin/ampd, bin/speakerd-run, the units, setup-helper.py, the PipeWire
+# config, factory.json), and says so in its VERSION (contents=); one without that line was made
+# before firmware/ counted (its id covers bin/ and lv2/ only) and is checked as it was made.
+BUNDLE_CONTENTS="bin lv2 firmware"
+contents_hash() {   # $1 = bundle folder, $2 = the folders (default BUNDLE_CONTENTS)
+    local folders
+    read -r -a folders <<< "${2:-$BUNDLE_CONTENTS}"
+    (cd "$1" && find "${folders[@]}" -type f -print0 2> /dev/null | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -c1-8)
+}
+
+# The folders a bundle's id covers, from its VERSION: BUNDLE_CONTENTS, or "bin lv2" for a
+# bundle made before the line (anything else is not a bundle this installer made).
+bundle_contents() {   # $1 = the VERSION file
+    local said
+    said="$(sed -n 's/^contents=//p' "$1" | head -n 1)"
+    if [ -z "$said" ]; then echo "bin lv2"
+    elif [ "$said" = "$BUNDLE_CONTENTS" ]; then echo "$said"
+    else return 1; fi
 }
 
 # Assembles a bundle in $1 (a new, empty or missing folder).
@@ -215,6 +232,7 @@ make_bundle() {
         id="${commit:0:12}$([ $dirty = yes ] && echo -dirty)-$(contents_hash "$out")"
         {
             echo "id=$id"
+            echo "contents=$BUNDLE_CONTENTS"
             echo "commit=$commit"
             echo "dirty=$dirty"
             echo "bundled=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

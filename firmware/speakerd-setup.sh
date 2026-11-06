@@ -673,12 +673,15 @@ check_bundle() {
     [ -f "$BUNDLE/bin/speakerd" ] || die "$BUNDLE has no bin/speakerd"
     BUNDLE_ID="$(version_value "$BUNDLE/VERSION" id)"
     [ -n "$BUNDLE_ID" ] && [ "$BUNDLE_ID" != none ] || die "$BUNDLE/VERSION has no id: a bundle without speakerd (made for status or rollback)"
-    local machine here hash
+    local machine here hash contents
     machine="$(elf_machine "$BUNDLE/bin/speakerd")"
     here="$(uname -m)"; [ "$here" = arm64 ] && here=aarch64
     [ "$machine" = "$here" ] || die "the bundle's speakerd is built for $machine, this machine is $here"
-    hash="$(contents_hash "$BUNDLE")"
-    [ "${BUNDLE_ID##*-}" = "$hash" ] || die "the bundle's contents do not match its VERSION (hash $hash, id $BUNDLE_ID): copied incompletely?"
+    # The id covers bin/, lv2/ and firmware/ (a bundle before contents= in its VERSION: bin/ and lv2/).
+    contents="$(bundle_contents "$BUNDLE/VERSION")" \
+        || die "$BUNDLE/VERSION says contents=$(sed -n 's/^contents=//p' "$BUNDLE/VERSION" | head -n 1), not '$BUNDLE_CONTENTS': not a bundle this installer made"
+    hash="$(contents_hash "$BUNDLE" "$contents")"
+    [ "${BUNDLE_ID##*-}" = "$hash" ] || die "the bundle's contents ($contents) do not match its VERSION (hash $hash, id $BUNDLE_ID): copied incompletely, or changed after it was made?"
     check_libraries
     require_speakerd_version "$BUNDLE/bin/speakerd" "the bundle's speakerd"
     BUNDLE_SPEAKERD_VERSION="$FOUND_VERSION"
@@ -1421,9 +1424,9 @@ speakerd_log() {   # everything speakerd and speakerd-run said since boot
 }
 
 # Whether the journal still reaches back to the running speakerd's start. A board's journal is
-# small and volatile (/run/log/journal), and speakerd logs a timing line a minute, so after
-# hours its start-up lines are gone: then the journal holds nothing of this boot from before the
-# moment systemd says speakerd.service became active. Returns 1 only then (and sets STARTED,
+# small and volatile (/run/log/journal), and speakerd logs timing lines (a summary a minute up
+# to 0.3.3; from 0.3.4 every 10 minutes while nothing is late), so after hours its start-up
+# lines are gone: then the journal holds nothing of this boot from before the moment systemd says speakerd.service became active. Returns 1 only then (and sets STARTED,
 # when that was, UTC); 0 when the start can be in the journal, or it cannot be told (no systemd,
 # the service not active, a time that does not read).
 journal_holds_start() {
@@ -1469,8 +1472,8 @@ do_smoke() {
     sd_link="$(ampd_link)"
     if [ -n "$log" ] && ! grep -q '^speakerd-run: starting speakerd' <<< "$log" && ! journal_holds_start; then
         start_gone=1
-        noted "the journal no longer holds speakerd's start (active since $STARTED; nothing of this boot in the journal is older): its start-up lines ('playing:', the layer, 'device: limits:') are NOT checked. To check them: systemctl --user restart speakerd, then smoke again"
-        said "a board's journal is small and volatile, and speakerd logs a timing line a minute: to keep more, a person may raise RuntimeMaxUse= (a journal in /run/log/journal; SystemMaxUse= for /var/log/journal) in a drop-in of /etc/systemd/journald.conf.d/ (journalctl --disk-usage says what it holds now)"
+        noted "the journal no longer holds speakerd's start (active since $STARTED; nothing of this boot in the journal is older): its start-up lines ('playing:', the layer, 'device: limits:') are NOT checked (the limits are, below, when speakerd reports them: speakerd 0.3.4 and later). To check them: systemctl --user restart speakerd, then smoke again"
+        said "a board's journal is small and volatile, and speakerd logs timing lines (a summary a minute up to 0.3.3; from 0.3.4 every 10 minutes while nothing is late, and a line for every second with a late cycle or a position jump): to keep more, a person may raise RuntimeMaxUse= (a journal in /run/log/journal; SystemMaxUse= for /var/log/journal) in a drop-in of /etc/systemd/journald.conf.d/ (journalctl --disk-usage says what it holds now)"
     fi
     if line="$(grep -m1 '^speakerd: playing: ' <<< "$since")"; then pass "it plays: ${line#speakerd: playing: }"
     elif [ "$start_gone" -eq 1 ]; then
@@ -1493,29 +1496,33 @@ do_smoke() {
     # speakerd made its own sink: the drop-in is not loaded.
     if line="$(grep -m1 -E "$NO_SINK_LINE" <<< "$since")"; then failed "${line#speakerd: }"; fi
 
-    # The limits it enforces, exactly the line, against device.json's.
-    local want_gain want_tweeter gain tweeter_on
-    want_gain="$(json_get "$device" '(d.get("limits") or {}).get("gain_db")')"
-    want_tweeter="$(json_get "$device" '(d.get("limits") or {}).get("tweeter")')"
-    if line="$(grep -m1 '^speakerd: device: limits: ' <<< "$since")"; then
-        gain=""; tweeter_on=""
-        if [[ "$line" =~ $LIMITS_LINE ]]; then gain="${BASH_REMATCH[1]}"; tweeter_on="${BASH_REMATCH[3]}"; fi
-        if [ -z "$gain" ]; then
-            failed "speakerd does not play device.json's limits: '${line#speakerd: }'"
-        elif [ -z "$want_gain" ]; then
-            failed "device.json has no limits (speakerd then plays with its fail-safe ones; say them explicitly): ${line#speakerd: }"
-        elif ! awk -v a="$gain" -v b="$want_gain" 'BEGIN { exit !(a - b < 0.001 && b - a < 0.001) }' || [ "$tweeter_on" != "$want_tweeter" ]; then
-            failed "speakerd says '${line#speakerd: }'; device.json says output at $want_gain dB, tweeter $want_tweeter"
-        else
-            pass "device.json's limits: output at $gain dB, tweeter $tweeter_on"
-        fi
-    elif [ "$start_gone" -eq 1 ]; then
-        local wanted="no limits"
-        [ -z "$want_gain" ] || wanted="output at $want_gain dB, tweeter $want_tweeter"
-        noted "the limits speakerd enforces are NOT checked: its 'device: limits:' line is no longer in the journal (device.json says $wanted)"
+    # The limits it enforces, against device.json's: its start-up line (while the journal holds
+    # it) and what it reports on its local link (speakerd 0.3.4: its hello and status), through
+    # ampd's status.json while ampd holds the link, or else its status, read now (this read is
+    # also the timing's "before": a late cycle from here on counts as in the window).
+    local socket="$RUNTIME/control.sock" probe=1 rc unread="" kind text
+    local -a limits_from
+    printf '%s\n' "$device" > "$WORK/smoke-device.json"
+    : > "$WORK/timing-before.json"
+    if [ -n "$sd_link" ]; then
+        probe=0
+        limits_from=(--ampd-status "$XDG_RUNTIME_DIR/ampd/status.json")
     else
-        failed "speakerd did not say which limits it enforces ('device: limits: ...'): a speakerd without the limits must not play on a board"
+        rc=0; helper status "$socket" > "$WORK/timing-before.json" 2> "$WORK/status.err" || rc=$?
+        if [ "$rc" -eq 3 ]; then unread="speakerd's local link is busy (another client holds it)"
+        elif [ "$rc" -ne 0 ]; then unread="speakerd's status could not be read ($(head -c 300 "$WORK/status.err" | tr '\n' ' ' | sed 's/ *$//'))"; : > "$WORK/timing-before.json"; fi
+        limits_from=(--speakerd-status "$WORK/timing-before.json" --unread "$unread")
     fi
+    line="$(grep -m1 '^speakerd: device: limits: ' <<< "$since")"
+    while read -r kind text; do
+        case "$kind" in
+            pass) pass "$text" ;;
+            FAIL) failed "$text" ;;
+            warn) noted "$text" ;;
+            *)    said "$text" ;;
+        esac
+    done < <(helper limits --device "$WORK/smoke-device.json" --line "$line" --start-gone "$start_gone" "${limits_from[@]}" \
+             || echo "FAIL the limits check did not run")
 
     # The pipewire.conf: an older copy of the repository's keeps an older buffer size range.
     pipewire_conf_state "$MAIN_CONF" "$FIRMWARE_DIR/pipewire/pipewire.conf"
@@ -1607,12 +1614,9 @@ do_smoke() {
     fi
 
     # A while without a restart, an xrun or a lost PipeWire. speakerd's timing counters before
-    # it, when its local link is free. While ampd holds it, smoke does not ask (speakerd would
-    # refuse a second client, and log it): its log says the timing.
-    local socket="$RUNTIME/control.sock" probe=1
-    if [ -n "$sd_link" ]; then probe=0; said "speakerd's local link is ampd's (it takes one client): the timing comes from speakerd's log"; fi
-    if [ "$probe" -eq 1 ]; then helper status "$socket" > "$WORK/timing-before.json" 2> /dev/null || : > "$WORK/timing-before.json"
-    else : > "$WORK/timing-before.json"; fi
+    # it (read with the limits, above), when its local link is free. While ampd holds it, smoke
+    # does not ask (speakerd would refuse a second client, and log it): its log says the timing.
+    if [ "$probe" -eq 0 ]; then said "speakerd's local link is ampd's (it takes one client): the timing comes from speakerd's log"; fi
     said "watching for ${WINDOW} s"
     sleep "$WINDOW"
     # speakerd's per-second timing line and its status come up to a second after the second.
@@ -1635,7 +1639,6 @@ do_smoke() {
     if grep -qE '^speakerd: (lost PipeWire|stopping)' <<< "$after"; then failed "speakerd stopped or lost PipeWire while watched"; fi
 
     # What the audio thread spends: per node, the graph, the cycle; late cycles, position jumps.
-    local kind text
     if [ "$probe" -eq 1 ]; then helper status "$socket" > "$WORK/timing-after.json" 2> /dev/null || : > "$WORK/timing-after.json"
     else : > "$WORK/timing-after.json"; fi
     printf '%s\n' "$after" > "$WORK/timing-window.log"
