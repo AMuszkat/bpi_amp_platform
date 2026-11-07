@@ -2,11 +2,31 @@
 
 ![The BPI AMP Platform: your devices, a phone and the controller on a laptop, in one frame; the Wi-Fi; and speaker 1 and speaker 2, each a board running JUCE DSP plugins and driving a loudspeaker](docs/images/hero.png)
 
-The BPI AMP Platform is an open hardware and software stack for building and tuning custom
-active loudspeakers. Each loudspeaker contains a BananaPi BPI-CM4 compute module on two
-purpose-built boards. The speaker receives music over the network, applies its own tuning in
-real time, and drives a woofer and a tweeter through two MAX98397 class-D amplifiers. Two
-speakers form a stereo pair, tuned together from a single desktop application.
+![How the platform is developed: a person sets the goal; an orchestrator agent plans the work and splits it between specialist agents working in parallel; every change is tested on two virtual speakers and reviewed, and a failed test or review sends it back to be fixed; a board operations agent deploys it to the real speakers and reports back](docs/images/agents.png)
+
+The BPI AMP Platform is an autonomous, agentic platform for audio streaming, loudspeaker
+tuning and digital signal processing (DSP). It is an open hardware and software stack for
+building and tuning custom active loudspeakers, and its software is developed, tested and
+deployed by a team of AI agents working under the direction of a person.
+
+Each loudspeaker contains a BananaPi BPI-CM4 compute module on two purpose-built boards. The
+speaker receives music over the network, applies its own tuning in real time, and drives a
+woofer and a tweeter through two MAX98397 class-D amplifiers. Two speakers form a stereo pair,
+tuned together from a single desktop application.
+
+## Autonomous development
+
+The platform is built by specialised AI agents, each responsible for one part of the stack:
+the audio plugins, the speaker's audio engine, the controller application, the board
+software, and the pictures of the project. A person sets the goal and approves the result. An
+orchestrator agent plans the work, runs the specialists in parallel, merges their changes and
+has a reviewer agent read them; a failed test or a review comment goes back to the agent that made the change. Every change is tested on two virtual speakers running on one
+computer before it is published, and again by continuous integration. A board operations agent
+installs the result on the real speakers and checks them. Safeguards apply throughout: no
+private data enters the repository, nothing reaches the main branch without review, and a lab
+lock keeps the agents away from the boards while they are on the bench. The agents, their
+rules and their tools are described in [`CLAUDE.md`](CLAUDE.md) and
+[`docs/autonomous-development.md`](docs/autonomous-development.md).
 
 ## Overview
 

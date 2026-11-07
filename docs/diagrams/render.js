@@ -12,7 +12,7 @@ const ROOT = path.resolve(__dirname, "..", "..");
 const { chromium } = require(path.join(ROOT, "tools", "mermaid-check", "node_modules", "playwright"));
 
 async function main() {
-  const names = process.argv.slice(2).length ? process.argv.slice(2) : ["overview", "speaker", "hero"];
+  const names = process.argv.slice(2).length ? process.argv.slice(2) : ["overview", "speaker", "hero", "agents"];
   const launch = {};
   if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE) launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
   const browser = await chromium.launch(launch);
